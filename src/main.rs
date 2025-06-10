@@ -3,6 +3,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::{fmt::Display, path::PathBuf, str::FromStr};
 
 pub mod commands;
+pub mod system;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -23,17 +24,16 @@ enum Commands {
 
 #[derive(Args, Debug)]
 pub struct ParquetArgs {
-    /// One or more input Arrow IPC stream files to process.
-    #[arg()]
-    inputs: Vec<String>,
+    /// Input Arrow IPC stream file to process.
+    #[arg(value_parser = clap::value_parser!(clio::Input).exists().is_file())]
+    input: clio::Input,
 
-    /// Write output to a directory, creating a corresponding .parquet file for each input.
-    ///
-    /// It will strip `.arrow` from the input file name, if present, and add `.parquet`.
-    #[arg(short, long)]
-    output_dir: PathBuf,
+    /// Output Parquet file path.
+    #[arg(value_parser)]
+    output: clio::OutputPath,
 
     /// Sort the data by one or more columns before writing.
+    ///
     /// Format: A comma-separated list like "col_a,col_b:desc,col_c".
     #[arg(short, long)]
     sort_by: Option<SortSpec>,
@@ -43,6 +43,7 @@ pub struct ParquetArgs {
     compression: ParquetCompression,
 
     /// Embed metadata indicating that the file's data is sorted.
+    ///
     /// Requires --sort-by to be set.
     #[arg(long, default_value_t = false, requires = "sort_by")]
     write_sorted_metadata: bool,
@@ -112,34 +113,39 @@ pub struct ParquetArgs {
 
 #[derive(Args, Debug)]
 pub struct DuckDbArgs {
-    /// One or more input Arrow IPC stream files to process.
-    #[arg()]
-    inputs: Vec<String>,
+    /// Input Arrow IPC stream file to process.
+    #[arg(value_parser = clap::value_parser!(clio::Input).exists().is_file())]
+    input: clio::Input,
 
-    /// Path to the DuckDB database file to create or modify.
-    #[arg(short, long)]
-    output: PathBuf,
+    /// Output DuckDB database file path.
+    #[arg(value_parser)]
+    output: clio::OutputPath,
 
     /// Sort the data by one or more columns before writing.
     ///
     /// Format: A comma-separated list like "col_a,col_b:desc,col_c".
     #[arg(short, long)]
     sort_by: Option<SortSpec>,
+
+    /// Truncate the database before writing.
+    ///
+    /// By default, the database is appended to.
+    #[arg(long, default_value_t = false)]
+    truncate: bool,
 }
 
 #[derive(Args, Debug)]
 pub struct ArrowArgs {
-    /// Input Arrow IPC stream files.
-    #[arg()]
-    inputs: Vec<String>,
+    /// Input Arrow IPC stream file.
+    #[arg(value_parser = clap::value_parser!(clio::Input).exists().is_file())]
+    input: clio::Input,
 
-    /// Write output to a directory, creating a corresponding .parquet file for each input.
-    ///
-    /// It will keep the same file name as the input file.
-    #[arg(long)]
-    output_dir: PathBuf,
+    /// Output Arrow IPC file path.
+    #[arg(value_parser)]
+    output: clio::OutputPath,
 
     /// Sort the data by one or more columns before writing.
+    ///
     /// Format: A comma-separated list like "col_a,col_b:desc,col_c".
     #[arg(short, long)]
     sort_by: Option<SortSpec>,
@@ -224,7 +230,7 @@ pub struct SortColumn {
     pub direction: SortDirection,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum SortDirection {
     Ascending,
     Descending,
@@ -291,13 +297,14 @@ impl Display for SortSpec {
     }
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
         Commands::Parquet(args) => commands::parquet::run(args)?,
         Commands::Duckdb(args) => commands::duckdb::run(args)?,
-        Commands::Arrow(args) => commands::arrow::run(args)?,
+        Commands::Arrow(args) => commands::arrow::run(args).await?,
     };
     Ok(())
 }

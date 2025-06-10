@@ -2,15 +2,16 @@ use crate::ParquetArgs;
 use anyhow::Result;
 
 pub fn run(args: ParquetArgs) -> Result<()> {
-    println!("Running `parquet` command with args: {:#?}", args);
+    println!("Converting {} to {:?}", args.input, args.output);
+    println!("Sort: {:?}", args.sort_by);
+    println!("Compression: {}", args.compression);
 
-    // Your parquet conversion logic here
-    // Example:
-    // - Read input files: args.inputs
-    // - Apply sorting if args.sort_by is Some
-    // - Configure compression: args.compression
-    // - Set up bloom filters based on args.bloom_all/bloom_column
-    // - Write to args.output_dir with args.max_row_group_size
+    // Create output directory if needed
+    // if let Some(parent) = args.output.parent() {
+    //     std::fs::create_dir_all(parent)?;
+    // }
+
+    // TODO: Implement actual conversion
 
     Ok(())
 }
