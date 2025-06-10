@@ -11,5 +11,4 @@ clio = { version = "0.3.5", features = ["clap-parse"] }
 datafusion = "47.0.0"
 futures = "0.3.31"
 parquet = "55.1.0"
-sysinfo = "0.35.2"
 tokio = { version = "1.45.1", features = ["full"] }

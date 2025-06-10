@@ -1,9 +1,8 @@
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use std::{fmt::Display, path::PathBuf, str::FromStr};
+use std::{fmt::Display, str::FromStr};
 
 pub mod commands;
-pub mod system;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
