@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use std::path::PathBuf;
+use std::{fmt::Display, path::PathBuf, str::FromStr};
 
 pub mod commands;
 
@@ -36,7 +36,7 @@ pub struct ParquetArgs {
     /// Sort the data by one or more columns before writing.
     /// Format: A comma-separated list like "col_a,col_b:desc,col_c".
     #[arg(short, long)]
-    sort_by: Option<String>,
+    sort_by: Option<SortSpec>,
 
     /// The compression algorithm to use.
     #[arg(short, long, default_value_t = ParquetCompression::None)]
@@ -121,9 +121,10 @@ pub struct DuckDbArgs {
     output: PathBuf,
 
     /// Sort the data by one or more columns before writing.
+    ///
     /// Format: A comma-separated list like "col_a,col_b:desc,col_c".
     #[arg(short, long)]
-    sort_by: Option<String>,
+    sort_by: Option<SortSpec>,
 }
 
 #[derive(Args, Debug)]
@@ -134,14 +135,14 @@ pub struct ArrowArgs {
 
     /// Write output to a directory, creating a corresponding .parquet file for each input.
     ///
-    /// It will strip `.arrow` from the input file name, if present, and add `.parquet`.
+    /// It will keep the same file name as the input file.
     #[arg(long)]
     output_dir: PathBuf,
 
     /// Sort the data by one or more columns before writing.
     /// Format: A comma-separated list like "col_a,col_b:desc,col_c".
     #[arg(short, long)]
-    sort_by: Option<String>,
+    sort_by: Option<SortSpec>,
 
     /// The IPC compression to use for the output.
     #[arg(long, default_value_t = ArrowCompression::None)]
@@ -214,6 +215,79 @@ impl std::fmt::Display for ArrowCompression {
             Self::None => "none",
         };
         write!(f, "{}", s)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SortColumn {
+    pub name: String,
+    pub direction: SortDirection,
+}
+
+#[derive(Debug, Clone)]
+pub enum SortDirection {
+    Ascending,
+    Descending,
+}
+
+#[derive(Debug, Clone)]
+pub struct SortSpec {
+    pub columns: Vec<SortColumn>,
+}
+
+impl FromStr for SortSpec {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut columns = Vec::new();
+
+        for part in s.split(',') {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+
+            let (name, descending) = if let Some((col, direction)) = part.split_once(':') {
+                let direction = direction.trim().to_lowercase();
+                match direction.as_str() {
+                    "desc" | "descending" => (col.trim(), true),
+                    "asc" | "ascending" => (col.trim(), false),
+                    _ => {
+                        return Err(anyhow::anyhow!(
+                            "Invalid sort direction '{}'. Use 'asc' or 'desc'",
+                            direction
+                        ));
+                    }
+                }
+            } else {
+                (part, false) // default to ascending
+            };
+
+            columns.push(SortColumn {
+                name: name.to_string(),
+                direction: if descending {
+                    SortDirection::Descending
+                } else {
+                    SortDirection::Ascending
+                },
+            });
+        }
+
+        Ok(SortSpec { columns })
+    }
+}
+
+impl Display for SortSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let parts: Vec<String> = self
+            .columns
+            .iter()
+            .map(|col| match col.direction {
+                SortDirection::Descending => format!("{}:desc", col.name),
+                SortDirection::Ascending => col.name.clone(),
+            })
+            .collect();
+        write!(f, "{}", parts.join(","))
     }
 }
 
