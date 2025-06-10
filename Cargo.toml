@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+arrow = { version = "55.1.0", features = ["default", "ipc_compression"] }
+clap = { version = "4.5.40", features = ["default", "derive"] }
+parquet = "55.1.0"
