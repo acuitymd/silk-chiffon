@@ -1,5 +1,8 @@
+use anyhow::Result;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
+
+pub mod commands;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -19,7 +22,7 @@ enum Commands {
 }
 
 #[derive(Args, Debug)]
-struct ParquetArgs {
+pub struct ParquetArgs {
     /// One or more input Arrow IPC stream files to process.
     #[arg()]
     inputs: Vec<String>,
@@ -108,7 +111,7 @@ struct ParquetArgs {
 }
 
 #[derive(Args, Debug)]
-struct DuckDbArgs {
+pub struct DuckDbArgs {
     /// One or more input Arrow IPC stream files to process.
     #[arg()]
     inputs: Vec<String>,
@@ -124,7 +127,7 @@ struct DuckDbArgs {
 }
 
 #[derive(Args, Debug)]
-struct ArrowArgs {
+pub struct ArrowArgs {
     /// Input Arrow IPC stream files.
     #[arg()]
     inputs: Vec<String>,
@@ -146,7 +149,7 @@ struct ArrowArgs {
 }
 
 #[derive(ValueEnum, Clone, Debug, Default)]
-enum ParquetCompression {
+pub enum ParquetCompression {
     #[value(name = "zstd")]
     Zstd,
     #[value(name = "snappy")]
@@ -174,7 +177,7 @@ impl std::fmt::Display for ParquetCompression {
 }
 
 #[derive(ValueEnum, Clone, Debug, Default)]
-enum ParquetWriterVersion {
+pub enum ParquetWriterVersion {
     #[value(name = "v1")]
     V1,
     #[default]
@@ -193,7 +196,7 @@ impl std::fmt::Display for ParquetWriterVersion {
 }
 
 #[derive(ValueEnum, Clone, Debug, Default)]
-enum ArrowCompression {
+pub enum ArrowCompression {
     #[value(name = "zstd")]
     Zstd,
     #[value(name = "lz4")]
@@ -214,22 +217,13 @@ impl std::fmt::Display for ArrowCompression {
     }
 }
 
-fn main() {
+fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // You can now handle the logic for each subcommand.
     match cli.command {
-        Commands::Parquet(args) => {
-            println!("Running `parquet` command with args: {:#?}", args);
-            // TODO: Add logic for Parquet conversion
-        }
-        Commands::Duckdb(args) => {
-            println!("Running `duckdb` command with args: {:#?}", args);
-            // TODO: Add logic for DuckDB loading
-        }
-        Commands::Arrow(args) => {
-            println!("Running `arrow` command with args: {:#?}", args);
-            // TODO: Add logic for Arrow processing
-        }
-    }
+        Commands::Parquet(args) => commands::parquet::run(args)?,
+        Commands::Duckdb(args) => commands::duckdb::run(args)?,
+        Commands::Arrow(args) => commands::arrow::run(args)?,
+    };
+    Ok(())
 }
