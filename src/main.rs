@@ -17,13 +17,13 @@ enum Commands {
     Parquet(ParquetArgs),
     /// Convert Arrow data to DuckDB format.
     Duckdb(DuckDbArgs),
-    /// Convert Arrow IPC data to Arrow IPC format (with changes, presumably).
+    /// Convert any Arrow IPC file to an Arrow IPC file in the file (not stream) format.
     Arrow(ArrowArgs),
 }
 
 #[derive(Args, Debug)]
 pub struct ParquetArgs {
-    /// Input Arrow IPC stream file to process.
+    /// Input Arrow IPC file.
     #[arg(value_parser = clap::value_parser!(clio::Input).exists().is_file())]
     input: clio::Input,
 
@@ -112,7 +112,7 @@ pub struct ParquetArgs {
 
 #[derive(Args, Debug)]
 pub struct DuckDbArgs {
-    /// Input Arrow IPC stream file to process.
+    /// Input Arrow IPC file.
     #[arg(value_parser = clap::value_parser!(clio::Input).exists().is_file())]
     input: clio::Input,
 
@@ -135,7 +135,7 @@ pub struct DuckDbArgs {
 
 #[derive(Args, Debug)]
 pub struct ArrowArgs {
-    /// Input Arrow IPC stream file.
+    /// Input Arrow IPC file.
     #[arg(value_parser = clap::value_parser!(clio::Input).exists().is_file())]
     input: clio::Input,
 
@@ -306,4 +306,108 @@ async fn main() -> Result<()> {
         Commands::Arrow(args) => commands::arrow::run(args).await?,
     };
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sort_spec_parsing() {
+        // single column with default sort
+        let spec = SortSpec::from_str("col1").unwrap();
+        assert_eq!(spec.columns.len(), 1);
+        assert_eq!(spec.columns[0].name, "col1");
+        assert_eq!(spec.columns[0].direction, SortDirection::Ascending);
+
+        // single column with explicit ascending
+        let spec = SortSpec::from_str("col1:asc").unwrap();
+        assert_eq!(spec.columns.len(), 1);
+        assert_eq!(spec.columns[0].name, "col1");
+        assert_eq!(spec.columns[0].direction, SortDirection::Ascending);
+
+        // single column with explicit descending
+        let spec = SortSpec::from_str("col1:desc").unwrap();
+        assert_eq!(spec.columns.len(), 1);
+        assert_eq!(spec.columns[0].name, "col1");
+        assert_eq!(spec.columns[0].direction, SortDirection::Descending);
+
+        // multiple columns
+        let spec = SortSpec::from_str("col1,col2:desc,col3:asc").unwrap();
+        assert_eq!(spec.columns.len(), 3);
+        assert_eq!(spec.columns[0].name, "col1");
+        assert_eq!(spec.columns[0].direction, SortDirection::Ascending);
+        assert_eq!(spec.columns[1].name, "col2");
+        assert_eq!(spec.columns[1].direction, SortDirection::Descending);
+        assert_eq!(spec.columns[2].name, "col3");
+        assert_eq!(spec.columns[2].direction, SortDirection::Ascending);
+
+        // make sure it's tolerant of extra whitespace
+        let spec = SortSpec::from_str("col1 , col2:desc , col3").unwrap();
+        assert_eq!(spec.columns.len(), 3);
+        assert_eq!(spec.columns[0].name, "col1");
+        assert_eq!(spec.columns[1].name, "col2");
+        assert_eq!(spec.columns[2].name, "col3");
+
+        // make sure it's tolerant of empty parts
+        let spec = SortSpec::from_str("col1,,col2").unwrap();
+        assert_eq!(spec.columns.len(), 2);
+        assert_eq!(spec.columns[0].name, "col1");
+        assert_eq!(spec.columns[1].name, "col2");
+    }
+
+    #[test]
+    fn test_sort_spec_invalid_direction() {
+        let result = SortSpec::from_str("col1:invalid");
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid sort direction")
+        );
+    }
+
+    #[test]
+    fn test_sort_spec_display() {
+        let spec = SortSpec {
+            columns: vec![
+                SortColumn {
+                    name: "col1".to_string(),
+                    direction: SortDirection::Ascending,
+                },
+                SortColumn {
+                    name: "col2".to_string(),
+                    direction: SortDirection::Descending,
+                },
+                SortColumn {
+                    name: "col3".to_string(),
+                    direction: SortDirection::Ascending,
+                },
+            ],
+        };
+        assert_eq!(spec.to_string(), "col1,col2:desc,col3");
+    }
+
+    #[test]
+    fn test_parquet_compression_display() {
+        assert_eq!(ParquetCompression::Zstd.to_string(), "zstd");
+        assert_eq!(ParquetCompression::Snappy.to_string(), "snappy");
+        assert_eq!(ParquetCompression::Gzip.to_string(), "gzip");
+        assert_eq!(ParquetCompression::Lz4.to_string(), "lz4");
+        assert_eq!(ParquetCompression::None.to_string(), "none");
+    }
+
+    #[test]
+    fn test_parquet_writer_version_display() {
+        assert_eq!(ParquetWriterVersion::V1.to_string(), "v1");
+        assert_eq!(ParquetWriterVersion::V2.to_string(), "v2");
+    }
+
+    #[test]
+    fn test_arrow_compression_display() {
+        assert_eq!(ArrowCompression::Zstd.to_string(), "zstd");
+        assert_eq!(ArrowCompression::Lz4.to_string(), "lz4");
+        assert_eq!(ArrowCompression::None.to_string(), "none");
+    }
 }
