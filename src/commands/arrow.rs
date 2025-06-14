@@ -1,15 +1,13 @@
-use anyhow::anyhow;
 use arrow::ipc::{
     CompressionType,
     writer::{FileWriter, IpcWriteOptions},
 };
 use futures::stream::StreamExt;
-use std::{
-    fs::{File, create_dir_all},
-    sync::Arc,
-};
+use std::{fs::File, sync::Arc};
 
-use crate::{ArrowArgs, ArrowCompression, SortDirection};
+use crate::{
+    ArrowArgs, ArrowCompression, SortDirection, utils::filesystem::ensure_parent_dir_exists,
+};
 use anyhow::Result;
 use arrow::ipc::reader::{FileReader, StreamReader};
 use datafusion::{
@@ -19,13 +17,7 @@ use datafusion::{
 use std::io::BufReader;
 
 pub async fn run(args: ArrowArgs) -> Result<()> {
-    let parent = args
-        .output
-        .path()
-        .parent()
-        .ok_or_else(|| anyhow!("Output directory not found"))?;
-
-    create_dir_all(parent)?;
+    ensure_parent_dir_exists(args.output.path()).await?;
 
     let input_path = args.input.path().to_str().unwrap();
     let output_path = args.output.path();
@@ -193,6 +185,7 @@ mod tests {
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
     use nix::unistd::Uid;
+    use std::path::Path;
     use std::sync::Arc;
     use tempfile::tempdir;
 
@@ -827,7 +820,7 @@ mod tests {
 
         write_test_arrow_file(&input_path, false).unwrap();
 
-        let result = create_dir_all("/root/no_permission");
+        let result = ensure_parent_dir_exists(Path::new("/root/no_permission")).await;
         assert!(result.is_err());
     }
 
