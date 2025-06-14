@@ -194,7 +194,7 @@ mod tests {
     use arrow::record_batch::RecordBatch;
     use nix::unistd::Uid;
     use std::sync::Arc;
-    use tempfile::TempDir;
+    use tempfile::tempdir;
 
     fn create_test_schema() -> Arc<Schema> {
         Arc::new(Schema::new(vec![
@@ -234,7 +234,7 @@ mod tests {
 
     #[test]
     fn test_convert_stream_to_file_format() {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = tempdir().unwrap();
         let input_path = temp_dir.path().join("input.arrow");
         let output_path = temp_dir.path().join("output.arrow");
 
@@ -259,7 +259,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_convert_file_to_file_format() {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = tempdir().unwrap();
         let input_path = temp_dir.path().join("input.arrow");
         let output_path = temp_dir.path().join("output.arrow");
 
@@ -286,7 +286,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stream_arrow_direct_file_format() {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = tempdir().unwrap();
         let input_path = temp_dir.path().join("input.arrow");
         let output_path = temp_dir.path().join("output.arrow");
 
@@ -302,7 +302,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stream_arrow_direct_stream_format() {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = tempdir().unwrap();
         let input_path = temp_dir.path().join("input.arrow");
         let output_path = temp_dir.path().join("output.arrow");
 
@@ -318,7 +318,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_creates_parent_directory() {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = tempdir().unwrap();
         let input_path = temp_dir.path().join("input.arrow");
         let output_dir = temp_dir.path().join("subdir");
         let output_path = output_dir.join("output.arrow");
@@ -342,7 +342,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_with_compression() {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = tempdir().unwrap();
         let input_path = temp_dir.path().join("input.arrow");
         let output_path = temp_dir.path().join("output.arrow");
 
@@ -361,7 +361,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stream_arrow_with_sorting_file_format() {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = tempdir().unwrap();
         let input_path = temp_dir.path().join("input.arrow");
         let output_path = temp_dir.path().join("output.arrow");
 
@@ -427,7 +427,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stream_arrow_with_sorting_stream_format() {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = tempdir().unwrap();
         let input_path = temp_dir.path().join("input.arrow");
         let output_path = temp_dir.path().join("output.arrow");
 
@@ -487,7 +487,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_multi_column_sorting() {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = tempdir().unwrap();
         let input_path = temp_dir.path().join("input.arrow");
         let output_path = temp_dir.path().join("output.arrow");
 
@@ -563,7 +563,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sorting_with_nulls() {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = tempdir().unwrap();
         let input_path = temp_dir.path().join("input.arrow");
         let output_path = temp_dir.path().join("output.arrow");
 
@@ -622,7 +622,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sorting_with_nulls_descending() {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = tempdir().unwrap();
         let input_path = temp_dir.path().join("input.arrow");
         let output_path = temp_dir.path().join("output.arrow");
 
@@ -681,7 +681,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_with_lz4_compression() {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = tempdir().unwrap();
         let input_path = temp_dir.path().join("input.arrow");
         let output_path = temp_dir.path().join("output.arrow");
 
@@ -700,7 +700,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sorting_with_compression() {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = tempdir().unwrap();
         let input_path = temp_dir.path().join("input.arrow");
         let output_path = temp_dir.path().join("output.arrow");
 
@@ -726,7 +726,7 @@ mod tests {
 
     #[test]
     fn test_multiple_batches() {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = tempdir().unwrap();
         let input_path = temp_dir.path().join("input.arrow");
         let output_path = temp_dir.path().join("output.arrow");
 
@@ -775,7 +775,7 @@ mod tests {
 
     #[test]
     fn test_empty_file() {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = tempdir().unwrap();
         let input_path = temp_dir.path().join("input.arrow");
         let output_path = temp_dir.path().join("output.arrow");
 
@@ -802,7 +802,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_invalid_input_path() {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = tempdir().unwrap();
         let output_path = temp_dir.path().join("output.arrow");
 
         let result = stream_arrow_direct(
@@ -822,7 +822,7 @@ mod tests {
             return;
         }
 
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = tempdir().unwrap();
         let input_path = temp_dir.path().join("input.arrow");
 
         write_test_arrow_file(&input_path, false).unwrap();
@@ -833,7 +833,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_invalid_sort_column() {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = tempdir().unwrap();
         let input_path = temp_dir.path().join("input.arrow");
         let output_path = temp_dir.path().join("output.arrow");
 
@@ -859,7 +859,7 @@ mod tests {
 
     #[test]
     fn test_corrupted_arrow_file() {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = tempdir().unwrap();
         let input_path = temp_dir.path().join("corrupted.arrow");
         let output_path = temp_dir.path().join("output.arrow");
 
