@@ -1,6 +1,9 @@
-use arrow::ipc::{
-    CompressionType,
-    writer::{FileWriter, IpcWriteOptions},
+use arrow::{
+    error::ArrowError,
+    ipc::{
+        CompressionType,
+        writer::{FileWriter, IpcWriteOptions},
+    },
 };
 use futures::stream::StreamExt;
 use std::{fs::File, sync::Arc};
@@ -8,7 +11,7 @@ use std::{fs::File, sync::Arc};
 use crate::{
     ArrowArgs, ArrowCompression, SortDirection, utils::filesystem::ensure_parent_dir_exists,
 };
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use arrow::ipc::reader::{FileReader, StreamReader};
 use datafusion::{
     execution::{options::ArrowReadOptions, runtime_env::RuntimeEnvBuilder},
@@ -30,16 +33,11 @@ pub async fn run(args: ArrowArgs) -> Result<()> {
 
     let write_options = IpcWriteOptions::default().try_with_compression(compression)?;
 
-    if args.sort_by.is_none() {
-        stream_arrow_direct(input_path, output_path, write_options).await
-    } else {
-        stream_arrow_with_sorting(
-            input_path,
-            output_path,
-            write_options,
-            args.sort_by.unwrap(),
-        )
-        .await
+    match args.sort_by {
+        Some(sort_spec) => {
+            stream_arrow_with_sorting(input_path, output_path, write_options, sort_spec).await
+        }
+        None => stream_arrow_direct(input_path, output_path, write_options).await,
     }
 }
 
@@ -49,17 +47,17 @@ async fn stream_arrow_direct(
     write_options: IpcWriteOptions,
 ) -> Result<()> {
     let input_file = File::open(input_path)?;
-    let mut buf_reader = BufReader::new(input_file);
 
-    match FileReader::try_new(&mut buf_reader, None) {
-        Ok(file_reader) => {
-            // The input is in the Arrow IPC *file* format
-            convert_file_to_file_format(file_reader, output_path, write_options)?;
+    match FileReader::try_new(input_file, None) {
+        Ok(_) => {
+            // The input file is in the Arrow IPC *file* format
+            convert_file_to_file_format(input_path, output_path, write_options).await?;
         }
-        Err(_) => {
-            // Presumably the file is in the Arrow IPC *stream* format
-            convert_stream_to_file_format(input_path, output_path, write_options)?;
+        Err(ArrowError::ParseError(_)) => {
+            // Presumably the input file is in the Arrow IPC *stream* format
+            convert_stream_to_file_format(input_path, output_path, write_options).await?;
         }
+        Err(e) => return Err(anyhow!("Error parsing input file {:?}", e)),
     }
 
     Ok(())
@@ -83,13 +81,18 @@ async fn stream_arrow_with_sorting(
     let mut buf_reader = BufReader::new(input_file);
 
     let temp_file_path = match FileReader::try_new(&mut buf_reader, None) {
-        Ok(_) => None,
-        Err(_) => {
+        Ok(_) => {
+            // The input file is in the Arrow IPC *file* format, so we can use it directly
+            None
+        }
+        Err(ArrowError::ParseError(_)) => {
+            // Presumably the input file is in the Arrow IPC *stream* format, so convert it to the file format in a temp file
             let temp_path = output_path.with_extension("tmp.arrow");
             let temp_write_options = IpcWriteOptions::default();
-            convert_stream_to_file_format(input_path, &temp_path, temp_write_options)?;
+            convert_stream_to_file_format(input_path, &temp_path, temp_write_options).await?;
             Some(temp_path)
         }
+        Err(e) => return Err(anyhow!("Error parsing input file {:?}", e)),
     };
 
     let datafusion_input = temp_file_path
@@ -136,44 +139,55 @@ async fn stream_arrow_with_sorting(
     Ok(())
 }
 
-fn convert_stream_to_file_format(
+async fn convert_stream_to_file_format(
     input_path: &str,
     output_path: &std::path::Path,
     write_options: IpcWriteOptions,
 ) -> Result<()> {
     let input_file = File::open(input_path)?;
-    let buf_reader = BufReader::new(input_file);
-    let stream_reader = StreamReader::try_new(buf_reader, None)?;
+    let stream_reader = StreamReader::try_new_buffered(input_file, None)?;
 
     let schema = stream_reader.schema();
     let output_file = File::create(output_path)?;
     let mut writer = FileWriter::try_new_with_options(output_file, &schema, write_options)?;
 
-    for batch_result in stream_reader {
-        let batch = batch_result?;
-        writer.write(&batch)?;
-    }
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        for batch_result in stream_reader {
+            let batch = batch_result?;
+            writer.write(&batch)?;
+        }
+        writer.finish()?;
 
-    writer.finish()?;
+        Ok(())
+    })
+    .await??;
 
     Ok(())
 }
 
-fn convert_file_to_file_format(
-    file_reader: FileReader<&mut BufReader<File>>,
+async fn convert_file_to_file_format(
+    input_path: &str,
     output_path: &std::path::Path,
     write_options: IpcWriteOptions,
 ) -> Result<()> {
+    let input_file = File::open(input_path)?;
+    let file_reader = FileReader::try_new(input_file, None)?;
+
     let schema = file_reader.schema();
     let output_file = File::create(output_path)?;
     let mut writer = FileWriter::try_new_with_options(output_file, &schema, write_options)?;
 
-    for batch_result in file_reader {
-        let batch = batch_result?;
-        writer.write(&batch)?;
-    }
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        for batch_result in file_reader {
+            let batch = batch_result?;
+            writer.write(&batch)?;
+        }
 
-    writer.finish()?;
+        writer.finish()?;
+
+        Ok(())
+    })
+    .await??;
 
     Ok(())
 }
@@ -225,8 +239,8 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn test_convert_stream_to_file_format() {
+    #[tokio::test]
+    async fn test_convert_stream_to_file_format() {
         let temp_dir = tempdir().unwrap();
         let input_path = temp_dir.path().join("input.arrow");
         let output_path = temp_dir.path().join("output.arrow");
@@ -238,6 +252,7 @@ mod tests {
             &output_path,
             IpcWriteOptions::default(),
         )
+        .await
         .unwrap();
 
         let file = File::open(&output_path).unwrap();
@@ -259,11 +274,10 @@ mod tests {
         write_test_arrow_file(&input_path, false).unwrap();
 
         let write_options = IpcWriteOptions::default();
-        let file = File::open(&input_path).unwrap();
-        let mut reader = BufReader::new(file);
-        let file_reader = FileReader::try_new(&mut reader, None).unwrap();
 
-        convert_file_to_file_format(file_reader, &output_path, write_options).unwrap();
+        convert_file_to_file_format(input_path.to_str().unwrap(), &output_path, write_options)
+            .await
+            .unwrap();
 
         assert!(output_path.exists());
 
@@ -717,8 +731,8 @@ mod tests {
         assert!(output_path.exists());
     }
 
-    #[test]
-    fn test_multiple_batches() {
+    #[tokio::test]
+    async fn test_multiple_batches() {
         let temp_dir = tempdir().unwrap();
         let input_path = temp_dir.path().join("input.arrow");
         let output_path = temp_dir.path().join("output.arrow");
@@ -754,6 +768,7 @@ mod tests {
             &output_path,
             IpcWriteOptions::default(),
         )
+        .await
         .unwrap();
 
         let file = File::open(&output_path).unwrap();
@@ -766,8 +781,8 @@ mod tests {
         assert_eq!(batches[1].num_rows(), 2);
     }
 
-    #[test]
-    fn test_empty_file() {
+    #[tokio::test]
+    async fn test_empty_file() {
         let temp_dir = tempdir().unwrap();
         let input_path = temp_dir.path().join("input.arrow");
         let output_path = temp_dir.path().join("output.arrow");
@@ -783,6 +798,7 @@ mod tests {
             &output_path,
             IpcWriteOptions::default(),
         )
+        .await
         .unwrap();
 
         let file = File::open(&output_path).unwrap();
@@ -850,8 +866,8 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[test]
-    fn test_corrupted_arrow_file() {
+    #[tokio::test]
+    async fn test_corrupted_arrow_file() {
         let temp_dir = tempdir().unwrap();
         let input_path = temp_dir.path().join("corrupted.arrow");
         let output_path = temp_dir.path().join("output.arrow");
@@ -862,7 +878,8 @@ mod tests {
             input_path.to_str().unwrap(),
             &output_path,
             IpcWriteOptions::default(),
-        );
+        )
+        .await;
 
         assert!(result.is_err());
     }

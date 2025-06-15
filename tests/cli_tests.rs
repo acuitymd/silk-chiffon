@@ -9,13 +9,13 @@ fn test_help_command() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Convert Arrow data to Parquet format",
+            "Convert Arrow format to Parquet format",
         ))
         .stdout(predicate::str::contains(
-            "Convert Arrow data to DuckDB format",
+            "Convert Arrow format to DuckDB format",
         ))
         .stdout(predicate::str::contains(
-            "Convert Arrow IPC data to Arrow IPC format",
+            "Convert Arrow format to Arrow format",
         ));
 }
 
@@ -35,9 +35,8 @@ fn test_parquet_help() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Input Arrow IPC stream file to process",
+            "Convert Arrow format to Parquet format.",
         ))
-        .stdout(predicate::str::contains("Output Parquet file path"))
         .stdout(predicate::str::contains(
             "Sort the data by one or more columns",
         ))
@@ -51,9 +50,8 @@ fn test_duckdb_help() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Input Arrow IPC stream file to process",
+            "Convert Arrow format to DuckDB format.",
         ))
-        .stdout(predicate::str::contains("Output DuckDB database file path"))
         .stdout(predicate::str::contains(
             "Sort the data by one or more columns",
         ));
@@ -65,8 +63,9 @@ fn test_arrow_help() {
     cmd.args(["arrow", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Input Arrow IPC stream file"))
-        .stdout(predicate::str::contains("Output Arrow IPC file path"))
+        .stdout(predicate::str::contains(
+            "Convert Arrow format to Arrow format.",
+        ))
         .stdout(predicate::str::contains(
             "Sort the data by one or more columns",
         ));

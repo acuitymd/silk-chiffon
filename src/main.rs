@@ -14,11 +14,35 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Convert Arrow data to Parquet format.
+    /// Convert Arrow format to Parquet format.
+    ///
+    /// Input formats:
+    ///   - Arrow IPC stream format
+    ///   - Arrow IPC file format
+    ///
+    /// Output formats:
+    ///   - Parquet file format
+    #[command(verbatim_doc_comment)]
     Parquet(ParquetArgs),
-    /// Convert Arrow data to DuckDB format.
+    /// Convert Arrow format to DuckDB format.
+    ///
+    /// Input formats:
+    ///   - Arrow IPC stream format
+    ///   - Arrow IPC file format
+    ///
+    /// Output formats:
+    ///   - DuckDB database file format
+    #[command(verbatim_doc_comment)]
     Duckdb(DuckDbArgs),
-    /// Convert any Arrow IPC file to an Arrow IPC file in the file (not stream) format.
+    /// Convert Arrow format to Arrow format.
+    ///
+    /// Input formats:
+    ///   - Arrow IPC stream format
+    ///   - Arrow IPC file format
+    ///
+    /// Output formats:
+    ///   - Arrow IPC file format
+    #[command(verbatim_doc_comment)]
     Arrow(ArrowArgs),
 }
 
