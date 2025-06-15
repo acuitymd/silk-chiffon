@@ -326,7 +326,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Parquet(args) => commands::parquet::run(args)?,
+        Commands::Parquet(args) => commands::parquet::run(args).await?,
         Commands::Duckdb(args) => commands::duckdb::run(args).await?,
         Commands::Arrow(args) => commands::arrow::run(args).await?,
     };

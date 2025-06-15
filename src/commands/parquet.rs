@@ -1,7 +1,9 @@
-use crate::ParquetArgs;
+use crate::{ParquetArgs, utils::filesystem::ensure_parent_dir_exists};
 use anyhow::Result;
 
-pub fn run(_args: ParquetArgs) -> Result<()> {
+pub async fn run(args: ParquetArgs) -> Result<()> {
+    ensure_parent_dir_exists(args.output.path()).await?;
+
     Ok(())
 }
 
@@ -12,8 +14,8 @@ mod tests {
     use clio::{Input, OutputPath};
     use tempfile::TempDir;
 
-    #[test]
-    fn test_run_returns_ok() {
+    #[tokio::test]
+    async fn test_run_returns_ok() {
         let temp_dir = TempDir::new().unwrap();
         let input_path = temp_dir.path().join("input.arrow");
         let output_path = temp_dir.path().join("output.parquet");
@@ -34,11 +36,11 @@ mod tests {
             writer_version: ParquetWriterVersion::V2,
         };
 
-        assert!(run(args).is_ok());
+        assert!(run(args).await.is_ok());
     }
 
-    #[test]
-    fn test_run_with_compression() {
+    #[tokio::test]
+    async fn test_run_with_compression() {
         let temp_dir = TempDir::new().unwrap();
         let input_path = temp_dir.path().join("input.arrow");
         let output_path = temp_dir.path().join("output.parquet");
@@ -59,6 +61,6 @@ mod tests {
             writer_version: ParquetWriterVersion::V2,
         };
 
-        assert!(run(args).is_ok());
+        assert!(run(args).await.is_ok());
     }
 }
