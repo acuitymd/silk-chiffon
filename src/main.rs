@@ -2,7 +2,6 @@ use anyhow::{Result, anyhow};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::{fmt::Display, str::FromStr};
 
-pub mod bloom_filter_args;
 pub mod commands;
 pub mod utils;
 
@@ -423,7 +422,7 @@ impl FromStr for BloomFilterColumnConfig {
                 size_config: BloomFilterSizeConfig::from_str(rest)?,
             })
         } else {
-            return Err(anyhow!("Invalid bloom filter specification: {}", s));
+            Err(anyhow!("Invalid bloom filter specification: {}", s))
         }
     }
 }

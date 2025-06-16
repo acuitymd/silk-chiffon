@@ -9,7 +9,7 @@ use parquet::{
 };
 
 pub async fn run(args: ParquetArgs) -> Result<()> {
-    let input_path = args.input.path().to_str().ok_or_else(|| {
+    let _input_path = args.input.path().to_str().ok_or_else(|| {
         anyhow!(
             "Input path contains invalid UTF-8 characters: {:?}",
             args.input.path()
@@ -22,7 +22,7 @@ pub async fn run(args: ParquetArgs) -> Result<()> {
     Ok(())
 }
 
-fn create_writer_properties(args: &ParquetArgs) -> Result<WriterProperties> {
+fn _create_writer_properties(args: &ParquetArgs) -> Result<WriterProperties> {
     let mut builder = WriterProperties::builder().set_max_row_group_size(args.max_row_group_size);
 
     builder = match args.compression {
@@ -54,15 +54,15 @@ fn create_writer_properties(args: &ParquetArgs) -> Result<WriterProperties> {
         builder = builder.set_dictionary_enabled(false);
     }
 
-    if let Some(bloom_all) = &args.bloom_all {
-        builder = configure_bloom_all(builder, bloom_all)?;
-    }
+    // if let Some(bloom_all) = &args.bloom_all {
+    //     builder = configure_bloom_all(builder, bloom_all)?;
+    // }
 
-    for bloom_col in &args.bloom_column {
-        builder = configure_bloom_column(builder, bloom_col)?;
-    }
+    // for bloom_col in &args.bloom_column {
+    //     builder = configure_bloom_column(builder, bloom_col)?;
+    // }
 
-    builder = add_metadata_to_properties(builder, args);
+    // builder = add_metadata_to_properties(builder, args);
 
     Ok(builder.build())
 }
