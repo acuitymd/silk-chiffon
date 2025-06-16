@@ -810,25 +810,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "croptop"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arrow",
- "assert_cmd",
- "clap",
- "clio",
- "datafusion",
- "duckdb",
- "futures",
- "nix",
- "parquet",
- "predicates",
- "tempfile",
- "tokio",
-]
-
-[[package]]
 name = "crossbeam-utils"
 version = "0.8.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -869,6 +850,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d02f3b0da4c6504f86e9cd789d8dbafab48c2321be74e9987593de5a894d93d"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "daisy"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arrow",
+ "assert_cmd",
+ "clap",
+ "clio",
+ "datafusion",
+ "duckdb",
+ "futures",
+ "nix",
+ "parquet",
+ "predicates",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
