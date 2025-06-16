@@ -1,7 +1,8 @@
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::{fmt::Display, str::FromStr};
 
+pub mod bloom_filter_args;
 pub mod commands;
 pub mod utils;
 
@@ -89,11 +90,11 @@ pub struct ParquetArgs {
     ///   --bloom-all "ndv=1000000:fpp=0.01" # Same, different order
     #[arg(
         long,
-        value_name = "[fpp=VALUE][:ndv=VALUE]",
+        value_name = "[fpp=VALUE|ndv=VALUE|fpp=VALUE:ndv=VALUE|ndv=VALUE:fpp=VALUE]",
         conflicts_with = "bloom_column",
         verbatim_doc_comment
     )]
-    bloom_all: Option<String>,
+    bloom_all: Option<BloomFilterSizeConfig>,
 
     /// Enable bloom filter for specific columns with optional custom settings.
     /// Can be specified multiple times. Mutually exclusive with --bloom-all.
@@ -116,7 +117,7 @@ pub struct ParquetArgs {
         conflicts_with = "bloom_all",
         verbatim_doc_comment
     )]
-    bloom_column: Vec<String>,
+    bloom_column: Vec<BloomFilterColumnConfig>,
 
     /// The maximum number of rows per Parquet row group.
     #[arg(long, default_value_t = 122_880)]
@@ -318,6 +319,112 @@ impl Display for SortSpec {
             })
             .collect();
         write!(f, "{}", parts.join(","))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct BloomFilterSizeConfig {
+    pub fpp: Option<f64>,
+    pub ndv: Option<u64>,
+}
+
+impl FromStr for BloomFilterSizeConfig {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut fpp = None;
+        let mut ndv = None;
+
+        let parts = s
+            .split(':')
+            .map(|p| p.trim())
+            .filter(|p| !p.is_empty())
+            .collect::<Vec<&str>>();
+
+        if parts.len() > 2 {
+            return Err(anyhow!("Invalid bloom filter specification: {}", s));
+        }
+
+        for part in parts {
+            if part.is_empty() {
+                return Err(anyhow!("Invalid bloom filter specification: {}", s));
+            }
+
+            if let Some((key, value)) = part.split_once('=') {
+                let key = key.trim();
+                let value = value.trim();
+
+                match key {
+                    "fpp" => {
+                        if fpp.is_some() {
+                            return Err(anyhow!(
+                                "Invalid bloom filter specification, fpp is set twice: {}",
+                                s
+                            ));
+                        }
+
+                        fpp = Some(value.parse::<f64>().map_err(|e| {
+                            anyhow::anyhow!("Invalid fpp value '{}': {}", value, e)
+                        })?);
+                    }
+                    "ndv" => {
+                        if ndv.is_some() {
+                            return Err(anyhow!(
+                                "Invalid bloom filter specification, ndv is set twice: {}",
+                                s
+                            ));
+                        }
+
+                        ndv = Some(value.parse::<u64>().map_err(|e| {
+                            anyhow::anyhow!("Invalid ndv value '{}': {}", value, e)
+                        })?);
+                    }
+                    _ => {
+                        return Err(anyhow::anyhow!(
+                            "Unknown parameter '{}'. Valid parameters are 'fpp' and 'ndv'",
+                            key
+                        ));
+                    }
+                }
+            } else {
+                return Err(anyhow::anyhow!(
+                    "Invalid parameter format '{}'. Expected 'key=value'",
+                    part
+                ));
+            }
+        }
+
+        Ok(BloomFilterSizeConfig { fpp, ndv })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct BloomFilterColumnConfig {
+    pub name: String,
+    pub size_config: BloomFilterSizeConfig,
+}
+
+impl FromStr for BloomFilterColumnConfig {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if let Some((column_name, rest)) = s.split_once(':') {
+            let column_name = column_name.trim();
+
+            if column_name.is_empty() {
+                return Err(anyhow!(
+                    "Invalid bloom filter specification, column name is empty: {}",
+                    s
+                ));
+            }
+
+            Ok(BloomFilterColumnConfig {
+                name: column_name.to_string(),
+                size_config: BloomFilterSizeConfig::from_str(rest)?,
+            })
+        } else {
+            return Err(anyhow!("Invalid bloom filter specification: {}", s));
+        }
     }
 }
 
