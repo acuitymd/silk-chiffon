@@ -260,17 +260,9 @@ pub enum SortDirection {
     Descending,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SortSpec {
     pub columns: Vec<SortColumn>,
-}
-
-impl Default for SortSpec {
-    fn default() -> Self {
-        Self {
-            columns: Vec::new(),
-        }
-    }
 }
 
 impl FromStr for SortSpec {

@@ -207,7 +207,9 @@ impl ArrowConverter {
                 input.path().to_path_buf(),
             )),
             ArrowIPCFormat::Stream => {
-                let temp_file = NamedTempFile::new()?;
+                let temp_file = tempfile::Builder::new()
+                    .suffix(".arrow")
+                    .tempfile()?;
                 ArrowConverter::convert_arrow_reader_to_file_format(
                     input.stream_reader()?,
                     temp_file.path(),
@@ -282,7 +284,7 @@ impl ArrowIPCReader {
     pub fn from_path<P: AsRef<std::path::Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
 
-        if let Ok(_) = FileReader::try_new_buffered(File::open(path)?, None) {
+        if FileReader::try_new_buffered(File::open(path)?, None).is_ok() {
             return Ok(ArrowIPCReader {
                 inner: ArrowIPCReaderInner::File {
                     path: path.to_path_buf(),
@@ -290,7 +292,7 @@ impl ArrowIPCReader {
             });
         }
 
-        if let Ok(_) = StreamReader::try_new_buffered(File::open(path)?, None) {
+        if StreamReader::try_new_buffered(File::open(path)?, None).is_ok() {
             return Ok(ArrowIPCReader {
                 inner: ArrowIPCReaderInner::Stream {
                     path: path.to_path_buf(),
