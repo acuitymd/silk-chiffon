@@ -353,23 +353,6 @@ impl ArrowIPCReader {
             }
         }
     }
-
-    pub async fn as_file_format(&self) -> Result<ArrowIPCFileInFileFormat> {
-        match &self.inner {
-            ArrowIPCReaderInner::File { path } => {
-                Ok(ArrowIPCFileInFileFormat::Original(path.clone()))
-            }
-            ArrowIPCReaderInner::Stream { path } => {
-                let temp_file = NamedTempFile::new()?;
-                let converter = ArrowConverter::new(path.to_str().unwrap(), temp_file.path());
-                converter.convert().await?;
-                Ok(ArrowIPCFileInFileFormat::Temp {
-                    original_path: path.clone(),
-                    temp_file,
-                })
-            }
-        }
-    }
 }
 
 #[cfg(test)]
