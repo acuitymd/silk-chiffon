@@ -200,16 +200,12 @@ impl ArrowConverter {
         Ok(())
     }
 
-    async fn as_file_format(&self) -> Result<ArrowIPCFileInFileFormat> {
+    async fn as_file_format(&self) -> Result<ArrowFileSource> {
         let input = ArrowIPCReader::from_path(&self.input_path)?;
         match input.format() {
-            ArrowIPCFormat::File => Ok(ArrowIPCFileInFileFormat::Original(
-                input.path().to_path_buf(),
-            )),
+            ArrowIPCFormat::File => Ok(ArrowFileSource::Original(input.path().to_path_buf())),
             ArrowIPCFormat::Stream => {
-                let temp_file = tempfile::Builder::new()
-                    .suffix(".arrow")
-                    .tempfile()?;
+                let temp_file = tempfile::Builder::new().suffix(".arrow").tempfile()?;
                 ArrowConverter::convert_arrow_reader_to_file_format(
                     input.stream_reader()?,
                     temp_file.path(),
@@ -217,7 +213,7 @@ impl ArrowConverter {
                 )
                 .await?;
 
-                Ok(ArrowIPCFileInFileFormat::Temp {
+                Ok(ArrowFileSource::Temp {
                     original_path: input.path().to_path_buf(),
                     temp_file,
                 })
@@ -240,7 +236,7 @@ pub enum ArrowIPCReaderInner {
     Stream { path: PathBuf },
 }
 
-pub enum ArrowIPCFileInFileFormat {
+pub enum ArrowFileSource {
     Original(PathBuf),
     Temp {
         original_path: PathBuf,
@@ -248,11 +244,11 @@ pub enum ArrowIPCFileInFileFormat {
     },
 }
 
-impl ArrowIPCFileInFileFormat {
+impl ArrowFileSource {
     pub fn path(&self) -> &Path {
         match self {
-            ArrowIPCFileInFileFormat::Original(path) => path,
-            ArrowIPCFileInFileFormat::Temp {
+            ArrowFileSource::Original(path) => path,
+            ArrowFileSource::Temp {
                 original_path: _,
                 temp_file,
             } => temp_file.path(),
@@ -368,647 +364,912 @@ mod tests {
     use std::sync::Arc;
     use tempfile::tempdir;
 
-    fn create_test_schema() -> Arc<Schema> {
-        Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Int32, false),
-            Field::new("name", DataType::Utf8, false),
-        ]))
-    }
+    mod test_data {
+        use super::*;
 
-    fn create_test_batch(schema: &Arc<Schema>) -> RecordBatch {
-        let id_array = Int32Array::from(vec![1, 2, 3, 4, 5]);
-        let name_array = StringArray::from(vec!["Alice", "Bob", "Charlie", "David", "Eve"]);
-
-        RecordBatch::try_new(
-            schema.clone(),
-            vec![Arc::new(id_array), Arc::new(name_array)],
-        )
-        .unwrap()
-    }
-
-    fn write_test_arrow_file(path: &std::path::Path, use_stream: bool) -> Result<()> {
-        let schema = create_test_schema();
-        let batch = create_test_batch(&schema);
-        let file = File::create(path)?;
-
-        if use_stream {
-            let mut writer = arrow::ipc::writer::StreamWriter::try_new(file, &schema)?;
-            writer.write(&batch)?;
-            writer.finish()?;
-        } else {
-            let mut writer = FileWriter::try_new(file, &schema)?;
-            writer.write(&batch)?;
-            writer.finish()?;
+        pub fn simple_schema() -> SchemaRef {
+            Arc::new(Schema::new(vec![
+                Field::new("id", DataType::Int32, false),
+                Field::new("name", DataType::Utf8, false),
+            ]))
         }
 
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_convert_stream_to_file_format() {
-        let temp_dir = tempdir().unwrap();
-        let input_path = temp_dir.path().join("input.arrow");
-        let output_path = temp_dir.path().join("output.arrow");
-
-        write_test_arrow_file(&input_path, true).unwrap();
-
-        ArrowConverter::convert_arrow_reader_to_file_format(
-            StreamReader::try_new_buffered(File::open(&input_path).unwrap(), None).unwrap(),
-            &output_path,
-            IpcWriteOptions::default(),
-        )
-        .await
-        .unwrap();
-
-        let file = File::open(&output_path).unwrap();
-        let mut reader = BufReader::new(file);
-        let file_reader = FileReader::try_new(&mut reader, None).unwrap();
-
-        let schema = file_reader.schema();
-        assert_eq!(schema.fields().len(), 2);
-        assert_eq!(schema.field(0).name(), "id");
-        assert_eq!(schema.field(1).name(), "name");
-    }
-
-    #[tokio::test]
-    async fn test_convert_file_to_file_format() {
-        let temp_dir = tempdir().unwrap();
-        let input_path = temp_dir.path().join("input.arrow");
-        let output_path = temp_dir.path().join("output.arrow");
-
-        write_test_arrow_file(&input_path, false).unwrap();
-
-        let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path);
-        converter.convert().await.unwrap();
-
-        assert!(output_path.exists());
-
-        let file = File::open(&output_path).unwrap();
-        let mut reader = BufReader::new(file);
-        let file_reader = FileReader::try_new(&mut reader, None).unwrap();
-
-        let schema = file_reader.schema();
-        assert_eq!(schema.fields().len(), 2);
-        assert_eq!(schema.field(0).name(), "id");
-        assert_eq!(schema.field(1).name(), "name");
-    }
-
-    #[tokio::test]
-    async fn test_stream_arrow_direct_file_format() {
-        let temp_dir = tempdir().unwrap();
-        let input_path = temp_dir.path().join("input.arrow");
-        let output_path = temp_dir.path().join("output.arrow");
-
-        write_test_arrow_file(&input_path, false).unwrap();
-
-        let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path);
-        converter.convert().await.unwrap();
-
-        assert!(output_path.exists());
-    }
-
-    #[tokio::test]
-    async fn test_stream_arrow_direct_stream_format() {
-        let temp_dir = tempdir().unwrap();
-        let input_path = temp_dir.path().join("input.arrow");
-        let output_path = temp_dir.path().join("output.arrow");
-
-        write_test_arrow_file(&input_path, true).unwrap();
-
-        let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path);
-        converter.convert().await.unwrap();
-
-        assert!(output_path.exists());
-    }
-
-    #[tokio::test]
-    async fn test_run_creates_parent_directory() {
-        let temp_dir = tempdir().unwrap();
-        let input_path = temp_dir.path().join("input.arrow");
-        let output_dir = temp_dir.path().join("subdir");
-        let output_path = output_dir.join("output.arrow");
-
-        write_test_arrow_file(&input_path, false).unwrap();
-
-        std::fs::create_dir_all(&output_dir).unwrap();
-
-        let args = ArrowArgs {
-            input: clio::Input::new(&input_path).unwrap(),
-            output: clio::OutputPath::new(&output_path).unwrap(),
-            sort_by: None,
-            compression: ArrowCompression::None,
-        };
-
-        run(args).await.unwrap();
-
-        assert!(output_dir.exists());
-        assert!(output_path.exists());
-    }
-
-    #[tokio::test]
-    async fn test_run_with_compression() {
-        let temp_dir = tempdir().unwrap();
-        let input_path = temp_dir.path().join("input.arrow");
-        let output_path = temp_dir.path().join("output.arrow");
-
-        write_test_arrow_file(&input_path, false).unwrap();
-
-        let args = ArrowArgs {
-            input: clio::Input::new(&input_path).unwrap(),
-            output: clio::OutputPath::new(&output_path).unwrap(),
-            sort_by: None,
-            compression: ArrowCompression::Zstd,
-        };
-
-        run(args).await.unwrap();
-        assert!(output_path.exists());
-    }
-
-    #[tokio::test]
-    async fn test_stream_arrow_with_sorting_file_format() {
-        let temp_dir = tempdir().unwrap();
-        let input_path = temp_dir.path().join("input.arrow");
-        let output_path = temp_dir.path().join("output.arrow");
-
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Int32, false),
-            Field::new("name", DataType::Utf8, false),
-        ]));
-
-        let id_array = Int32Array::from(vec![5, 2, 4, 1, 3]);
-        let name_array = StringArray::from(vec!["Eve", "Bob", "David", "Alice", "Charlie"]);
-
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![Arc::new(id_array), Arc::new(name_array)],
-        )
-        .unwrap();
-
-        let file = File::create(&input_path).unwrap();
-        let mut writer = FileWriter::try_new(file, &schema).unwrap();
-        writer.write(&batch).unwrap();
-        writer.finish().unwrap();
-
-        let sort_spec = crate::SortSpec {
-            columns: vec![crate::SortColumn {
-                name: "id".to_string(),
-                direction: SortDirection::Ascending,
-            }],
-        };
-
-        let converter =
-            ArrowConverter::new(input_path.to_str().unwrap(), &output_path).with_sorting(sort_spec);
-
-        converter.convert().await.unwrap();
-
-        let file = File::open(&output_path).unwrap();
-        let mut reader = BufReader::new(file);
-        let file_reader = FileReader::try_new(&mut reader, None).unwrap();
-
-        let mut batches = vec![];
-        for batch_result in file_reader {
-            batches.push(batch_result.unwrap());
+        pub fn nullable_id_schema() -> SchemaRef {
+            Arc::new(Schema::new(vec![
+                Field::new("id", DataType::Int32, true),
+                Field::new("name", DataType::Utf8, false),
+            ]))
         }
 
-        assert_eq!(batches.len(), 1);
-        let result_batch = &batches[0];
+        pub fn multi_column_for_sorting_schema() -> SchemaRef {
+            Arc::new(Schema::new(vec![
+                Field::new("group", DataType::Int32, false),
+                Field::new("value", DataType::Int32, false),
+            ]))
+        }
 
-        let ids = result_batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .unwrap();
+        pub fn create_batch_with_ids_and_names(
+            schema: &SchemaRef,
+            ids: &[i32],
+            names: &[&str],
+        ) -> RecordBatch {
+            RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(Int32Array::from(ids.to_vec())),
+                    Arc::new(StringArray::from(names.to_vec())),
+                ],
+            )
+            .unwrap()
+        }
 
-        assert_eq!(ids.value(0), 1);
-        assert_eq!(ids.value(1), 2);
-        assert_eq!(ids.value(2), 3);
-        assert_eq!(ids.value(3), 4);
-        assert_eq!(ids.value(4), 5);
+        pub fn create_batch_with_nullable_ids_and_non_nullable_names(
+            schema: &SchemaRef,
+            ids: &[Option<i32>],
+            names: &[&str],
+        ) -> RecordBatch {
+            RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(Int32Array::from(ids.to_vec())),
+                    Arc::new(StringArray::from(names.to_vec())),
+                ],
+            )
+            .unwrap()
+        }
+
+        pub fn create_multi_column_for_sorting_batch(
+            schema: &Arc<Schema>,
+            groups: &[i32],
+            values: &[i32],
+        ) -> RecordBatch {
+            RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(Int32Array::from(groups.to_vec())),
+                    Arc::new(Int32Array::from(values.to_vec())),
+                ],
+            )
+            .unwrap()
+        }
     }
 
-    #[tokio::test]
-    async fn test_stream_arrow_with_sorting_stream_format() {
-        let temp_dir = tempdir().unwrap();
-        let input_path = temp_dir.path().join("input.arrow");
-        let output_path = temp_dir.path().join("output.arrow");
+    mod file_helpers {
+        use super::*;
+        use arrow::ipc::writer::{FileWriter, StreamWriter};
+        use std::fs::File;
 
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("value", DataType::Int32, false),
-            Field::new("category", DataType::Utf8, false),
-        ]));
+        pub fn write_arrow_file(
+            path: &Path,
+            schema: &SchemaRef,
+            batches: Vec<RecordBatch>,
+        ) -> Result<()> {
+            let file = File::create(path)?;
+            let mut writer = FileWriter::try_new(file, schema)?;
+            for batch in batches {
+                writer.write(&batch)?;
+            }
+            writer.finish()?;
+            Ok(())
+        }
 
-        let value_array = Int32Array::from(vec![30, 10, 20]);
-        let category_array = StringArray::from(vec!["C", "A", "B"]);
+        pub fn write_arrow_stream(
+            path: &Path,
+            schema: &SchemaRef,
+            batches: Vec<RecordBatch>,
+        ) -> Result<()> {
+            let file = File::create(path)?;
+            let mut writer = StreamWriter::try_new(file, schema)?;
+            for batch in batches {
+                writer.write(&batch)?;
+            }
+            writer.finish()?;
+            Ok(())
+        }
 
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![Arc::new(value_array), Arc::new(category_array)],
-        )
-        .unwrap();
-
-        let file = File::create(&input_path).unwrap();
-        let mut writer = arrow::ipc::writer::StreamWriter::try_new(file, &schema).unwrap();
-        writer.write(&batch).unwrap();
-        writer.finish().unwrap();
-
-        let sort_spec = crate::SortSpec {
-            columns: vec![crate::SortColumn {
-                name: "value".to_string(),
-                direction: SortDirection::Descending,
-            }],
-        };
-
-        let converter =
-            ArrowConverter::new(input_path.to_str().unwrap(), &output_path).with_sorting(sort_spec);
-
-        converter.convert().await.unwrap();
-
-        let temp_file = output_path.with_extension("tmp.arrow");
-        assert!(!temp_file.exists());
-
-        let file = File::open(&output_path).unwrap();
-        let mut reader = BufReader::new(file);
-        let file_reader = FileReader::try_new(&mut reader, None).unwrap();
-
-        let batch = file_reader.into_iter().next().unwrap().unwrap();
-        let values = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .unwrap();
-
-        assert_eq!(values.value(0), 30);
-        assert_eq!(values.value(1), 20);
-        assert_eq!(values.value(2), 10);
+        pub fn write_invalid_file(path: &std::path::Path) -> Result<()> {
+            std::fs::write(path, b"not an arrow file")?;
+            Ok(())
+        }
     }
 
-    #[tokio::test]
-    async fn test_multi_column_sorting() {
-        let temp_dir = tempdir().unwrap();
-        let input_path = temp_dir.path().join("input.arrow");
-        let output_path = temp_dir.path().join("output.arrow");
+    mod verify {
+        use super::*;
 
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("group", DataType::Int32, false),
-            Field::new("value", DataType::Int32, false),
-        ]));
+        pub fn read_output_file(path: &Path) -> Result<Vec<RecordBatch>> {
+            let file = File::open(path)?;
+            let reader = FileReader::try_new_buffered(file, None)?;
+            reader.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        }
 
-        let group_array = Int32Array::from(vec![1, 2, 1, 2, 1]);
-        let value_array = Int32Array::from(vec![30, 20, 10, 40, 20]);
+        pub fn assert_schema_matches(actual: &Schema, expected: &Schema) {
+            assert_eq!(actual.fields().len(), expected.fields().len());
+            for (i, field) in expected.fields().iter().enumerate() {
+                let actual_field = actual.field(i);
 
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![Arc::new(group_array), Arc::new(value_array)],
-        )
-        .unwrap();
+                assert_eq!(actual_field.name(), field.name());
+                assert_eq!(actual_field.data_type(), field.data_type());
+                assert_eq!(actual_field.is_nullable(), field.is_nullable());
+            }
+        }
 
-        let file = File::create(&input_path).unwrap();
-        let mut writer = FileWriter::try_new(file, &schema).unwrap();
-        writer.write(&batch).unwrap();
-        writer.finish().unwrap();
+        pub fn assert_id_name_batch_data_matches(
+            batch: &RecordBatch,
+            expected_ids: &[i32],
+            expected_names: &[&str],
+        ) {
+            assert_schema_matches(&batch.schema(), &test_data::simple_schema());
 
-        let sort_spec = crate::SortSpec {
-            columns: vec![
-                crate::SortColumn {
-                    name: "group".to_string(),
+            let id_column = batch.column_by_name("id").unwrap();
+            let name_column = batch.column_by_name("name").unwrap();
+
+            let ids = id_column.as_any().downcast_ref::<Int32Array>().unwrap();
+            let names = name_column.as_any().downcast_ref::<StringArray>().unwrap();
+
+            assert_eq!(ids.len(), expected_ids.len());
+            assert_eq!(names.len(), expected_names.len());
+
+            for (i, expected_id) in expected_ids.iter().enumerate() {
+                assert_eq!(ids.value(i), *expected_id);
+            }
+            for (i, expected_name) in expected_names.iter().enumerate() {
+                assert_eq!(names.value(i), *expected_name);
+            }
+        }
+    }
+
+    mod arrow_ipc_reader_tests {
+        use super::*;
+
+        #[test]
+        fn test_reader_detects_file_format() {
+            let temp_dir = tempdir().unwrap();
+            let file_path = temp_dir.path().join("file.arrow");
+
+            let test_ids = vec![1, 2, 3];
+            let test_names = vec!["A", "B", "C"];
+
+            let schema = test_data::simple_schema();
+            let batch = test_data::create_batch_with_ids_and_names(&schema, &test_ids, &test_names);
+            file_helpers::write_arrow_file(&file_path, &schema, vec![batch]).unwrap();
+
+            let reader = ArrowIPCReader::from_path(&file_path).unwrap();
+            match reader.format() {
+                ArrowIPCFormat::File => (),
+                _ => panic!("Expected file format"),
+            }
+        }
+
+        #[test]
+        fn test_reader_returns_path() {
+            let temp_dir = tempdir().unwrap();
+            let file_path = temp_dir.path().join("file.arrow");
+
+            let test_ids = vec![1, 2, 3];
+            let test_names = vec!["A", "B", "C"];
+
+            let schema = test_data::simple_schema();
+            let batch = test_data::create_batch_with_ids_and_names(&schema, &test_ids, &test_names);
+            file_helpers::write_arrow_file(&file_path, &schema, vec![batch]).unwrap();
+
+            let reader = ArrowIPCReader::from_path(&file_path).unwrap();
+            assert_eq!(reader.path(), file_path);
+        }
+
+        #[test]
+        fn test_reader_detects_stream_format() {
+            let temp_dir = tempdir().unwrap();
+            let stream_path = temp_dir.path().join("stream.arrow");
+
+            let test_ids = vec![1, 2, 3];
+            let test_names = vec!["A", "B", "C"];
+
+            let schema = test_data::simple_schema();
+            let batch = test_data::create_batch_with_ids_and_names(&schema, &test_ids, &test_names);
+            file_helpers::write_arrow_stream(&stream_path, &schema, vec![batch]).unwrap();
+
+            let reader = ArrowIPCReader::from_path(&stream_path).unwrap();
+            match reader.format() {
+                ArrowIPCFormat::Stream => (),
+                _ => panic!("Expected stream format"),
+            }
+        }
+
+        #[test]
+        fn test_reader_rejects_invalid_file() {
+            let temp_dir = tempdir().unwrap();
+            let invalid_path = temp_dir.path().join("invalid.arrow");
+            file_helpers::write_invalid_file(&invalid_path).unwrap();
+
+            let result = ArrowIPCReader::from_path(&invalid_path);
+            assert!(result.is_err());
+            let err = result.err().unwrap();
+            assert!(err.to_string().contains("Invalid arrow file"));
+        }
+
+        #[test]
+        fn test_reader_schema_access() {
+            let temp_dir = tempdir().unwrap();
+            let file_path = temp_dir.path().join("file.arrow");
+
+            let test_ids = vec![1, 2, 3];
+            let test_names = vec!["A", "B", "C"];
+
+            let schema = test_data::simple_schema();
+            let batch = test_data::create_batch_with_ids_and_names(&schema, &test_ids, &test_names);
+            file_helpers::write_arrow_file(&file_path, &schema, vec![batch]).unwrap();
+
+            let reader = ArrowIPCReader::from_path(&file_path).unwrap();
+            let read_schema = reader.schema().unwrap();
+            verify::assert_schema_matches(&read_schema, &schema);
+        }
+
+        #[test]
+        fn test_file_reader_creation() {
+            let temp_dir = tempdir().unwrap();
+            let file_path = temp_dir.path().join("file.arrow");
+
+            let test_ids = vec![1, 2, 3];
+            let test_names = vec!["A", "B", "C"];
+
+            let schema = test_data::simple_schema();
+            let batch = test_data::create_batch_with_ids_and_names(&schema, &test_ids, &test_names);
+            file_helpers::write_arrow_file(&file_path, &schema, vec![batch]).unwrap();
+
+            let reader = ArrowIPCReader::from_path(&file_path).unwrap();
+            assert!(reader.file_reader().is_ok());
+            assert!(reader.stream_reader().is_err());
+        }
+
+        #[test]
+        fn test_stream_reader_creation() {
+            let temp_dir = tempdir().unwrap();
+            let stream_path = temp_dir.path().join("stream.arrow");
+
+            let test_ids = vec![1, 2, 3];
+            let test_names = vec!["A", "B", "C"];
+
+            let schema = test_data::simple_schema();
+            let batch = test_data::create_batch_with_ids_and_names(&schema, &test_ids, &test_names);
+            file_helpers::write_arrow_stream(&stream_path, &schema, vec![batch]).unwrap();
+
+            let reader = ArrowIPCReader::from_path(&stream_path).unwrap();
+            assert!(reader.stream_reader().is_ok());
+            assert!(reader.file_reader().is_err());
+        }
+    }
+
+    mod arrow_converter_tests {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_converter_basic_file_to_file() {
+            let temp_dir = tempdir().unwrap();
+            let input_path = temp_dir.path().join("input.arrow");
+            let output_path = temp_dir.path().join("output.arrow");
+
+            let test_ids = vec![1, 2, 3, 4, 5];
+            let test_names = vec!["Alice", "Bob", "Charlie", "David", "Eve"];
+
+            let schema = test_data::simple_schema();
+            let batch = test_data::create_batch_with_ids_and_names(&schema, &test_ids, &test_names);
+            file_helpers::write_arrow_file(&input_path, &schema, vec![batch]).unwrap();
+
+            let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path);
+            converter.convert().await.unwrap();
+
+            let batches = verify::read_output_file(&output_path).unwrap();
+            assert_eq!(batches.len(), 1);
+            verify::assert_id_name_batch_data_matches(&batches[0], &test_ids, &test_names);
+        }
+
+        #[tokio::test]
+        async fn test_converter_basic_stream_to_file() {
+            let temp_dir = tempdir().unwrap();
+            let input_path = temp_dir.path().join("input.arrow");
+            let output_path = temp_dir.path().join("output.arrow");
+
+            let test_ids = vec![1, 2, 3];
+            let test_names = vec!["A", "B", "C"];
+
+            let schema = test_data::simple_schema();
+            let batch = test_data::create_batch_with_ids_and_names(&schema, &test_ids, &test_names);
+            file_helpers::write_arrow_stream(&input_path, &schema, vec![batch]).unwrap();
+
+            let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path);
+            converter.convert().await.unwrap();
+
+            let batches = verify::read_output_file(&output_path).unwrap();
+            assert_eq!(batches.len(), 1);
+            verify::assert_id_name_batch_data_matches(&batches[0], &test_ids, &test_names);
+        }
+
+        #[tokio::test]
+        async fn test_converter_with_zstd_compression() {
+            let temp_dir = tempdir().unwrap();
+            let input_path = temp_dir.path().join("input.arrow");
+            let output_path = temp_dir.path().join("output.arrow");
+
+            let test_ids = vec![1, 2, 3];
+            let test_names = vec!["A", "B", "C"];
+
+            let schema = test_data::simple_schema();
+            let batch = test_data::create_batch_with_ids_and_names(&schema, &test_ids, &test_names);
+            file_helpers::write_arrow_file(&input_path, &schema, vec![batch]).unwrap();
+
+            let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path)
+                .with_compression(ArrowCompression::Zstd);
+            converter.convert().await.unwrap();
+
+            assert!(output_path.exists());
+            let batches = verify::read_output_file(&output_path).unwrap();
+            assert_eq!(batches.len(), 1);
+        }
+
+        #[tokio::test]
+        async fn test_converter_with_lz4_compression() {
+            let temp_dir = tempdir().unwrap();
+            let input_path = temp_dir.path().join("input.arrow");
+            let output_path = temp_dir.path().join("output.arrow");
+
+            let test_ids = vec![1, 2, 3];
+            let test_names = vec!["A", "B", "C"];
+
+            let schema = test_data::simple_schema();
+            let batch = test_data::create_batch_with_ids_and_names(&schema, &test_ids, &test_names);
+            file_helpers::write_arrow_file(&input_path, &schema, vec![batch]).unwrap();
+
+            let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path)
+                .with_compression(ArrowCompression::Lz4);
+            converter.convert().await.unwrap();
+
+            assert!(output_path.exists());
+            let batches = verify::read_output_file(&output_path).unwrap();
+            assert_eq!(batches.len(), 1);
+        }
+
+        #[tokio::test]
+        async fn test_converter_multiple_batches() {
+            let temp_dir = tempdir().unwrap();
+            let input_path = temp_dir.path().join("input.arrow");
+            let output_path = temp_dir.path().join("output.arrow");
+
+            let test_first_batch_ids = vec![1, 2, 3];
+            let test_first_batch_names = vec!["A", "B", "C"];
+            let test_second_batch_ids = vec![4, 5];
+            let test_second_batch_names = vec!["D", "E"];
+
+            let schema = test_data::simple_schema();
+            let batch1 = test_data::create_batch_with_ids_and_names(
+                &schema,
+                &test_first_batch_ids,
+                &test_first_batch_names,
+            );
+            let batch2 = test_data::create_batch_with_ids_and_names(
+                &schema,
+                &test_second_batch_ids,
+                &test_second_batch_names,
+            );
+            file_helpers::write_arrow_stream(&input_path, &schema, vec![batch1, batch2]).unwrap();
+
+            let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path);
+            converter.convert().await.unwrap();
+
+            let batches = verify::read_output_file(&output_path).unwrap();
+            assert_eq!(batches.len(), 2);
+            assert_eq!(batches[0].num_rows(), 3);
+            assert_eq!(batches[1].num_rows(), 2);
+        }
+
+        #[tokio::test]
+        async fn test_converter_empty_file() {
+            let temp_dir = tempdir().unwrap();
+            let input_path = temp_dir.path().join("input.arrow");
+            let output_path = temp_dir.path().join("output.arrow");
+
+            let schema = test_data::simple_schema();
+            file_helpers::write_arrow_stream(&input_path, &schema, vec![]).unwrap();
+
+            let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path);
+            converter.convert().await.unwrap();
+
+            let batches = verify::read_output_file(&output_path).unwrap();
+            assert_eq!(batches.len(), 0);
+        }
+
+        #[tokio::test]
+        async fn test_converter_invalid_input_path() {
+            let temp_dir = tempdir().unwrap();
+            let output_path = temp_dir.path().join("output.arrow");
+
+            let converter = ArrowConverter::new("/nonexistent/file.arrow", &output_path);
+            let result = converter.convert().await;
+
+            assert!(result.is_err());
+        }
+
+        #[tokio::test]
+        async fn test_converter_corrupted_file() {
+            let temp_dir = tempdir().unwrap();
+            let input_path = temp_dir.path().join("corrupted.arrow");
+            let output_path = temp_dir.path().join("output.arrow");
+
+            file_helpers::write_invalid_file(&input_path).unwrap();
+
+            let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path);
+            let result = converter.convert().await;
+
+            assert!(result.is_err());
+        }
+    }
+
+    mod sorting_tests {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_single_column_sort_ascending() {
+            let temp_dir = tempdir().unwrap();
+            let input_path = temp_dir.path().join("input.arrow");
+            let output_path = temp_dir.path().join("output.arrow");
+
+            let test_ids = vec![5, 2, 4, 1, 3];
+            let test_names = vec!["Eve", "Bob", "David", "Alice", "Charlie"];
+
+            let schema = test_data::simple_schema();
+            let batch = test_data::create_batch_with_ids_and_names(&schema, &test_ids, &test_names);
+            file_helpers::write_arrow_file(&input_path, &schema, vec![batch]).unwrap();
+
+            let sort_spec = SortSpec {
+                columns: vec![crate::SortColumn {
+                    name: "id".to_string(),
                     direction: SortDirection::Ascending,
-                },
-                crate::SortColumn {
-                    name: "value".to_string(),
-                    direction: SortDirection::Descending,
-                },
-            ],
-        };
+                }],
+            };
 
-        let converter =
-            ArrowConverter::new(input_path.to_str().unwrap(), &output_path).with_sorting(sort_spec);
+            let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path)
+                .with_sorting(sort_spec);
+            converter.convert().await.unwrap();
 
-        converter.convert().await.unwrap();
+            let batches = verify::read_output_file(&output_path).unwrap();
+            assert_eq!(batches.len(), 1);
 
-        let file = File::open(&output_path).unwrap();
-        let mut reader = BufReader::new(file);
-        let file_reader = FileReader::try_new(&mut reader, None).unwrap();
-
-        let batch = file_reader.into_iter().next().unwrap().unwrap();
-        let groups = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .unwrap();
-        let values = batch
-            .column(1)
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .unwrap();
-
-        assert_eq!(groups.value(0), 1);
-        assert_eq!(values.value(0), 30);
-        assert_eq!(groups.value(1), 1);
-        assert_eq!(values.value(1), 20);
-        assert_eq!(groups.value(2), 1);
-        assert_eq!(values.value(2), 10);
-
-        assert_eq!(groups.value(3), 2);
-        assert_eq!(values.value(3), 40);
-        assert_eq!(groups.value(4), 2);
-        assert_eq!(values.value(4), 20);
-    }
-
-    #[tokio::test]
-    async fn test_sorting_with_nulls() {
-        let temp_dir = tempdir().unwrap();
-        let input_path = temp_dir.path().join("input.arrow");
-        let output_path = temp_dir.path().join("output.arrow");
-
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Int32, true),
-            Field::new("name", DataType::Utf8, false),
-        ]));
-
-        let id_array = Int32Array::from(vec![Some(3), None, Some(1), None, Some(2)]);
-        let name_array = StringArray::from(vec!["C", "null1", "A", "null2", "B"]);
-
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![Arc::new(id_array), Arc::new(name_array)],
-        )
-        .unwrap();
-
-        let file = File::create(&input_path).unwrap();
-        let mut writer = FileWriter::try_new(file, &schema).unwrap();
-        writer.write(&batch).unwrap();
-        writer.finish().unwrap();
-
-        let sort_spec = crate::SortSpec {
-            columns: vec![crate::SortColumn {
-                name: "id".to_string(),
-                direction: SortDirection::Ascending,
-            }],
-        };
-
-        let converter =
-            ArrowConverter::new(input_path.to_str().unwrap(), &output_path).with_sorting(sort_spec);
-
-        converter.convert().await.unwrap();
-
-        let file = File::open(&output_path).unwrap();
-        let mut reader = BufReader::new(file);
-        let file_reader = FileReader::try_new(&mut reader, None).unwrap();
-
-        let batch = file_reader.into_iter().next().unwrap().unwrap();
-        let ids = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .unwrap();
-
-        assert_eq!(ids.value(0), 1);
-        assert_eq!(ids.value(1), 2);
-        assert_eq!(ids.value(2), 3);
-        assert!(ids.is_null(3));
-        assert!(ids.is_null(4));
-    }
-
-    #[tokio::test]
-    async fn test_sorting_with_nulls_descending() {
-        let temp_dir = tempdir().unwrap();
-        let input_path = temp_dir.path().join("input.arrow");
-        let output_path = temp_dir.path().join("output.arrow");
-
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Int32, true),
-            Field::new("name", DataType::Utf8, false),
-        ]));
-
-        let id_array = Int32Array::from(vec![Some(3), None, Some(1), None, Some(2)]);
-        let name_array = StringArray::from(vec!["C", "null1", "A", "null2", "B"]);
-
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![Arc::new(id_array), Arc::new(name_array)],
-        )
-        .unwrap();
-
-        let file = File::create(&input_path).unwrap();
-        let mut writer = FileWriter::try_new(file, &schema).unwrap();
-        writer.write(&batch).unwrap();
-        writer.finish().unwrap();
-
-        let sort_spec = crate::SortSpec {
-            columns: vec![crate::SortColumn {
-                name: "id".to_string(),
-                direction: SortDirection::Descending,
-            }],
-        };
-
-        let converter =
-            ArrowConverter::new(input_path.to_str().unwrap(), &output_path).with_sorting(sort_spec);
-
-        converter.convert().await.unwrap();
-
-        let file = File::open(&output_path).unwrap();
-        let mut reader = BufReader::new(file);
-        let file_reader = FileReader::try_new(&mut reader, None).unwrap();
-
-        let batch = file_reader.into_iter().next().unwrap().unwrap();
-        let ids = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .unwrap();
-
-        assert!(ids.is_null(0));
-        assert!(ids.is_null(1));
-        assert_eq!(ids.value(2), 3);
-        assert_eq!(ids.value(3), 2);
-        assert_eq!(ids.value(4), 1);
-    }
-
-    #[tokio::test]
-    async fn test_run_with_lz4_compression() {
-        let temp_dir = tempdir().unwrap();
-        let input_path = temp_dir.path().join("input.arrow");
-        let output_path = temp_dir.path().join("output.arrow");
-
-        write_test_arrow_file(&input_path, false).unwrap();
-
-        let args = ArrowArgs {
-            input: clio::Input::new(&input_path).unwrap(),
-            output: clio::OutputPath::new(&output_path).unwrap(),
-            sort_by: None,
-            compression: ArrowCompression::Lz4,
-        };
-
-        run(args).await.unwrap();
-        assert!(output_path.exists());
-    }
-
-    #[tokio::test]
-    async fn test_sorting_with_compression() {
-        let temp_dir = tempdir().unwrap();
-        let input_path = temp_dir.path().join("input.arrow");
-        let output_path = temp_dir.path().join("output.arrow");
-
-        write_test_arrow_file(&input_path, true).unwrap();
-
-        let sort_spec = crate::SortSpec {
-            columns: vec![crate::SortColumn {
-                name: "id".to_string(),
-                direction: SortDirection::Descending,
-            }],
-        };
-
-        let args = ArrowArgs {
-            input: clio::Input::new(&input_path).unwrap(),
-            output: clio::OutputPath::new(&output_path).unwrap(),
-            sort_by: Some(sort_spec),
-            compression: ArrowCompression::Zstd,
-        };
-
-        run(args).await.unwrap();
-        assert!(output_path.exists());
-    }
-
-    #[tokio::test]
-    async fn test_multiple_batches() {
-        let temp_dir = tempdir().unwrap();
-        let input_path = temp_dir.path().join("input.arrow");
-        let output_path = temp_dir.path().join("output.arrow");
-
-        let schema = create_test_schema();
-
-        let batch1 = RecordBatch::try_new(
-            schema.clone(),
-            vec![
-                Arc::new(Int32Array::from(vec![1, 2, 3])),
-                Arc::new(StringArray::from(vec!["A", "B", "C"])),
-            ],
-        )
-        .unwrap();
-
-        let batch2 = RecordBatch::try_new(
-            schema.clone(),
-            vec![
-                Arc::new(Int32Array::from(vec![4, 5])),
-                Arc::new(StringArray::from(vec!["D", "E"])),
-            ],
-        )
-        .unwrap();
-
-        let file = File::create(&input_path).unwrap();
-        let mut writer = arrow::ipc::writer::StreamWriter::try_new(file, &schema).unwrap();
-        writer.write(&batch1).unwrap();
-        writer.write(&batch2).unwrap();
-        writer.finish().unwrap();
-
-        ArrowConverter::convert_arrow_reader_to_file_format(
-            StreamReader::try_new_buffered(File::open(&input_path).unwrap(), None).unwrap(),
-            &output_path,
-            IpcWriteOptions::default(),
-        )
-        .await
-        .unwrap();
-
-        let file = File::open(&output_path).unwrap();
-        let mut reader = BufReader::new(file);
-        let file_reader = FileReader::try_new(&mut reader, None).unwrap();
-
-        let batches: Vec<_> = file_reader.collect::<Result<Vec<_>, _>>().unwrap();
-        assert_eq!(batches.len(), 2);
-        assert_eq!(batches[0].num_rows(), 3);
-        assert_eq!(batches[1].num_rows(), 2);
-    }
-
-    #[tokio::test]
-    async fn test_empty_file() {
-        let temp_dir = tempdir().unwrap();
-        let input_path = temp_dir.path().join("input.arrow");
-        let output_path = temp_dir.path().join("output.arrow");
-
-        let schema = create_test_schema();
-
-        let file = File::create(&input_path).unwrap();
-        let mut writer = arrow::ipc::writer::StreamWriter::try_new(file, &schema).unwrap();
-        writer.finish().unwrap();
-
-        ArrowConverter::convert_arrow_reader_to_file_format(
-            StreamReader::try_new_buffered(File::open(&input_path).unwrap(), None).unwrap(),
-            &output_path,
-            IpcWriteOptions::default(),
-        )
-        .await
-        .unwrap();
-
-        let file = File::open(&output_path).unwrap();
-        let mut reader = BufReader::new(file);
-        let file_reader = FileReader::try_new(&mut reader, None).unwrap();
-
-        let batches: Vec<_> = file_reader.collect::<Result<Vec<_>, _>>().unwrap();
-        assert_eq!(batches.len(), 0);
-    }
-
-    #[tokio::test]
-    async fn test_invalid_input_path() {
-        let temp_dir = tempdir().unwrap();
-        let output_path = temp_dir.path().join("output.arrow");
-
-        let converter = ArrowConverter::new("/nonexistent/file.arrow", &output_path);
-        let result = converter.convert().await;
-
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_output_directory_creation_failure() {
-        if Uid::effective().is_root() {
-            // Can't very well test permissions errors if we're root
-            return;
+            let ids = batches[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap();
+            assert_eq!(ids.value(0), 1);
+            assert_eq!(ids.value(1), 2);
+            assert_eq!(ids.value(2), 3);
+            assert_eq!(ids.value(3), 4);
+            assert_eq!(ids.value(4), 5);
         }
 
-        let temp_dir = tempdir().unwrap();
-        let input_path = temp_dir.path().join("input.arrow");
+        #[tokio::test]
+        async fn test_single_column_sort_descending() {
+            let temp_dir = tempdir().unwrap();
+            let input_path = temp_dir.path().join("input.arrow");
+            let output_path = temp_dir.path().join("output.arrow");
 
-        write_test_arrow_file(&input_path, false).unwrap();
+            let test_ids = vec![30, 10, 20];
+            let test_names = vec!["C", "A", "B"];
 
-        let result = ensure_parent_dir_exists(Path::new("/root/no_permission")).await;
-        assert!(result.is_err());
+            let schema = test_data::simple_schema();
+            let batch = test_data::create_batch_with_ids_and_names(&schema, &test_ids, &test_names);
+            file_helpers::write_arrow_stream(&input_path, &schema, vec![batch]).unwrap();
+
+            let sort_spec = SortSpec {
+                columns: vec![crate::SortColumn {
+                    name: "id".to_string(),
+                    direction: SortDirection::Descending,
+                }],
+            };
+
+            let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path)
+                .with_sorting(sort_spec);
+            converter.convert().await.unwrap();
+
+            let batches = verify::read_output_file(&output_path).unwrap();
+            let ids = batches[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap();
+            assert_eq!(ids.value(0), 30);
+            assert_eq!(ids.value(1), 20);
+            assert_eq!(ids.value(2), 10);
+        }
+
+        #[tokio::test]
+        async fn test_multi_column_sort() {
+            let temp_dir = tempdir().unwrap();
+            let input_path = temp_dir.path().join("input.arrow");
+            let output_path = temp_dir.path().join("output.arrow");
+
+            let test_groups = vec![1, 2, 1, 2, 1];
+            let test_values = vec![30, 20, 10, 40, 20];
+
+            let schema = test_data::multi_column_for_sorting_schema();
+            let batch = test_data::create_multi_column_for_sorting_batch(
+                &schema,
+                &test_groups,
+                &test_values,
+            );
+            file_helpers::write_arrow_file(&input_path, &schema, vec![batch]).unwrap();
+
+            let sort_spec = SortSpec {
+                columns: vec![
+                    crate::SortColumn {
+                        name: "group".to_string(),
+                        direction: SortDirection::Ascending,
+                    },
+                    crate::SortColumn {
+                        name: "value".to_string(),
+                        direction: SortDirection::Descending,
+                    },
+                ],
+            };
+
+            let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path)
+                .with_sorting(sort_spec);
+            converter.convert().await.unwrap();
+
+            let batches = verify::read_output_file(&output_path).unwrap();
+            let batch = &batches[0];
+            let groups = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap();
+            let values = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap();
+
+            assert_eq!(groups.value(0), 1);
+            assert_eq!(values.value(0), 30);
+            assert_eq!(groups.value(1), 1);
+            assert_eq!(values.value(1), 20);
+            assert_eq!(groups.value(2), 1);
+            assert_eq!(values.value(2), 10);
+
+            assert_eq!(groups.value(3), 2);
+            assert_eq!(values.value(3), 40);
+            assert_eq!(groups.value(4), 2);
+            assert_eq!(values.value(4), 20);
+        }
+
+        #[tokio::test]
+        async fn test_sort_with_nulls_ascending() {
+            let temp_dir = tempdir().unwrap();
+            let input_path = temp_dir.path().join("input.arrow");
+            let output_path = temp_dir.path().join("output.arrow");
+
+            let test_ids = vec![Some(3), None, Some(1), None, Some(2)];
+            let test_names = vec!["C", "null1", "A", "null2", "B"];
+
+            let schema = test_data::nullable_id_schema();
+            let batch = test_data::create_batch_with_nullable_ids_and_non_nullable_names(
+                &schema,
+                &test_ids,
+                &test_names,
+            );
+            file_helpers::write_arrow_file(&input_path, &schema, vec![batch]).unwrap();
+
+            let sort_spec = SortSpec {
+                columns: vec![crate::SortColumn {
+                    name: "id".to_string(),
+                    direction: SortDirection::Ascending,
+                }],
+            };
+
+            let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path)
+                .with_sorting(sort_spec);
+            converter.convert().await.unwrap();
+
+            let batches = verify::read_output_file(&output_path).unwrap();
+            let ids = batches[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap();
+
+            assert_eq!(ids.value(0), 1);
+            assert_eq!(ids.value(1), 2);
+            assert_eq!(ids.value(2), 3);
+            assert!(ids.is_null(3));
+            assert!(ids.is_null(4));
+        }
+
+        #[tokio::test]
+        async fn test_sort_with_nulls_descending() {
+            let temp_dir = tempdir().unwrap();
+            let input_path = temp_dir.path().join("input.arrow");
+            let output_path = temp_dir.path().join("output.arrow");
+
+            let test_ids = vec![Some(3), None, Some(1), None, Some(2)];
+            let test_names = vec!["C", "null1", "A", "null2", "B"];
+
+            let schema = test_data::nullable_id_schema();
+            let batch = test_data::create_batch_with_nullable_ids_and_non_nullable_names(
+                &schema,
+                &test_ids,
+                &test_names,
+            );
+            file_helpers::write_arrow_file(&input_path, &schema, vec![batch]).unwrap();
+
+            let sort_spec = SortSpec {
+                columns: vec![crate::SortColumn {
+                    name: "id".to_string(),
+                    direction: SortDirection::Descending,
+                }],
+            };
+
+            let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path)
+                .with_sorting(sort_spec);
+            converter.convert().await.unwrap();
+
+            let batches = verify::read_output_file(&output_path).unwrap();
+            let ids = batches[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap();
+
+            assert!(ids.is_null(0));
+            assert!(ids.is_null(1));
+            assert_eq!(ids.value(2), 3);
+            assert_eq!(ids.value(3), 2);
+            assert_eq!(ids.value(4), 1);
+        }
+
+        #[tokio::test]
+        async fn test_sort_with_compression() {
+            let temp_dir = tempdir().unwrap();
+            let input_path = temp_dir.path().join("input.arrow");
+            let output_path = temp_dir.path().join("output.arrow");
+
+            let test_ids = vec![3, 1, 2];
+            let test_names = vec!["C", "A", "B"];
+
+            let schema = test_data::simple_schema();
+            let batch = test_data::create_batch_with_ids_and_names(&schema, &test_ids, &test_names);
+            file_helpers::write_arrow_stream(&input_path, &schema, vec![batch]).unwrap();
+
+            let sort_spec = SortSpec {
+                columns: vec![crate::SortColumn {
+                    name: "id".to_string(),
+                    direction: SortDirection::Ascending,
+                }],
+            };
+
+            let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path)
+                .with_sorting(sort_spec)
+                .with_compression(ArrowCompression::Zstd);
+            converter.convert().await.unwrap();
+
+            assert!(output_path.exists());
+            let batches = verify::read_output_file(&output_path).unwrap();
+            let ids = batches[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap();
+            assert_eq!(ids.value(0), 1);
+            assert_eq!(ids.value(1), 2);
+            assert_eq!(ids.value(2), 3);
+        }
+
+        #[tokio::test]
+        async fn test_sort_invalid_column() {
+            let temp_dir = tempdir().unwrap();
+            let input_path = temp_dir.path().join("input.arrow");
+            let output_path = temp_dir.path().join("output.arrow");
+
+            let test_ids = vec![1, 2, 3];
+            let test_names = vec!["A", "B", "C"];
+
+            let schema = test_data::simple_schema();
+            let batch = test_data::create_batch_with_ids_and_names(&schema, &test_ids, &test_names);
+            file_helpers::write_arrow_file(&input_path, &schema, vec![batch]).unwrap();
+
+            let sort_spec = SortSpec {
+                columns: vec![crate::SortColumn {
+                    name: "nonexistent_column".to_string(),
+                    direction: SortDirection::Ascending,
+                }],
+            };
+
+            let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path)
+                .with_sorting(sort_spec);
+            let result = converter.convert().await;
+
+            assert!(result.is_err());
+        }
     }
 
-    #[tokio::test]
-    async fn test_invalid_sort_column() {
-        let temp_dir = tempdir().unwrap();
-        let input_path = temp_dir.path().join("input.arrow");
-        let output_path = temp_dir.path().join("output.arrow");
+    mod arrow_file_source_tests {
+        use super::*;
 
-        write_test_arrow_file(&input_path, false).unwrap();
+        #[tokio::test]
+        async fn test_file_source_from_file_format() {
+            let temp_dir = tempdir().unwrap();
+            let input_path = temp_dir.path().join("input.arrow");
 
-        let sort_spec = crate::SortSpec {
-            columns: vec![crate::SortColumn {
-                name: "nonexistent_column".to_string(),
-                direction: SortDirection::Ascending,
-            }],
-        };
+            let test_ids = vec![1, 2, 3];
+            let test_names = vec!["A", "B", "C"];
 
-        let converter =
-            ArrowConverter::new(input_path.to_str().unwrap(), &output_path).with_sorting(sort_spec);
+            let schema = test_data::simple_schema();
+            let batch = test_data::create_batch_with_ids_and_names(&schema, &test_ids, &test_names);
+            file_helpers::write_arrow_file(&input_path, &schema, vec![batch]).unwrap();
 
-        let result = converter.convert().await;
+            let converter = ArrowConverter::new(input_path.to_str().unwrap(), Path::new("unused"));
+            let file_source = converter.as_file_format().await.unwrap();
 
-        assert!(result.is_err());
+            match file_source {
+                ArrowFileSource::Original(path) => {
+                    assert_eq!(path, input_path);
+                }
+                _ => panic!("Expected Original variant for file format input"),
+            }
+        }
+
+        #[tokio::test]
+        async fn test_file_source_from_stream_format() {
+            let temp_dir = tempdir().unwrap();
+            let input_path = temp_dir.path().join("input.arrow");
+
+            let test_ids = vec![1, 2, 3];
+            let test_names = vec!["A", "B", "C"];
+
+            let schema = test_data::simple_schema();
+            let batch = test_data::create_batch_with_ids_and_names(&schema, &test_ids, &test_names);
+            file_helpers::write_arrow_stream(&input_path, &schema, vec![batch]).unwrap();
+
+            let converter = ArrowConverter::new(input_path.to_str().unwrap(), Path::new("unused"));
+            let file_source = converter.as_file_format().await.unwrap();
+
+            match file_source {
+                ArrowFileSource::Temp {
+                    original_path,
+                    temp_file,
+                } => {
+                    assert_eq!(original_path, input_path);
+                    assert!(temp_file.path().exists());
+
+                    let reader = ArrowIPCReader::from_path(temp_file.path()).unwrap();
+                    match reader.format() {
+                        ArrowIPCFormat::File => (),
+                        _ => panic!("Temp file should be in file format"),
+                    }
+                }
+                _ => panic!("Expected Temp variant for stream format input"),
+            }
+        }
+
+        #[tokio::test]
+        async fn test_file_source_temp_cleanup() {
+            let temp_dir = tempdir().unwrap();
+            let input_path = temp_dir.path().join("input.arrow");
+
+            let test_ids = vec![1, 2, 3];
+            let test_names = vec!["A", "B", "C"];
+
+            let schema = test_data::simple_schema();
+            let batch = test_data::create_batch_with_ids_and_names(&schema, &test_ids, &test_names);
+            file_helpers::write_arrow_stream(&input_path, &schema, vec![batch]).unwrap();
+
+            let converter = ArrowConverter::new(input_path.to_str().unwrap(), Path::new("unused"));
+            let file_source = converter.as_file_format().await.unwrap();
+
+            let temp_path = match &file_source {
+                ArrowFileSource::Temp { temp_file, .. } => temp_file.path().to_path_buf(),
+                _ => panic!("Expected Temp variant"),
+            };
+
+            assert!(temp_path.exists());
+            drop(file_source); // dropping should remove the temp file
+            assert!(!temp_path.exists());
+        }
     }
 
-    #[tokio::test]
-    async fn test_corrupted_arrow_file() {
-        let temp_dir = tempdir().unwrap();
-        let input_path = temp_dir.path().join("corrupted.arrow");
-        let output_path = temp_dir.path().join("output.arrow");
+    mod integration_tests {
+        use super::*;
 
-        std::fs::write(&input_path, b"not an arrow file").unwrap();
+        #[tokio::test]
+        async fn test_run_creates_parent_directory() {
+            let temp_dir = tempdir().unwrap();
+            let input_path = temp_dir.path().join("input.arrow");
+            let output_dir = temp_dir.path().join("nested/subdir");
+            let output_path = output_dir.join("output.arrow");
 
-        let result = ArrowConverter::new(input_path.to_str().unwrap(), &output_path)
-            .convert()
-            .await;
+            let test_ids = vec![1, 2, 3];
+            let test_names = vec!["A", "B", "C"];
 
-        assert!(result.is_err());
+            let schema = test_data::simple_schema();
+            let batch = test_data::create_batch_with_ids_and_names(&schema, &test_ids, &test_names);
+            file_helpers::write_arrow_file(&input_path, &schema, vec![batch]).unwrap();
+
+            // clio::OutputPath requires parent directory to exist first
+            std::fs::create_dir_all(&output_dir).unwrap();
+
+            let args = ArrowArgs {
+                input: clio::Input::new(&input_path).unwrap(),
+                output: clio::OutputPath::new(&output_path).unwrap(),
+                sort_by: None,
+                compression: ArrowCompression::None,
+            };
+
+            // remove the directory to test that run() creates it
+            std::fs::remove_dir(&output_dir).unwrap();
+
+            run(args).await.unwrap();
+
+            assert!(output_dir.exists());
+            assert!(output_path.exists());
+        }
+
+        #[tokio::test]
+        async fn test_run_with_all_options() {
+            let temp_dir = tempdir().unwrap();
+            let input_path = temp_dir.path().join("input.arrow");
+            let output_path = temp_dir.path().join("output.arrow");
+
+            let test_ids = vec![3, 1, 2];
+            let test_names = vec!["C", "A", "B"];
+
+            let schema = test_data::simple_schema();
+            let batch = test_data::create_batch_with_ids_and_names(&schema, &test_ids, &test_names);
+            file_helpers::write_arrow_stream(&input_path, &schema, vec![batch]).unwrap();
+
+            let sort_spec = SortSpec {
+                columns: vec![crate::SortColumn {
+                    name: "id".to_string(),
+                    direction: SortDirection::Ascending,
+                }],
+            };
+
+            let args = ArrowArgs {
+                input: clio::Input::new(&input_path).unwrap(),
+                output: clio::OutputPath::new(&output_path).unwrap(),
+                sort_by: Some(sort_spec),
+                compression: ArrowCompression::Zstd,
+            };
+
+            run(args).await.unwrap();
+
+            let batches = verify::read_output_file(&output_path).unwrap();
+            assert_eq!(batches.len(), 1);
+            let ids = batches[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap();
+            assert_eq!(ids.value(0), 1);
+            assert_eq!(ids.value(1), 2);
+            assert_eq!(ids.value(2), 3);
+        }
+
+        #[tokio::test]
+        async fn test_output_directory_creation_failure() {
+            if Uid::effective().is_root() {
+                // skip test if running as root
+                return;
+            }
+
+            let temp_dir = tempdir().unwrap();
+            let input_path = temp_dir.path().join("input.arrow");
+
+            let test_ids = vec![1, 2, 3];
+            let test_names = vec!["A", "B", "C"];
+
+            let schema = test_data::simple_schema();
+            let batch = test_data::create_batch_with_ids_and_names(&schema, &test_ids, &test_names);
+            file_helpers::write_arrow_file(&input_path, &schema, vec![batch]).unwrap();
+
+            let result = ensure_parent_dir_exists(Path::new("/root/no_permission")).await;
+            assert!(result.is_err());
+        }
     }
 }
