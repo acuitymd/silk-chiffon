@@ -3,6 +3,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::{fmt::Display, str::FromStr};
 
 pub mod commands;
+pub mod converters;
 pub mod utils;
 
 #[derive(Parser, Debug)]

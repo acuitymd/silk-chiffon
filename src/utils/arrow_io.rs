@@ -144,14 +144,18 @@ impl ArrowIPCReader {
 
 #[cfg(test)]
 mod tests {
+    use crate::{
+        converters::arrow::ArrowConverter,
+        utils::{
+            arrow_io::{ArrowFileSource, ArrowIPCFormat, ArrowIPCReader},
+            test_helpers::{file_helpers, test_data, verify},
+        },
+    };
+    use std::path::Path;
+    use tempfile::tempdir;
 
     mod arrow_ipc_reader_tests {
-        use tempfile::tempdir;
-
-        use crate::utils::{
-            arrow_io::{ArrowIPCFormat, ArrowIPCReader},
-            test_helpers::{file_helpers, test_data, verify},
-        };
+        use super::*;
 
         #[test]
         fn test_reader_detects_file_format() {
@@ -270,17 +274,7 @@ mod tests {
         }
     }
     mod arrow_file_source_tests {
-        use std::path::Path;
-
-        use tempfile::tempdir;
-
-        use crate::{
-            commands::arrow::ArrowConverter,
-            utils::{
-                arrow_io::{ArrowFileSource, ArrowIPCFormat, ArrowIPCReader},
-                test_helpers::{file_helpers, test_data},
-            },
-        };
+        use super::*;
 
         #[tokio::test]
         async fn test_file_source_from_file_format() {
