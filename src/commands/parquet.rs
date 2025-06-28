@@ -1,77 +1,44 @@
 use crate::{
-    ParquetArgs, ParquetCompression, ParquetStatistics, ParquetWriterVersion,
+    BloomFilterConfig, ParquetArgs, converters::parquet::ParquetConverter,
     utils::filesystem::ensure_parent_dir_exists,
 };
-use anyhow::{Result, anyhow};
-use parquet::{
-    basic::{Compression, GzipLevel, ZstdLevel},
-    file::properties::{EnabledStatistics, WriterProperties},
-};
+use anyhow::Result;
 
 pub async fn run(args: ParquetArgs) -> Result<()> {
-    let _input_path = args.input.path().to_str().ok_or_else(|| {
-        anyhow!(
-            "Input path contains invalid UTF-8 characters: {:?}",
-            args.input.path()
-        )
-    })?;
-    let output_path = args.output.path();
+    let input_path = args.input.path().to_string_lossy().to_string();
+    let output_path = args.output.path().to_path_buf();
 
-    ensure_parent_dir_exists(output_path).await?;
+    ensure_parent_dir_exists(&output_path).await?;
+
+    let bloom_filters = if args.bloom_all.is_some() || !args.bloom_column.is_empty() {
+        Some(BloomFilterConfig {
+            all_columns: args.bloom_all,
+            specific_columns: args.bloom_column,
+        })
+    } else {
+        None
+    };
+
+    let converter = ParquetConverter::new(input_path, output_path)
+        .with_sort_spec(args.sort_by)
+        .with_record_batch_size(args.record_batch_size)
+        .with_parquet_row_group_size(args.max_row_group_size)
+        .with_compression(args.compression)
+        .with_bloom_filters(bloom_filters)
+        .with_statistics(args.statistics)
+        .with_no_dictionary(args.no_dictionary)
+        .with_writer_version(args.writer_version)
+        .with_write_sorted_metadata(args.write_sorted_metadata);
+
+    converter.convert().await?;
 
     Ok(())
-}
-
-fn _create_writer_properties(args: &ParquetArgs) -> Result<WriterProperties> {
-    let mut builder = WriterProperties::builder().set_max_row_group_size(args.max_row_group_size);
-
-    builder = match args.compression {
-        ParquetCompression::Zstd => {
-            builder.set_compression(Compression::ZSTD(ZstdLevel::default()))
-        }
-        ParquetCompression::Snappy => builder.set_compression(Compression::SNAPPY),
-        ParquetCompression::Gzip => {
-            builder.set_compression(Compression::GZIP(GzipLevel::default()))
-        }
-        ParquetCompression::Lz4 => builder.set_compression(Compression::LZ4_RAW),
-        ParquetCompression::None => builder.set_compression(Compression::UNCOMPRESSED),
-    };
-
-    builder = match args.writer_version {
-        ParquetWriterVersion::V1 => {
-            builder.set_writer_version(parquet::file::properties::WriterVersion::PARQUET_1_0)
-        }
-        ParquetWriterVersion::V2 => {
-            builder.set_writer_version(parquet::file::properties::WriterVersion::PARQUET_2_0)
-        }
-    };
-
-    builder = match args.statistics {
-        ParquetStatistics::None => builder.set_statistics_enabled(EnabledStatistics::None),
-        ParquetStatistics::Chunk => builder.set_statistics_enabled(EnabledStatistics::Chunk),
-        ParquetStatistics::Page => builder.set_statistics_enabled(EnabledStatistics::Page),
-    };
-
-    if args.no_dictionary {
-        builder = builder.set_dictionary_enabled(false);
-    }
-
-    // if let Some(bloom_all) = &args.bloom_all {
-    //     builder = configure_bloom_all(builder, bloom_all)?;
-    // }
-
-    // for bloom_col in &args.bloom_column {
-    //     builder = configure_bloom_column(builder, bloom_col)?;
-    // }
-
-    // builder = add_metadata_to_properties(builder, args);
-
-    Ok(builder.build())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::test_helpers::{file_helpers, test_data};
     use crate::{ParquetCompression, ParquetStatistics, ParquetWriterVersion};
     use clio::{Input, OutputPath};
     use tempfile::TempDir;
@@ -82,7 +49,10 @@ mod tests {
         let input_path = temp_dir.path().join("input.arrow");
         let output_path = temp_dir.path().join("output.parquet");
 
-        std::fs::write(&input_path, b"dummy").unwrap();
+        let schema = test_data::simple_schema();
+        let batch =
+            test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["A", "B", "C"]);
+        file_helpers::write_arrow_file(&input_path, &schema, vec![batch]).unwrap();
 
         let args = ParquetArgs {
             input: Input::new(&input_path).unwrap(),
@@ -108,7 +78,10 @@ mod tests {
         let input_path = temp_dir.path().join("input.arrow");
         let output_path = temp_dir.path().join("output.parquet");
 
-        std::fs::write(&input_path, b"dummy").unwrap();
+        let schema = test_data::simple_schema();
+        let batch =
+            test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["A", "B", "C"]);
+        file_helpers::write_arrow_file(&input_path, &schema, vec![batch]).unwrap();
 
         let args = ParquetArgs {
             input: Input::new(&input_path).unwrap(),

@@ -521,6 +521,12 @@ impl FromStr for ColumnBloomFilterConfig {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct BloomFilterConfig {
+    pub all_columns: Option<AllColumnsBloomFilterSizeConfig>,
+    pub specific_columns: Vec<ColumnBloomFilterConfig>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();

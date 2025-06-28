@@ -11,6 +11,7 @@ use arrow::{
 use std::fs::File;
 use tempfile::NamedTempFile;
 
+#[derive(PartialEq)]
 pub enum ArrowIPCFormat {
     File,
     Stream,
