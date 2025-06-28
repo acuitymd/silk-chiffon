@@ -76,20 +76,15 @@ pub struct ParquetArgs {
     /// Mutually exclusive with --bloom-column.
     ///
     /// Formats:
-    ///   --bloom-all                 - Use defaults for both FPP and NDV
-    ///   --bloom-all "fpp=VALUE"     - Custom FPP, auto-estimate NDV
-    ///   --bloom-all "ndv=VALUE"     - Default FPP, custom NDV  
-    ///   --bloom-all "fpp=VALUE:ndv=VALUE" - Both custom (order doesn't matter)
+    ///   --bloom-all             # Use default for FPP (0.01) and calculate NDV for each column
+    ///   --bloom-all "fpp=VALUE" # Custom FPP, calculate NDV for each column
     ///
     /// Examples:
-    ///   --bloom-all                      # All defaults
-    ///   --bloom-all "fpp=0.001"          # Custom FPP only
-    ///   --bloom-all "ndv=1000000"        # Custom NDV only
-    ///   --bloom-all "fpp=0.01:ndv=1000000" # Both custom
-    ///   --bloom-all "ndv=1000000:fpp=0.01" # Same, different order
+    ///   --bloom-all             # Use default for FPP (0.01) and calculate NDV for each column
+    ///   --bloom-all "fpp=0.001" # Custom FPP and calculate NDV for each column
     #[arg(
         long,
-        value_name = "[fpp=VALUE|ndv=VALUE|fpp=VALUE:ndv=VALUE|ndv=VALUE:fpp=VALUE]",
+        value_name = "[fpp=VALUE]",
         conflicts_with = "bloom_column",
         verbatim_doc_comment
     )]
@@ -99,15 +94,15 @@ pub struct ParquetArgs {
     /// Can be specified multiple times. Mutually exclusive with --bloom-all.
     ///
     /// Formats:
-    ///   COLUMN                     - Use defaults for both FPP and NDV
-    ///   COLUMN:fpp=VALUE           - Custom FPP, auto-estimate NDV
-    ///   COLUMN:ndv=VALUE           - Default FPP, custom NDV  
-    ///   COLUMN:fpp=VALUE:ndv=VALUE - Both custom (order doesn't matter)
+    ///   COLUMN                     # Use default for FPP (0.01) and calculate NDV
+    ///   COLUMN:fpp=VALUE           # Custom FPP (0.01), calculate NDV
+    ///   COLUMN:ndv=VALUE           # Default FPP (0.01), custom NDV  
+    ///   COLUMN:fpp=VALUE:ndv=VALUE # Both custom (order doesn't matter)
     ///
     /// Examples:
-    ///   --bloom-column "user_id"                    # All defaults
-    ///   --bloom-column "user_id:fpp=0.001"          # Custom FPP only
-    ///   --bloom-column "user_id:ndv=1000000"        # Custom NDV only
+    ///   --bloom-column "user_id"                      # Use default for FPP (0.01) and calculate NDV
+    ///   --bloom-column "user_id:fpp=0.001"            # Custom FPP (0.001), calculate NDV
+    ///   --bloom-column "user_id:ndv=1000000"          # Use default for FPP (0.01), custom NDV
     ///   --bloom-column "user_id:fpp=0.01:ndv=1000000" # Both custom
     ///   --bloom-column "user_id:ndv=1000000:fpp=0.01" # Same, different order
     #[arg(
