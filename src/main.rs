@@ -88,7 +88,7 @@ pub struct ParquetArgs {
         conflicts_with = "bloom_column",
         verbatim_doc_comment
     )]
-    bloom_all: Option<BloomFilterSizeConfig>,
+    bloom_all: Option<AllColumnsBloomFilterSizeConfig>,
 
     /// Enable bloom filter for specific columns with optional custom settings.
     /// Can be specified multiple times. Mutually exclusive with --bloom-all.
@@ -111,7 +111,7 @@ pub struct ParquetArgs {
         conflicts_with = "bloom_all",
         verbatim_doc_comment
     )]
-    bloom_column: Vec<BloomFilterColumnConfig>,
+    bloom_column: Vec<ColumnBloomFilterConfig>,
 
     /// The maximum number of rows per Parquet row group.
     #[arg(long, default_value_t = 122_880)]
@@ -317,12 +317,74 @@ impl Display for SortSpec {
 }
 
 #[derive(Debug, Clone)]
-pub struct BloomFilterSizeConfig {
+pub struct AllColumnsBloomFilterSizeConfig {
+    pub fpp: Option<f64>,
+}
+
+impl FromStr for AllColumnsBloomFilterSizeConfig {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut fpp = None;
+
+        let parts = s
+            .split(':')
+            .map(|p| p.trim())
+            .filter(|p| !p.is_empty())
+            .collect::<Vec<&str>>();
+
+        if parts.len() > 1 {
+            return Err(anyhow!("Invalid bloom filter specification: {}", s));
+        }
+
+        for part in parts {
+            if part.is_empty() {
+                return Err(anyhow!("Invalid bloom filter specification: {}", s));
+            }
+
+            if let Some((key, value)) = part.split_once('=') {
+                let key = key.trim();
+                let value = value.trim();
+
+                match key {
+                    "fpp" => {
+                        if fpp.is_some() {
+                            return Err(anyhow!(
+                                "Invalid bloom filter specification, fpp is set twice: {}",
+                                s
+                            ));
+                        }
+
+                        fpp = Some(value.parse::<f64>().map_err(|e| {
+                            anyhow::anyhow!("Invalid fpp value '{}': {}", value, e)
+                        })?);
+                    }
+                    _ => {
+                        return Err(anyhow::anyhow!(
+                            "Unknown parameter '{}'. Valid parameter is 'fpp'",
+                            key
+                        ));
+                    }
+                }
+            } else {
+                return Err(anyhow::anyhow!(
+                    "Invalid parameter format '{}'. Expected 'key=value'",
+                    part
+                ));
+            }
+        }
+
+        Ok(AllColumnsBloomFilterSizeConfig { fpp })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ColumnBloomFilterSizeConfig {
     pub fpp: Option<f64>,
     pub ndv: Option<u64>,
 }
 
-impl FromStr for BloomFilterSizeConfig {
+impl FromStr for ColumnBloomFilterSizeConfig {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -388,17 +450,17 @@ impl FromStr for BloomFilterSizeConfig {
             }
         }
 
-        Ok(BloomFilterSizeConfig { fpp, ndv })
+        Ok(ColumnBloomFilterSizeConfig { fpp, ndv })
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct BloomFilterColumnConfig {
+pub struct ColumnBloomFilterConfig {
     pub name: String,
-    pub size_config: BloomFilterSizeConfig,
+    pub size_config: ColumnBloomFilterSizeConfig,
 }
 
-impl FromStr for BloomFilterColumnConfig {
+impl FromStr for ColumnBloomFilterConfig {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -412,9 +474,9 @@ impl FromStr for BloomFilterColumnConfig {
                 ));
             }
 
-            Ok(BloomFilterColumnConfig {
+            Ok(ColumnBloomFilterConfig {
                 name: column_name.to_string(),
-                size_config: BloomFilterSizeConfig::from_str(rest)?,
+                size_config: ColumnBloomFilterSizeConfig::from_str(rest)?,
             })
         } else {
             Err(anyhow!("Invalid bloom filter specification: {}", s))
