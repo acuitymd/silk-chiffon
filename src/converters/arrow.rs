@@ -4,6 +4,7 @@ use std::{
     sync::Arc,
 };
 
+use arrow::compute::BatchCoalescer;
 use arrow::{
     array::RecordBatch,
     error::ArrowError,
@@ -29,6 +30,8 @@ pub struct ArrowConverter {
     output_path: PathBuf,
     write_options: IpcWriteOptions,
     sort_spec: SortSpec,
+    record_batch_size: usize,
+    datafusion_batch_size: usize,
 }
 
 impl ArrowConverter {
@@ -40,6 +43,8 @@ impl ArrowConverter {
             output_path,
             write_options,
             sort_spec: SortSpec::default(),
+            record_batch_size: 122_880,
+            datafusion_batch_size: 8192,
         }
     }
 
@@ -66,6 +71,11 @@ impl ArrowConverter {
         self
     }
 
+    pub fn with_record_batch_size(mut self, record_batch_size: usize) -> Self {
+        self.record_batch_size = record_batch_size;
+        self
+    }
+
     pub async fn convert(&self) -> Result<()> {
         if self.sort_spec.columns.is_empty() {
             self.convert_direct().await
@@ -77,7 +87,7 @@ impl ArrowConverter {
     async fn convert_with_sorting(&self) -> Result<()> {
         let mut config = SessionConfig::new();
         let options = config.options_mut();
-        options.execution.batch_size = 122_880;
+        options.execution.batch_size = self.datafusion_batch_size;
 
         let runtime_config = RuntimeEnvBuilder::new();
         let runtime_env = runtime_config.build()?;
@@ -86,6 +96,7 @@ impl ArrowConverter {
         let output_path = self.output_path.clone();
         let write_options = self.write_options.clone();
         let sort_spec = self.sort_spec.clone();
+        let record_batch_size = self.record_batch_size;
 
         let file_format = self.as_file_format().await?;
 
@@ -119,9 +130,22 @@ impl ArrowConverter {
             let output_file = File::create(output_path)?;
             let mut writer = FileWriter::try_new_with_options(output_file, &schema, write_options)?;
 
+            let mut coalescer = BatchCoalescer::new(schema.clone(), record_batch_size);
+
             while let Some(batch_result) = stream.next().await {
                 let batch = batch_result?;
-                writer.write(&batch)?;
+
+                coalescer.push_batch(batch)?;
+
+                while let Some(completed_batch) = coalescer.next_completed_batch() {
+                    writer.write(&completed_batch)?;
+                }
+            }
+
+            if let Ok(()) = coalescer.finish_buffered_batch() {
+                if let Some(final_batch) = coalescer.next_completed_batch() {
+                    writer.write(&final_batch)?;
+                }
             }
 
             writer.finish()?;
@@ -142,6 +166,7 @@ impl ArrowConverter {
                     file_reader,
                     &self.output_path,
                     self.write_options.clone(),
+                    self.record_batch_size,
                 )
                 .await
             }
@@ -151,6 +176,7 @@ impl ArrowConverter {
                     stream_reader,
                     &self.output_path,
                     self.write_options.clone(),
+                    self.record_batch_size,
                 )
                 .await
             }
@@ -161,6 +187,7 @@ impl ArrowConverter {
         reader: I,
         output_path: &Path,
         write_options: IpcWriteOptions,
+        record_batch_size: usize,
     ) -> Result<()>
     where
         I: Iterator<Item = Result<RecordBatch, ArrowError>> + HasSchema + Send + 'static,
@@ -172,9 +199,24 @@ impl ArrowConverter {
             let output_file = File::create(output_path)?;
             let mut writer = FileWriter::try_new_with_options(output_file, &schema, write_options)?;
 
+            let mut coalescer = BatchCoalescer::new(schema.clone(), record_batch_size);
+
             for batch_result in reader {
-                writer.write(&batch_result?)?;
+                let batch = batch_result?;
+
+                coalescer.push_batch(batch)?;
+
+                while let Some(completed_batch) = coalescer.next_completed_batch() {
+                    writer.write(&completed_batch)?;
+                }
             }
+
+            if let Ok(()) = coalescer.finish_buffered_batch() {
+                if let Some(final_batch) = coalescer.next_completed_batch() {
+                    writer.write(&final_batch)?;
+                }
+            }
+
             writer.finish()?;
 
             Ok::<(), anyhow::Error>(())
@@ -194,6 +236,7 @@ impl ArrowConverter {
                     input.stream_reader()?,
                     temp_file.path(),
                     IpcWriteOptions::default(),
+                    self.record_batch_size,
                 )
                 .await?;
 
@@ -329,7 +372,8 @@ mod tests {
             );
             file_helpers::write_arrow_stream(&input_path, &schema, vec![batch1, batch2]).unwrap();
 
-            let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path);
+            let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path)
+                .with_record_batch_size(3);
             converter.convert().await.unwrap();
 
             let batches = verify::read_output_file(&output_path).unwrap();

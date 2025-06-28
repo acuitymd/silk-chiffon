@@ -1,6 +1,9 @@
 use anyhow::{Result, anyhow};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use std::{fmt::Display, str::FromStr};
+use std::{
+    fmt::{Display, Formatter},
+    str::FromStr,
+};
 
 pub mod commands;
 pub mod converters;
@@ -115,12 +118,16 @@ pub struct ParquetArgs {
     bloom_column: Vec<ColumnBloomFilterConfig>,
 
     /// The maximum number of rows per Parquet row group.
-    #[arg(long, default_value_t = 122_880)]
+    #[arg(long, default_value_t = 1_048_576)]
     max_row_group_size: usize,
 
-    /// Disable writing statistics (min/max/null count) for columns.
-    #[arg(long, default_value_t = false)]
-    no_stats: bool,
+    /// Control column statistics level.
+    #[arg(long, default_value_t = ParquetStatistics::Page)]
+    statistics: ParquetStatistics,
+
+    /// Size of Arrow record batches written to the output file.
+    #[arg(long, default_value_t = 122_880)]
+    record_batch_size: usize,
 
     /// Disable dictionary encoding for columns.
     #[arg(long, default_value_t = false)]
@@ -173,6 +180,10 @@ pub struct ArrowArgs {
     /// The IPC compression to use for the output.
     #[arg(long, default_value_t = ArrowCompression::None)]
     compression: ArrowCompression,
+
+    /// Size of Arrow record batches written to the output file.
+    #[arg(long, default_value_t = 122_880)]
+    record_batch_size: usize,
 }
 
 #[derive(ValueEnum, Clone, Debug, Default)]
@@ -190,14 +201,39 @@ pub enum ParquetCompression {
     None,
 }
 
-impl std::fmt::Display for ParquetCompression {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for ParquetCompression {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let s = match self {
             Self::Zstd => "zstd",
             Self::Snappy => "snappy",
             Self::Gzip => "gzip",
             Self::Lz4 => "lz4",
             Self::None => "none",
+        };
+        write!(f, "{}", s)
+    }
+}
+
+#[derive(ValueEnum, Clone, Debug, Default)]
+pub enum ParquetStatistics {
+    /// No statistics
+    #[value(name = "none")]
+    None,
+    /// Compute column chunk-level statistics but not page-level.
+    #[value(name = "chunk")]
+    Chunk,
+    /// Compute page-level and column chunk-level statistics.
+    #[default]
+    #[value(name = "page")]
+    Page,
+}
+
+impl Display for ParquetStatistics {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Self::None => "none",
+            Self::Chunk => "chunk",
+            Self::Page => "page",
         };
         write!(f, "{}", s)
     }
@@ -212,8 +248,8 @@ pub enum ParquetWriterVersion {
     V2,
 }
 
-impl std::fmt::Display for ParquetWriterVersion {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for ParquetWriterVersion {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let s = match self {
             Self::V1 => "v1",
             Self::V2 => "v2",
@@ -233,8 +269,8 @@ pub enum ArrowCompression {
     None,
 }
 
-impl std::fmt::Display for ArrowCompression {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for ArrowCompression {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let s = match self {
             Self::Zstd => "zstd",
             Self::Lz4 => "lz4",
@@ -585,6 +621,13 @@ mod tests {
         assert_eq!(ParquetCompression::Gzip.to_string(), "gzip");
         assert_eq!(ParquetCompression::Lz4.to_string(), "lz4");
         assert_eq!(ParquetCompression::None.to_string(), "none");
+    }
+
+    #[test]
+    fn test_parquet_statistics_display() {
+        assert_eq!(ParquetStatistics::None.to_string(), "none");
+        assert_eq!(ParquetStatistics::Chunk.to_string(), "chunk");
+        assert_eq!(ParquetStatistics::Page.to_string(), "page");
     }
 
     #[test]

@@ -11,7 +11,8 @@ pub async fn run(args: ArrowArgs) -> Result<()> {
 
     let converter = ArrowConverter::new(input_path, output_path)
         .with_compression(args.compression)
-        .with_sorting(args.sort_by.unwrap_or_default());
+        .with_sorting(args.sort_by.unwrap_or_default())
+        .with_record_batch_size(args.record_batch_size);
 
     converter.convert().await
 }
@@ -56,6 +57,7 @@ mod tests {
                 output: clio::OutputPath::new(&output_path).unwrap(),
                 sort_by: None,
                 compression: ArrowCompression::None,
+                record_batch_size: 122_880,
             };
 
             // remove the directory to test that run() creates it
@@ -92,6 +94,7 @@ mod tests {
                 output: clio::OutputPath::new(&output_path).unwrap(),
                 sort_by: Some(sort_spec),
                 compression: ArrowCompression::Zstd,
+                record_batch_size: 122_880,
             };
 
             run(args).await.unwrap();

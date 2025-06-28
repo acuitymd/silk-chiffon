@@ -1,5 +1,5 @@
 use crate::{
-    ParquetArgs, ParquetCompression, ParquetWriterVersion,
+    ParquetArgs, ParquetCompression, ParquetStatistics, ParquetWriterVersion,
     utils::filesystem::ensure_parent_dir_exists,
 };
 use anyhow::{Result, anyhow};
@@ -46,9 +46,11 @@ fn _create_writer_properties(args: &ParquetArgs) -> Result<WriterProperties> {
         }
     };
 
-    if args.no_stats {
-        builder = builder.set_statistics_enabled(EnabledStatistics::None);
-    }
+    builder = match args.statistics {
+        ParquetStatistics::None => builder.set_statistics_enabled(EnabledStatistics::None),
+        ParquetStatistics::Chunk => builder.set_statistics_enabled(EnabledStatistics::Chunk),
+        ParquetStatistics::Page => builder.set_statistics_enabled(EnabledStatistics::Page),
+    };
 
     if args.no_dictionary {
         builder = builder.set_dictionary_enabled(false);
@@ -70,7 +72,7 @@ fn _create_writer_properties(args: &ParquetArgs) -> Result<WriterProperties> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ParquetCompression, ParquetWriterVersion};
+    use crate::{ParquetCompression, ParquetStatistics, ParquetWriterVersion};
     use clio::{Input, OutputPath};
     use tempfile::TempDir;
 
@@ -90,8 +92,9 @@ mod tests {
             write_sorted_metadata: false,
             bloom_all: None,
             bloom_column: vec![],
-            max_row_group_size: 122_880,
-            no_stats: false,
+            max_row_group_size: 1_048_576,
+            statistics: ParquetStatistics::Page,
+            record_batch_size: 122_880,
             no_dictionary: false,
             writer_version: ParquetWriterVersion::V2,
         };
@@ -115,8 +118,9 @@ mod tests {
             write_sorted_metadata: false,
             bloom_all: None,
             bloom_column: vec![],
-            max_row_group_size: 122_880,
-            no_stats: false,
+            max_row_group_size: 1_048_576,
+            statistics: ParquetStatistics::Page,
+            record_batch_size: 122_880,
             no_dictionary: false,
             writer_version: ParquetWriterVersion::V2,
         };
