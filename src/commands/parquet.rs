@@ -10,13 +10,12 @@ pub async fn run(args: ParquetArgs) -> Result<()> {
 
     ensure_parent_dir_exists(&output_path).await?;
 
-    let bloom_filters = if args.bloom_all.is_some() || !args.bloom_column.is_empty() {
-        Some(BloomFilterConfig {
-            all_columns: args.bloom_all,
-            specific_columns: args.bloom_column,
-        })
+    let bloom_filters = if let Some(all_config) = args.bloom_all {
+        BloomFilterConfig::All(all_config)
+    } else if !args.bloom_column.is_empty() {
+        BloomFilterConfig::Columns(args.bloom_column)
     } else {
-        None
+        BloomFilterConfig::None
     };
 
     let converter = ParquetConverter::new(input_path, output_path)

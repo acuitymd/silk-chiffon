@@ -186,7 +186,7 @@ pub struct ArrowArgs {
     record_batch_size: usize,
 }
 
-#[derive(ValueEnum, Clone, Debug, Default)]
+#[derive(ValueEnum, Clone, Copy, Debug, Default)]
 pub enum ParquetCompression {
     #[value(name = "zstd")]
     Zstd,
@@ -214,7 +214,7 @@ impl Display for ParquetCompression {
     }
 }
 
-#[derive(ValueEnum, Clone, Debug, Default)]
+#[derive(ValueEnum, Clone, Copy, Debug, Default)]
 pub enum ParquetStatistics {
     /// No statistics
     #[value(name = "none")]
@@ -239,7 +239,7 @@ impl Display for ParquetStatistics {
     }
 }
 
-#[derive(ValueEnum, Clone, Debug, Default)]
+#[derive(ValueEnum, Clone, Copy, Debug, Default)]
 pub enum ParquetWriterVersion {
     #[value(name = "v1")]
     V1,
@@ -521,10 +521,19 @@ impl FromStr for ColumnBloomFilterConfig {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct BloomFilterConfig {
-    pub all_columns: Option<AllColumnsBloomFilterSizeConfig>,
-    pub specific_columns: Vec<ColumnBloomFilterConfig>,
+#[derive(Debug, Clone, Default)]
+pub enum BloomFilterConfig {
+    #[default]
+    None,
+    All(AllColumnsBloomFilterSizeConfig),
+    Columns(Vec<ColumnBloomFilterConfig>),
+}
+
+impl BloomFilterConfig {
+    /// Returns true if any bloom filter configuration is set
+    pub fn is_configured(&self) -> bool {
+        !matches!(self, BloomFilterConfig::None)
+    }
 }
 
 #[tokio::main]

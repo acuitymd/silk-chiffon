@@ -8,7 +8,6 @@ fn test_parquet_conversion_basic() {
     let input_path = temp_dir.path().join("input.arrow");
     let output_path = temp_dir.path().join("output.parquet");
 
-    // Create a valid Arrow file
     use arrow::{
         array::{Int32Array, StringArray},
         datatypes::{DataType, Field, Schema},
@@ -36,9 +35,8 @@ fn test_parquet_conversion_basic() {
     writer.write(&batch).unwrap();
     writer.finish().unwrap();
 
-    // Run the parquet command
     let output = Command::new("cargo")
-        .args(&[
+        .args([
             "run",
             "--release",
             "--",
@@ -52,7 +50,6 @@ fn test_parquet_conversion_basic() {
     assert!(output.status.success(), "Command failed: {:?}", output);
     assert!(output_path.exists(), "Output file was not created");
 
-    // Verify the output is a valid Parquet file
     let file = File::open(&output_path).unwrap();
     let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)
         .unwrap()
@@ -70,7 +67,6 @@ fn test_parquet_conversion_with_sorting() {
     let input_path = temp_dir.path().join("input.arrow");
     let output_path = temp_dir.path().join("output.parquet");
 
-    // Create a valid Arrow file with unsorted data
     use arrow::{
         array::{Int32Array, StringArray},
         datatypes::{DataType, Field, Schema},
@@ -98,9 +94,8 @@ fn test_parquet_conversion_with_sorting() {
     writer.write(&batch).unwrap();
     writer.finish().unwrap();
 
-    // Run the parquet command with sorting
     let output = Command::new("cargo")
-        .args(&[
+        .args([
             "run",
             "--release",
             "--",
@@ -116,7 +111,6 @@ fn test_parquet_conversion_with_sorting() {
     assert!(output.status.success(), "Command failed: {:?}", output);
     assert!(output_path.exists(), "Output file was not created");
 
-    // Verify the output is sorted
     let file = File::open(&output_path).unwrap();
     let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)
         .unwrap()
@@ -142,7 +136,6 @@ fn test_parquet_conversion_with_compression() {
     let input_path = temp_dir.path().join("input.arrow");
     let output_path = temp_dir.path().join("output.parquet");
 
-    // Create a valid Arrow file
     use arrow::{
         array::{Int32Array, StringArray},
         datatypes::{DataType, Field, Schema},
@@ -170,9 +163,8 @@ fn test_parquet_conversion_with_compression() {
     writer.write(&batch).unwrap();
     writer.finish().unwrap();
 
-    // Run the parquet command with compression
     let output = Command::new("cargo")
-        .args(&[
+        .args([
             "run",
             "--release",
             "--",
@@ -188,7 +180,6 @@ fn test_parquet_conversion_with_compression() {
     assert!(output.status.success(), "Command failed: {:?}", output);
     assert!(output_path.exists(), "Output file was not created");
 
-    // Verify the output is a valid Parquet file
     let file = File::open(&output_path).unwrap();
     let _reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)
         .unwrap()
