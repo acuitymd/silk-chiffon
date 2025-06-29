@@ -131,6 +131,10 @@ impl ParquetWritePropertiesBuilder {
         builder: WriterPropertiesBuilder,
         schema: &SchemaRef,
     ) -> Result<WriterPropertiesBuilder> {
+        if self.sort_spec.is_empty() {
+            return Ok(builder);
+        }
+
         let mut sorting_columns = Vec::new();
 
         for sort_col in &self.sort_spec.columns {

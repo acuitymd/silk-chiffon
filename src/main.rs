@@ -296,8 +296,12 @@ pub struct SortSpec {
 }
 
 impl SortSpec {
+    pub fn is_empty(&self) -> bool {
+        self.columns.is_empty()
+    }
+
     pub fn is_configured(&self) -> bool {
-        !self.columns.is_empty()
+        !self.is_empty()
     }
 }
 
