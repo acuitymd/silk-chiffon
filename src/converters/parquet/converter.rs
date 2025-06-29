@@ -12,10 +12,7 @@ use crate::{
     utils::arrow_io::{ArrowIPCFormat, ArrowIPCReader},
 };
 
-use super::{
-    metadata::SortMetadataBuilder, ndv_calculator::NdvCalculator,
-    writer_builder::ParquetWritePropertiesBuilder,
-};
+use super::{ndv_calculator::NdvCalculator, writer_builder::ParquetWritePropertiesBuilder};
 
 pub struct ParquetConverter {
     input_path: String,
@@ -146,12 +143,6 @@ impl ParquetConverter {
         input_path: &Path,
         ndv_map: &std::collections::HashMap<String, u64>,
     ) -> Result<WriterProperties> {
-        let sort_metadata_builder = if self.write_sorted_metadata {
-            Some(SortMetadataBuilder::new(self.sort_spec.clone()))
-        } else {
-            None
-        };
-
         let writer_builder = ParquetWritePropertiesBuilder::new(
             self.compression,
             self.statistics,
@@ -159,7 +150,7 @@ impl ParquetConverter {
             self.parquet_row_group_size,
             self.no_dictionary,
             self.bloom_filters.clone(),
-            sort_metadata_builder,
+            self.sort_spec.clone(),
         );
 
         writer_builder.build(input_path, ndv_map)

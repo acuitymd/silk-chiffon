@@ -5,14 +5,14 @@ use parquet::{
     file::properties::{
         EnabledStatistics, WriterProperties, WriterPropertiesBuilder, WriterVersion,
     },
+    format::SortingColumn,
     schema::types::ColumnPath,
 };
 use std::{collections::HashMap, path::Path};
 
-use super::metadata::SortMetadataBuilder;
 use crate::{
-    BloomFilterConfig, ParquetCompression, ParquetStatistics, ParquetWriterVersion,
-    utils::arrow_io::ArrowIPCReader,
+    BloomFilterConfig, ParquetCompression, ParquetStatistics, ParquetWriterVersion, SortDirection,
+    SortSpec, utils::arrow_io::ArrowIPCReader,
 };
 
 pub struct ParquetWritePropertiesBuilder {
@@ -22,7 +22,7 @@ pub struct ParquetWritePropertiesBuilder {
     parquet_row_group_size: usize,
     no_dictionary: bool,
     bloom_filters: BloomFilterConfig,
-    sort_metadata_builder: Option<SortMetadataBuilder>,
+    sort_spec: SortSpec,
 }
 
 impl ParquetWritePropertiesBuilder {
@@ -33,7 +33,7 @@ impl ParquetWritePropertiesBuilder {
         parquet_row_group_size: usize,
         no_dictionary: bool,
         bloom_filters: BloomFilterConfig,
-        sort_metadata_builder: Option<SortMetadataBuilder>,
+        sort_spec: SortSpec,
     ) -> Self {
         let compression = match compression {
             ParquetCompression::Zstd => Compression::ZSTD(ZstdLevel::default()),
@@ -61,7 +61,7 @@ impl ParquetWritePropertiesBuilder {
             parquet_row_group_size,
             no_dictionary,
             bloom_filters,
-            sort_metadata_builder,
+            sort_spec,
         }
     }
 
@@ -131,10 +131,23 @@ impl ParquetWritePropertiesBuilder {
         builder: WriterPropertiesBuilder,
         schema: &SchemaRef,
     ) -> Result<WriterPropertiesBuilder> {
-        match &self.sort_metadata_builder {
-            Some(sort_builder) => sort_builder.apply(builder, schema),
-            None => Ok(builder),
+        let mut sorting_columns = Vec::new();
+
+        for sort_col in &self.sort_spec.columns {
+            let column_idx = schema
+                .index_of(&sort_col.name)
+                .map_err(|_| anyhow!("Sort column '{}' not found in schema", sort_col.name))?;
+
+            let descending = sort_col.direction == SortDirection::Descending;
+
+            sorting_columns.push(SortingColumn {
+                column_idx: column_idx as i32,
+                descending,
+                nulls_first: descending,
+            });
         }
+
+        Ok(builder.set_sorting_columns(Some(sorting_columns)))
     }
 }
 
@@ -154,7 +167,7 @@ mod tests {
             1000,
             false,
             BloomFilterConfig::None,
-            None,
+            SortSpec::default(),
         );
         assert!(matches!(builder.compression, Compression::ZSTD(_)));
 
@@ -165,7 +178,7 @@ mod tests {
             1000,
             false,
             BloomFilterConfig::None,
-            None,
+            SortSpec::default(),
         );
         assert!(matches!(builder.compression, Compression::SNAPPY));
 
@@ -176,7 +189,7 @@ mod tests {
             1000,
             false,
             BloomFilterConfig::None,
-            None,
+            SortSpec::default(),
         );
         assert!(matches!(builder.compression, Compression::GZIP(_)));
 
@@ -187,7 +200,7 @@ mod tests {
             1000,
             false,
             BloomFilterConfig::None,
-            None,
+            SortSpec::default(),
         );
         assert!(matches!(builder.compression, Compression::LZ4_RAW));
 
@@ -198,7 +211,7 @@ mod tests {
             1000,
             false,
             BloomFilterConfig::None,
-            None,
+            SortSpec::default(),
         );
         assert!(matches!(builder.compression, Compression::UNCOMPRESSED));
     }
@@ -212,7 +225,7 @@ mod tests {
             1000,
             false,
             BloomFilterConfig::None,
-            None,
+            SortSpec::default(),
         );
         assert!(matches!(builder.writer_version, WriterVersion::PARQUET_1_0));
 
@@ -223,7 +236,7 @@ mod tests {
             1000,
             false,
             BloomFilterConfig::None,
-            None,
+            SortSpec::default(),
         );
         assert!(matches!(builder.writer_version, WriterVersion::PARQUET_2_0));
     }
@@ -237,7 +250,7 @@ mod tests {
             1000,
             false,
             BloomFilterConfig::None,
-            None,
+            SortSpec::default(),
         );
         assert!(matches!(builder.statistics, EnabledStatistics::None));
 
@@ -248,7 +261,7 @@ mod tests {
             1000,
             false,
             BloomFilterConfig::None,
-            None,
+            SortSpec::default(),
         );
         assert!(matches!(builder.statistics, EnabledStatistics::Chunk));
 
@@ -259,7 +272,7 @@ mod tests {
             1000,
             false,
             BloomFilterConfig::None,
-            None,
+            SortSpec::default(),
         );
         assert!(matches!(builder.statistics, EnabledStatistics::Page));
     }
@@ -273,7 +286,7 @@ mod tests {
             50000,
             false,
             BloomFilterConfig::None,
-            None,
+            SortSpec::default(),
         );
 
         let props_builder = writer_builder.create_base_builder();
@@ -292,7 +305,7 @@ mod tests {
             100000,
             true,
             BloomFilterConfig::None,
-            None,
+            SortSpec::default(),
         );
 
         let props_builder = writer_builder.create_base_builder();
@@ -312,7 +325,7 @@ mod tests {
             1000,
             false,
             bloom_config,
-            None,
+            SortSpec::default(),
         );
 
         let mut ndv_map = HashMap::new();
@@ -339,7 +352,7 @@ mod tests {
             1000,
             false,
             bloom_config,
-            None,
+            SortSpec::default(),
         );
 
         let mut ndv_map = HashMap::new();
@@ -365,7 +378,7 @@ mod tests {
             1000,
             false,
             bloom_config,
-            None,
+            SortSpec::default(),
         );
 
         let mut ndv_map = HashMap::new();
@@ -391,7 +404,7 @@ mod tests {
             1000,
             false,
             bloom_config,
-            None,
+            SortSpec::default(),
         );
 
         let ndv_map = HashMap::new();
@@ -420,7 +433,7 @@ mod tests {
             1000,
             false,
             bloom_config,
-            None,
+            SortSpec::default(),
         );
 
         let mut ndv_map = HashMap::new();
@@ -446,7 +459,7 @@ mod tests {
             1000,
             false,
             bloom_config,
-            None,
+            SortSpec::default(),
         );
 
         let mut ndv_map = HashMap::new();
