@@ -1,5 +1,8 @@
 use anyhow::{Result, anyhow};
-use arrow::datatypes::{DataType, Schema};
+use arrow::{
+    array::UInt64Array,
+    datatypes::{DataType, Schema},
+};
 use datafusion::{
     execution::options::ArrowReadOptions,
     functions_aggregate::expr_fn::{count_distinct, max},
@@ -103,47 +106,59 @@ impl NdvCalculator {
         let df_with_group = df_with_row_num.with_column(
             "_row_group",
             cast(
-                (col("_row_num") - lit(1i64)) / lit(self.row_group_size as i64),
-                DataType::Int64,
+                (col("_row_num") - lit(1u64)) / lit(self.row_group_size as u64),
+                DataType::UInt64,
             )
             .alias("_row_group"),
         )?;
 
+        let df_with_group_ndv = df_with_group.aggregate(
+            vec![col("_row_group")],
+            columns
+                .iter()
+                .map(|c| count_distinct(col(c)).alias(c))
+                .collect::<Vec<_>>(),
+        )?;
+
+        let df_with_group_ndv_cast = df_with_group_ndv.select(
+            std::iter::once(col("_row_group"))
+                .chain(
+                    columns
+                        .iter()
+                        .map(|c| cast(col(c), DataType::UInt64).alias(c)),
+                )
+                .collect::<Vec<_>>(),
+        )?;
+
+        let df_with_group_ndv_max = df_with_group_ndv_cast.aggregate(
+            vec![],
+            columns
+                .iter()
+                .map(|c| max(col(c)).alias(c))
+                .collect::<Vec<_>>(),
+        )?;
+
+        let batches = df_with_group_ndv_max.collect().await?;
+
         let mut results = HashMap::new();
 
-        for col_name in columns {
-            let group_ndv = df_with_group.clone().aggregate(
-                vec![col("_row_group")],
-                vec![count_distinct(col(col_name)).alias("ndv")],
-            )?;
+        if batches.is_empty() {
+            return Ok(results);
+        }
 
-            let max_ndv = group_ndv.aggregate(vec![], vec![max(col("ndv")).alias("max_ndv")])?;
+        let batch = &batches[0];
 
-            let batches = max_ndv.collect().await?;
-
-            if batches.is_empty() {
-                continue;
-            }
-
-            let batch = &batches[0];
-            let array = batch
-                .column_by_name("max_ndv")
-                .ok_or_else(|| anyhow!("max_ndv column not found"))?;
-
-            if array.len() != 1 {
-                return Err(anyhow!(
-                    "Expected single max NDV result row, got {}",
-                    array.len()
-                ));
-            }
-
-            let max_array = array
-                .as_any()
-                .downcast_ref::<arrow::array::Int64Array>()
-                .ok_or_else(|| anyhow!("max_ndv is not Int64 type"))?;
-
-            let max_ndv_value = max_array.value(0);
-            results.insert(col_name.clone(), max_ndv_value as u64);
+        for c in columns {
+            results.insert(
+                c.to_string(),
+                batch
+                    .column_by_name(c)
+                    .ok_or_else(|| anyhow!("{} column not found", c))?
+                    .as_any()
+                    .downcast_ref::<UInt64Array>()
+                    .ok_or_else(|| anyhow!("{} column is not UInt64 type", c))?
+                    .value(0),
+            );
         }
 
         Ok(results)
@@ -160,7 +175,11 @@ mod tests {
 
     #[test]
     fn test_needs_calculation_with_bloom_filters() {
-        let bloom_config = BloomFilterConfig::All(AllColumnsBloomFilterConfig { fpp: Some(0.01) });
+        let bloom_config = BloomFilterConfig::All(AllColumnsBloomFilterConfig { fpp: 0.01 });
+        let calculator = NdvCalculator::new(bloom_config, 1_000_000);
+        assert!(calculator.needs_calculation());
+
+        let bloom_config = BloomFilterConfig::All(AllColumnsBloomFilterConfig { fpp: 0.001 });
         let calculator = NdvCalculator::new(bloom_config, 1_000_000);
         assert!(calculator.needs_calculation());
     }
@@ -174,7 +193,7 @@ mod tests {
 
     #[test]
     fn test_get_columns_needing_ndv_all_columns() {
-        let bloom_config = BloomFilterConfig::All(AllColumnsBloomFilterConfig { fpp: Some(0.01) });
+        let bloom_config = BloomFilterConfig::All(AllColumnsBloomFilterConfig { fpp: 0.01 });
         let calculator = NdvCalculator::new(bloom_config, 1_000_000);
 
         let schema = Schema::new(vec![
@@ -273,7 +292,7 @@ mod tests {
 
         file_helpers::write_arrow_file(&arrow_path, &schema, batches).unwrap();
 
-        let bloom_config = BloomFilterConfig::All(AllColumnsBloomFilterConfig { fpp: Some(0.01) });
+        let bloom_config = BloomFilterConfig::All(AllColumnsBloomFilterConfig { fpp: 0.01 });
         let calculator = NdvCalculator::new(bloom_config, 5);
 
         let result = calculator.calculate(&arrow_path).await.unwrap();

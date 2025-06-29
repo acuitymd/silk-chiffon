@@ -499,7 +499,7 @@ mod tests {
         let batch = test_data::create_batch_with_ids_and_names(&schema, &test_ids, &test_names);
         file_helpers::write_arrow_file(&input_path, &schema, vec![batch]).unwrap();
 
-        let bloom_config = BloomFilterConfig::All(AllColumnsBloomFilterConfig { fpp: Some(0.001) });
+        let bloom_config = BloomFilterConfig::All(AllColumnsBloomFilterConfig { fpp: 0.001 });
 
         let converter = ParquetConverter::new(
             input_path.to_str().unwrap().to_string(),

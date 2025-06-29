@@ -96,7 +96,7 @@ impl ParquetWritePropertiesBuilder {
         match &self.bloom_filters {
             BloomFilterConfig::None => Ok(builder),
             BloomFilterConfig::All(bloom_all) => {
-                let fpp = bloom_all.fpp.unwrap_or(0.01);
+                let fpp = bloom_all.fpp;
                 builder = builder
                     .set_bloom_filter_enabled(true)
                     .set_bloom_filter_fpp(fpp);
@@ -316,7 +316,7 @@ mod tests {
 
     #[test]
     fn test_apply_bloom_filters_all_columns() {
-        let bloom_config = BloomFilterConfig::All(AllColumnsBloomFilterConfig { fpp: Some(0.001) });
+        let bloom_config = BloomFilterConfig::All(AllColumnsBloomFilterConfig { fpp: 0.001 });
 
         let builder = ParquetWritePropertiesBuilder::new(
             ParquetCompression::None,
@@ -424,7 +424,7 @@ mod tests {
 
     #[test]
     fn test_apply_bloom_filters_default_fpp() {
-        let bloom_config = BloomFilterConfig::All(AllColumnsBloomFilterConfig { fpp: None });
+        let bloom_config = BloomFilterConfig::All(AllColumnsBloomFilterConfig { fpp: 0.01 });
 
         let builder = ParquetWritePropertiesBuilder::new(
             ParquetCompression::None,

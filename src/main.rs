@@ -90,6 +90,8 @@ pub struct ParquetArgs {
         long,
         value_name = "[fpp=VALUE]",
         conflicts_with = "bloom_column",
+        num_args = 0..=1,
+        default_missing_value = "",
         verbatim_doc_comment
     )]
     bloom_all: Option<AllColumnsBloomFilterConfig>,
@@ -355,15 +357,23 @@ impl Display for SortSpec {
     }
 }
 
+const DEFAULT_BLOOM_FILTER_FPP: f64 = 0.01;
+
 #[derive(Debug, Clone)]
 pub struct AllColumnsBloomFilterConfig {
-    pub fpp: Option<f64>, // defaults to 0.01
+    pub fpp: f64, // defaults to 0.01
 }
 
 impl FromStr for AllColumnsBloomFilterConfig {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.trim().is_empty() {
+            return Ok(AllColumnsBloomFilterConfig {
+                fpp: DEFAULT_BLOOM_FILTER_FPP,
+            });
+        }
+
         let mut fpp = None;
 
         let parts = s
@@ -413,7 +423,9 @@ impl FromStr for AllColumnsBloomFilterConfig {
             }
         }
 
-        Ok(AllColumnsBloomFilterConfig { fpp })
+        Ok(AllColumnsBloomFilterConfig {
+            fpp: fpp.unwrap_or(DEFAULT_BLOOM_FILTER_FPP),
+        })
     }
 }
 
