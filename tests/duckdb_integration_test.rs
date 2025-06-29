@@ -248,3 +248,108 @@ fn test_duckdb_with_sorting() {
         .unwrap();
     assert_eq!(ids, vec![1, 2, 3]);
 }
+
+#[test]
+fn test_duckdb_add_multiple_tables() {
+    let temp_dir = tempdir().unwrap();
+
+    let users_path = temp_dir.path().join("users.arrow");
+    let users_schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int32, false),
+        Field::new("name", DataType::Utf8, false),
+    ]));
+    let users_batch = RecordBatch::try_new(
+        users_schema.clone(),
+        vec![
+            Arc::new(Int32Array::from(vec![1, 2, 3])),
+            Arc::new(StringArray::from(vec!["Alice", "Bob", "Charlie"])),
+        ],
+    )
+    .unwrap();
+
+    let file = File::create(&users_path).unwrap();
+    let mut writer = FileWriter::try_new(file, &users_schema).unwrap();
+    writer.write(&users_batch).unwrap();
+    writer.finish().unwrap();
+
+    let products_path = temp_dir.path().join("products.arrow");
+    let products_schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int32, false),
+        Field::new("name", DataType::Utf8, false),
+    ]));
+    let products_batch = RecordBatch::try_new(
+        products_schema.clone(),
+        vec![
+            Arc::new(Int32Array::from(vec![100, 101, 102])),
+            Arc::new(StringArray::from(vec!["Widget", "Gadget", "Tool"])),
+        ],
+    )
+    .unwrap();
+
+    let file = File::create(&products_path).unwrap();
+    let mut writer = FileWriter::try_new(file, &products_schema).unwrap();
+    writer.write(&products_batch).unwrap();
+    writer.finish().unwrap();
+
+    let output_path = temp_dir.path().join("multi_table.db");
+    let output = Command::new("cargo")
+        .args([
+            "run",
+            "--release",
+            "--",
+            "duckdb",
+            users_path.to_str().unwrap(),
+            output_path.to_str().unwrap(),
+            "--table-name",
+            "users",
+        ])
+        .output()
+        .expect("Failed to execute command");
+
+    assert!(
+        output.status.success(),
+        "Failed to create users table: {:?}",
+        output
+    );
+
+    let output = Command::new("cargo")
+        .args([
+            "run",
+            "--release",
+            "--",
+            "duckdb",
+            products_path.to_str().unwrap(),
+            output_path.to_str().unwrap(),
+            "--table-name",
+            "products",
+        ])
+        .output()
+        .expect("Failed to execute command");
+
+    assert!(
+        output.status.success(),
+        "Failed to create products table: {:?}",
+        output
+    );
+
+    let conn = Connection::open(&output_path).unwrap();
+
+    let user_count: i32 = conn
+        .query_row("SELECT COUNT(*) FROM users", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(user_count, 3);
+
+    let product_count: i32 = conn
+        .query_row("SELECT COUNT(*) FROM products", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(product_count, 3);
+
+    let join_count: i32 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM users CROSS JOIN products",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(join_count, 9); // 3 users * 3 products
+}
