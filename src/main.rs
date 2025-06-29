@@ -146,17 +146,23 @@ pub struct DuckDbArgs {
     #[arg(value_parser)]
     output: clio::OutputPath,
 
+    /// Name of the table to create.
+    #[arg(short, long)]
+    table_name: String,
+
     /// Sort the data by one or more columns before writing.
     ///
     /// Format: A comma-separated list like "col_a,col_b:desc,col_c".
-    #[arg(short, long)]
-    sort_by: Option<SortSpec>,
+    #[arg(short, long, default_value_t = SortSpec::default())]
+    sort_by: SortSpec,
 
-    /// Truncate the database before writing.
-    ///
-    /// By default, the database is appended to.
+    /// Truncate the database file before writing (removes entire file).
     #[arg(long, default_value_t = false)]
     truncate: bool,
+
+    /// Drop the table if it already exists before creating.
+    #[arg(long, default_value_t = false, conflicts_with = "truncate")]
+    drop_table: bool,
 }
 
 #[derive(Args, Debug)]
