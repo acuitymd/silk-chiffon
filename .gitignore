@@ -8,3 +8,4 @@ dist/
 wheels/
 *.egg-info
 .venv
+*.abi3.so
