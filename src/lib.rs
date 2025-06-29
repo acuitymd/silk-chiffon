@@ -554,3 +554,16 @@ impl BloomFilterConfig {
         !matches!(self, BloomFilterConfig::None)
     }
 }
+
+#[cfg(feature = "python")]
+mod python;
+
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+
+#[cfg(feature = "python")]
+#[pymodule]
+fn _daisy(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    python::register_module(m)?;
+    Ok(())
+}

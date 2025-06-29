@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
-use daisy::{commands, Cli};
+use daisy::{Cli, commands};
 
 #[tokio::main]
 async fn main() -> Result<()> {
