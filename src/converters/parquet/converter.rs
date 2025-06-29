@@ -91,13 +91,23 @@ impl ParquetConverter {
     }
 
     pub async fn convert(&self) -> Result<()> {
-        let (arrow_file_path, _temp_keep_alive) = self.prepare_arrow_file().await?;
+        let (arrow_file_path, _temp_variable_to_keep_file_on_disk_until_end_of_function) =
+            self.prepare_arrow_file().await?;
 
-        let ndv_calculator =
-            NdvCalculator::new(self.bloom_filters.clone(), self.parquet_row_group_size);
-        let ndv_map = ndv_calculator.calculate(&arrow_file_path).await?;
+        let ndv_map = NdvCalculator::new(self.bloom_filters.clone(), self.parquet_row_group_size)
+            .calculate(&arrow_file_path)
+            .await?;
 
-        let writer_properties = self.create_writer_properties(&arrow_file_path, &ndv_map)?;
+        let writer_properties = ParquetWritePropertiesBuilder::new(
+            self.compression,
+            self.statistics,
+            self.writer_version,
+            self.parquet_row_group_size,
+            self.no_dictionary,
+            self.bloom_filters.clone(),
+            self.sort_spec.clone(),
+        )
+        .build(&arrow_file_path, &ndv_map)?;
 
         self.write_parquet(&arrow_file_path, writer_properties)
             .await?;
@@ -131,23 +141,6 @@ impl ParquetConverter {
             || self.sort_spec.is_configured()
             || NdvCalculator::new(self.bloom_filters.clone(), self.parquet_row_group_size)
                 .needs_calculation()
-    }
-
-    fn create_writer_properties(
-        &self,
-        input_path: &Path,
-        ndv_map: &std::collections::HashMap<String, u64>,
-    ) -> Result<WriterProperties> {
-        ParquetWritePropertiesBuilder::new(
-            self.compression,
-            self.statistics,
-            self.writer_version,
-            self.parquet_row_group_size,
-            self.no_dictionary,
-            self.bloom_filters.clone(),
-            self.sort_spec.clone(),
-        )
-        .build(input_path, ndv_map)
     }
 
     async fn write_parquet(
