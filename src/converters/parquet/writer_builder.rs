@@ -110,15 +110,11 @@ impl<'a> ParquetWriterBuilder<'a> {
             BloomFilterConfig::Columns(columns) => {
                 for bloom_col in columns {
                     let col_path = ColumnPath::from(bloom_col.name.as_str());
-                    let fpp = bloom_col.size_config.fpp.unwrap_or(0.01);
+                    let fpp = bloom_col.config.fpp.unwrap_or(0.01);
 
-                    let ndv = bloom_col
-                        .size_config
-                        .ndv
-                        .or_else(|| ndv_map.get(&bloom_col.name).copied())
-                        .ok_or_else(|| {
-                            anyhow!("NDV not available for column {}", bloom_col.name)
-                        })?;
+                    let ndv = ndv_map.get(&bloom_col.name).copied().ok_or_else(|| {
+                        anyhow!("NDV not available for column {}", bloom_col.name)
+                    })?;
 
                     builder = builder
                         .set_column_bloom_filter_enabled(col_path.clone(), true)
@@ -146,7 +142,7 @@ impl<'a> ParquetWriterBuilder<'a> {
 mod tests {
     use super::*;
     use crate::{
-        AllColumnsBloomFilterSizeConfig, ColumnBloomFilterConfig, ColumnBloomFilterSizeConfig,
+        AllColumnsBloomFilterConfig, ColumnBloomFilterConfig, ColumnSpecificBloomFilterConfig,
     };
 
     #[test]
@@ -307,8 +303,7 @@ mod tests {
 
     #[test]
     fn test_apply_bloom_filters_all_columns() {
-        let bloom_config =
-            BloomFilterConfig::All(AllColumnsBloomFilterSizeConfig { fpp: Some(0.001) });
+        let bloom_config = BloomFilterConfig::All(AllColumnsBloomFilterConfig { fpp: Some(0.001) });
 
         let builder = ParquetWriterBuilder::new(
             ParquetCompression::None,
@@ -332,12 +327,9 @@ mod tests {
 
     #[test]
     fn test_apply_bloom_filters_specific_columns_with_ndv() {
-        let bloom_config = BloomFilterConfig::Columns(vec![ColumnBloomFilterConfig {
+        let bloom_config = BloomFilterConfig::Columns(vec![ColumnSpecificBloomFilterConfig {
             name: "id".to_string(),
-            size_config: ColumnBloomFilterSizeConfig {
-                fpp: Some(0.005),
-                ndv: Some(150),
-            },
+            config: ColumnBloomFilterConfig { fpp: Some(0.005) },
         }]);
 
         let builder = ParquetWriterBuilder::new(
@@ -350,7 +342,8 @@ mod tests {
             None,
         );
 
-        let ndv_map = HashMap::new();
+        let mut ndv_map = HashMap::new();
+        ndv_map.insert("id".to_string(), 150);
 
         let props_builder = WriterProperties::builder();
         let result = builder.apply_bloom_filters(props_builder, &ndv_map);
@@ -360,12 +353,9 @@ mod tests {
 
     #[test]
     fn test_apply_bloom_filters_specific_columns_from_map() {
-        let bloom_config = BloomFilterConfig::Columns(vec![ColumnBloomFilterConfig {
+        let bloom_config = BloomFilterConfig::Columns(vec![ColumnSpecificBloomFilterConfig {
             name: "id".to_string(),
-            size_config: ColumnBloomFilterSizeConfig {
-                fpp: Some(0.01),
-                ndv: None,
-            },
+            config: ColumnBloomFilterConfig { fpp: Some(0.01) },
         }]);
 
         let builder = ParquetWriterBuilder::new(
@@ -389,12 +379,9 @@ mod tests {
 
     #[test]
     fn test_apply_bloom_filters_missing_ndv() {
-        let bloom_config = BloomFilterConfig::Columns(vec![ColumnBloomFilterConfig {
+        let bloom_config = BloomFilterConfig::Columns(vec![ColumnSpecificBloomFilterConfig {
             name: "missing_column".to_string(),
-            size_config: ColumnBloomFilterSizeConfig {
-                fpp: Some(0.01),
-                ndv: None,
-            },
+            config: ColumnBloomFilterConfig { fpp: Some(0.01) },
         }]);
 
         let builder = ParquetWriterBuilder::new(
@@ -424,7 +411,7 @@ mod tests {
 
     #[test]
     fn test_apply_bloom_filters_default_fpp() {
-        let bloom_config = BloomFilterConfig::All(AllColumnsBloomFilterSizeConfig { fpp: None });
+        let bloom_config = BloomFilterConfig::All(AllColumnsBloomFilterConfig { fpp: None });
 
         let builder = ParquetWriterBuilder::new(
             ParquetCompression::None,
@@ -447,12 +434,9 @@ mod tests {
 
     #[test]
     fn test_apply_bloom_filters_mixed_config() {
-        let bloom_config = BloomFilterConfig::Columns(vec![ColumnBloomFilterConfig {
+        let bloom_config = BloomFilterConfig::Columns(vec![ColumnSpecificBloomFilterConfig {
             name: "id".to_string(),
-            size_config: ColumnBloomFilterSizeConfig {
-                fpp: Some(0.001),
-                ndv: Some(500),
-            },
+            config: ColumnBloomFilterConfig { fpp: Some(0.001) },
         }]);
 
         let builder = ParquetWriterBuilder::new(
@@ -466,8 +450,7 @@ mod tests {
         );
 
         let mut ndv_map = HashMap::new();
-        ndv_map.insert("id".to_string(), 100);
-        ndv_map.insert("name".to_string(), 200);
+        ndv_map.insert("id".to_string(), 500);
 
         let props_builder = WriterProperties::builder();
         let result = builder.apply_bloom_filters(props_builder, &ndv_map);

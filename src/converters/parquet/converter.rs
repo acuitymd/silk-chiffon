@@ -17,7 +17,6 @@ use super::{
     writer_builder::ParquetWriterBuilder,
 };
 
-/// Main converter for Arrow to Parquet format
 pub struct ParquetConverter {
     config: ParquetConfig,
 }
@@ -29,7 +28,6 @@ impl ParquetConverter {
         }
     }
 
-    // Builder methods
     pub fn with_sort_spec(mut self, sort_spec: Option<SortSpec>) -> Self {
         self.config.sort_spec = sort_spec;
         self
@@ -78,7 +76,10 @@ impl ParquetConverter {
     pub async fn convert(&self) -> Result<()> {
         let (arrow_file_path, _temp_keep_alive) = self.prepare_arrow_file().await?;
 
-        let ndv_calculator = NdvCalculator::new(self.config.bloom_filters.clone());
+        let ndv_calculator = NdvCalculator::new(
+            self.config.bloom_filters.clone(),
+            self.config.parquet_row_group_size,
+        );
         let ndv_map = ndv_calculator.calculate(&arrow_file_path).await?;
 
         let writer_properties = self.create_writer_properties(&arrow_file_path, &ndv_map)?;
@@ -113,7 +114,11 @@ impl ParquetConverter {
     fn needs_intermediate_arrow_file(&self) -> bool {
         self.input_is_arrow_stream()
             || self.config.sort_spec.is_some()
-            || NdvCalculator::new(self.config.bloom_filters.clone()).needs_calculation()
+            || NdvCalculator::new(
+                self.config.bloom_filters.clone(),
+                self.config.parquet_row_group_size,
+            )
+            .needs_calculation()
     }
 
     fn input_is_arrow_stream(&self) -> bool {

@@ -38,7 +38,7 @@ impl ParquetConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AllColumnsBloomFilterSizeConfig, SortColumn, SortDirection};
+    use crate::{AllColumnsBloomFilterConfig, SortColumn, SortDirection};
 
     #[test]
     fn test_new_default_values() {
@@ -99,8 +99,7 @@ mod tests {
         let mut config =
             ParquetConfig::new("input.arrow".to_string(), PathBuf::from("output.parquet"));
 
-        let bloom_config =
-            BloomFilterConfig::All(AllColumnsBloomFilterSizeConfig { fpp: Some(0.001) });
+        let bloom_config = BloomFilterConfig::All(AllColumnsBloomFilterConfig { fpp: Some(0.001) });
 
         config.bloom_filters = bloom_config;
 
@@ -209,7 +208,7 @@ mod tests {
         config.record_batch_size = 10000;
         config.compression = ParquetCompression::Zstd;
         config.bloom_filters =
-            BloomFilterConfig::All(AllColumnsBloomFilterSizeConfig { fpp: Some(0.001) });
+            BloomFilterConfig::All(AllColumnsBloomFilterConfig { fpp: Some(0.001) });
         config.statistics = ParquetStatistics::Chunk;
         config.parquet_row_group_size = 500000;
         config.no_dictionary = true;

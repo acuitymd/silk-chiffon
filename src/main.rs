@@ -80,42 +80,38 @@ pub struct ParquetArgs {
     /// Mutually exclusive with --bloom-column.
     ///
     /// Formats:
-    ///   --bloom-all             # Use default for FPP (0.01) and calculate NDV for each column
-    ///   --bloom-all "fpp=VALUE" # Custom FPP, calculate NDV for each column
+    ///   --bloom-all             # Use default FPP (0.01)
+    ///   --bloom-all "fpp=VALUE" # Custom FPP
     ///
     /// Examples:
-    ///   --bloom-all             # Use default for FPP (0.01) and calculate NDV for each column
-    ///   --bloom-all "fpp=0.001" # Custom FPP and calculate NDV for each column
+    ///   --bloom-all             # Use default FPP (0.01)
+    ///   --bloom-all "fpp=0.001" # Custom FPP (0.001)
     #[arg(
         long,
         value_name = "[fpp=VALUE]",
         conflicts_with = "bloom_column",
         verbatim_doc_comment
     )]
-    bloom_all: Option<AllColumnsBloomFilterSizeConfig>,
+    bloom_all: Option<AllColumnsBloomFilterConfig>,
 
     /// Enable bloom filter for specific columns with optional custom settings.
     /// Can be specified multiple times. Mutually exclusive with --bloom-all.
     ///
     /// Formats:
-    ///   COLUMN                     # Use default for FPP (0.01) and calculate NDV
-    ///   COLUMN:fpp=VALUE           # Custom FPP (0.01), calculate NDV
-    ///   COLUMN:ndv=VALUE           # Default FPP (0.01), custom NDV  
-    ///   COLUMN:fpp=VALUE:ndv=VALUE # Both custom (order doesn't matter)
+    ///   COLUMN           # Use default FPP (0.01)
+    ///   COLUMN:fpp=VALUE # Custom FPP
     ///
     /// Examples:
-    ///   --bloom-column "user_id"                      # Use default for FPP (0.01) and calculate NDV
-    ///   --bloom-column "user_id:fpp=0.001"            # Custom FPP (0.001), calculate NDV
-    ///   --bloom-column "user_id:ndv=1000000"          # Use default for FPP (0.01), custom NDV
-    ///   --bloom-column "user_id:fpp=0.01:ndv=1000000" # Both custom
-    ///   --bloom-column "user_id:ndv=1000000:fpp=0.01" # Same, different order
+    ///   --bloom-column "user_id"            # Use default FPP (0.01)
+    ///   --bloom-column "user_id:fpp=0.001"  # Custom FPP (0.001)
+    ///   --bloom-column "user_id" --bloom-column "name:fpp=0.05" # Multiple columns
     #[arg(
         long,
-        value_name = "COLUMN[:fpp=VALUE][:ndv=VALUE]",
+        value_name = "COLUMN[:fpp=VALUE]",
         conflicts_with = "bloom_all",
         verbatim_doc_comment
     )]
-    bloom_column: Vec<ColumnBloomFilterConfig>,
+    bloom_column: Vec<ColumnSpecificBloomFilterConfig>,
 
     /// The maximum number of rows per Parquet row group.
     #[arg(long, default_value_t = 1_048_576)]
@@ -354,11 +350,11 @@ impl Display for SortSpec {
 }
 
 #[derive(Debug, Clone)]
-pub struct AllColumnsBloomFilterSizeConfig {
-    pub fpp: Option<f64>,
+pub struct AllColumnsBloomFilterConfig {
+    pub fpp: Option<f64>, // defaults to 0.01
 }
 
-impl FromStr for AllColumnsBloomFilterSizeConfig {
+impl FromStr for AllColumnsBloomFilterConfig {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -411,22 +407,20 @@ impl FromStr for AllColumnsBloomFilterSizeConfig {
             }
         }
 
-        Ok(AllColumnsBloomFilterSizeConfig { fpp })
+        Ok(AllColumnsBloomFilterConfig { fpp })
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct ColumnBloomFilterSizeConfig {
-    pub fpp: Option<f64>,
-    pub ndv: Option<u64>,
+pub struct ColumnBloomFilterConfig {
+    pub fpp: Option<f64>, // defaults to 0.01
 }
 
-impl FromStr for ColumnBloomFilterSizeConfig {
+impl FromStr for ColumnBloomFilterConfig {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let mut fpp = None;
-        let mut ndv = None;
 
         let parts = s
             .split(':')
@@ -434,7 +428,7 @@ impl FromStr for ColumnBloomFilterSizeConfig {
             .filter(|p| !p.is_empty())
             .collect::<Vec<&str>>();
 
-        if parts.len() > 2 {
+        if parts.len() > 1 {
             return Err(anyhow!("Invalid bloom filter specification: {}", s));
         }
 
@@ -460,21 +454,9 @@ impl FromStr for ColumnBloomFilterSizeConfig {
                             anyhow::anyhow!("Invalid fpp value '{}': {}", value, e)
                         })?);
                     }
-                    "ndv" => {
-                        if ndv.is_some() {
-                            return Err(anyhow!(
-                                "Invalid bloom filter specification, ndv is set twice: {}",
-                                s
-                            ));
-                        }
-
-                        ndv = Some(value.parse::<u64>().map_err(|e| {
-                            anyhow::anyhow!("Invalid ndv value '{}': {}", value, e)
-                        })?);
-                    }
                     _ => {
                         return Err(anyhow::anyhow!(
-                            "Unknown parameter '{}'. Valid parameters are 'fpp' and 'ndv'",
+                            "Unknown parameter '{}'. Valid parameter is 'fpp'",
                             key
                         ));
                     }
@@ -487,17 +469,17 @@ impl FromStr for ColumnBloomFilterSizeConfig {
             }
         }
 
-        Ok(ColumnBloomFilterSizeConfig { fpp, ndv })
+        Ok(ColumnBloomFilterConfig { fpp })
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct ColumnBloomFilterConfig {
+pub struct ColumnSpecificBloomFilterConfig {
     pub name: String,
-    pub size_config: ColumnBloomFilterSizeConfig,
+    pub config: ColumnBloomFilterConfig,
 }
 
-impl FromStr for ColumnBloomFilterConfig {
+impl FromStr for ColumnSpecificBloomFilterConfig {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -511,12 +493,21 @@ impl FromStr for ColumnBloomFilterConfig {
                 ));
             }
 
-            Ok(ColumnBloomFilterConfig {
+            Ok(ColumnSpecificBloomFilterConfig {
                 name: column_name.to_string(),
-                size_config: ColumnBloomFilterSizeConfig::from_str(rest)?,
+                config: ColumnBloomFilterConfig::from_str(rest)?,
             })
         } else {
-            Err(anyhow!("Invalid bloom filter specification: {}", s))
+            let column_name = s.trim();
+            if column_name.is_empty() {
+                return Err(anyhow!(
+                    "Invalid bloom filter specification: empty column name"
+                ));
+            }
+            Ok(ColumnSpecificBloomFilterConfig {
+                name: column_name.to_string(),
+                config: ColumnBloomFilterConfig { fpp: None },
+            })
         }
     }
 }
@@ -525,12 +516,11 @@ impl FromStr for ColumnBloomFilterConfig {
 pub enum BloomFilterConfig {
     #[default]
     None,
-    All(AllColumnsBloomFilterSizeConfig),
-    Columns(Vec<ColumnBloomFilterConfig>),
+    All(AllColumnsBloomFilterConfig),
+    Columns(Vec<ColumnSpecificBloomFilterConfig>),
 }
 
 impl BloomFilterConfig {
-    /// Returns true if any bloom filter configuration is set
     pub fn is_configured(&self) -> bool {
         !matches!(self, BloomFilterConfig::None)
     }
@@ -554,25 +544,21 @@ mod tests {
 
     #[test]
     fn test_sort_spec_parsing() {
-        // single column with default sort
         let spec = SortSpec::from_str("col1").unwrap();
         assert_eq!(spec.columns.len(), 1);
         assert_eq!(spec.columns[0].name, "col1");
         assert_eq!(spec.columns[0].direction, SortDirection::Ascending);
 
-        // single column with explicit ascending
         let spec = SortSpec::from_str("col1:asc").unwrap();
         assert_eq!(spec.columns.len(), 1);
         assert_eq!(spec.columns[0].name, "col1");
         assert_eq!(spec.columns[0].direction, SortDirection::Ascending);
 
-        // single column with explicit descending
         let spec = SortSpec::from_str("col1:desc").unwrap();
         assert_eq!(spec.columns.len(), 1);
         assert_eq!(spec.columns[0].name, "col1");
         assert_eq!(spec.columns[0].direction, SortDirection::Descending);
 
-        // multiple columns
         let spec = SortSpec::from_str("col1,col2:desc,col3:asc").unwrap();
         assert_eq!(spec.columns.len(), 3);
         assert_eq!(spec.columns[0].name, "col1");
@@ -582,14 +568,12 @@ mod tests {
         assert_eq!(spec.columns[2].name, "col3");
         assert_eq!(spec.columns[2].direction, SortDirection::Ascending);
 
-        // make sure it's tolerant of extra whitespace
         let spec = SortSpec::from_str("col1 , col2:desc , col3").unwrap();
         assert_eq!(spec.columns.len(), 3);
         assert_eq!(spec.columns[0].name, "col1");
         assert_eq!(spec.columns[1].name, "col2");
         assert_eq!(spec.columns[2].name, "col3");
 
-        // make sure it's tolerant of empty parts
         let spec = SortSpec::from_str("col1,,col2").unwrap();
         assert_eq!(spec.columns.len(), 2);
         assert_eq!(spec.columns[0].name, "col1");

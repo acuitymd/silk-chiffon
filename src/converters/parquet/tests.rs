@@ -307,8 +307,8 @@ mod parquet_converter_tests {
 mod bloom_filter_tests {
     use crate::converters::parquet::ParquetConverter;
     use crate::{
-        AllColumnsBloomFilterSizeConfig, BloomFilterConfig, ColumnBloomFilterConfig,
-        ColumnBloomFilterSizeConfig,
+        AllColumnsBloomFilterConfig, BloomFilterConfig, ColumnBloomFilterConfig,
+        ColumnSpecificBloomFilterConfig,
         utils::test_helpers::{file_helpers, test_data},
     };
     use tempfile::tempdir;
@@ -326,8 +326,7 @@ mod bloom_filter_tests {
         let batch = test_data::create_batch_with_ids_and_names(&schema, &test_ids, &test_names);
         file_helpers::write_arrow_file(&input_path, &schema, vec![batch]).unwrap();
 
-        let bloom_config =
-            BloomFilterConfig::All(AllColumnsBloomFilterSizeConfig { fpp: Some(0.001) });
+        let bloom_config = BloomFilterConfig::All(AllColumnsBloomFilterConfig { fpp: Some(0.001) });
 
         let converter = ParquetConverter::new(
             input_path.to_str().unwrap().to_string(),
@@ -353,19 +352,13 @@ mod bloom_filter_tests {
         file_helpers::write_arrow_file(&input_path, &schema, vec![batch]).unwrap();
 
         let bloom_config = BloomFilterConfig::Columns(vec![
-            ColumnBloomFilterConfig {
+            ColumnSpecificBloomFilterConfig {
                 name: "id".to_string(),
-                size_config: ColumnBloomFilterSizeConfig {
-                    fpp: Some(0.01),
-                    ndv: None,
-                },
+                config: ColumnBloomFilterConfig { fpp: Some(0.01) },
             },
-            ColumnBloomFilterConfig {
+            ColumnSpecificBloomFilterConfig {
                 name: "name".to_string(),
-                size_config: ColumnBloomFilterSizeConfig {
-                    fpp: None,
-                    ndv: Some(3),
-                },
+                config: ColumnBloomFilterConfig { fpp: None },
             },
         ]);
 
@@ -392,12 +385,9 @@ mod bloom_filter_tests {
         let batch = test_data::create_batch_with_ids_and_names(&schema, &test_ids, &test_names);
         file_helpers::write_arrow_file(&input_path, &schema, vec![batch]).unwrap();
 
-        let bloom_config = BloomFilterConfig::Columns(vec![ColumnBloomFilterConfig {
+        let bloom_config = BloomFilterConfig::Columns(vec![ColumnSpecificBloomFilterConfig {
             name: "nonexistent_column".to_string(),
-            size_config: ColumnBloomFilterSizeConfig {
-                fpp: Some(0.01),
-                ndv: None,
-            },
+            config: ColumnBloomFilterConfig { fpp: Some(0.01) },
         }]);
 
         let converter =
@@ -529,7 +519,7 @@ mod sorting_metadata_tests {
 mod integration_tests {
     use crate::converters::parquet::ParquetConverter;
     use crate::{
-        BloomFilterConfig, ColumnBloomFilterConfig, ColumnBloomFilterSizeConfig,
+        BloomFilterConfig, ColumnBloomFilterConfig, ColumnSpecificBloomFilterConfig,
         ParquetCompression, ParquetStatistics, ParquetWriterVersion, SortColumn, SortDirection,
         SortSpec,
         utils::test_helpers::{file_helpers, test_data},
@@ -557,12 +547,9 @@ mod integration_tests {
             }],
         };
 
-        let bloom_config = BloomFilterConfig::Columns(vec![ColumnBloomFilterConfig {
+        let bloom_config = BloomFilterConfig::Columns(vec![ColumnSpecificBloomFilterConfig {
             name: "id".to_string(),
-            size_config: ColumnBloomFilterSizeConfig {
-                fpp: Some(0.001),
-                ndv: None,
-            },
+            config: ColumnBloomFilterConfig { fpp: Some(0.001) },
         }]);
 
         let converter = ParquetConverter::new(
