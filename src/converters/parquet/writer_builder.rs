@@ -110,7 +110,7 @@ impl ParquetWritePropertiesBuilder {
             BloomFilterConfig::Columns(columns) => {
                 for bloom_col in columns {
                     let col_path = ColumnPath::from(bloom_col.name.as_str());
-                    let fpp = bloom_col.config.fpp.unwrap_or(0.01);
+                    let fpp = bloom_col.config.fpp;
 
                     let ndv = ndv_map.get(&bloom_col.name).copied().ok_or_else(|| {
                         anyhow!("NDV not available for column {}", bloom_col.name)
@@ -346,7 +346,7 @@ mod tests {
     fn test_apply_bloom_filters_specific_columns_with_ndv() {
         let bloom_config = BloomFilterConfig::Columns(vec![ColumnSpecificBloomFilterConfig {
             name: "id".to_string(),
-            config: ColumnBloomFilterConfig { fpp: Some(0.005) },
+            config: ColumnBloomFilterConfig { fpp: 0.005 },
         }]);
 
         let builder = ParquetWritePropertiesBuilder::new(
@@ -372,7 +372,7 @@ mod tests {
     fn test_apply_bloom_filters_specific_columns_from_map() {
         let bloom_config = BloomFilterConfig::Columns(vec![ColumnSpecificBloomFilterConfig {
             name: "id".to_string(),
-            config: ColumnBloomFilterConfig { fpp: Some(0.01) },
+            config: ColumnBloomFilterConfig { fpp: 0.01 },
         }]);
 
         let builder = ParquetWritePropertiesBuilder::new(
@@ -398,7 +398,7 @@ mod tests {
     fn test_apply_bloom_filters_missing_ndv() {
         let bloom_config = BloomFilterConfig::Columns(vec![ColumnSpecificBloomFilterConfig {
             name: "missing_column".to_string(),
-            config: ColumnBloomFilterConfig { fpp: Some(0.01) },
+            config: ColumnBloomFilterConfig { fpp: 0.01 },
         }]);
 
         let builder = ParquetWritePropertiesBuilder::new(
@@ -453,7 +453,7 @@ mod tests {
     fn test_apply_bloom_filters_mixed_config() {
         let bloom_config = BloomFilterConfig::Columns(vec![ColumnSpecificBloomFilterConfig {
             name: "id".to_string(),
-            config: ColumnBloomFilterConfig { fpp: Some(0.001) },
+            config: ColumnBloomFilterConfig { fpp: 0.001 },
         }]);
 
         let builder = ParquetWritePropertiesBuilder::new(

@@ -527,11 +527,11 @@ mod tests {
         let bloom_config = BloomFilterConfig::Columns(vec![
             ColumnSpecificBloomFilterConfig {
                 name: "id".to_string(),
-                config: ColumnBloomFilterConfig { fpp: Some(0.01) },
+                config: ColumnBloomFilterConfig { fpp: 0.01 },
             },
             ColumnSpecificBloomFilterConfig {
                 name: "name".to_string(),
-                config: ColumnBloomFilterConfig { fpp: None },
+                config: ColumnBloomFilterConfig { fpp: 0.01 },
             },
         ]);
 
@@ -560,7 +560,7 @@ mod tests {
 
         let bloom_config = BloomFilterConfig::Columns(vec![ColumnSpecificBloomFilterConfig {
             name: "nonexistent_column".to_string(),
-            config: ColumnBloomFilterConfig { fpp: Some(0.01) },
+            config: ColumnBloomFilterConfig { fpp: 0.01 },
         }]);
 
         let converter =
@@ -698,7 +698,7 @@ mod tests {
 
         let bloom_config = BloomFilterConfig::Columns(vec![ColumnSpecificBloomFilterConfig {
             name: "id".to_string(),
-            config: ColumnBloomFilterConfig { fpp: Some(0.001) },
+            config: ColumnBloomFilterConfig { fpp: 0.001 },
         }]);
 
         let converter = ParquetConverter::new(

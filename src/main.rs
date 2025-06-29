@@ -365,7 +365,7 @@ const DEFAULT_BLOOM_FILTER_FPP: f64 = 0.01;
 
 #[derive(Debug, Clone)]
 pub struct AllColumnsBloomFilterConfig {
-    pub fpp: f64, // defaults to 0.01
+    pub fpp: f64,
 }
 
 impl FromStr for AllColumnsBloomFilterConfig {
@@ -435,7 +435,7 @@ impl FromStr for AllColumnsBloomFilterConfig {
 
 #[derive(Debug, Clone)]
 pub struct ColumnBloomFilterConfig {
-    pub fpp: Option<f64>, // defaults to 0.01
+    pub fpp: f64,
 }
 
 impl FromStr for ColumnBloomFilterConfig {
@@ -491,7 +491,9 @@ impl FromStr for ColumnBloomFilterConfig {
             }
         }
 
-        Ok(ColumnBloomFilterConfig { fpp })
+        Ok(ColumnBloomFilterConfig {
+            fpp: fpp.unwrap_or(DEFAULT_BLOOM_FILTER_FPP),
+        })
     }
 }
 
@@ -528,7 +530,9 @@ impl FromStr for ColumnSpecificBloomFilterConfig {
             }
             Ok(ColumnSpecificBloomFilterConfig {
                 name: column_name.to_string(),
-                config: ColumnBloomFilterConfig { fpp: None },
+                config: ColumnBloomFilterConfig {
+                    fpp: DEFAULT_BLOOM_FILTER_FPP,
+                },
             })
         }
     }

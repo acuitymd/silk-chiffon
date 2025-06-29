@@ -212,11 +212,11 @@ mod tests {
         let bloom_config = BloomFilterConfig::Columns(vec![
             ColumnSpecificBloomFilterConfig {
                 name: "id".to_string(),
-                config: ColumnBloomFilterConfig { fpp: Some(0.01) },
+                config: ColumnBloomFilterConfig { fpp: 0.01 },
             },
             ColumnSpecificBloomFilterConfig {
                 name: "name".to_string(),
-                config: ColumnBloomFilterConfig { fpp: Some(0.01) },
+                config: ColumnBloomFilterConfig { fpp: 0.01 },
             },
         ]);
         let calculator = NdvCalculator::new(bloom_config, 1_000_000);
