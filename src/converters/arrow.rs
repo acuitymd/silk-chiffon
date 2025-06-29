@@ -100,59 +100,54 @@ impl ArrowConverter {
 
         let file_format = self.as_file_format().await?;
 
-        tokio::task::spawn(async move {
-            ctx.register_arrow(
-                "input_table",
-                file_format.path_str(),
-                ArrowReadOptions::default(),
-            )
-            .await?;
-            let df = ctx.table("input_table").await?;
+        ctx.register_arrow(
+            "input_table",
+            file_format.path_str(),
+            ArrowReadOptions::default(),
+        )
+        .await?;
+        let df = ctx.table("input_table").await?;
 
-            let sort_exprs = sort_spec
-                .columns
-                .iter()
-                .map(|sort_column| {
-                    col(&sort_column.name).sort(
-                        matches!(sort_column.direction, SortDirection::Ascending),
-                        // match the behavior of postgres here, where nulls are first for descending
-                        // and last for ascending
-                        // https://www.postgresql.org/docs/current/queries-order.html#:~:text=The%20NULLS%20FIRST%20and%20NULLS%20LAST%20options%20can%20be%20used%20to%20determine%20whether%20nulls%20appear%20before%20or%20after%20non%2Dnull%20values%20in%20the%20sort%20ordering.%20By%20default%2C%20null%20values%20sort%20as%20if%20larger%20than%20any%20non%2Dnull%20value%3B%20that%20is%2C%20NULLS%20FIRST%20is%20the%20default%20for%20DESC%20order%2C%20and%20NULLS%20LAST%20otherwise
-                        matches!(sort_column.direction, SortDirection::Descending),
-                    )
-                })
-                .collect();
+        let sort_exprs = sort_spec
+            .columns
+            .iter()
+            .map(|sort_column| {
+                col(&sort_column.name).sort(
+                    matches!(sort_column.direction, SortDirection::Ascending),
+                    // match the behavior of postgres here, where nulls are first for descending
+                    // and last for ascending
+                    // https://www.postgresql.org/docs/current/queries-order.html#:~:text=The%20NULLS%20FIRST%20and%20NULLS%20LAST%20options%20can%20be%20used%20to%20determine%20whether%20nulls%20appear%20before%20or%20after%20non%2Dnull%20values%20in%20the%20sort%20ordering.%20By%20default%2C%20null%20values%20sort%20as%20if%20larger%20than%20any%20non%2Dnull%20value%3B%20that%20is%2C%20NULLS%20FIRST%20is%20the%20default%20for%20DESC%20order%2C%20and%20NULLS%20LAST%20otherwise
+                    matches!(sort_column.direction, SortDirection::Descending),
+                )
+            })
+            .collect();
 
-            let df = df.sort(sort_exprs)?;
+        let df = df.sort(sort_exprs)?;
 
-            let mut stream = df.execute_stream().await?;
-            let schema = stream.schema();
-            let output_file = File::create(output_path)?;
-            let mut writer = FileWriter::try_new_with_options(output_file, &schema, write_options)?;
+        let mut stream = df.execute_stream().await?;
+        let schema = stream.schema();
+        let output_file = File::create(output_path)?;
+        let mut writer = FileWriter::try_new_with_options(output_file, &schema, write_options)?;
 
-            let mut coalescer = BatchCoalescer::new(schema.clone(), record_batch_size);
+        let mut coalescer = BatchCoalescer::new(schema.clone(), record_batch_size);
 
-            while let Some(batch_result) = stream.next().await {
-                let batch = batch_result?;
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result?;
 
-                coalescer.push_batch(batch)?;
+            coalescer.push_batch(batch)?;
 
-                while let Some(completed_batch) = coalescer.next_completed_batch() {
-                    writer.write(&completed_batch)?;
-                }
+            while let Some(completed_batch) = coalescer.next_completed_batch() {
+                writer.write(&completed_batch)?;
             }
+        }
 
-            if let Ok(()) = coalescer.finish_buffered_batch() {
-                if let Some(final_batch) = coalescer.next_completed_batch() {
-                    writer.write(&final_batch)?;
-                }
+        if let Ok(()) = coalescer.finish_buffered_batch() {
+            if let Some(final_batch) = coalescer.next_completed_batch() {
+                writer.write(&final_batch)?;
             }
+        }
 
-            writer.finish()?;
-
-            Ok::<(), anyhow::Error>(())
-        })
-        .await??;
+        writer.finish()?;
 
         Ok(())
     }
@@ -190,38 +185,31 @@ impl ArrowConverter {
         record_batch_size: usize,
     ) -> Result<()>
     where
-        I: Iterator<Item = Result<RecordBatch, ArrowError>> + HasSchema + Send + 'static,
+        I: Iterator<Item = Result<RecordBatch, ArrowError>> + HasSchema,
     {
-        let output_path = output_path.to_path_buf();
+        let schema = reader.schema();
+        let output_file = File::create(output_path)?;
+        let mut writer = FileWriter::try_new_with_options(output_file, &schema, write_options)?;
 
-        tokio::task::spawn(async move {
-            let schema = reader.schema();
-            let output_file = File::create(output_path)?;
-            let mut writer = FileWriter::try_new_with_options(output_file, &schema, write_options)?;
+        let mut coalescer = BatchCoalescer::new(schema.clone(), record_batch_size);
 
-            let mut coalescer = BatchCoalescer::new(schema.clone(), record_batch_size);
+        for batch_result in reader {
+            let batch = batch_result?;
 
-            for batch_result in reader {
-                let batch = batch_result?;
+            coalescer.push_batch(batch)?;
 
-                coalescer.push_batch(batch)?;
-
-                while let Some(completed_batch) = coalescer.next_completed_batch() {
-                    writer.write(&completed_batch)?;
-                }
+            while let Some(completed_batch) = coalescer.next_completed_batch() {
+                writer.write(&completed_batch)?;
             }
+        }
 
-            if let Ok(()) = coalescer.finish_buffered_batch() {
-                if let Some(final_batch) = coalescer.next_completed_batch() {
-                    writer.write(&final_batch)?;
-                }
+        if let Ok(()) = coalescer.finish_buffered_batch() {
+            if let Some(final_batch) = coalescer.next_completed_batch() {
+                writer.write(&final_batch)?;
             }
+        }
 
-            writer.finish()?;
-
-            Ok::<(), anyhow::Error>(())
-        })
-        .await??;
+        writer.finish()?;
 
         Ok(())
     }
