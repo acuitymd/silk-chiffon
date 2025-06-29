@@ -667,4 +667,70 @@ mod tests {
         assert_eq!(ArrowCompression::Lz4.to_string(), "lz4");
         assert_eq!(ArrowCompression::None.to_string(), "none");
     }
+
+    #[test]
+    fn test_all_columns_bloom_filter_config_from_str() {
+        let config = AllColumnsBloomFilterConfig::from_str("").unwrap();
+        assert_eq!(config.fpp, DEFAULT_BLOOM_FILTER_FPP);
+
+        let config = AllColumnsBloomFilterConfig::from_str("fpp=0.001").unwrap();
+        assert_eq!(config.fpp, 0.001);
+
+        let config = AllColumnsBloomFilterConfig::from_str("fpp=0.05").unwrap();
+        assert_eq!(config.fpp, 0.05);
+
+        assert!(AllColumnsBloomFilterConfig::from_str("invalid").is_err());
+        assert!(AllColumnsBloomFilterConfig::from_str("fpp:0.01").is_err());
+        assert!(AllColumnsBloomFilterConfig::from_str("fpp=").is_err());
+        assert!(AllColumnsBloomFilterConfig::from_str("fpp=invalid").is_err());
+        assert!(AllColumnsBloomFilterConfig::from_str("unknown=0.01").is_err());
+        assert!(AllColumnsBloomFilterConfig::from_str("fpp=0.01:extra").is_err());
+
+        assert!(AllColumnsBloomFilterConfig::from_str("fpp=0.01:fpp=0.02").is_err());
+    }
+
+    #[test]
+    fn test_column_bloom_filter_config_from_str() {
+        let config = ColumnBloomFilterConfig::from_str("").unwrap();
+        assert_eq!(config.fpp, DEFAULT_BLOOM_FILTER_FPP);
+
+        let config = ColumnBloomFilterConfig::from_str("fpp=0.001").unwrap();
+        assert_eq!(config.fpp, 0.001);
+
+        let config = ColumnBloomFilterConfig::from_str("fpp=0.1").unwrap();
+        assert_eq!(config.fpp, 0.1);
+
+        assert!(ColumnBloomFilterConfig::from_str("invalid").is_err());
+        assert!(ColumnBloomFilterConfig::from_str("fpp:0.01").is_err());
+        assert!(ColumnBloomFilterConfig::from_str("fpp=").is_err());
+        assert!(ColumnBloomFilterConfig::from_str("fpp=not_a_number").is_err());
+        assert!(ColumnBloomFilterConfig::from_str("unknown=0.01").is_err());
+    }
+
+    #[test]
+    fn test_column_specific_bloom_filter_config_from_str() {
+        let config = ColumnSpecificBloomFilterConfig::from_str("user_id").unwrap();
+        assert_eq!(config.name, "user_id");
+        assert_eq!(config.config.fpp, DEFAULT_BLOOM_FILTER_FPP);
+
+        let config = ColumnSpecificBloomFilterConfig::from_str("  column_name  ").unwrap();
+        assert_eq!(config.name, "column_name");
+        assert_eq!(config.config.fpp, DEFAULT_BLOOM_FILTER_FPP);
+
+        let config = ColumnSpecificBloomFilterConfig::from_str("user_id:fpp=0.001").unwrap();
+        assert_eq!(config.name, "user_id");
+        assert_eq!(config.config.fpp, 0.001);
+
+        let config = ColumnSpecificBloomFilterConfig::from_str("name:fpp=0.05").unwrap();
+        assert_eq!(config.name, "name");
+        assert_eq!(config.config.fpp, 0.05);
+
+        assert!(ColumnSpecificBloomFilterConfig::from_str("").is_err());
+        assert!(ColumnSpecificBloomFilterConfig::from_str("   ").is_err());
+        assert!(ColumnSpecificBloomFilterConfig::from_str(":fpp=0.01").is_err());
+
+        assert!(ColumnSpecificBloomFilterConfig::from_str("col:invalid").is_err());
+        assert!(ColumnSpecificBloomFilterConfig::from_str("col:fpp=").is_err());
+        assert!(ColumnSpecificBloomFilterConfig::from_str("col:fpp=not_a_number").is_err());
+    }
 }
