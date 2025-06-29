@@ -138,7 +138,7 @@ impl ParquetConverter {
         input_path: &Path,
         ndv_map: &std::collections::HashMap<String, u64>,
     ) -> Result<WriterProperties> {
-        let writer_builder = ParquetWritePropertiesBuilder::new(
+        ParquetWritePropertiesBuilder::new(
             self.compression,
             self.statistics,
             self.writer_version,
@@ -146,9 +146,8 @@ impl ParquetConverter {
             self.no_dictionary,
             self.bloom_filters.clone(),
             self.sort_spec.clone(),
-        );
-
-        writer_builder.build(input_path, ndv_map)
+        )
+        .build(input_path, ndv_map)
     }
 
     async fn write_parquet(
