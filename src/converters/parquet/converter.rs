@@ -147,7 +147,9 @@ impl ParquetConverter {
         ndv_map: &std::collections::HashMap<String, u64>,
     ) -> Result<WriterProperties> {
         let sort_metadata_builder = if self.write_sorted_metadata {
-            self.sort_spec.as_ref().map(SortMetadataBuilder::new)
+            self.sort_spec
+                .as_ref()
+                .map(|s| SortMetadataBuilder::new(s.clone()))
         } else {
             None
         };
@@ -158,7 +160,7 @@ impl ParquetConverter {
             self.writer_version,
             self.parquet_row_group_size,
             self.no_dictionary,
-            &self.bloom_filters,
+            self.bloom_filters.clone(),
             sort_metadata_builder,
         );
 

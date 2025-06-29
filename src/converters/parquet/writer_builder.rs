@@ -15,25 +15,25 @@ use crate::{
     utils::arrow_io::ArrowIPCReader,
 };
 
-pub struct ParquetWriterBuilder<'a> {
+pub struct ParquetWriterBuilder {
     compression: Compression,
     statistics: EnabledStatistics,
     writer_version: WriterVersion,
     parquet_row_group_size: usize,
     no_dictionary: bool,
-    bloom_filters: &'a BloomFilterConfig,
-    sort_metadata_builder: Option<SortMetadataBuilder<'a>>,
+    bloom_filters: BloomFilterConfig,
+    sort_metadata_builder: Option<SortMetadataBuilder>,
 }
 
-impl<'a> ParquetWriterBuilder<'a> {
+impl ParquetWriterBuilder {
     pub fn new(
         compression: ParquetCompression,
         statistics: ParquetStatistics,
         writer_version: ParquetWriterVersion,
         parquet_row_group_size: usize,
         no_dictionary: bool,
-        bloom_filters: &'a BloomFilterConfig,
-        sort_metadata_builder: Option<SortMetadataBuilder<'a>>,
+        bloom_filters: BloomFilterConfig,
+        sort_metadata_builder: Option<SortMetadataBuilder>,
     ) -> Self {
         let compression = match compression {
             ParquetCompression::Zstd => Compression::ZSTD(ZstdLevel::default()),
@@ -93,7 +93,7 @@ impl<'a> ParquetWriterBuilder<'a> {
         mut builder: WriterPropertiesBuilder,
         ndv_map: &HashMap<String, u64>,
     ) -> Result<WriterPropertiesBuilder> {
-        match self.bloom_filters {
+        match &self.bloom_filters {
             BloomFilterConfig::None => Ok(builder),
             BloomFilterConfig::All(bloom_all) => {
                 let fpp = bloom_all.fpp.unwrap_or(0.01);
@@ -153,7 +153,7 @@ mod tests {
             ParquetWriterVersion::V1,
             1000,
             false,
-            &BloomFilterConfig::None,
+            BloomFilterConfig::None,
             None,
         );
         assert!(matches!(builder.compression, Compression::ZSTD(_)));
@@ -164,7 +164,7 @@ mod tests {
             ParquetWriterVersion::V1,
             1000,
             false,
-            &BloomFilterConfig::None,
+            BloomFilterConfig::None,
             None,
         );
         assert!(matches!(builder.compression, Compression::SNAPPY));
@@ -175,7 +175,7 @@ mod tests {
             ParquetWriterVersion::V1,
             1000,
             false,
-            &BloomFilterConfig::None,
+            BloomFilterConfig::None,
             None,
         );
         assert!(matches!(builder.compression, Compression::GZIP(_)));
@@ -186,7 +186,7 @@ mod tests {
             ParquetWriterVersion::V1,
             1000,
             false,
-            &BloomFilterConfig::None,
+            BloomFilterConfig::None,
             None,
         );
         assert!(matches!(builder.compression, Compression::LZ4_RAW));
@@ -197,7 +197,7 @@ mod tests {
             ParquetWriterVersion::V1,
             1000,
             false,
-            &BloomFilterConfig::None,
+            BloomFilterConfig::None,
             None,
         );
         assert!(matches!(builder.compression, Compression::UNCOMPRESSED));
@@ -211,7 +211,7 @@ mod tests {
             ParquetWriterVersion::V1,
             1000,
             false,
-            &BloomFilterConfig::None,
+            BloomFilterConfig::None,
             None,
         );
         assert!(matches!(builder.writer_version, WriterVersion::PARQUET_1_0));
@@ -222,7 +222,7 @@ mod tests {
             ParquetWriterVersion::V2,
             1000,
             false,
-            &BloomFilterConfig::None,
+            BloomFilterConfig::None,
             None,
         );
         assert!(matches!(builder.writer_version, WriterVersion::PARQUET_2_0));
@@ -236,7 +236,7 @@ mod tests {
             ParquetWriterVersion::V1,
             1000,
             false,
-            &BloomFilterConfig::None,
+            BloomFilterConfig::None,
             None,
         );
         assert!(matches!(builder.statistics, EnabledStatistics::None));
@@ -247,7 +247,7 @@ mod tests {
             ParquetWriterVersion::V1,
             1000,
             false,
-            &BloomFilterConfig::None,
+            BloomFilterConfig::None,
             None,
         );
         assert!(matches!(builder.statistics, EnabledStatistics::Chunk));
@@ -258,7 +258,7 @@ mod tests {
             ParquetWriterVersion::V1,
             1000,
             false,
-            &BloomFilterConfig::None,
+            BloomFilterConfig::None,
             None,
         );
         assert!(matches!(builder.statistics, EnabledStatistics::Page));
@@ -272,7 +272,7 @@ mod tests {
             ParquetWriterVersion::V2,
             50000,
             false,
-            &BloomFilterConfig::None,
+            BloomFilterConfig::None,
             None,
         );
 
@@ -291,7 +291,7 @@ mod tests {
             ParquetWriterVersion::V2,
             100000,
             true,
-            &BloomFilterConfig::None,
+            BloomFilterConfig::None,
             None,
         );
 
@@ -311,7 +311,7 @@ mod tests {
             ParquetWriterVersion::V1,
             1000,
             false,
-            &bloom_config,
+            bloom_config,
             None,
         );
 
@@ -338,7 +338,7 @@ mod tests {
             ParquetWriterVersion::V1,
             1000,
             false,
-            &bloom_config,
+            bloom_config,
             None,
         );
 
@@ -364,7 +364,7 @@ mod tests {
             ParquetWriterVersion::V1,
             1000,
             false,
-            &bloom_config,
+            bloom_config,
             None,
         );
 
@@ -390,7 +390,7 @@ mod tests {
             ParquetWriterVersion::V1,
             1000,
             false,
-            &bloom_config,
+            bloom_config,
             None,
         );
 
@@ -419,7 +419,7 @@ mod tests {
             ParquetWriterVersion::V1,
             1000,
             false,
-            &bloom_config,
+            bloom_config,
             None,
         );
 
@@ -445,7 +445,7 @@ mod tests {
             ParquetWriterVersion::V1,
             1000,
             false,
-            &bloom_config,
+            bloom_config,
             None,
         );
 

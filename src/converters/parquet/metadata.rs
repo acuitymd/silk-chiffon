@@ -4,12 +4,12 @@ use parquet::{file::properties::WriterPropertiesBuilder, format::SortingColumn};
 
 use crate::{SortDirection, SortSpec};
 
-pub struct SortMetadataBuilder<'a> {
-    sort_spec: &'a SortSpec,
+pub struct SortMetadataBuilder {
+    sort_spec: SortSpec,
 }
 
-impl<'a> SortMetadataBuilder<'a> {
-    pub fn new(sort_spec: &'a SortSpec) -> Self {
+impl SortMetadataBuilder {
+    pub fn new(sort_spec: SortSpec) -> Self {
         Self { sort_spec }
     }
 
@@ -72,7 +72,7 @@ mod tests {
             }],
         };
 
-        let builder = SortMetadataBuilder::new(&sort_spec);
+        let builder = SortMetadataBuilder::new(sort_spec);
         let schema = create_test_schema();
         let result = builder.build_sorting_columns(&schema).unwrap();
 
@@ -91,7 +91,7 @@ mod tests {
             }],
         };
 
-        let builder = SortMetadataBuilder::new(&sort_spec);
+        let builder = SortMetadataBuilder::new(sort_spec);
         let schema = create_test_schema();
         let result = builder.build_sorting_columns(&schema).unwrap();
 
@@ -120,7 +120,7 @@ mod tests {
             ],
         };
 
-        let builder = SortMetadataBuilder::new(&sort_spec);
+        let builder = SortMetadataBuilder::new(sort_spec);
         let schema = create_test_schema();
         let result = builder.build_sorting_columns(&schema).unwrap();
 
@@ -148,7 +148,7 @@ mod tests {
             }],
         };
 
-        let builder = SortMetadataBuilder::new(&sort_spec);
+        let builder = SortMetadataBuilder::new(sort_spec);
         let schema = create_test_schema();
         let result = builder.build_sorting_columns(&schema);
 
@@ -176,7 +176,7 @@ mod tests {
             ],
         };
 
-        let builder = SortMetadataBuilder::new(&sort_spec);
+        let builder = SortMetadataBuilder::new(sort_spec);
         let schema = create_test_schema();
         let result = builder.build_sorting_columns(&schema);
 
@@ -204,7 +204,7 @@ mod tests {
             ],
         };
 
-        let builder = SortMetadataBuilder::new(&sort_spec);
+        let builder = SortMetadataBuilder::new(sort_spec);
         let schema = create_test_schema();
         let props_builder = parquet::file::properties::WriterProperties::builder();
 
@@ -224,7 +224,7 @@ mod tests {
             }],
         };
 
-        let builder = SortMetadataBuilder::new(&sort_spec);
+        let builder = SortMetadataBuilder::new(sort_spec);
         let schema = create_test_schema();
         let result = builder.build_sorting_columns(&schema).unwrap();
 
@@ -238,7 +238,7 @@ mod tests {
     fn test_empty_sort_spec() {
         let sort_spec = SortSpec { columns: vec![] };
 
-        let builder = SortMetadataBuilder::new(&sort_spec);
+        let builder = SortMetadataBuilder::new(sort_spec);
         let schema = create_test_schema();
         let result = builder.build_sorting_columns(&schema).unwrap();
 
