@@ -63,8 +63,8 @@ pub struct ParquetArgs {
     /// Sort the data by one or more columns before writing.
     ///
     /// Format: A comma-separated list like "col_a,col_b:desc,col_c".
-    #[arg(short, long)]
-    sort_by: Option<SortSpec>,
+    #[arg(short, long, default_value_t = SortSpec::default())]
+    sort_by: SortSpec,
 
     /// The compression algorithm to use.
     #[arg(short, long, default_value_t = ParquetCompression::None)]
@@ -291,6 +291,12 @@ pub enum SortDirection {
 #[derive(Debug, Clone, Default)]
 pub struct SortSpec {
     pub columns: Vec<SortColumn>,
+}
+
+impl SortSpec {
+    pub fn is_configured(&self) -> bool {
+        !self.columns.is_empty()
+    }
 }
 
 impl FromStr for SortSpec {

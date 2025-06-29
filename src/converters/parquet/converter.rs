@@ -14,13 +14,13 @@ use crate::{
 
 use super::{
     metadata::SortMetadataBuilder, ndv_calculator::NdvCalculator,
-    writer_builder::ParquetWriterBuilder,
+    writer_builder::ParquetWritePropertiesBuilder,
 };
 
 pub struct ParquetConverter {
     input_path: String,
     output_path: PathBuf,
-    sort_spec: Option<SortSpec>,
+    sort_spec: SortSpec,
     record_batch_size: usize,
     compression: ParquetCompression,
     bloom_filters: BloomFilterConfig,
@@ -36,7 +36,7 @@ impl ParquetConverter {
         Self {
             input_path,
             output_path,
-            sort_spec: None,
+            sort_spec: SortSpec::default(),
             record_batch_size: 122_880,
             compression: ParquetCompression::None,
             bloom_filters: BloomFilterConfig::default(),
@@ -48,7 +48,7 @@ impl ParquetConverter {
         }
     }
 
-    pub fn with_sort_spec(mut self, sort_spec: Option<SortSpec>) -> Self {
+    pub fn with_sort_spec(mut self, sort_spec: SortSpec) -> Self {
         self.sort_spec = sort_spec;
         self
     }
@@ -115,8 +115,8 @@ impl ParquetConverter {
 
             let mut arrow_converter = ArrowConverter::new(&self.input_path, &temp_path);
 
-            if let Some(ref sort_spec) = self.sort_spec {
-                arrow_converter = arrow_converter.with_sorting(sort_spec.clone());
+            if self.sort_spec.is_configured() {
+                arrow_converter = arrow_converter.with_sorting(self.sort_spec.clone());
             }
 
             arrow_converter = arrow_converter.with_record_batch_size(self.record_batch_size);
@@ -131,7 +131,7 @@ impl ParquetConverter {
 
     fn needs_intermediate_arrow_file(&self) -> bool {
         self.input_is_arrow_stream()
-            || self.sort_spec.is_some()
+            || self.sort_spec.is_configured()
             || NdvCalculator::new(self.bloom_filters.clone(), self.parquet_row_group_size)
                 .needs_calculation()
     }
@@ -147,14 +147,12 @@ impl ParquetConverter {
         ndv_map: &std::collections::HashMap<String, u64>,
     ) -> Result<WriterProperties> {
         let sort_metadata_builder = if self.write_sorted_metadata {
-            self.sort_spec
-                .as_ref()
-                .map(|s| SortMetadataBuilder::new(s.clone()))
+            Some(SortMetadataBuilder::new(self.sort_spec.clone()))
         } else {
             None
         };
 
-        let writer_builder = ParquetWriterBuilder::new(
+        let writer_builder = ParquetWritePropertiesBuilder::new(
             self.compression,
             self.statistics,
             self.writer_version,
@@ -332,7 +330,7 @@ mod tests {
             input_path.to_str().unwrap().to_string(),
             output_path.clone(),
         )
-        .with_sort_spec(Some(sort_spec));
+        .with_sort_spec(sort_spec);
         converter.convert().await.unwrap();
 
         let file = std::fs::File::open(&output_path).unwrap();
@@ -625,7 +623,7 @@ mod tests {
             input_path.to_str().unwrap().to_string(),
             output_path.clone(),
         )
-        .with_sort_spec(Some(sort_spec))
+        .with_sort_spec(sort_spec)
         .with_write_sorted_metadata(true);
         converter.convert().await.unwrap();
 
@@ -664,7 +662,7 @@ mod tests {
             input_path.to_str().unwrap().to_string(),
             output_path.clone(),
         )
-        .with_sort_spec(Some(sort_spec))
+        .with_sort_spec(sort_spec)
         .with_write_sorted_metadata(true);
         converter.convert().await.unwrap();
 
@@ -693,7 +691,7 @@ mod tests {
 
         let converter =
             ParquetConverter::new(input_path.to_str().unwrap().to_string(), output_path)
-                .with_sort_spec(Some(sort_spec))
+                .with_sort_spec(sort_spec)
                 .with_write_sorted_metadata(true);
         let result = converter.convert().await;
 
@@ -729,7 +727,7 @@ mod tests {
             input_path.to_str().unwrap().to_string(),
             output_path.clone(),
         )
-        .with_sort_spec(Some(sort_spec))
+        .with_sort_spec(sort_spec)
         .with_compression(ParquetCompression::Zstd)
         .with_bloom_filters(bloom_config)
         .with_statistics(ParquetStatistics::Page)

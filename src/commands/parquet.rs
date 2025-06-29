@@ -38,7 +38,7 @@ pub async fn run(args: ParquetArgs) -> Result<()> {
 mod tests {
     use super::*;
     use crate::utils::test_helpers::{file_helpers, test_data};
-    use crate::{ParquetCompression, ParquetStatistics, ParquetWriterVersion};
+    use crate::{ParquetCompression, ParquetStatistics, ParquetWriterVersion, SortSpec};
     use clio::{Input, OutputPath};
     use tempfile::TempDir;
 
@@ -56,7 +56,7 @@ mod tests {
         let args = ParquetArgs {
             input: Input::new(&input_path).unwrap(),
             output: OutputPath::new(&output_path).unwrap(),
-            sort_by: None,
+            sort_by: SortSpec::default(),
             compression: ParquetCompression::None,
             write_sorted_metadata: false,
             bloom_all: None,
@@ -85,7 +85,7 @@ mod tests {
         let args = ParquetArgs {
             input: Input::new(&input_path).unwrap(),
             output: OutputPath::new(&output_path).unwrap(),
-            sort_by: None,
+            sort_by: SortSpec::default(),
             compression: ParquetCompression::Zstd,
             write_sorted_metadata: false,
             bloom_all: None,

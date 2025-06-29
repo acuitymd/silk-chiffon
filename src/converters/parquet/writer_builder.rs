@@ -15,7 +15,7 @@ use crate::{
     utils::arrow_io::ArrowIPCReader,
 };
 
-pub struct ParquetWriterBuilder {
+pub struct ParquetWritePropertiesBuilder {
     compression: Compression,
     statistics: EnabledStatistics,
     writer_version: WriterVersion,
@@ -25,7 +25,7 @@ pub struct ParquetWriterBuilder {
     sort_metadata_builder: Option<SortMetadataBuilder>,
 }
 
-impl ParquetWriterBuilder {
+impl ParquetWritePropertiesBuilder {
     pub fn new(
         compression: ParquetCompression,
         statistics: ParquetStatistics,
@@ -147,7 +147,7 @@ mod tests {
 
     #[test]
     fn test_compression_variants() {
-        let builder = ParquetWriterBuilder::new(
+        let builder = ParquetWritePropertiesBuilder::new(
             ParquetCompression::Zstd,
             ParquetStatistics::None,
             ParquetWriterVersion::V1,
@@ -158,7 +158,7 @@ mod tests {
         );
         assert!(matches!(builder.compression, Compression::ZSTD(_)));
 
-        let builder = ParquetWriterBuilder::new(
+        let builder = ParquetWritePropertiesBuilder::new(
             ParquetCompression::Snappy,
             ParquetStatistics::None,
             ParquetWriterVersion::V1,
@@ -169,7 +169,7 @@ mod tests {
         );
         assert!(matches!(builder.compression, Compression::SNAPPY));
 
-        let builder = ParquetWriterBuilder::new(
+        let builder = ParquetWritePropertiesBuilder::new(
             ParquetCompression::Gzip,
             ParquetStatistics::None,
             ParquetWriterVersion::V1,
@@ -180,7 +180,7 @@ mod tests {
         );
         assert!(matches!(builder.compression, Compression::GZIP(_)));
 
-        let builder = ParquetWriterBuilder::new(
+        let builder = ParquetWritePropertiesBuilder::new(
             ParquetCompression::Lz4,
             ParquetStatistics::None,
             ParquetWriterVersion::V1,
@@ -191,7 +191,7 @@ mod tests {
         );
         assert!(matches!(builder.compression, Compression::LZ4_RAW));
 
-        let builder = ParquetWriterBuilder::new(
+        let builder = ParquetWritePropertiesBuilder::new(
             ParquetCompression::None,
             ParquetStatistics::None,
             ParquetWriterVersion::V1,
@@ -205,7 +205,7 @@ mod tests {
 
     #[test]
     fn test_writer_version() {
-        let builder = ParquetWriterBuilder::new(
+        let builder = ParquetWritePropertiesBuilder::new(
             ParquetCompression::None,
             ParquetStatistics::None,
             ParquetWriterVersion::V1,
@@ -216,7 +216,7 @@ mod tests {
         );
         assert!(matches!(builder.writer_version, WriterVersion::PARQUET_1_0));
 
-        let builder = ParquetWriterBuilder::new(
+        let builder = ParquetWritePropertiesBuilder::new(
             ParquetCompression::None,
             ParquetStatistics::None,
             ParquetWriterVersion::V2,
@@ -230,7 +230,7 @@ mod tests {
 
     #[test]
     fn test_statistics() {
-        let builder = ParquetWriterBuilder::new(
+        let builder = ParquetWritePropertiesBuilder::new(
             ParquetCompression::None,
             ParquetStatistics::None,
             ParquetWriterVersion::V1,
@@ -241,7 +241,7 @@ mod tests {
         );
         assert!(matches!(builder.statistics, EnabledStatistics::None));
 
-        let builder = ParquetWriterBuilder::new(
+        let builder = ParquetWritePropertiesBuilder::new(
             ParquetCompression::None,
             ParquetStatistics::Chunk,
             ParquetWriterVersion::V1,
@@ -252,7 +252,7 @@ mod tests {
         );
         assert!(matches!(builder.statistics, EnabledStatistics::Chunk));
 
-        let builder = ParquetWriterBuilder::new(
+        let builder = ParquetWritePropertiesBuilder::new(
             ParquetCompression::None,
             ParquetStatistics::Page,
             ParquetWriterVersion::V1,
@@ -266,7 +266,7 @@ mod tests {
 
     #[test]
     fn test_create_base_builder_with_dictionary() {
-        let writer_builder = ParquetWriterBuilder::new(
+        let writer_builder = ParquetWritePropertiesBuilder::new(
             ParquetCompression::Snappy,
             ParquetStatistics::Chunk,
             ParquetWriterVersion::V2,
@@ -285,7 +285,7 @@ mod tests {
 
     #[test]
     fn test_create_base_builder_without_dictionary() {
-        let writer_builder = ParquetWriterBuilder::new(
+        let writer_builder = ParquetWritePropertiesBuilder::new(
             ParquetCompression::Snappy,
             ParquetStatistics::Chunk,
             ParquetWriterVersion::V2,
@@ -305,7 +305,7 @@ mod tests {
     fn test_apply_bloom_filters_all_columns() {
         let bloom_config = BloomFilterConfig::All(AllColumnsBloomFilterConfig { fpp: Some(0.001) });
 
-        let builder = ParquetWriterBuilder::new(
+        let builder = ParquetWritePropertiesBuilder::new(
             ParquetCompression::None,
             ParquetStatistics::None,
             ParquetWriterVersion::V1,
@@ -332,7 +332,7 @@ mod tests {
             config: ColumnBloomFilterConfig { fpp: Some(0.005) },
         }]);
 
-        let builder = ParquetWriterBuilder::new(
+        let builder = ParquetWritePropertiesBuilder::new(
             ParquetCompression::None,
             ParquetStatistics::None,
             ParquetWriterVersion::V1,
@@ -358,7 +358,7 @@ mod tests {
             config: ColumnBloomFilterConfig { fpp: Some(0.01) },
         }]);
 
-        let builder = ParquetWriterBuilder::new(
+        let builder = ParquetWritePropertiesBuilder::new(
             ParquetCompression::None,
             ParquetStatistics::None,
             ParquetWriterVersion::V1,
@@ -384,7 +384,7 @@ mod tests {
             config: ColumnBloomFilterConfig { fpp: Some(0.01) },
         }]);
 
-        let builder = ParquetWriterBuilder::new(
+        let builder = ParquetWritePropertiesBuilder::new(
             ParquetCompression::None,
             ParquetStatistics::None,
             ParquetWriterVersion::V1,
@@ -413,7 +413,7 @@ mod tests {
     fn test_apply_bloom_filters_default_fpp() {
         let bloom_config = BloomFilterConfig::All(AllColumnsBloomFilterConfig { fpp: None });
 
-        let builder = ParquetWriterBuilder::new(
+        let builder = ParquetWritePropertiesBuilder::new(
             ParquetCompression::None,
             ParquetStatistics::None,
             ParquetWriterVersion::V1,
@@ -439,7 +439,7 @@ mod tests {
             config: ColumnBloomFilterConfig { fpp: Some(0.001) },
         }]);
 
-        let builder = ParquetWriterBuilder::new(
+        let builder = ParquetWritePropertiesBuilder::new(
             ParquetCompression::None,
             ParquetStatistics::None,
             ParquetWriterVersion::V1,
