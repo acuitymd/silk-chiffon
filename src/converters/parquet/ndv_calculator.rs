@@ -35,12 +35,11 @@ impl NdvCalculator {
 
         let ctx = SessionContext::new();
 
-        let arrow_reader = ArrowIPCReader::from_path(
+        let schema = ArrowIPCReader::schema_from_path(
             arrow_file_path
                 .to_str()
                 .ok_or_else(|| anyhow!("Invalid path: {:?}", arrow_file_path))?,
         )?;
-        let schema = arrow_reader.schema()?;
 
         ctx.register_arrow(
             "arrow_table",

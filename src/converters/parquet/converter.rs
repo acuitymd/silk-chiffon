@@ -127,15 +127,10 @@ impl ParquetConverter {
     }
 
     fn needs_intermediate_arrow_file(&self) -> bool {
-        self.input_is_arrow_stream()
+        ArrowIPCReader::is_stream_format(&self.input_path)
             || self.sort_spec.is_configured()
             || NdvCalculator::new(self.bloom_filters.clone(), self.parquet_row_group_size)
                 .needs_calculation()
-    }
-
-    fn input_is_arrow_stream(&self) -> bool {
-        ArrowIPCReader::from_path(&self.input_path)
-            .is_ok_and(|r| r.format() == ArrowIPCFormat::Stream)
     }
 
     fn create_writer_properties(

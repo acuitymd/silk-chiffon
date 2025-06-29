@@ -89,6 +89,18 @@ impl ArrowIPCReader {
         Err(anyhow!("Invalid arrow file found at {}", path.display()))
     }
 
+    pub fn schema_from_path<P: AsRef<std::path::Path>>(path: P) -> Result<SchemaRef> {
+        ArrowIPCReader::from_path(path)?.schema()
+    }
+
+    pub fn is_stream_format<P: AsRef<std::path::Path>>(path: P) -> bool {
+        ArrowIPCReader::from_path(path).is_ok_and(|r| r.format() == ArrowIPCFormat::Stream)
+    }
+
+    pub fn is_file_format<P: AsRef<std::path::Path>>(path: P) -> bool {
+        ArrowIPCReader::from_path(path).is_ok_and(|r| r.format() == ArrowIPCFormat::File)
+    }
+
     pub fn path(&self) -> &std::path::Path {
         match &self.inner {
             ArrowIPCReaderInner::File { path } => path,

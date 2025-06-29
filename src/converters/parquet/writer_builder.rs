@@ -70,7 +70,7 @@ impl ParquetWritePropertiesBuilder {
         input_path: &Path,
         ndv_map: &HashMap<String, u64>,
     ) -> Result<WriterProperties> {
-        let schema = ArrowIPCReader::from_path(input_path)?.schema()?;
+        let schema = ArrowIPCReader::schema_from_path(input_path)?;
 
         let builder = self.create_base_builder();
         let builder = self.apply_bloom_filters(builder, ndv_map)?;
