@@ -29,9 +29,7 @@ pub async fn run(args: ParquetArgs) -> Result<()> {
         .with_writer_version(args.writer_version)
         .with_write_sorted_metadata(args.write_sorted_metadata);
 
-    converter.convert().await?;
-
-    Ok(())
+    converter.convert().await
 }
 
 #[cfg(test)]

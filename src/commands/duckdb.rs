@@ -14,9 +14,7 @@ pub async fn run(args: DuckDbArgs) -> Result<()> {
         .with_truncate(args.truncate)
         .with_drop_table(args.drop_table);
 
-    converter.convert().await?;
-
-    Ok(())
+    converter.convert().await
 }
 
 #[cfg(test)]
