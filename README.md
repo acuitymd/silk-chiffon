@@ -1,21 +1,21 @@
 # 🎀 Silk Chiffon
 
-> *Converting Arrow files has never been silkier...*
+> _Converting Arrow files has never been silkier..._
 
-A blazingly fast, memory-efficient CLI tool and Python library for converting between Apache Arrow data format and a handful of others. Written in Rust for maximum performance, wrapped in Python for maximum convenience.
+A blazingly fast, memory-efficient CLI tool and Python library for converting between the Apache Arrow IPC data format and a handful of other formats. Written in Rust for maximum performance, wrapped in Python for maximum convenience.
 
 ## ✨ What is Silk Chiffon?
 
-Silk Chiffon is your Swiss Army knife for Arrow data format conversions. Like its namesake fabric&mdash;light, flowing, and effortlessly elegant&mdash;this tool makes data transformations smooth and painless.
+Silk Chiffon is your Swiss Army knife for Arrow-to-X data format conversions. Like its namesake fabric&mdash;light, flowing, and effortlessly elegant&mdash;this tool makes data transformations silky smooth.
 
 ### 🎯 Core Features
 
 - **🚀 Lightning Fast**: Built with Rust for native performance.
-- **🔄 Multi-Format Support**: Convert between Arrow IPC, Parquet, and DuckDB.
+- **🔄 Multi-Format Support**: Convert from Arrow IPC to Arrow IPC, Parquet, and DuckDB.
 - **🧩 Smart Processing**: Sort, compress, and optimize your data on-the-fly.
 - **🐍 Python-Friendly**: Native Python bindings for seamless integration.
 - **💾 Memory Efficient**: Configurable batch processing for huge datasets.
-- **🎨 Rich Configuration**: Fine-tune every aspect of your conversions.
+- **🎨 Rich Configuration**: Fine-tune many aspects of your conversions.
 
 ## 📦 Installation
 
@@ -70,7 +70,7 @@ silk-chiffon arrow stream.arrows file.arrow --compression lz4 --sort-by "date:as
 ```python
 import silk_chiffon as sc
 
-# Convert Arrow to Parquet with bloom filters
+# Convert Arrow to Parquet with bloom filters, with NDV automatically optimized
 sc.arrow_to_parquet(
     "data.arrow",
     "data.parquet",
@@ -91,7 +91,7 @@ sc.arrow_to_duckdb(
 
 ### 🪶 Arrow → Parquet
 
-Transform your Arrow data into analytics-optimized Parquet files:
+Transform your Arrow data into optimized Parquet files:
 
 ```bash
 silk-chiffon parquet [OPTIONS] <INPUT> <OUTPUT>
@@ -101,8 +101,8 @@ silk-chiffon parquet [OPTIONS] <INPUT> <OUTPUT>
 
 - `--compression`: Choose from `zstd`, `snappy`, `gzip`, `lz4`, or `none`
 - `--sort-by`: Sort by columns (e.g., `"date,amount:desc"`)
-- `--bloom-all`: Enable bloom filters for all columns
-- `--bloom-column`: Target specific columns for bloom filters
+- `--bloom-all`: Enable bloom filters for all columns, with optimal NDV calculated automatically
+- `--bloom-column`: Target specific columns for bloom filters, also with automatic NDV values
 - `--max-row-group-size`: Control Parquet row group sizing
 - `--statistics`: Set statistics level (`none`, `chunk`, `page`)
 - `--writer-version`: Choose Parquet format version (`v1`, `v2`)
@@ -130,6 +130,9 @@ Load your Arrow data directly into the DuckDB format:
 silk-chiffon duckdb [OPTIONS] --table-name <TABLE_NAME> <INPUT> <OUTPUT>
 ```
 
+> [!NOTE]
+> By default this will _add_ new tables to existing DuckDB files, assuming the table doesn't already exist. Use `--truncate` if you want a fresh file.
+
 **Key Options:**
 
 - `--table-name`: Required table name for your data
@@ -139,7 +142,7 @@ silk-chiffon duckdb [OPTIONS] --table-name <TABLE_NAME> <INPUT> <OUTPUT>
 
 ### 🔄 Arrow → Arrow
 
-Transform between Arrow formats or apply optimizations:
+Transform between Arrow formats or apply optimizations to an Arrow file:
 
 ```bash
 silk-chiffon arrow [OPTIONS] <INPUT> <OUTPUT>
@@ -256,4 +259,4 @@ Silk Chiffon is open source software, licensed under [LICENSE](./LICENSE).
 
 ---
 
-*Made with 🦀 and ❤️ for the data community*
+_Made with 🦀 and ❤️ for the data community_
