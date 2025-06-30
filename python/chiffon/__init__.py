@@ -1,12 +1,12 @@
 """
-Daisy - Fast Arrow format conversions
+Chiffon - Fast Arrow format conversions
 
 This package provides high-performance conversions between Apache Arrow IPC,
 Parquet, and DuckDB formats.
 """
 
 from typing import List, Optional, Tuple, Union, Literal, Dict
-from daisy._daisy import arrow_to_arrow, arrow_to_parquet, arrow_to_duckdb
+from chiffon._chiffon import arrow_to_arrow, arrow_to_parquet, arrow_to_duckdb
 
 __version__ = "0.1.0"
 __all__ = ["arrow_to_arrow", "arrow_to_parquet", "arrow_to_duckdb"]
