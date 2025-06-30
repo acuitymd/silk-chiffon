@@ -657,27 +657,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
-name = "chiffon"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arrow",
- "assert_cmd",
- "clap",
- "clio",
- "datafusion",
- "duckdb",
- "futures",
- "nix",
- "parquet",
- "pg_escape",
- "predicates",
- "pyo3",
- "tempfile",
- "tokio",
-]
-
-[[package]]
 name = "chrono"
 version = "0.4.41"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3091,6 +3070,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9203b8055f63a2a00e2f593bb0510367fe707d7ff1e5c872de2f537b339e5410"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "silk_chiffon"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arrow",
+ "assert_cmd",
+ "clap",
+ "clio",
+ "datafusion",
+ "duckdb",
+ "futures",
+ "nix",
+ "parquet",
+ "pg_escape",
+ "predicates",
+ "pyo3",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

@@ -4,7 +4,7 @@ import pytest
 import pyarrow as pa
 import pyarrow.parquet as pq
 import duckdb
-import chiffon
+import silk_chiffon
 
 
 def create_test_arrow_file(path: str, num_rows: int = 1000):
@@ -31,7 +31,7 @@ class TestArrowToParquet:
         parquet_file = tmp_path / "test.parquet"
 
         create_test_arrow_file(str(arrow_file))
-        chiffon.arrow_to_parquet(str(arrow_file), str(parquet_file))
+        silk_chiffon.arrow_to_parquet(str(arrow_file), str(parquet_file))
 
         assert parquet_file.exists()
 
@@ -47,7 +47,7 @@ class TestArrowToParquet:
         compressions = ["snappy", "gzip", "zstd", "lz4"]
         for comp in compressions:
             parquet_file = tmp_path / f"test_{comp}.parquet"
-            chiffon.arrow_to_parquet(str(arrow_file), str(parquet_file), compression=comp)
+            silk_chiffon.arrow_to_parquet(str(arrow_file), str(parquet_file), compression=comp)
             assert parquet_file.exists()
 
             pf = pq.ParquetFile(str(parquet_file))
@@ -63,7 +63,7 @@ class TestArrowToParquet:
         parquet_file = tmp_path / "test_sorted.parquet"
 
         create_test_arrow_file(str(arrow_file))
-        chiffon.arrow_to_parquet(
+        silk_chiffon.arrow_to_parquet(
             str(arrow_file), str(parquet_file), sort_by=["category", ("value", "desc")]
         )
 
@@ -88,13 +88,13 @@ class TestArrowToParquet:
         create_test_arrow_file(str(arrow_file))
 
         parquet_file1 = tmp_path / "test_bloom_all.parquet"
-        chiffon.arrow_to_parquet(
+        silk_chiffon.arrow_to_parquet(
             str(arrow_file), str(parquet_file1), bloom_filter_all=0.05
         )
         assert parquet_file1.exists()
 
         parquet_file2 = tmp_path / "test_bloom_columns.parquet"
-        chiffon.arrow_to_parquet(
+        silk_chiffon.arrow_to_parquet(
             str(arrow_file), str(parquet_file2), bloom_filter_columns=["id", "category"]
         )
         assert parquet_file2.exists()
@@ -112,7 +112,7 @@ class TestArrowToParquet:
         stats_options = ["none", "chunk", "page"]
         for stats in stats_options:
             parquet_file = tmp_path / f"test_stats_{stats}.parquet"
-            chiffon.arrow_to_parquet(str(arrow_file), str(parquet_file), statistics=stats)
+            silk_chiffon.arrow_to_parquet(str(arrow_file), str(parquet_file), statistics=stats)
             assert parquet_file.exists()
 
     def test_writer_versions(self, tmp_path):
@@ -123,7 +123,7 @@ class TestArrowToParquet:
         versions = ["v1", "v2"]
         for version in versions:
             parquet_file = tmp_path / f"test_{version}.parquet"
-            chiffon.arrow_to_parquet(
+            silk_chiffon.arrow_to_parquet(
                 str(arrow_file), str(parquet_file), writer_version=version
             )
             assert parquet_file.exists()
@@ -137,7 +137,7 @@ class TestArrowToParquet:
         parquet_file = tmp_path / "test_small_rg.parquet"
 
         create_test_arrow_file(str(arrow_file), num_rows=2000)
-        chiffon.arrow_to_parquet(
+        silk_chiffon.arrow_to_parquet(
             str(arrow_file), str(parquet_file), max_row_group_size=500
         )
 
@@ -157,7 +157,7 @@ class TestArrowToDuckDB:
         db_file = tmp_path / "test.db"
 
         create_test_arrow_file(str(arrow_file))
-        chiffon.arrow_to_duckdb(str(arrow_file), str(db_file), "test_table")
+        silk_chiffon.arrow_to_duckdb(str(arrow_file), str(db_file), "test_table")
 
         assert db_file.exists()
 
@@ -176,7 +176,7 @@ class TestArrowToDuckDB:
         db_file = tmp_path / "test.db"
 
         create_test_arrow_file(str(arrow_file))
-        chiffon.arrow_to_duckdb(
+        silk_chiffon.arrow_to_duckdb(
             str(arrow_file),
             str(db_file),
             "sorted_table",
@@ -213,12 +213,12 @@ class TestArrowToDuckDB:
 
         create_test_arrow_file(str(arrow_file))
 
-        chiffon.arrow_to_duckdb(str(arrow_file), str(db_file), "test_table")
+        silk_chiffon.arrow_to_duckdb(str(arrow_file), str(db_file), "test_table")
 
         with pytest.raises(Exception):
-            chiffon.arrow_to_duckdb(str(arrow_file), str(db_file), "test_table")
+            silk_chiffon.arrow_to_duckdb(str(arrow_file), str(db_file), "test_table")
 
-        chiffon.arrow_to_duckdb(
+        silk_chiffon.arrow_to_duckdb(
             str(arrow_file), str(db_file), "test_table", drop_table=True
         )
 
@@ -239,7 +239,7 @@ class TestArrowToDuckDB:
         conn.execute("INSERT INTO other_table VALUES (1), (2), (3)")
         conn.close()
 
-        chiffon.arrow_to_duckdb(str(arrow_file), str(db_file), "test_table")
+        silk_chiffon.arrow_to_duckdb(str(arrow_file), str(db_file), "test_table")
 
         conn = duckdb.connect(str(db_file))
         tables = conn.execute("SHOW TABLES").fetchall()
@@ -248,7 +248,7 @@ class TestArrowToDuckDB:
         assert "test_table" in table_names
         conn.close()
 
-        chiffon.arrow_to_duckdb(str(arrow_file), str(db_file), "new_table", truncate=True)
+        silk_chiffon.arrow_to_duckdb(str(arrow_file), str(db_file), "new_table", truncate=True)
 
         conn = duckdb.connect(str(db_file))
         tables = conn.execute("SHOW TABLES").fetchall()
@@ -267,9 +267,9 @@ class TestArrowToDuckDB:
         create_test_arrow_file(str(arrow_file1), num_rows=500)
         create_test_arrow_file(str(arrow_file2), num_rows=300)
 
-        chiffon.arrow_to_duckdb(str(arrow_file1), str(db_file), "table1")
+        silk_chiffon.arrow_to_duckdb(str(arrow_file1), str(db_file), "table1")
 
-        chiffon.arrow_to_duckdb(str(arrow_file2), str(db_file), "table2")
+        silk_chiffon.arrow_to_duckdb(str(arrow_file2), str(db_file), "table2")
 
         conn = duckdb.connect(str(db_file))
 
@@ -296,7 +296,7 @@ class TestArrowToArrow:
         output_file = tmp_path / "test_output.arrow"
 
         create_test_arrow_file(str(input_file))
-        chiffon.arrow_to_arrow(str(input_file), str(output_file))
+        silk_chiffon.arrow_to_arrow(str(input_file), str(output_file))
 
         assert output_file.exists()
 
@@ -324,7 +324,7 @@ class TestArrowToArrow:
                 writer.write_table(table)
 
         output_file = tmp_path / "test_output.arrow"
-        chiffon.arrow_to_arrow(str(stream_file), str(output_file))
+        silk_chiffon.arrow_to_arrow(str(stream_file), str(output_file))
 
         assert output_file.exists()
 
@@ -349,7 +349,7 @@ class TestArrowToArrow:
         compressions = ["lz4", "zstd"]
         for comp in compressions:
             output_file = tmp_path / f"test_{comp}.arrow"
-            chiffon.arrow_to_arrow(str(input_file), str(output_file), compression=comp)
+            silk_chiffon.arrow_to_arrow(str(input_file), str(output_file), compression=comp)
             assert output_file.exists()
 
             with pa.OSFile(str(output_file), "rb") as source:
@@ -363,7 +363,7 @@ class TestArrowToArrow:
         output_file = tmp_path / "test_batched.arrow"
 
         create_test_arrow_file(str(input_file), num_rows=1000)
-        chiffon.arrow_to_arrow(str(input_file), str(output_file), record_batch_size=250)
+        silk_chiffon.arrow_to_arrow(str(input_file), str(output_file), record_batch_size=250)
 
         assert output_file.exists()
 
@@ -383,7 +383,7 @@ class TestErrorHandling:
     def test_invalid_input_file(self):
         """Test handling of non-existent input file."""
         with pytest.raises(Exception):
-            chiffon.arrow_to_parquet("/non/existent/file.arrow", "output.parquet")
+            silk_chiffon.arrow_to_parquet("/non/existent/file.arrow", "output.parquet")
 
     def test_invalid_compression(self, tmp_path):
         """Test handling of invalid compression type."""
@@ -391,7 +391,7 @@ class TestErrorHandling:
         create_test_arrow_file(str(arrow_file))
 
         with pytest.raises(Exception):
-            chiffon.arrow_to_parquet(
+            silk_chiffon.arrow_to_parquet(
                 str(arrow_file),
                 str(tmp_path / "output.parquet"),
                 compression="invalid_compression",
@@ -403,7 +403,7 @@ class TestErrorHandling:
         create_test_arrow_file(str(arrow_file))
 
         with pytest.raises(Exception):
-            chiffon.arrow_to_parquet(
+            silk_chiffon.arrow_to_parquet(
                 str(arrow_file),
                 str(tmp_path / "output.parquet"),
                 sort_by=[("id", "invalid_direction")],
@@ -415,7 +415,7 @@ class TestErrorHandling:
         create_test_arrow_file(str(arrow_file))
 
         with pytest.raises(Exception):
-            chiffon.arrow_to_parquet(
+            silk_chiffon.arrow_to_parquet(
                 str(arrow_file),
                 str(tmp_path / "output.parquet"),
                 statistics="invalid_stats",

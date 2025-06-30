@@ -563,7 +563,7 @@ use pyo3::prelude::*;
 
 #[cfg(feature = "python")]
 #[pymodule]
-fn _chiffon(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _silk_chiffon(m: &Bound<'_, PyModule>) -> PyResult<()> {
     python::register_module(m)?;
     Ok(())
 }

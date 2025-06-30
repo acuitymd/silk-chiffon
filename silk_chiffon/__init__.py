@@ -1,12 +1,12 @@
 """
-Chiffon - Fast Arrow format conversions
+silk_chiffon - Fast Arrow format conversions
 
 This package provides high-performance conversions between Apache Arrow IPC,
 Parquet, and DuckDB formats.
 """
 
 from typing import List, Optional, Tuple, Union, Literal, Dict
-from chiffon._chiffon import arrow_to_arrow, arrow_to_parquet, arrow_to_duckdb
+from silk_chiffon._silk_chiffon import arrow_to_arrow, arrow_to_parquet, arrow_to_duckdb
 
 __version__ = "0.1.0"
 __all__ = ["arrow_to_arrow", "arrow_to_parquet", "arrow_to_duckdb"]
