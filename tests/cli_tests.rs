@@ -4,7 +4,7 @@ use tempfile::TempDir;
 
 #[test]
 fn test_help_command() {
-    let mut cmd = Command::cargo_bin("silk_chiffon").unwrap();
+    let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
     cmd.arg("--help")
         .assert()
         .success()
@@ -21,7 +21,7 @@ fn test_help_command() {
 
 #[test]
 fn test_version_command() {
-    let mut cmd = Command::cargo_bin("silk_chiffon").unwrap();
+    let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
     cmd.arg("--version")
         .assert()
         .success()
@@ -30,7 +30,7 @@ fn test_version_command() {
 
 #[test]
 fn test_parquet_help() {
-    let mut cmd = Command::cargo_bin("silk_chiffon").unwrap();
+    let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
     cmd.args(["parquet", "--help"])
         .assert()
         .success()
@@ -45,7 +45,7 @@ fn test_parquet_help() {
 
 #[test]
 fn test_duckdb_help() {
-    let mut cmd = Command::cargo_bin("silk_chiffon").unwrap();
+    let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
     cmd.args(["duckdb", "--help"])
         .assert()
         .success()
@@ -59,7 +59,7 @@ fn test_duckdb_help() {
 
 #[test]
 fn test_arrow_help() {
-    let mut cmd = Command::cargo_bin("silk_chiffon").unwrap();
+    let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
     cmd.args(["arrow", "--help"])
         .assert()
         .success()
@@ -73,7 +73,7 @@ fn test_arrow_help() {
 
 #[test]
 fn test_missing_subcommand() {
-    let mut cmd = Command::cargo_bin("silk_chiffon").unwrap();
+    let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
     cmd.assert()
         .failure()
         .stderr(predicate::str::contains("Usage:"));
@@ -81,7 +81,7 @@ fn test_missing_subcommand() {
 
 #[test]
 fn test_parquet_missing_args() {
-    let mut cmd = Command::cargo_bin("silk_chiffon").unwrap();
+    let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
     cmd.arg("parquet")
         .assert()
         .failure()
@@ -90,7 +90,7 @@ fn test_parquet_missing_args() {
 
 #[test]
 fn test_duckdb_missing_args() {
-    let mut cmd = Command::cargo_bin("silk_chiffon").unwrap();
+    let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
     cmd.arg("duckdb")
         .assert()
         .failure()
@@ -99,7 +99,7 @@ fn test_duckdb_missing_args() {
 
 #[test]
 fn test_arrow_missing_args() {
-    let mut cmd = Command::cargo_bin("silk_chiffon").unwrap();
+    let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
     cmd.arg("arrow")
         .assert()
         .failure()
@@ -111,7 +111,7 @@ fn test_parquet_non_existent_input() {
     let temp_dir = TempDir::new().unwrap();
     let output_path = temp_dir.path().join("output.parquet");
 
-    let mut cmd = Command::cargo_bin("silk_chiffon").unwrap();
+    let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
     cmd.args([
         "parquet",
         "/non/existent/file.arrow",
@@ -127,7 +127,7 @@ fn test_arrow_non_existent_input() {
     let temp_dir = TempDir::new().unwrap();
     let output_path = temp_dir.path().join("output.arrow");
 
-    let mut cmd = Command::cargo_bin("silk_chiffon").unwrap();
+    let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
     cmd.args([
         "arrow",
         "/non/existent/file.arrow",
@@ -143,7 +143,7 @@ fn test_duckdb_non_existent_input() {
     let temp_dir = TempDir::new().unwrap();
     let output_path = temp_dir.path().join("output.db");
 
-    let mut cmd = Command::cargo_bin("silk_chiffon").unwrap();
+    let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
     cmd.args([
         "duckdb",
         "/non/existent/file.arrow",
