@@ -131,7 +131,7 @@ silk-chiffon duckdb [OPTIONS] --table-name <TABLE_NAME> <INPUT> <OUTPUT>
 ```
 
 > [!NOTE]
-> By default this will _add_ new tables to existing DuckDB files, assuming the table doesn't already exist. Use `--truncate` if you want a fresh file.
+> By default this will add new tables to existing DuckDB files, assuming the table doesn't already exist. Use `--truncate` if you want a fresh file.
 
 **Key Options:**
 
