@@ -6,7 +6,7 @@ A blazingly fast, memory-efficient CLI tool and Python library for converting be
 
 ## ✨ What is Silk Chiffon?
 
-Silk Chiffon is your Swiss Army knife for Arrow data format conversions. Like its namesake&mdash;fabric—light, flowing, and effortlessly elegant&mdash;this tool makes data transformations smooth and painless.
+Silk Chiffon is your Swiss Army knife for Arrow data format conversions. Like its namesake fabric&mdash;light, flowing, and effortlessly elegant&mdash;this tool makes data transformations smooth and painless.
 
 ### 🎯 Core Features
 
