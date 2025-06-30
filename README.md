@@ -252,7 +252,7 @@ We welcome contributions! Please check out our [GitHub repository](https://githu
 
 ## 📄 License
 
-Silk Chiffon is open source software, licensed under [LICENSE].
+Silk Chiffon is open source software, licensed under [LICENSE](./LICENSE).
 
 ---
 
