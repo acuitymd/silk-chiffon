@@ -1,0 +1,7 @@
+{
+  "include": ["silk_chiffon.pyi", "tests"],
+  "typeCheckingMode": "strict",
+  "pythonVersion": "3.9",
+  "reportMissingImports": false,
+  "reportMissingTypeStubs": false
+}

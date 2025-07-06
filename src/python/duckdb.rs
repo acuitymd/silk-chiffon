@@ -1,14 +1,11 @@
+#![allow(unsafe_op_in_unsafe_fn)]
+
 use pyo3::prelude::*;
 
-use crate::{DuckDbArgs, SortColumn, SortDirection, SortSpec, commands};
-
-#[derive(FromPyObject)]
-enum PySortColumn {
-    #[pyo3(transparent)]
-    Name(String),
-    #[pyo3(transparent)]
-    NameAndDirection((String, String)),
-}
+use super::common::{
+    PySortColumn, create_input, create_output, parse_sort_spec, run_async_command,
+};
+use crate::{DuckDbArgs, commands};
 
 #[pyfunction]
 #[pyo3(signature = (
@@ -28,57 +25,17 @@ pub fn arrow_to_duckdb(
     sort_by: Option<Vec<PySortColumn>>,
     truncate: bool,
     drop_table: bool,
-) -> PyResult<()> {
-    let sort_spec = if let Some(cols) = sort_by {
-        let columns =
-            cols.into_iter()
-                .map(|col| match col {
-                    PySortColumn::Name(name) => Ok(SortColumn {
-                        name,
-                        direction: SortDirection::Ascending,
-                    }),
-                    PySortColumn::NameAndDirection((name, dir)) => {
-                        let direction = match dir.as_str() {
-                            "asc" => SortDirection::Ascending,
-                            "desc" => SortDirection::Descending,
-                            _ => {
-                                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                                    format!("Invalid sort direction: {}. Use 'asc' or 'desc'", dir),
-                                ));
-                            }
-                        };
-                        Ok(SortColumn { name, direction })
-                    }
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-        SortSpec { columns }
-    } else {
-        SortSpec::default()
-    };
+) -> anyhow::Result<()> {
+    let sort_spec = parse_sort_spec(sort_by)?.unwrap_or_default();
 
     let args = DuckDbArgs {
-        input: clio::Input::new(&input_path).map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyIOError, _>(format!(
-                "Failed to open input file: {}",
-                e
-            ))
-        })?,
-        output: clio::OutputPath::new(&output_path).map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyIOError, _>(format!(
-                "Failed to open output file: {}",
-                e
-            ))
-        })?,
+        input: create_input(&input_path)?,
+        output: create_output(&output_path)?,
         table_name,
         sort_by: sort_spec,
         truncate,
         drop_table,
     };
 
-    py.allow_threads(|| {
-        tokio::runtime::Runtime::new()
-            .unwrap()
-            .block_on(commands::duckdb::run(args))
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
-    })
+    run_async_command(py, || commands::duckdb::run(args))
 }

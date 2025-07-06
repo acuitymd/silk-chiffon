@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow};
 use arrow::datatypes::SchemaRef;
 use parquet::{
-    basic::{Compression, GzipLevel, ZstdLevel},
+    basic::Compression,
     file::properties::{
         EnabledStatistics, WriterProperties, WriterPropertiesBuilder, WriterVersion,
     },
@@ -35,24 +35,9 @@ impl ParquetWritePropertiesBuilder {
         bloom_filters: BloomFilterConfig,
         sort_spec: SortSpec,
     ) -> Self {
-        let compression = match compression {
-            ParquetCompression::Zstd => Compression::ZSTD(ZstdLevel::default()),
-            ParquetCompression::Snappy => Compression::SNAPPY,
-            ParquetCompression::Gzip => Compression::GZIP(GzipLevel::default()),
-            ParquetCompression::Lz4 => Compression::LZ4_RAW,
-            ParquetCompression::None => Compression::UNCOMPRESSED,
-        };
-
-        let writer_version = match writer_version {
-            ParquetWriterVersion::V1 => WriterVersion::PARQUET_1_0,
-            ParquetWriterVersion::V2 => WriterVersion::PARQUET_2_0,
-        };
-
-        let statistics = match statistics {
-            ParquetStatistics::None => EnabledStatistics::None,
-            ParquetStatistics::Chunk => EnabledStatistics::Chunk,
-            ParquetStatistics::Page => EnabledStatistics::Page,
-        };
+        let compression = compression.into();
+        let writer_version = writer_version.into();
+        let statistics = statistics.into();
 
         Self {
             compression,

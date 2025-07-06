@@ -3,7 +3,12 @@ pub mod converters;
 pub mod utils;
 
 use anyhow::{Result, anyhow};
+use arrow::ipc::CompressionType;
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use parquet::{
+    basic::{Compression, GzipLevel, ZstdLevel},
+    file::properties::{EnabledStatistics, WriterVersion},
+};
 use std::{
     fmt::{Display, Formatter},
     str::FromStr,
@@ -48,6 +53,26 @@ pub enum Commands {
     ///   - Arrow IPC file format
     #[command(verbatim_doc_comment)]
     Arrow(ArrowArgs),
+    /// Split Arrow data into multiple Arrow files based on unique values in a column.
+    ///
+    /// Input formats:
+    ///   - Arrow IPC stream format
+    ///   - Arrow IPC file format
+    ///
+    /// Output formats:
+    ///   - Arrow IPC file format
+    #[command(name = "split-to-arrow", verbatim_doc_comment)]
+    SplitToArrow(SplitToArrowArgs),
+    /// Split Arrow data into multiple Parquet files based on unique values in a column.
+    ///
+    /// Input formats:
+    ///   - Arrow IPC stream format
+    ///   - Arrow IPC file format
+    ///
+    /// Output formats:
+    ///   - Parquet file format
+    #[command(name = "split-to-parquet", verbatim_doc_comment)]
+    SplitToParquet(SplitToParquetArgs),
 }
 
 #[derive(Args, Debug)]
@@ -190,6 +215,156 @@ pub struct ArrowArgs {
     pub record_batch_size: usize,
 }
 
+#[derive(Args, Debug)]
+pub struct SplitToArrowArgs {
+    /// Input Arrow IPC file.
+    #[arg(value_parser = clap::value_parser!(clio::Input).exists().is_file())]
+    pub input: clio::Input,
+
+    /// Column to split by.
+    #[arg(short, long)]
+    pub by: String,
+
+    /// Output file template with placeholders.
+    ///
+    /// Placeholders:
+    ///   {value}      - The raw column value
+    ///   {column}     - The column name
+    ///   {safe_value} - Sanitized value safe for filenames
+    ///   {hash}       - First 8 characters of SHA256 hash of the value
+    ///
+    /// Examples:
+    ///   "split_{value}.arrow"
+    ///   "{column}/{value}/data.parquet"
+    ///   "partition_{safe_value}_{hash}.arrow"
+    #[arg(
+        short = 't',
+        long,
+        default_value = "{column}_{value}.arrow",
+        verbatim_doc_comment
+    )]
+    pub output_template: String,
+
+    /// Target number of rows per record batch.
+    #[arg(long, default_value_t = 122_880)]
+    pub record_batch_size: usize,
+
+    /// Sort the data within each partition before writing.
+    ///
+    /// Format: A comma-separated list like "col_a,col_b:desc,col_c".
+    #[arg(short, long)]
+    pub sort_by: Option<SortSpec>,
+
+    /// Create directories as needed.
+    #[arg(long, default_value_t = true)]
+    pub create_dirs: bool,
+
+    /// Overwrite existing files.
+    #[arg(long, default_value_t = false)]
+    pub overwrite: bool,
+
+    /// The IPC compression to use for the output.
+    #[arg(short, long, default_value_t = ArrowCompression::None)]
+    pub compression: ArrowCompression,
+}
+
+#[derive(Args, Debug)]
+pub struct SplitToParquetArgs {
+    /// Input Arrow IPC file.
+    #[arg(value_parser = clap::value_parser!(clio::Input).exists().is_file())]
+    pub input: clio::Input,
+
+    /// Column to split by.
+    #[arg(short, long)]
+    pub by: String,
+
+    /// Output file template with placeholders.
+    ///
+    /// Placeholders:
+    ///   {value}      - The raw column value
+    ///   {column}     - The column name
+    ///   {safe_value} - Sanitized value safe for filenames
+    ///   {hash}       - First 8 characters of SHA256 hash of the value
+    ///
+    /// Examples:
+    ///   "split_{value}.parquet"
+    ///   "{column}/{value}/data.parquet"
+    ///   "partition_{safe_value}_{hash}.parquet"
+    #[arg(
+        short = 't',
+        long,
+        default_value = "{column}_{value}.parquet",
+        verbatim_doc_comment
+    )]
+    pub output_template: String,
+
+    /// Target number of rows per record batch.
+    #[arg(long, default_value_t = 122_880)]
+    pub record_batch_size: usize,
+
+    /// Sort the data within each partition before writing.
+    ///
+    /// Format: A comma-separated list like "col_a,col_b:desc,col_c".
+    #[arg(short, long)]
+    pub sort_by: Option<SortSpec>,
+
+    /// Create directories as needed.
+    #[arg(long, default_value_t = true)]
+    pub create_dirs: bool,
+
+    /// Overwrite existing files.
+    #[arg(long, default_value_t = false)]
+    pub overwrite: bool,
+
+    /// The compression algorithm to use.
+    #[arg(short, long, default_value_t = ParquetCompression::None)]
+    pub compression: ParquetCompression,
+
+    /// Column statistics level.
+    #[arg(long, default_value_t = ParquetStatistics::Page)]
+    pub statistics: ParquetStatistics,
+
+    /// Maximum number of rows per row group.
+    #[arg(long, default_value_t = 1_048_576)]
+    pub max_row_group_size: usize,
+
+    /// Writer version.
+    #[arg(long, default_value_t = ParquetWriterVersion::V2)]
+    pub writer_version: ParquetWriterVersion,
+
+    /// Disable dictionary encoding.
+    #[arg(long, default_value_t = false)]
+    pub no_dictionary: bool,
+
+    /// Embed metadata indicating that the file's data is sorted.
+    ///
+    /// Requires --sort-by to be set.
+    #[arg(long, default_value_t = false, requires = "sort_by")]
+    pub write_sorted_metadata: bool,
+
+    /// Enable bloom filters for all columns.
+    /// Mutually exclusive with --bloom-column.
+    #[arg(
+        long,
+        value_name = "[fpp=VALUE]",
+        conflicts_with = "bloom_column",
+        num_args = 0..=1,
+        default_missing_value = "",
+        verbatim_doc_comment
+    )]
+    pub bloom_all: Option<AllColumnsBloomFilterConfig>,
+
+    /// Enable bloom filter for specific columns.
+    /// Can be specified multiple times. Mutually exclusive with --bloom-all.
+    #[arg(
+        long,
+        value_name = "COLUMN[:fpp=VALUE]",
+        conflicts_with = "bloom_all",
+        verbatim_doc_comment
+    )]
+    pub bloom_column: Vec<ColumnSpecificBloomFilterConfig>,
+}
+
 #[derive(ValueEnum, Clone, Copy, Debug, Default)]
 pub enum ParquetCompression {
     #[value(name = "zstd")]
@@ -203,6 +378,33 @@ pub enum ParquetCompression {
     #[default]
     #[value(name = "none")]
     None,
+}
+
+impl From<ParquetCompression> for Compression {
+    fn from(compression: ParquetCompression) -> Self {
+        match compression {
+            ParquetCompression::Zstd => Compression::ZSTD(ZstdLevel::default()),
+            ParquetCompression::Snappy => Compression::SNAPPY,
+            ParquetCompression::Gzip => Compression::GZIP(GzipLevel::default()),
+            ParquetCompression::Lz4 => Compression::LZ4_RAW,
+            ParquetCompression::None => Compression::UNCOMPRESSED,
+        }
+    }
+}
+
+impl FromStr for ParquetCompression {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "zstd" => Ok(ParquetCompression::Zstd),
+            "snappy" => Ok(ParquetCompression::Snappy),
+            "gzip" => Ok(ParquetCompression::Gzip),
+            "lz4" => Ok(ParquetCompression::Lz4),
+            "none" => Ok(ParquetCompression::None),
+            _ => Err(anyhow::anyhow!("Invalid compression: {}", s)),
+        }
+    }
 }
 
 impl Display for ParquetCompression {
@@ -229,6 +431,16 @@ pub enum ParquetStatistics {
     Page,
 }
 
+impl From<ParquetStatistics> for EnabledStatistics {
+    fn from(statistics: ParquetStatistics) -> Self {
+        match statistics {
+            ParquetStatistics::None => EnabledStatistics::None,
+            ParquetStatistics::Chunk => EnabledStatistics::Chunk,
+            ParquetStatistics::Page => EnabledStatistics::Page,
+        }
+    }
+}
+
 impl Display for ParquetStatistics {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let s = match self {
@@ -247,6 +459,15 @@ pub enum ParquetWriterVersion {
     #[default]
     #[value(name = "v2")]
     V2,
+}
+
+impl From<ParquetWriterVersion> for WriterVersion {
+    fn from(writer_version: ParquetWriterVersion) -> Self {
+        match writer_version {
+            ParquetWriterVersion::V1 => WriterVersion::PARQUET_1_0,
+            ParquetWriterVersion::V2 => WriterVersion::PARQUET_2_0,
+        }
+    }
 }
 
 impl Display for ParquetWriterVersion {
@@ -270,6 +491,29 @@ pub enum ArrowCompression {
     None,
 }
 
+impl From<ArrowCompression> for Option<CompressionType> {
+    fn from(compression: ArrowCompression) -> Self {
+        match compression {
+            ArrowCompression::Zstd => Some(CompressionType::ZSTD),
+            ArrowCompression::Lz4 => Some(CompressionType::LZ4_FRAME),
+            ArrowCompression::None => None,
+        }
+    }
+}
+
+impl FromStr for ArrowCompression {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "zstd" => Ok(ArrowCompression::Zstd),
+            "lz4" => Ok(ArrowCompression::Lz4),
+            "none" => Ok(ArrowCompression::None),
+            _ => Err(anyhow::anyhow!("Invalid compression: {}", s)),
+        }
+    }
+}
+
 impl Display for ArrowCompression {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let s = match self {
@@ -291,6 +535,18 @@ pub struct SortColumn {
 pub enum SortDirection {
     Ascending,
     Descending,
+}
+
+impl FromStr for SortDirection {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "asc" => Ok(SortDirection::Ascending),
+            "desc" => Ok(SortDirection::Descending),
+            _ => Err(anyhow::anyhow!("Invalid sort direction: {}", s)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -563,7 +819,7 @@ use pyo3::prelude::*;
 
 #[cfg(feature = "python")]
 #[pymodule]
-fn _silk_chiffon(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn silk_chiffon(m: &Bound<'_, PyModule>) -> PyResult<()> {
     python::register_module(m)?;
     Ok(())
 }

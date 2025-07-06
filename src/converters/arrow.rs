@@ -49,11 +49,8 @@ impl ArrowConverter {
     }
 
     pub fn with_compression(mut self, compression: ArrowCompression) -> Self {
-        let compression_type = match compression {
-            ArrowCompression::Zstd => Some(CompressionType::ZSTD),
-            ArrowCompression::Lz4 => Some(CompressionType::LZ4_FRAME),
-            ArrowCompression::None => None,
-        };
+        let compression_type =
+            <ArrowCompression as Into<Option<CompressionType>>>::into(compression.clone());
         self.write_options = self
             .write_options
             .try_with_compression(compression_type)
