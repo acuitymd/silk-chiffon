@@ -9,6 +9,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  DUCKDB_VERSION: v1.3.2
+
 jobs:
   python-ci:
     name: Python CI for ${{ matrix.python-version }} on ${{ matrix.os }}
@@ -24,7 +27,15 @@ jobs:
 
       - name: Setup DuckDB (Ubuntu only)
         if: ${{ matrix.os == 'ubuntu-latest' }}
-        uses: opt-nc/setup-duckdb-action@v1.0.13
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl unzip build-essential
+          curl -L -O https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/libduckdb-linux-amd64.zip
+          unzip libduckdb-linux-amd64.zip -d libduckdb
+          mv libduckdb/duckdb.* /usr/local/include/
+          mv libduckdb/libduckdb.so /usr/local/lib/
+          ldconfig /usr/local/lib
+          rm -rf libduckdb libduckdb-linux-amd64.zip
 
       - name: Setup DuckDB (macOS only)
         if: ${{ matrix.os == 'macos-latest' }}
