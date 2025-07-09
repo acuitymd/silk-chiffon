@@ -35,8 +35,10 @@ jobs:
           cache-prefix: "rye-cache"
 
       - name: Install dependencies
+        env:
+          PYTHON_VERSION: ${{ matrix.python-version }}
         run: |
-          rye pin {{ matrix.python-version }}
+          rye pin $PYTHON_VERSION
           rye sync --no-lock
 
       - name: Build and install Python module
