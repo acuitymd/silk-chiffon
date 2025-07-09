@@ -2,7 +2,7 @@
 
 from typing import Dict, List, Literal, Optional, Tuple, Union
 
-SortDirection = Literal["ascending", "descending"]
+SortDirection = Literal["asc", "desc"]
 SortColumn = Union[str, Tuple[str, SortDirection]]
 
 def arrow_to_arrow(

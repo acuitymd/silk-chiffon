@@ -65,7 +65,7 @@ class TestArrowToParquet:
 
         make_test_file(str(src))
         silk_chiffon.arrow_to_parquet(
-            str(src), str(dst), sort_by=["category", ("value", "descending")]
+            str(src), str(dst), sort_by=["category", ("value", "desc")]
         )
 
         t: pa.Table = pq.read_table(str(dst)) # type: ignore
@@ -128,7 +128,7 @@ class TestArrowToDuckDB:
 
         make_test_file(str(src))
         silk_chiffon.arrow_to_duckdb(
-            str(src), str(db), "sorted", sort_by=["category", ("id", "descending")]
+            str(src), str(db), "sorted", sort_by=["category", ("id", "desc")]
         )
 
         conn: duckdb.DuckDBPyConnection = duckdb.connect(str(db)) # type: ignore
@@ -279,7 +279,7 @@ class TestSplitToArrow:
 
         make_test_file(str(src))
         silk_chiffon.split_to_arrow(
-            str(src), template, "category", sort_by=[("value", "descending")]
+            str(src), template, "category", sort_by=[("value", "desc")]
         )
 
         for i in range(5):
@@ -369,7 +369,7 @@ class TestSplitToParquet:
             str(src),
             template,
             "category",
-            sort_by=["id", ("value", "descending")],
+            sort_by=["id", ("value", "desc")],
             write_sorted_metadata=True,
         )
 
