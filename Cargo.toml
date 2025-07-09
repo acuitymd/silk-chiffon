@@ -31,8 +31,10 @@ pyo3 = { version = "0.22", features = [
   "anyhow",
   "extension-module",
 ], optional = true }
+sha2 = "0.10"
 tempfile = "3.20.0"
 tokio = { version = "1.45.1", features = ["full"] }
+sanitize-filename = "0.6.0"
 
 [features]
 default = []
@@ -43,3 +45,25 @@ tempfile = "3.20.0"
 assert_cmd = "2.0.17"
 predicates = "3.1.3"
 nix = { version = "0.30.1", features = ["user"] }
+rand = "0.9.1"
+criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
+
+[[bench]]
+name = "split_benchmark"
+harness = false
+
+[[bench]]
+name = "split_formats_benchmark"
+harness = false
+
+[[bench]]
+name = "split_distributions_benchmark"
+harness = false
+
+[[bench]]
+name = "split_string_keys_benchmark"
+harness = false
+
+[[bench]]
+name = "split_sorting_benchmark"
+harness = false

@@ -3,13 +3,11 @@
 use pyo3::prelude::*;
 use std::collections::HashMap;
 
-use super::common::{
-    PySortColumn, create_input, create_output, parse_sort_spec, run_async_command,
-};
+use super::common::{PySortColumn, create_input, parse_sort_spec, run_async_command};
 use crate::{
     AllColumnsBloomFilterConfig, BloomFilterConfig, ColumnBloomFilterConfig,
-    ColumnSpecificBloomFilterConfig, DEFAULT_BLOOM_FILTER_FPP, ParquetArgs, ParquetCompression,
-    ParquetStatistics, ParquetWriterVersion, commands,
+    ColumnSpecificBloomFilterConfig, DEFAULT_BLOOM_FILTER_FPP, ParquetCompression,
+    ParquetStatistics, ParquetWriterVersion, SplitToParquetArgs, commands,
 };
 
 #[derive(FromPyObject)]
@@ -33,36 +31,43 @@ pub enum PyBloomFilterColumn {
 #[pyfunction]
 #[pyo3(signature = (
     input_path,
-    output_path,
+    output_template,
+    split_column,
     *,
     sort_by = None,
     compression = "none",
+    create_dirs = true,
+    overwrite = false,
+    record_batch_size = 122_880,
     write_sorted_metadata = false,
     bloom_filter_all = None,
     bloom_filter_columns = None,
     max_row_group_size = 1_048_576,
     statistics = "page",
-    record_batch_size = 122_880,
     enable_dictionary = true,
     writer_version = "v2"
 ))]
 #[allow(clippy::too_many_arguments)]
-pub fn arrow_to_parquet(
+pub fn split_to_parquet(
     py: Python<'_>,
     input_path: String,
-    output_path: String,
+    output_template: String,
+    split_column: String,
     sort_by: Option<Vec<PySortColumn>>,
     compression: &str,
+    create_dirs: bool,
+    overwrite: bool,
+    record_batch_size: usize,
     write_sorted_metadata: bool,
     bloom_filter_all: Option<PyBloomFilterAll>,
     bloom_filter_columns: Option<Vec<PyBloomFilterColumn>>,
     max_row_group_size: usize,
     statistics: &str,
-    record_batch_size: usize,
     enable_dictionary: bool,
     writer_version: &str,
 ) -> anyhow::Result<()> {
-    let sort_spec = parse_sort_spec(sort_by)?.unwrap_or_default();
+    let sort_spec = parse_sort_spec(sort_by)?;
+    let compression = compression.parse::<ParquetCompression>()?;
 
     let bloom_config = match (bloom_filter_all, bloom_filter_columns) {
         (Some(all_config), None) => match all_config {
@@ -73,13 +78,19 @@ pub fn arrow_to_parquet(
             PyBloomFilterAll::Fpp(fpp) => {
                 BloomFilterConfig::All(AllColumnsBloomFilterConfig { fpp })
             }
-            PyBloomFilterAll::Dict(dict) => {
-                let fpp = dict.get("fpp").copied().unwrap_or(DEFAULT_BLOOM_FILTER_FPP);
-                BloomFilterConfig::All(AllColumnsBloomFilterConfig { fpp })
+            PyBloomFilterAll::Dict(config) => {
+                let columns = config
+                    .into_iter()
+                    .map(|(name, fpp)| ColumnSpecificBloomFilterConfig {
+                        name,
+                        config: ColumnBloomFilterConfig { fpp },
+                    })
+                    .collect();
+                BloomFilterConfig::Columns(columns)
             }
         },
         (None, Some(columns)) => {
-            let configs = columns
+            let column_configs = columns
                 .into_iter()
                 .map(|col| match col {
                     PyBloomFilterColumn::Name(name) => ColumnSpecificBloomFilterConfig {
@@ -88,24 +99,16 @@ pub fn arrow_to_parquet(
                             fpp: DEFAULT_BLOOM_FILTER_FPP,
                         },
                     },
-                    PyBloomFilterColumn::Config(dict) => {
-                        if let Some((column_name, fpp_value)) = dict.iter().next() {
-                            ColumnSpecificBloomFilterConfig {
-                                name: column_name.clone(),
-                                config: ColumnBloomFilterConfig { fpp: *fpp_value },
-                            }
-                        } else {
-                            ColumnSpecificBloomFilterConfig {
-                                name: String::new(),
-                                config: ColumnBloomFilterConfig {
-                                    fpp: DEFAULT_BLOOM_FILTER_FPP,
-                                },
-                            }
+                    PyBloomFilterColumn::Config(config) => {
+                        let (name, fpp) = config.into_iter().next().unwrap();
+                        ColumnSpecificBloomFilterConfig {
+                            name,
+                            config: ColumnBloomFilterConfig { fpp },
                         }
                     }
                 })
                 .collect();
-            BloomFilterConfig::Columns(configs)
+            BloomFilterConfig::Columns(column_configs)
         }
         (None, None) => BloomFilterConfig::None,
         (Some(_), Some(_)) => {
@@ -115,18 +118,10 @@ pub fn arrow_to_parquet(
         }
     };
 
-    let compression = match compression {
-        "zstd" => ParquetCompression::Zstd,
-        "snappy" => ParquetCompression::Snappy,
-        "gzip" => ParquetCompression::Gzip,
-        "lz4" => ParquetCompression::Lz4,
-        "none" => ParquetCompression::None,
-        _ => {
-            return Err(anyhow::anyhow!(
-                "Invalid compression: {}. Valid options: zstd, snappy, gzip, lz4, none",
-                compression
-            ));
-        }
+    let (bloom_all, bloom_column) = match bloom_config {
+        BloomFilterConfig::None => (None, Vec::new()),
+        BloomFilterConfig::All(config) => (Some(config), Vec::new()),
+        BloomFilterConfig::Columns(columns) => (None, columns),
     };
 
     let statistics = match statistics {
@@ -152,26 +147,23 @@ pub fn arrow_to_parquet(
         }
     };
 
-    let (bloom_all, bloom_column) = match bloom_config {
-        BloomFilterConfig::None => (None, Vec::new()),
-        BloomFilterConfig::All(config) => (Some(config), Vec::new()),
-        BloomFilterConfig::Columns(columns) => (None, columns),
-    };
-
-    let args = ParquetArgs {
+    let args = SplitToParquetArgs {
         input: create_input(&input_path)?,
-        output: create_output(&output_path)?,
+        by: split_column,
+        output_template,
+        record_batch_size,
         sort_by: sort_spec,
+        create_dirs,
+        overwrite,
         compression,
+        statistics,
+        max_row_group_size,
+        writer_version,
+        no_dictionary: !enable_dictionary,
         write_sorted_metadata,
         bloom_all,
         bloom_column,
-        max_row_group_size,
-        statistics,
-        record_batch_size,
-        no_dictionary: !enable_dictionary,
-        writer_version,
     };
 
-    run_async_command(py, || commands::parquet::run(args))
+    run_async_command(py, || commands::split_to_parquet::run(args))
 }

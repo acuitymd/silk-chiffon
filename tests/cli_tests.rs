@@ -16,6 +16,12 @@ fn test_help_command() {
         ))
         .stdout(predicate::str::contains(
             "Convert Arrow format to Arrow format",
+        ))
+        .stdout(predicate::str::contains(
+            "Split Arrow data into multiple Arrow files",
+        ))
+        .stdout(predicate::str::contains(
+            "Split Arrow data into multiple Parquet files",
         ));
 }
 
@@ -148,6 +154,76 @@ fn test_duckdb_non_existent_input() {
         "duckdb",
         "/non/existent/file.arrow",
         output_path.to_str().unwrap(),
+    ])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("No such file or directory"));
+}
+
+#[test]
+fn test_split_to_arrow_help() {
+    let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
+    cmd.args(["split-to-arrow", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Split Arrow data into multiple Arrow files",
+        ))
+        .stdout(predicate::str::contains("Column to split by"));
+}
+
+#[test]
+fn test_split_to_parquet_help() {
+    let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
+    cmd.args(["split-to-parquet", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Split Arrow data into multiple Parquet files",
+        ))
+        .stdout(predicate::str::contains("Column to split by"));
+}
+
+#[test]
+fn test_split_to_arrow_missing_args() {
+    let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
+    cmd.arg("split-to-arrow")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("required arguments"));
+}
+
+#[test]
+fn test_split_to_parquet_missing_args() {
+    let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
+    cmd.arg("split-to-parquet")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("required arguments"));
+}
+
+#[test]
+fn test_split_to_arrow_non_existent_input() {
+    let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
+    cmd.args([
+        "split-to-arrow",
+        "/non/existent/file.arrow",
+        "--by",
+        "category",
+    ])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("No such file or directory"));
+}
+
+#[test]
+fn test_split_to_parquet_non_existent_input() {
+    let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
+    cmd.args([
+        "split-to-parquet",
+        "/non/existent/file.arrow",
+        "--by",
+        "category",
     ])
     .assert()
     .failure()

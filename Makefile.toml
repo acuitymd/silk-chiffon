@@ -1,0 +1,39 @@
+[tasks.rust-build]
+command = "cargo"
+args = ["build", "--release"]
+
+[tasks.rust-test]
+command = "cargo"
+args = ["test", "--verbose"]
+
+[tasks.rust-lint]
+command = "cargo"
+args = ["clippy", "--all-targets", "--all-features", "--", "-D", "warnings"]
+
+[tasks.rust-type-check]
+command = "cargo"
+args = ["check", "--all-features"]
+
+[tasks.python-build]
+command = "rye"
+args = ["run", "maturin", "build", "--release", "--features", "python"]
+
+[tasks.python-install]
+script_runner = "bash"
+script = '''
+  rye run python -m pip install --force-reinstall target/wheels/silk_chiffon-*.whl
+'''
+dependencies = ["python-build"]
+
+[tasks.python-test]
+command = "rye"
+args = ["test"]
+dependencies = ["python-install"]
+
+[tasks.python-lint]
+command = "rye"
+args = ["lint"]
+
+[tasks.python-type-check]
+command = "rye"
+args = ["run", "pyright"]
