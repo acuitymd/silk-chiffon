@@ -9,8 +9,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  test:
-    name: Test
+  rust-ci:
+    name: Rust CI for ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:

@@ -6,8 +6,8 @@ on:
     branches: [main]
 
 jobs:
-  test:
-    name: Test Python ${{ matrix.python-version }} on ${{ matrix.os }}
+  python-ci:
+    name: Python CI for ${{ matrix.python-version }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
