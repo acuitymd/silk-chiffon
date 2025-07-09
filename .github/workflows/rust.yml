@@ -18,7 +18,6 @@ jobs:
     name: Rust (${{ matrix.rust }}) CI for ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
-      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
         rust: [stable, beta, nightly]
