@@ -28,8 +28,8 @@ mod tests {
         },
     };
     use arrow::array::{Array, Int32Array};
-    use nix::unistd::Uid;
-    use std::path::Path;
+    use std::fs::{Permissions, create_dir, set_permissions};
+    use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
 
     mod integration_tests {
@@ -113,22 +113,25 @@ mod tests {
 
         #[tokio::test]
         async fn test_output_directory_creation_failure() {
-            if Uid::effective().is_root() {
-                // skip test if running as root
-                return;
-            }
+            // This is tricky to test, because we might be the root user or we might be on CI
+            // and have permissions to directories literally everywhere. So, to solve this,
+            // we'll:
+            //
+            // 1. create a restricted directory and remove all permissions from it.
+            // 2. try to create a subdirectory inside the restricted directory
+            // 3. restore permissions for cleanup
+            // 4. assert that the subdirectory creation failed
 
             let temp_dir = tempdir().unwrap();
-            let input_path = temp_dir.path().join("input.arrow");
+            let restricted_dir = temp_dir.path().join("restricted");
 
-            let test_ids = vec![1, 2, 3];
-            let test_names = vec!["A", "B", "C"];
+            create_dir(&restricted_dir).unwrap();
+            set_permissions(&restricted_dir, Permissions::from_mode(0o000)).unwrap();
 
-            let schema = test_data::simple_schema();
-            let batch = test_data::create_batch_with_ids_and_names(&schema, &test_ids, &test_names);
-            file_helpers::write_arrow_file(&input_path, &schema, vec![batch]).unwrap();
+            let result = ensure_parent_dir_exists(&restricted_dir.join("subdir/file.arrow")).await;
 
-            let result = ensure_parent_dir_exists(Path::new("/root/no_permission")).await;
+            set_permissions(&restricted_dir, Permissions::from_mode(0o755)).unwrap();
+
             assert!(result.is_err());
         }
     }
