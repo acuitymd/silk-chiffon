@@ -1,10 +1,19 @@
-use arrow::array::{ArrayRef, Float64Array, Int32Array, Int64Array, StringArray};
+use arrow::array::{
+    ArrayRef, Float64Array, Int32Array, Int64Array, RecordBatchReader, StringArray,
+};
 use arrow::datatypes::{DataType, Field, Schema};
+use arrow::error::ArrowError;
+use arrow::ipc::reader::StreamReader;
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use datafusion::catalog::stream::{StreamConfig, StreamProvider, StreamTable};
+use datafusion::error::DataFusionError;
+use datafusion::physical_plan::DisplayFormatType;
 use duckdb::Connection;
+use std::fmt::Formatter;
 use std::fs::{self, File};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -60,7 +69,7 @@ fn generate_test_data(
                 }
                 Arc::new(StringArray::from(split_values))
             }
-            _ => panic!("Unsupported data type for benchmark"),
+            _ => panic!("Unsupported data type for benchmark: {:?}", data_type),
         };
 
         for _ in 0..rows_in_batch {
@@ -139,18 +148,54 @@ fn run_duckdb_arrow(input_path: &std::path::Path, output_dir: &std::path::Path) 
     conn.execute(&query, []).unwrap();
 }
 
+#[derive(Debug)]
+struct ArrowIPCStreamProvider {
+    schema: Arc<Schema>,
+    location: PathBuf,
+}
+
+impl ArrowIPCStreamProvider {
+    pub fn new(schema: Arc<Schema>, location: PathBuf) -> Self {
+        Self { schema, location }
+    }
+}
+
+impl StreamProvider for ArrowIPCStreamProvider {
+    fn schema(&self) -> &Arc<Schema> {
+        &self.schema
+    }
+
+    fn reader(
+        &self,
+    ) -> Result<Box<dyn RecordBatchReader<Item = Result<RecordBatch, ArrowError>>>, DataFusionError>
+    {
+        Ok(Box::new(StreamReader::try_new_buffered(
+            File::open(&self.location)?,
+            None,
+        )?))
+    }
+
+    fn stream_write_display(&self, _t: DisplayFormatType, f: &mut Formatter) -> std::fmt::Result {
+        f.debug_struct("ArrowIPCStreamProvider")
+            .field("location", &self.location)
+            .finish()
+    }
+}
+
 async fn run_datafusion_parquet(input_path: &std::path::Path, output_dir: &std::path::Path) {
     use datafusion::prelude::*;
 
     let ctx = SessionContext::new();
 
     let file = File::open(input_path).unwrap();
-    let reader = arrow::ipc::reader::StreamReader::try_new(file, None).unwrap();
-    let schema = reader.schema();
-    let batches: Vec<_> = reader.collect::<Result<Vec<_>, _>>().unwrap();
+    let reader = StreamReader::try_new_buffered(file, None).unwrap();
+    let stream_provider = Arc::new(ArrowIPCStreamProvider::new(
+        reader.schema(),
+        input_path.to_path_buf(),
+    ));
+    let stream_table = StreamTable::new(Arc::new(StreamConfig::new(stream_provider)));
 
-    let provider = datafusion::datasource::MemTable::try_new(schema, vec![batches]).unwrap();
-    ctx.register_table("arrow_table", Arc::new(provider))
+    ctx.register_table("arrow_table", Arc::new(stream_table))
         .unwrap();
 
     let df = ctx.table("arrow_table").await.unwrap();
