@@ -18,6 +18,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: opt-nc/setup-duckdb-action@v1.0.13
+
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
