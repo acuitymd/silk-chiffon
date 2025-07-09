@@ -37,6 +37,13 @@ pub enum OutputFormat {
     },
 }
 
+struct ProcessingState {
+    current_value: Value,
+    writer: Option<PartitionWriter>,
+    coalescer: SliceCoalescer,
+    paths: Vec<PathBuf>,
+}
+
 pub struct SplitConverter {
     input_path: String,
     split_column: String,
@@ -317,10 +324,7 @@ impl SplitConverter {
     async fn process_batch(
         &self,
         batch: arrow::record_batch::RecordBatch,
-        current_value: &mut Value,
-        writer: &mut Option<PartitionWriter>,
-        coalescer: &mut SliceCoalescer,
-        paths: &mut Vec<PathBuf>,
+        state: &mut ProcessingState,
     ) -> Result<()> {
         if batch.num_rows() == 0 {
             return Ok(());
@@ -333,14 +337,14 @@ impl SplitConverter {
         let array = self.create_array_values(column)?;
         let schema = batch.schema();
 
-        if current_value.is_none() {
-            *current_value = array.get_value(0);
+        if state.current_value.is_none() {
+            state.current_value = array.get_value(0);
             let initial_path = self
                 .output_template
-                .resolve(&self.split_column, &self.format_value(current_value));
+                .resolve(&self.split_column, &self.format_value(&state.current_value));
 
-            paths.push(initial_path.clone());
-            *writer = Some(self.create_writer(&initial_path, &schema).await?);
+            state.paths.push(initial_path.clone());
+            state.writer = Some(self.create_writer(&initial_path, &schema).await?);
         }
 
         let mut from_row_index = 0;
@@ -354,25 +358,29 @@ impl SplitConverter {
 
             let value = array.get_value(from_row_index);
 
-            if !current_value.is_none() && current_value != &value {
-                self.finish_current_partition(writer, coalescer)?;
+            if !state.current_value.is_none() && state.current_value != value {
+                self.finish_current_partition(state)?;
 
                 let new_path = self
                     .output_template
                     .resolve(&self.split_column, &self.format_value(&value));
 
-                paths.push(new_path.clone());
-                *writer = Some(self.create_writer(&new_path, &schema).await?);
-                *coalescer = SliceCoalescer::new(schema.clone(), self.record_batch_size);
+                state.paths.push(new_path.clone());
+                state.writer = Some(self.create_writer(&new_path, &schema).await?);
+                state.coalescer = SliceCoalescer::new(schema.clone(), self.record_batch_size);
             }
 
-            *current_value = value;
+            state.current_value = value;
 
             let slice = batch.slice(from_row_index, to_row_index - from_row_index);
-            let completed_batches = coalescer.push_slice(slice)?;
+            let completed_batches = state.coalescer.push_slice(slice)?;
 
             for completed_batch in completed_batches {
-                writer.as_mut().unwrap().write_batch(&completed_batch)?;
+                state
+                    .writer
+                    .as_mut()
+                    .unwrap()
+                    .write_batch(&completed_batch)?;
             }
 
             from_row_index = to_row_index;
@@ -381,16 +389,12 @@ impl SplitConverter {
         Ok(())
     }
 
-    fn finish_current_partition(
-        &self,
-        writer: &mut Option<PartitionWriter>,
-        coalescer: &mut SliceCoalescer,
-    ) -> Result<()> {
-        if let Some(batch) = coalescer.flush()? {
-            writer.as_mut().unwrap().write_batch(&batch)?;
+    fn finish_current_partition(&self, state: &mut ProcessingState) -> Result<()> {
+        if let Some(batch) = state.coalescer.flush()? {
+            state.writer.as_mut().unwrap().write_batch(&batch)?;
         }
 
-        if let Some(w) = writer.take() {
+        if let Some(w) = state.writer.take() {
             w.finish()?;
         }
 
@@ -403,27 +407,22 @@ impl SplitConverter {
         let file_reader = FileReader::try_new_buffered(File::open(sorted_path.path())?, None)?;
         let schema = file_reader.schema();
 
-        let mut current_value = Value::None;
-        let mut paths = Vec::new();
-        let mut writer: Option<PartitionWriter> = None;
-        let mut coalescer = SliceCoalescer::new(schema.clone(), self.record_batch_size);
+        let mut state = ProcessingState {
+            current_value: Value::None,
+            writer: None,
+            coalescer: SliceCoalescer::new(schema.clone(), self.record_batch_size),
+            paths: Vec::new(),
+        };
 
         for batch in file_reader {
             let batch = batch?;
-            self.process_batch(
-                batch,
-                &mut current_value,
-                &mut writer,
-                &mut coalescer,
-                &mut paths,
-            )
-            .await?;
+            self.process_batch(batch, &mut state).await?;
         }
 
-        self.finish_current_partition(&mut writer, &mut coalescer)?;
+        self.finish_current_partition(&mut state)?;
 
-        paths.sort();
-        Ok(paths)
+        state.paths.sort();
+        Ok(state.paths)
     }
 }
 
