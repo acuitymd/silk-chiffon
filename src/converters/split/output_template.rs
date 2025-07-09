@@ -1,3 +1,4 @@
+use sanitize_filename::{Options, sanitize_with_options};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 
@@ -16,23 +17,21 @@ impl OutputTemplate {
 
         result = result.replace("{value}", value);
         result = result.replace("{column}", column_name);
-        result = result.replace("{safe_value}", &sanitize_filename(value));
+        result = result.replace(
+            "{safe_value}",
+            &sanitize_with_options(
+                value,
+                Options {
+                    truncate: true,
+                    replacement: "_",
+                    ..Options::default()
+                },
+            ),
+        );
         result = result.replace("{hash}", &hash_value(value));
 
         PathBuf::from(result)
     }
-}
-
-fn sanitize_filename(value: &str) -> String {
-    value
-        .chars()
-        .map(|c| match c {
-            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
-            c if c.is_control() => '_',
-            c => c,
-        })
-        .take(255)
-        .collect()
 }
 
 fn hash_value(value: &str) -> String {
@@ -92,32 +91,11 @@ mod tests {
     }
 
     #[test]
-    fn test_sanitize_filename() {
-        assert_eq!(sanitize_filename("normal_name"), "normal_name");
-        assert_eq!(sanitize_filename("file/name"), "file_name");
-        assert_eq!(sanitize_filename("file\\name"), "file_name");
-        assert_eq!(sanitize_filename("file:name"), "file_name");
-        assert_eq!(sanitize_filename("file*name"), "file_name");
-        assert_eq!(sanitize_filename("file?name"), "file_name");
-        assert_eq!(sanitize_filename("file\"name"), "file_name");
-        assert_eq!(sanitize_filename("file<name>"), "file_name_");
-        assert_eq!(sanitize_filename("file|name"), "file_name");
-        assert_eq!(sanitize_filename("file\x00name"), "file_name");
-    }
-
-    #[test]
     fn test_hash_consistency() {
         let value = "test value";
         let hash1 = hash_value(value);
         let hash2 = hash_value(value);
         assert_eq!(hash1, hash2);
         assert_eq!(hash1.len(), 8);
-    }
-
-    #[test]
-    fn test_long_filename_truncation() {
-        let long_value = "a".repeat(300);
-        let sanitized = sanitize_filename(&long_value);
-        assert_eq!(sanitized.len(), 255);
     }
 }

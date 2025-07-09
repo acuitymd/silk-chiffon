@@ -34,6 +34,7 @@ pyo3 = { version = "0.22", features = [
 sha2 = "0.10"
 tempfile = "3.20.0"
 tokio = { version = "1.45.1", features = ["full"] }
+sanitize-filename = "0.6.0"
 
 [features]
 default = []
