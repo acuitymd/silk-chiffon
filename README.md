@@ -8,14 +8,15 @@ A blazingly fast, memory-efficient CLI tool and Python library for converting be
 
 Silk Chiffon is versatile tool for Arrow-to-X data format conversions. Like its namesake fabric&mdash;light, flowing, and effortlessly elegant&mdash;this tool makes data transformations silky smooth.
 
-### 🎯 Core Features
+### ️🎯 Core Features
 
 - **🚀 Lightning Fast**: Built with Rust for native performance.
-- **🔄 Multi-Format Support**: Convert from Arrow IPC to Arrow IPC, Parquet, and DuckDB.
-- **🧩 Smart Processing**: Sort, compress, and optimize your data on-the-fly.
+- **🤹🏻‍♀ Multi-Format Support**: Convert from Arrow IPC to Arrow IPC, Parquet, and DuckDB.
+- **🪓 Data Partitioning**: Split data into multiple files based on column values.
+- **🧠 Smart Processing**: Sort, compress, and optimize your data on-the-fly.
 - **🐍 Python-Friendly**: Native Python bindings for seamless integration.
-- **💾 Memory Efficient**: Configurable batch processing for huge datasets.
-- **🎨 Rich Configuration**: Fine-tune many aspects of your conversions.
+- **🤏🏻 Memory Efficient**: Configurable batch processing for huge datasets.
+- **⚙️ Rich Configuration**: Fine-tune many aspects of your conversions.
 
 ## 📦 Installation
 
@@ -85,9 +86,28 @@ sc.arrow_to_duckdb(
     table_name="events",
     sort_by="timestamp"
 )
+
+# Split Arrow data by category into multiple Arrow files
+sc.split_to_arrow(
+    "data.arrow",
+    "output/{value}.arrow",
+    split_by="category",
+    sort_by=[("timestamp", "desc")],
+    compression="lz4"
+)
+
+# Split Arrow data into partitioned Parquet files
+sc.split_to_parquet(
+    "transactions.arrow",
+    "by_customer/{value}/data.parquet",
+    split_by="customer_id",
+    compression="zstd",
+    bloom_filter_columns=["transaction_id"],
+    create_dirs=True
+)
 ```
 
-## 📋 Command Reference
+## 🗒️ Command Reference
 
 ### 🪶 Arrow → Parquet
 
@@ -140,7 +160,7 @@ silk-chiffon duckdb [OPTIONS] --table-name <TABLE_NAME> <INPUT> <OUTPUT>
 - `--drop-table`: Replace existing table of the same name
 - `--truncate`: Start fresh with an empty database
 
-### 🔄 Arrow → Arrow
+### 🏹 Arrow → Arrow
 
 Transform between Arrow formats or apply optimizations to an Arrow file:
 
@@ -153,6 +173,82 @@ silk-chiffon arrow [OPTIONS] <INPUT> <OUTPUT>
 - `--compression`: Apply `zstd`, `lz4`, or keep uncompressed
 - `--sort-by`: Reorder your data
 - `--record-batch-size`: Control memory usage
+
+### 📂 Split Arrow → Multiple Arrow Files
+
+Split your Arrow data into multiple files based on unique values in a column:
+
+```bash
+silk-chiffon split-to-arrow [OPTIONS] --by <COLUMN> <INPUT>
+```
+
+**Key Options:**
+
+- `--by`: Column to split by (required)
+- `--output-template`: File naming template with placeholders
+- `--sort-by`: Sort data within each partition
+- `--compression`: Apply compression to output files
+- `--create-dirs`: Create output directories as needed
+- `--overwrite`: Replace existing files
+
+**Example:**
+
+```bash
+# Split by region, creating one file per unique region value
+silk-chiffon split-to-arrow data.arrow --by region \
+  --output-template "output/{column}/{value}.arrow"
+
+# Split with sorting and compression
+silk-chiffon split-to-arrow events.arrow --by date \
+  --output-template "events_{value}.arrow" \
+  --sort-by "timestamp:desc" \
+  --compression lz4 \
+  --create-dirs
+```
+
+### 📁 Split Arrow → Multiple Parquet Files
+
+Split your Arrow data into multiple Parquet files based on unique values in a column:
+
+```bash
+silk-chiffon split-to-parquet [OPTIONS] --by <COLUMN> <INPUT>
+```
+
+**Key Options:**
+
+- `--by`: Column to split by (required)
+- `--output-template`: File naming template with placeholders
+- `--sort-by`: Sort data within each partition
+- `--compression`: Choose compression algorithm
+- `--bloom-all` / `--bloom-column`: Configure bloom filters
+- `--write-sorted-metadata`: Embed sort metadata
+- `--create-dirs`: Create output directories as needed
+- `--overwrite`: Replace existing files
+
+**Example:**
+
+```bash
+# Split by customer_id with Parquet optimizations
+silk-chiffon split-to-parquet transactions.arrow --by customer_id \
+  --output-template "customers/{value}/transactions.parquet" \
+  --compression zstd \
+  --bloom-column "transaction_id" \
+  --create-dirs
+
+# Split with sorting and metadata
+silk-chiffon split-to-parquet logs.arrow --by log_level \
+  --output-template "logs/level_{value}.parquet" \
+  --sort-by "timestamp" \
+  --write-sorted-metadata \
+  --statistics page
+```
+
+**Template Placeholders:**
+
+- `{value}`: The raw column value
+- `{column}`: The column name
+- `{safe_value}`: Sanitized value safe for filenames
+- `{hash}`: First 8 characters of SHA256 hash of the value
 
 ## 🎯 Use Cases
 
@@ -213,6 +309,26 @@ sc.arrow_to_parquet(
 )
 ```
 
+### 🗂️ Data Partitioning
+
+Split large datasets into manageable partitions:
+
+```bash
+# Partition by date for time-series data
+silk-chiffon split-to-parquet sensor_data.arrow \
+  --by date \
+  --output-template "data/{column}/{value}/sensors.parquet" \
+  --sort-by "timestamp,sensor_id" \
+  --compression zstd \
+  --create-dirs
+
+# Split customer data by region for parallel processing
+silk-chiffon split-to-arrow customers.arrow \
+  --by region \
+  --output-template "regions/{safe_value}.arrow" \
+  --sort-by "customer_id"
+```
+
 ## 🔧 Advanced Features
 
 ### Bloom Filters
@@ -259,4 +375,4 @@ Silk Chiffon is open source software, licensed under [LICENSE](./LICENSE).
 
 ---
 
-_Made with 🦀 and ❤️ for the data community_
+_Made with 🦀 and ❤️ by AcuityMD for the data community_
