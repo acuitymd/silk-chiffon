@@ -5,7 +5,7 @@ use crate::{
 use anyhow::{Result, anyhow};
 use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
-use arrow::ipc::writer::FileWriter;
+use arrow::ipc::writer::{FileWriter, IpcWriteOptions};
 use parquet::arrow::arrow_writer::ArrowWriter;
 use parquet::file::properties::{WriterProperties, WriterPropertiesBuilder};
 use parquet::format::SortingColumn;
@@ -55,12 +55,12 @@ impl PartitionWriter {
     }
 }
 
-pub struct WriterBuilder {
+pub struct ArrowWriterBuilder {
     schema: SchemaRef,
     compression: Option<ArrowCompression>,
 }
 
-impl WriterBuilder {
+impl ArrowWriterBuilder {
     pub fn new(schema: SchemaRef) -> Self {
         Self {
             schema,
@@ -79,11 +79,11 @@ impl WriterBuilder {
 
         let writer = if let Some(compression) = &self.compression {
             let options = match compression {
-                ArrowCompression::Zstd => arrow::ipc::writer::IpcWriteOptions::default()
+                ArrowCompression::Zstd => IpcWriteOptions::default()
                     .try_with_compression(Some(arrow::ipc::CompressionType::ZSTD))?,
-                ArrowCompression::Lz4 => arrow::ipc::writer::IpcWriteOptions::default()
+                ArrowCompression::Lz4 => IpcWriteOptions::default()
                     .try_with_compression(Some(arrow::ipc::CompressionType::LZ4_FRAME))?,
-                ArrowCompression::None => arrow::ipc::writer::IpcWriteOptions::default(),
+                ArrowCompression::None => IpcWriteOptions::default(),
             };
             FileWriter::try_new_with_options(buf_writer, &self.schema, options)?
         } else {
@@ -204,36 +204,20 @@ impl ParquetWriterBuilder {
 
     fn apply_bloom_filters(
         &self,
-        mut builder: WriterPropertiesBuilder,
+        builder: WriterPropertiesBuilder,
     ) -> Result<WriterPropertiesBuilder> {
         match &self.bloom_filters {
             BloomFilterConfig::None => Ok(builder),
-            BloomFilterConfig::All(bloom_all) => {
-                let fpp = bloom_all.fpp;
-                builder = builder
-                    .set_bloom_filter_enabled(true)
-                    .set_bloom_filter_fpp(fpp);
-
-                let default_ndv = 100000;
-                for field in self.schema.fields() {
-                    let col_path = ColumnPath::from(field.name().as_str());
-                    builder = builder.set_column_bloom_filter_ndv(col_path, default_ndv);
-                }
-                Ok(builder)
-            }
+            BloomFilterConfig::All(bloom_all) => Ok(builder
+                .set_bloom_filter_enabled(true)
+                .set_bloom_filter_fpp(bloom_all.fpp)),
             BloomFilterConfig::Columns(columns) => {
-                for bloom_col in columns {
+                Ok(columns.iter().fold(builder, |acc_builder, bloom_col| {
                     let col_path = ColumnPath::from(bloom_col.name.as_str());
-                    let fpp = bloom_col.config.fpp;
-
-                    let default_ndv = 100000;
-
-                    builder = builder
+                    acc_builder
                         .set_column_bloom_filter_enabled(col_path.clone(), true)
-                        .set_column_bloom_filter_fpp(col_path.clone(), fpp)
-                        .set_column_bloom_filter_ndv(col_path, default_ndv);
-                }
-                Ok(builder)
+                        .set_column_bloom_filter_fpp(col_path.clone(), bloom_col.config.fpp)
+                }))
             }
         }
     }
@@ -303,7 +287,7 @@ mod tests {
         let path = temp_dir.path().join("test.arrow");
         let schema = create_test_schema();
 
-        let builder = WriterBuilder::new(schema.clone());
+        let builder = ArrowWriterBuilder::new(schema.clone());
         let mut writer = builder.build_arrow_writer(&path).unwrap();
 
         let batch = create_test_batch(schema);
@@ -325,7 +309,8 @@ mod tests {
                 .path()
                 .join(format!("test_{:?}.arrow", compression));
 
-            let builder = WriterBuilder::new(schema.clone()).with_compression(Some(compression));
+            let builder =
+                ArrowWriterBuilder::new(schema.clone()).with_compression(Some(compression));
             let mut writer = builder.build_arrow_writer(&path).unwrap();
 
             writer.write_batch(&batch).unwrap();

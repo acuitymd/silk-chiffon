@@ -1,7 +1,7 @@
 use crate::converters::arrow::ArrowConverter;
 use crate::converters::split::output_template::OutputTemplate;
 use crate::converters::split::partition_writer::{
-    ParquetWriterBuilder, PartitionWriter, WriterBuilder,
+    ArrowWriterBuilder, ParquetWriterBuilder, PartitionWriter,
 };
 use crate::converters::split::slice_coalescer::SliceCoalescer;
 use crate::{
@@ -253,7 +253,7 @@ impl SplitConverter {
         }
 
         match &self.output_format {
-            OutputFormat::Arrow { compression } => Ok(WriterBuilder::new(schema.clone())
+            OutputFormat::Arrow { compression } => Ok(ArrowWriterBuilder::new(schema.clone())
                 .with_compression(compression.clone())
                 .build_arrow_writer(path)?),
             OutputFormat::Parquet {
