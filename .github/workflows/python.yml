@@ -18,10 +18,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup DuckDB
+      - name: Setup DuckDB (Ubuntu only)
+        if: ${{ matrix.os == 'ubuntu-latest' }}
         uses: opt-nc/setup-duckdb-action@v1.0.13
-        with:
-          version: v1.3.2
+
+      - name: Setup DuckDB (macOS only)
+        if: ${{ matrix.os == 'macos-latest' }}
+        run: |
+          brew install duckdb
 
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
