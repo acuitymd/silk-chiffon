@@ -18,6 +18,8 @@ jobs:
     name: Rust (${{ matrix.rust }}) CI for ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
+      # This defaults to true so we need to explicitly set it to false
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
         rust: [stable, beta, nightly]
