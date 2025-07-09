@@ -2,9 +2,22 @@
 name = "silk_chiffon"
 version = "0.1.0"
 edition = "2024"
+authors = ["Cora Sutton <cora@sutton.me>"]
+description = "Silky smooth conversion between columnar data formats 💝"
+license = "MIT"
+repository = "https://github.com/acuitymd/silk-chiffon"
+homepage = "https://github.com/acuitymd/silk-chiffon"
+readme = "README.md"
+categories = [
+  "command line utilities",
+  "python libraries",
+  "data processing",
+  "columnar data",
+]
 
 [lib]
 name = "silk_chiffon"
+lib = "src/lib.rs"
 crate-type = ["cdylib", "rlib"]
 
 [[bin]]
