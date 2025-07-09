@@ -2,7 +2,6 @@ name: Python CI
 
 on:
   push:
-    branches: [main]
   pull_request:
     branches: [main]
 
@@ -14,7 +13,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+        python-version: ["3.11", "3.12", "3.13"]
 
     steps:
       - uses: actions/checkout@v4
@@ -38,7 +37,6 @@ jobs:
       - name: Install dependencies
         run: |
           rye sync --no-lock
-          rye add --dev pytest pyright
 
       - name: Build Python module
         run: |
@@ -46,10 +44,10 @@ jobs:
           rye run pip install --force-reinstall target/wheels/*.whl
 
       - name: Check Python formatting
-        run: rye run ruff format --check .
+        run: rye fmt --check
 
       - name: Lint Python code
-        run: rye run ruff check .
+        run: rye lint
 
       - name: Type check
         if: matrix.python-version == '3.12' && matrix.os == 'ubuntu-latest'
