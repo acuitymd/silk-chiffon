@@ -21,7 +21,10 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - uses: opt-nc/setup-duckdb-action@v1.0.13
+      - name: Setup DuckDB
+        uses: opt-nc/setup-duckdb-action@v1.0.13
+        with:
+          version: v1.3.2
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
