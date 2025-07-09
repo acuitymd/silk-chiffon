@@ -26,26 +26,26 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1.0.98"
 arrow = { version = "55.2.0", features = ["default", "ipc_compression"] }
-clap = { version = "4.5.40", features = ["default", "derive"] }
+clap = { version = "4.5.41", features = ["default", "derive"] }
 clio = { version = "0.3.5", features = ["clap-parse"] }
-datafusion = "48.0.0"
+datafusion = "48.0.1"
 duckdb = "1.3.2"
 futures = "0.3.31"
-pg_escape = "0.1.0"
+pg_escape = "0.1.1"
 parquet = { version = "55.2.0", features = [
   "default",
   "async",
   "json",
   "arrow_canonical_extension_types",
 ] }
-pyo3 = { version = "0.22", features = [
+pyo3 = { version = "0.25", features = [
   "abi3-py39",
   "anyhow",
   "extension-module",
 ], optional = true }
 sha2 = "0.10"
 tempfile = "3.20.0"
-tokio = { version = "1.45.1", features = ["full"] }
+tokio = { version = "1.46.1", features = ["full"] }
 sanitize-filename = "0.6.0"
 
 [features]
@@ -57,7 +57,7 @@ tempfile = "3.20.0"
 assert_cmd = "2.0.17"
 predicates = "3.1.3"
 rand = "0.9.1"
-criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
+criterion = { version = "0.6", features = ["html_reports", "async_tokio"] }
 
 [[bench]]
 name = "split_benchmark"

@@ -23,33 +23,33 @@ command = "cargo"
 args = ["check", "--all-features"]
 
 [tasks.python-fmt]
-command = "rye"
-args = ["fmt"]
+command = "uv"
+args = ["run", "ruff", "format"]
 
 [tasks.python-fmt-check]
-command = "rye"
-args = ["fmt", "--check"]
+command = "uv"
+args = ["run", "ruff", "format", "--check"]
 
 [tasks.python-build]
-command = "rye"
+command = "uv"
 args = ["run", "maturin", "build", "--release", "--features", "python"]
 
 [tasks.python-install]
 script_runner = "bash"
 script = '''
-  rye run python -m pip install --force-reinstall target/wheels/silk_chiffon-*.whl
+  uv run python -m pip install --force-reinstall target/wheels/silk_chiffon-*.whl
 '''
 dependencies = ["python-build"]
 
 [tasks.python-test]
-command = "rye"
-args = ["test"]
+command = "uv"
+args = ["run", "pytest"]
 dependencies = ["python-install"]
 
 [tasks.python-lint]
-command = "rye"
-args = ["lint"]
+command = "uv"
+args = ["run", "ruff", "check"]
 
 [tasks.python-type-check]
-command = "rye"
+command = "uv"
 args = ["run", "pyright"]

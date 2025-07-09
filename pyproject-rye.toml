@@ -17,7 +17,7 @@ classifiers = [
 readme = "README.md"
 license = { text = "MIT" }
 
-[tool.uv]
+[tool.rye]
 managed = true
 dev-dependencies = [
     "pytest>=8.0.0",
@@ -34,19 +34,33 @@ dev-dependencies = [
 features = ["pyo3/extension-module"]
 
 [tool.ruff]
+# Same line length as Black
 line-length = 88
-target-version = "py311"
+
+# Target Python 3.9+
+target-version = "py39"
 
 [tool.ruff.lint]
+# Enable pycodestyle (E), pyflakes (F), and isort (I) rules
 select = ["E", "F", "I"]
-ignore = ["E501"]
+
+# Ignore specific rules if needed
+ignore = [
+    "E501", # Line too long (handled by formatter)
+]
 
 [tool.ruff.format]
+# Use double quotes for strings
 quote-style = "double"
+
+# Indent with spaces
 indent-style = "space"
+
+# Unix-style line endings
 line-ending = "lf"
 
 [tool.pytest.ini_options]
+# pytest configuration
 testpaths = ["tests"]
 python_files = ["test_*.py", "*_test.py"]
 python_classes = ["Test*"]
