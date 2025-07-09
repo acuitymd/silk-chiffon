@@ -6,12 +6,10 @@ build-backend = "maturin"
 name = "silk_chiffon"
 version = "0.1.0"
 description = "Fast Arrow format conversions"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -48,7 +46,7 @@ select = ["E", "F", "I"]
 
 # Ignore specific rules if needed
 ignore = [
-    "E501",  # Line too long (handled by formatter)
+    "E501", # Line too long (handled by formatter)
 ]
 
 [tool.ruff.format]
