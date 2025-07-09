@@ -1,3 +1,11 @@
+[tasks.rust-fmt]
+command = "cargo"
+args = ["fmt"]
+
+[tasks.rust-fmt-check]
+command = "cargo"
+args = ["fmt", "--check"]
+
 [tasks.rust-build]
 command = "cargo"
 args = ["build", "--release"]
@@ -13,6 +21,14 @@ args = ["clippy", "--all-targets", "--all-features", "--", "-D", "warnings"]
 [tasks.rust-type-check]
 command = "cargo"
 args = ["check", "--all-features"]
+
+[tasks.python-fmt]
+command = "rye"
+args = ["fmt"]
+
+[tasks.python-fmt-check]
+command = "rye"
+args = ["fmt", "--check"]
 
 [tasks.python-build]
 command = "rye"

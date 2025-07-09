@@ -51,13 +51,13 @@ jobs:
         run: cargo install cargo-make
 
       - name: Check formatting
-        run: cargo fmt -- --check
+        run: cargo make rust-fmt-check
 
-      - name: Run clippy
-        run: cargo make lint
+      - name: Check linting
+        run: cargo make rust-lint
+
+      - name: Check types
+        run: cargo make rust-type-check
 
       - name: Run tests
-        run: cargo test --verbose
-
-      - name: Check
-        run: cargo check --all-features
+        run: cargo make rust-test
