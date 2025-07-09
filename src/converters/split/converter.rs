@@ -12,7 +12,7 @@ use arrow::array::{Array, AsArray, GenericByteArray, PrimitiveArray, RecordBatch
 use arrow::compute::BatchCoalescer;
 use arrow::datatypes::{
     DataType, Float32Type, Float64Type, GenericStringType, Int8Type, Int16Type, Int32Type,
-    Int64Type, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
+    Int64Type, SchemaRef, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
 };
 use arrow::ipc::reader::FileReader;
 use std::fs::{self, File};
@@ -37,11 +37,22 @@ pub enum OutputFormat {
     },
 }
 
-struct ProcessingState {
+struct PartitioningState {
     current_value: Value,
     writer: Option<PartitionWriter>,
     coalescer: BatchCoalescer,
     paths: Vec<PathBuf>,
+}
+
+impl PartitioningState {
+    fn new(schema: SchemaRef, record_batch_size: usize) -> Self {
+        Self {
+            current_value: Value::None,
+            writer: None,
+            coalescer: BatchCoalescer::new(schema, record_batch_size),
+            paths: Vec::new(),
+        }
+    }
 }
 
 pub struct SplitConverter {
@@ -321,7 +332,11 @@ impl SplitConverter {
         }
     }
 
-    async fn process_batch(&self, batch: RecordBatch, state: &mut ProcessingState) -> Result<()> {
+    async fn process_batch(
+        &self,
+        batch: RecordBatch,
+        partitioning_state: &mut PartitioningState,
+    ) -> Result<()> {
         if batch.num_rows() == 0 {
             return Ok(());
         }
@@ -333,14 +348,15 @@ impl SplitConverter {
         let array = self.create_array_values(column)?;
         let schema = batch.schema();
 
-        if state.current_value.is_none() {
-            state.current_value = array.get_value(0);
-            let initial_path = self
-                .output_template
-                .resolve(&self.split_column, &self.format_value(&state.current_value));
+        if partitioning_state.current_value.is_none() {
+            partitioning_state.current_value = array.get_value(0);
+            let initial_path = self.output_template.resolve(
+                &self.split_column,
+                &self.format_value(&partitioning_state.current_value),
+            );
 
-            state.paths.push(initial_path.clone());
-            state.writer = Some(self.create_writer(&initial_path, &schema).await?);
+            partitioning_state.paths.push(initial_path.clone());
+            partitioning_state.writer = Some(self.create_writer(&initial_path, &schema).await?);
         }
 
         let mut from_row_index = 0;
@@ -354,24 +370,27 @@ impl SplitConverter {
 
             let value = array.get_value(from_row_index);
 
-            if !state.current_value.is_none() && state.current_value != value {
-                self.finish_current_partition(state)?;
+            if !partitioning_state.current_value.is_none()
+                && partitioning_state.current_value != value
+            {
+                self.finish_current_partition(partitioning_state)?;
 
                 let new_path = self
                     .output_template
                     .resolve(&self.split_column, &self.format_value(&value));
 
-                state.paths.push(new_path.clone());
-                state.writer = Some(self.create_writer(&new_path, &schema).await?);
-                state.coalescer = BatchCoalescer::new(schema.clone(), self.record_batch_size);
+                partitioning_state.paths.push(new_path.clone());
+                partitioning_state.writer = Some(self.create_writer(&new_path, &schema).await?);
+                partitioning_state.coalescer =
+                    BatchCoalescer::new(schema.clone(), self.record_batch_size);
             }
 
-            state.current_value = value;
+            partitioning_state.current_value = value;
 
             let slice = batch.slice(from_row_index, to_row_index - from_row_index);
-            state.coalescer.push_batch(slice)?;
+            partitioning_state.coalescer.push_batch(slice)?;
 
-            self.write_pending_batches(state)?;
+            self.write_pending_batches(partitioning_state)?;
 
             from_row_index = to_row_index;
         }
@@ -379,9 +398,9 @@ impl SplitConverter {
         Ok(())
     }
 
-    fn write_pending_batches(&self, state: &mut ProcessingState) -> Result<()> {
-        while let Some(completed_batch) = state.coalescer.next_completed_batch() {
-            state
+    fn write_pending_batches(&self, partitioning_state: &mut PartitioningState) -> Result<()> {
+        while let Some(completed_batch) = partitioning_state.coalescer.next_completed_batch() {
+            partitioning_state
                 .writer
                 .as_mut()
                 .unwrap()
@@ -391,12 +410,12 @@ impl SplitConverter {
         Ok(())
     }
 
-    fn finish_current_partition(&self, state: &mut ProcessingState) -> Result<()> {
-        state.coalescer.finish_buffered_batch()?;
+    fn finish_current_partition(&self, partitioning_state: &mut PartitioningState) -> Result<()> {
+        partitioning_state.coalescer.finish_buffered_batch()?;
 
-        self.write_pending_batches(state)?;
+        self.write_pending_batches(partitioning_state)?;
 
-        if let Some(w) = state.writer.take() {
+        if let Some(w) = partitioning_state.writer.take() {
             w.finish()?;
         }
 
@@ -409,22 +428,17 @@ impl SplitConverter {
         let file_reader = FileReader::try_new_buffered(File::open(sorted_path.path())?, None)?;
         let schema = file_reader.schema();
 
-        let mut state = ProcessingState {
-            current_value: Value::None,
-            writer: None,
-            coalescer: BatchCoalescer::new(schema.clone(), self.record_batch_size),
-            paths: Vec::new(),
-        };
+        let mut partitioning_state = PartitioningState::new(schema.clone(), self.record_batch_size);
 
         for batch in file_reader {
             let batch = batch?;
-            self.process_batch(batch, &mut state).await?;
+            self.process_batch(batch, &mut partitioning_state).await?;
         }
 
-        self.finish_current_partition(&mut state)?;
+        self.finish_current_partition(&mut partitioning_state)?;
 
-        state.paths.sort();
-        Ok(state.paths)
+        partitioning_state.paths.sort();
+        Ok(partitioning_state.paths)
     }
 }
 
