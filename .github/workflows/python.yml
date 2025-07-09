@@ -67,7 +67,7 @@ jobs:
       - name: Build and install Python module
         run: |
           rye run maturin build --release --features python
-          rye run python -m pip install --force-reinstall target/wheels/*manylinux*.whl
+          ls targets/wheels/*.whl | head -1 | xargs -I {} rye run python -m pip install --force-reinstall {}
 
       - name: Check Python formatting
         run: rye fmt --check
