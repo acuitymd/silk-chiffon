@@ -2,7 +2,7 @@ use arrow::array::{ArrayRef, Float64Array, Int32Array, Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use duckdb::Connection;
 use std::fs::{self, File};
 use std::sync::Arc;
@@ -171,7 +171,7 @@ fn bench_format_comparison(c: &mut Criterion) {
                     |(temp_dir, input_path)| async move {
                         let output_dir = temp_dir.path().join("silk_arrow_output");
                         fs::create_dir_all(&output_dir).unwrap();
-                        run_silk_arrow(black_box(&input_path), black_box(&output_dir)).await;
+                        run_silk_arrow(&input_path, &output_dir).await;
                     },
                     criterion::BatchSize::SmallInput,
                 );
@@ -187,7 +187,7 @@ fn bench_format_comparison(c: &mut Criterion) {
                     |(temp_dir, input_path)| async move {
                         let output_dir = temp_dir.path().join("silk_parquet_output");
                         fs::create_dir_all(&output_dir).unwrap();
-                        run_silk_parquet(black_box(&input_path), black_box(&output_dir)).await;
+                        run_silk_parquet(&input_path, &output_dir).await;
                     },
                     criterion::BatchSize::SmallInput,
                 );
@@ -203,7 +203,7 @@ fn bench_format_comparison(c: &mut Criterion) {
                     |(temp_dir, input_path)| {
                         let output_dir = temp_dir.path().join("duckdb_parquet_output");
                         fs::create_dir_all(&output_dir).unwrap();
-                        run_duckdb_parquet(black_box(&input_path), black_box(&output_dir));
+                        run_duckdb_parquet(&input_path, &output_dir);
                     },
                     criterion::BatchSize::SmallInput,
                 );

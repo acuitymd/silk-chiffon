@@ -6,7 +6,7 @@ use arrow::error::ArrowError;
 use arrow::ipc::reader::StreamReader;
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use datafusion::catalog::stream::{StreamConfig, StreamProvider, StreamTable};
 use datafusion::error::DataFusionError;
 use datafusion::physical_plan::DisplayFormatType;
@@ -252,7 +252,7 @@ fn bench_small_datasets(c: &mut Criterion) {
                     |(temp_dir, input_path)| async move {
                         let output_dir = temp_dir.path().join("silk_output");
                         fs::create_dir_all(&output_dir).unwrap();
-                        run_silk_arrow(black_box(&input_path), black_box(&output_dir)).await;
+                        run_silk_arrow(&input_path, &output_dir).await;
                     },
                     criterion::BatchSize::SmallInput,
                 );
@@ -268,7 +268,7 @@ fn bench_small_datasets(c: &mut Criterion) {
                     |(temp_dir, input_path)| {
                         let output_dir = temp_dir.path().join("duckdb_output");
                         fs::create_dir_all(&output_dir).unwrap();
-                        run_duckdb_arrow(black_box(&input_path), black_box(&output_dir));
+                        run_duckdb_arrow(&input_path, &output_dir);
                     },
                     criterion::BatchSize::SmallInput,
                 );
@@ -284,8 +284,7 @@ fn bench_small_datasets(c: &mut Criterion) {
                     |(temp_dir, input_path)| async move {
                         let output_dir = temp_dir.path().join("datafusion_output");
                         fs::create_dir_all(&output_dir).unwrap();
-                        run_datafusion_parquet(black_box(&input_path), black_box(&output_dir))
-                            .await;
+                        run_datafusion_parquet(&input_path, &output_dir).await;
                     },
                     criterion::BatchSize::SmallInput,
                 );
@@ -337,7 +336,7 @@ fn bench_large_datasets(c: &mut Criterion) {
                     |(temp_dir, input_path)| async move {
                         let output_dir = temp_dir.path().join("silk_output");
                         fs::create_dir_all(&output_dir).unwrap();
-                        run_silk_arrow(black_box(&input_path), black_box(&output_dir)).await;
+                        run_silk_arrow(&input_path, &output_dir).await;
                     },
                     criterion::BatchSize::SmallInput,
                 );

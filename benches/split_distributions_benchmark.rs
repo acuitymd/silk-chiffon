@@ -2,7 +2,7 @@ use arrow::array::{ArrayRef, Float64Array, Int32Array, Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::fs::{self, File};
 use std::sync::Arc;
 use std::time::Duration;
@@ -191,7 +191,7 @@ fn bench_distributions(c: &mut Criterion) {
                     |(temp_dir, input_path)| async move {
                         let output_dir = temp_dir.path().join("output");
                         fs::create_dir_all(&output_dir).unwrap();
-                        run_silk_chiffon(black_box(&input_path), black_box(&output_dir)).await;
+                        run_silk_chiffon(&input_path, &output_dir).await;
                     },
                     criterion::BatchSize::SmallInput,
                 );
