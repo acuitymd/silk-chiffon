@@ -8,7 +8,7 @@ import silk_chiffon
 
 
 def make_test_file(path: str, rows: int = 1000):
-    t: pa.Table = pa.table( # type: ignore
+    t: pa.Table = pa.table(  # type: ignore
         {
             "id": list(range(rows)),
             "name": [f"name_{i}" for i in range(rows)],
@@ -23,7 +23,7 @@ def make_test_file(path: str, rows: int = 1000):
 
 
 def make_test_file_nulls(path: str):
-    t: pa.Table = pa.table( # type: ignore
+    t: pa.Table = pa.table(  # type: ignore
         {
             "id": list(range(100)),
             "name": [f"name_{i}" for i in range(100)],
@@ -46,7 +46,7 @@ class TestArrowToParquet:
         silk_chiffon.arrow_to_parquet(str(src), str(dst))
 
         assert dst.exists()
-        t: pa.Table = pq.read_table(str(dst)) # type: ignore
+        t: pa.Table = pq.read_table(str(dst))  # type: ignore
         assert len(t) == 1000
         assert set(t.column_names) == {"id", "name", "value", "category"}
 
@@ -58,7 +58,7 @@ class TestArrowToParquet:
         silk_chiffon.arrow_to_parquet(str(src), str(dst), compression="zstd")
 
         pf = pq.ParquetFile(str(dst))
-        assert pf.metadata.row_group(0).column(0).compression.lower() == "zstd" # type: ignore
+        assert pf.metadata.row_group(0).column(0).compression.lower() == "zstd"  # type: ignore
 
     def test_sorting(self, tmp_path: Path):
         src = tmp_path / "test.arrow"
@@ -69,7 +69,7 @@ class TestArrowToParquet:
             str(src), str(dst), sort_by=["category", ("value", "desc")]
         )
 
-        t: pa.Table = pq.read_table(str(dst)) # type: ignore
+        t: pa.Table = pq.read_table(str(dst))  # type: ignore
         cats = t["category"].to_pylist()
         vals = t["value"].to_pylist()
 
@@ -80,7 +80,11 @@ class TestArrowToParquet:
             elif last_cat == cat and i > 0:
                 current_val = vals[i]
                 prev_val = vals[i - 1]
-                assert current_val is not None and prev_val is not None and current_val <= prev_val
+                assert (
+                    current_val is not None
+                    and prev_val is not None
+                    and current_val <= prev_val
+                )
             last_cat = cat
 
     def test_bloom_filter(self, tmp_path: Path):
@@ -115,8 +119,8 @@ class TestArrowToDuckDB:
         make_test_file(str(src))
         silk_chiffon.arrow_to_duckdb(str(src), str(db), "test_table")
 
-        conn: duckdb.DuckDBPyConnection = duckdb.connect(str(db)) # type: ignore
-        count = conn.execute("SELECT COUNT(*) FROM test_table").fetchone()[0] # type: ignore
+        conn: duckdb.DuckDBPyConnection = duckdb.connect(str(db))  # type: ignore
+        count = conn.execute("SELECT COUNT(*) FROM test_table").fetchone()[0]  # type: ignore
         assert count == 1000
 
         cols = {col[0] for col in conn.execute("DESCRIBE test_table").fetchall()}
@@ -132,7 +136,7 @@ class TestArrowToDuckDB:
             str(src), str(db), "sorted", sort_by=["category", ("id", "desc")]
         )
 
-        conn: duckdb.DuckDBPyConnection = duckdb.connect(str(db)) # type: ignore
+        conn: duckdb.DuckDBPyConnection = duckdb.connect(str(db))  # type: ignore
         rows = conn.execute("SELECT category, id FROM sorted").fetchall()
 
         prev_cat = None
@@ -165,8 +169,8 @@ class TestArrowToDuckDB:
 
         silk_chiffon.arrow_to_duckdb(str(src), str(db), "mytable", drop_table=True)
 
-        conn: duckdb.DuckDBPyConnection = duckdb.connect(str(db)) # type: ignore
-        count = conn.execute("SELECT COUNT(*) FROM mytable").fetchone()[0] # type: ignore
+        conn: duckdb.DuckDBPyConnection = duckdb.connect(str(db))  # type: ignore
+        count = conn.execute("SELECT COUNT(*) FROM mytable").fetchone()[0]  # type: ignore
         assert count == 1000
         conn.close()
 
@@ -239,7 +243,9 @@ class TestErrors:
 
         with pytest.raises(Exception):
             silk_chiffon.arrow_to_parquet(
-                str(src), "out.parquet", sort_by=[("id", "wrong")] # type: ignore
+                str(src),
+                "out.parquet",
+                sort_by=[("id", "wrong")],  # type: ignore
             )
 
 
@@ -289,7 +295,7 @@ class TestSplitToArrow:
                 reader = pa.ipc.open_file(source)
                 t = reader.read_all()
                 vals = t["value"].to_pylist()
-                assert all(vals[j] >= vals[j + 1] for j in range(len(vals) - 1)) # type: ignore
+                assert all(vals[j] >= vals[j + 1] for j in range(len(vals) - 1))  # type: ignore
 
     def test_create_dirs(self, tmp_path: Path):
         src = tmp_path / "test.arrow"
@@ -330,7 +336,7 @@ class TestSplitToParquet:
             f = tmp_path / f"split_cat_{i}.parquet"
             assert f.exists()
 
-            t: pa.Table = pq.read_table(str(f)) # type: ignore
+            t: pa.Table = pq.read_table(str(f))  # type: ignore
             assert len(t) == 200
             cats = t["category"].to_pylist()
             assert all(c == f"cat_{i}" for c in cats)
@@ -346,7 +352,7 @@ class TestSplitToParquet:
 
         f = tmp_path / "split_cat_0.parquet"
         pf = pq.ParquetFile(str(f))
-        assert pf.metadata.row_group(0).column(0).compression.lower() == "snappy" # type: ignore
+        assert pf.metadata.row_group(0).column(0).compression.lower() == "snappy"  # type: ignore
 
     def test_with_bloom_filter(self, tmp_path: Path):
         src = tmp_path / "test.arrow"
@@ -378,7 +384,7 @@ class TestSplitToParquet:
             f = tmp_path / f"sorted_cat_{i}.parquet"
             assert f.exists()
 
-            t: pa.Table = pq.read_table(str(f)) # type: ignore
+            t: pa.Table = pq.read_table(str(f))  # type: ignore
             ids = t["id"].to_pylist()
             expected = [j for j in range(1000) if j % 5 == i]
             assert ids == expected
