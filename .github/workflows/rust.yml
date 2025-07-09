@@ -48,17 +48,14 @@ jobs:
         run: |
           brew install duckdb
 
-      - name: Install cargo-make
-        run: cargo install cargo-make
-
       - name: Check formatting
-        run: cargo make rust-fmt-check
+        run: cargo fmt --check
 
       - name: Check linting
-        run: cargo make rust-lint
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Check types
-        run: cargo make rust-type-check
+        run: cargo check --all-features
 
       - name: Run tests
-        run: cargo make rust-test
+        run: cargo test --verbose
