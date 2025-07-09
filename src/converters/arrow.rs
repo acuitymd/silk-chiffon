@@ -137,10 +137,10 @@ impl ArrowConverter {
             }
         }
 
-        if let Ok(()) = coalescer.finish_buffered_batch() {
-            if let Some(final_batch) = coalescer.next_completed_batch() {
-                writer.write(&final_batch)?;
-            }
+        if coalescer.finish_buffered_batch().is_ok()
+            && let Some(final_batch) = coalescer.next_completed_batch()
+        {
+            writer.write(&final_batch)?;
         }
 
         writer.finish()?;
@@ -199,10 +199,10 @@ impl ArrowConverter {
             }
         }
 
-        if let Ok(()) = coalescer.finish_buffered_batch() {
-            if let Some(final_batch) = coalescer.next_completed_batch() {
-                writer.write(&final_batch)?;
-            }
+        if coalescer.finish_buffered_batch().is_ok()
+            && let Some(final_batch) = coalescer.next_completed_batch()
+        {
+            writer.write(&final_batch)?;
         }
 
         writer.finish()?;
