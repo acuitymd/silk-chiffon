@@ -305,9 +305,7 @@ mod tests {
         let batch = create_test_batch(schema.clone());
 
         for compression in [ArrowCompression::Lz4, ArrowCompression::Zstd] {
-            let path = temp_dir
-                .path()
-                .join(format!("test_{:?}.arrow", compression));
+            let path = temp_dir.path().join(format!("test_{compression:?}.arrow"));
 
             let builder =
                 ArrowWriterBuilder::new(schema.clone()).with_compression(Some(compression));

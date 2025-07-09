@@ -65,17 +65,17 @@ fn generate_test_data(
                 let mut split_values = Vec::with_capacity(rows_in_batch);
                 for row_idx in 0..rows_in_batch {
                     let value = (batch_idx * batch_size + row_idx) % cardinality;
-                    split_values.push(format!("key_{:06}", value));
+                    split_values.push(format!("key_{value:06}"));
                 }
                 Arc::new(StringArray::from(split_values))
             }
-            _ => panic!("Unsupported data type for benchmark: {:?}", data_type),
+            _ => panic!("Unsupported data type for benchmark: {data_type:?}"),
         };
 
         for _ in 0..rows_in_batch {
             ids.push(id_counter);
             values.push(rand::random::<f64>() * 1000.0);
-            payloads.push(format!("{}{}", payload_base, id_counter));
+            payloads.push(format!("{payload_base}{id_counter}"));
             id_counter += 1;
         }
 

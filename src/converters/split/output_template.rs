@@ -38,7 +38,7 @@ fn hash_value(value: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(value.as_bytes());
     let result = hasher.finalize();
-    format!("{:x}", result).chars().take(8).collect()
+    format!("{result:x}").chars().take(8).collect()
 }
 
 #[cfg(test)]

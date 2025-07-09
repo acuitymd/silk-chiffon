@@ -416,7 +416,7 @@ impl Display for ParquetCompression {
             Self::Lz4 => "lz4",
             Self::None => "none",
         };
-        write!(f, "{}", s)
+        write!(f, "{s}")
     }
 }
 
@@ -448,7 +448,7 @@ impl Display for ParquetStatistics {
             Self::Chunk => "chunk",
             Self::Page => "page",
         };
-        write!(f, "{}", s)
+        write!(f, "{s}")
     }
 }
 
@@ -476,7 +476,7 @@ impl Display for ParquetWriterVersion {
             Self::V1 => "v1",
             Self::V2 => "v2",
         };
-        write!(f, "{}", s)
+        write!(f, "{s}")
     }
 }
 
@@ -521,7 +521,7 @@ impl Display for ArrowCompression {
             Self::Lz4 => "lz4",
             Self::None => "none",
         };
-        write!(f, "{}", s)
+        write!(f, "{s}")
     }
 }
 

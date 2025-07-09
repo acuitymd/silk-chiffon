@@ -275,7 +275,7 @@ mod tests {
         ] {
             let output = temp_dir
                 .path()
-                .join(format!("output_{:?}.parquet", compression));
+                .join(format!("output_{compression:?}.parquet"));
             let converter =
                 ParquetConverter::new(input_path.to_str().unwrap().to_string(), output.clone())
                     .with_compression(compression);
@@ -348,7 +348,7 @@ mod tests {
             ParquetStatistics::Chunk,
             ParquetStatistics::Page,
         ] {
-            let output = temp_dir.path().join(format!("output_{:?}.parquet", stats));
+            let output = temp_dir.path().join(format!("output_{stats:?}.parquet"));
             let converter =
                 ParquetConverter::new(input_path.to_str().unwrap().to_string(), output.clone())
                     .with_statistics(stats);
@@ -370,9 +370,7 @@ mod tests {
         file_helpers::write_arrow_file(&input_path, &schema, vec![batch]).unwrap();
 
         for version in [ParquetWriterVersion::V1, ParquetWriterVersion::V2] {
-            let output = temp_dir
-                .path()
-                .join(format!("output_{:?}.parquet", version));
+            let output = temp_dir.path().join(format!("output_{version:?}.parquet"));
             let converter =
                 ParquetConverter::new(input_path.to_str().unwrap().to_string(), output.clone())
                     .with_writer_version(version);

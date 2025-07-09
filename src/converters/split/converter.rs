@@ -467,7 +467,7 @@ mod tests {
             Float64Array::from((0..num_rows).map(|i| i as f64 * 1.5).collect::<Vec<_>>());
         let name_array = StringArray::from(
             (0..num_rows)
-                .map(|i| format!("item_{}", i))
+                .map(|i| format!("item_{i}"))
                 .collect::<Vec<_>>(),
         );
 
@@ -760,7 +760,7 @@ mod tests {
         assert_eq!(created_files.len(), 3);
 
         for i in 1..=3 {
-            let file = File::open(output_dir.join(format!("{}.arrow", i))).unwrap();
+            let file = File::open(output_dir.join(format!("{i}.arrow"))).unwrap();
             let reader = FileReader::try_new(file, None).unwrap();
             let batches: Vec<_> = reader.collect::<Result<Vec<_>, _>>().unwrap();
             let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
@@ -787,8 +787,7 @@ mod tests {
         let error_msg = result.unwrap_err().to_string();
         assert!(
             error_msg.contains("nonexistent"),
-            "Error message: {}",
-            error_msg
+            "Error message: {error_msg}"
         );
     }
 

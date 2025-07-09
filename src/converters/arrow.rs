@@ -56,8 +56,7 @@ impl ArrowConverter {
             .try_with_compression(compression_type)
             .unwrap_or_else(|_| {
                 panic!(
-                    "Failed to set compression to {:?} (compression: {:?}) -- feature not enabled",
-                    compression_type, compression
+                    "Failed to set compression to {compression_type:?} (compression: {compression:?}) -- feature not enabled"
                 );
             });
         self

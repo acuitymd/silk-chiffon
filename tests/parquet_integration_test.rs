@@ -46,7 +46,7 @@ fn test_parquet_conversion_basic() {
         .output()
         .expect("Failed to execute command");
 
-    assert!(output.status.success(), "Command failed: {:?}", output);
+    assert!(output.status.success(), "Command failed: {output:?}");
     assert!(output_path.exists(), "Output file was not created");
 
     let file = File::open(&output_path).unwrap();
@@ -99,7 +99,7 @@ fn test_parquet_conversion_with_sorting() {
         .output()
         .expect("Failed to execute command");
 
-    assert!(output.status.success(), "Command failed: {:?}", output);
+    assert!(output.status.success(), "Command failed: {output:?}");
     assert!(output_path.exists(), "Output file was not created");
 
     let file = File::open(&output_path).unwrap();
@@ -160,7 +160,7 @@ fn test_parquet_conversion_with_compression() {
         .output()
         .expect("Failed to execute command");
 
-    assert!(output.status.success(), "Command failed: {:?}", output);
+    assert!(output.status.success(), "Command failed: {output:?}");
     assert!(output_path.exists(), "Output file was not created");
 
     let file = File::open(&output_path).unwrap();
@@ -211,7 +211,7 @@ fn test_parquet_conversion_with_bloom_filter_all() {
         .output()
         .expect("Failed to execute command");
 
-    assert!(output.status.success(), "Command failed: {:?}", output);
+    assert!(output.status.success(), "Command failed: {output:?}");
     assert!(output_path.exists(), "Output file was not created");
 
     // Test with custom FPP
@@ -230,7 +230,7 @@ fn test_parquet_conversion_with_bloom_filter_all() {
         .output()
         .expect("Failed to execute command");
 
-    assert!(output.status.success(), "Command failed: {:?}", output);
+    assert!(output.status.success(), "Command failed: {output:?}");
     assert!(output_path2.exists(), "Output file was not created");
 }
 
@@ -277,6 +277,6 @@ fn test_parquet_conversion_with_bloom_filter_columns() {
         .output()
         .expect("Failed to execute command");
 
-    assert!(output.status.success(), "Command failed: {:?}", output);
+    assert!(output.status.success(), "Command failed: {output:?}");
     assert!(output_path.exists(), "Output file was not created");
 }

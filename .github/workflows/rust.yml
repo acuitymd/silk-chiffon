@@ -15,7 +15,7 @@ env:
 
 jobs:
   rust-ci:
-    name: Rust CI for ${{ matrix.os }}
+    name: Rust (${{ matrix.rust }}) CI for ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false

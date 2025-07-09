@@ -198,7 +198,7 @@ async fn test_split_to_arrow_with_int_column() {
         .unwrap();
 
     for i in 1..=10 {
-        assert!(output_dir.join(format!("item_{}.arrow", i)).exists());
+        assert!(output_dir.join(format!("item_{i}.arrow")).exists());
     }
 }
 

@@ -49,7 +49,7 @@ fn test_duckdb_conversion_basic() {
         .output()
         .expect("Failed to execute command");
 
-    assert!(output.status.success(), "Command failed: {:?}", output);
+    assert!(output.status.success(), "Command failed: {output:?}");
     assert!(output_path.exists(), "Database file was not created");
 
     let conn = Connection::open(&output_path).unwrap();
@@ -237,7 +237,7 @@ fn test_duckdb_with_sorting() {
         .output()
         .expect("Failed to execute command");
 
-    assert!(output.status.success(), "Command failed: {:?}", output);
+    assert!(output.status.success(), "Command failed: {output:?}");
 
     let conn = Connection::open(&output_path).unwrap();
     let mut stmt = conn.prepare("SELECT id FROM sorted_data").unwrap();
@@ -308,8 +308,7 @@ fn test_duckdb_add_multiple_tables() {
 
     assert!(
         output.status.success(),
-        "Failed to create users table: {:?}",
-        output
+        "Failed to create users table: {output:?}"
     );
 
     let output = Command::new("cargo")
@@ -328,8 +327,7 @@ fn test_duckdb_add_multiple_tables() {
 
     assert!(
         output.status.success(),
-        "Failed to create products table: {:?}",
-        output
+        "Failed to create products table: {output:?}"
     );
 
     let conn = Connection::open(&output_path).unwrap();
@@ -366,10 +364,7 @@ fn test_duckdb_preserves_insertion_order() {
     ]));
 
     let positions = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
-    let values: Vec<String> = positions
-        .iter()
-        .map(|i| format!("value_{:03}", i))
-        .collect();
+    let values: Vec<String> = positions.iter().map(|i| format!("value_{i:03}")).collect();
 
     let batch = RecordBatch::try_new(
         schema.clone(),
@@ -399,7 +394,7 @@ fn test_duckdb_preserves_insertion_order() {
         .output()
         .expect("Failed to execute command");
 
-    assert!(output.status.success(), "Command failed: {:?}", output);
+    assert!(output.status.success(), "Command failed: {output:?}");
 
     let conn = Connection::open(&output_path).unwrap();
     let mut stmt = conn
@@ -412,12 +407,11 @@ fn test_duckdb_preserves_insertion_order() {
         .unwrap();
 
     for (i, (pos, val)) in results.iter().enumerate() {
-        assert_eq!(*pos, i as i32, "Position {} found at index {}", pos, i);
+        assert_eq!(*pos, i as i32, "Position {pos} found at index {i}");
         assert_eq!(
             val,
-            &format!("value_{:03}", i),
-            "Value mismatch at position {}",
-            i
+            &format!("value_{i:03}"),
+            "Value mismatch at position {i}"
         );
     }
 }
@@ -467,7 +461,7 @@ fn test_duckdb_preserves_sorted_order() {
         .output()
         .expect("Failed to execute command");
 
-    assert!(output.status.success(), "Command failed: {:?}", output);
+    assert!(output.status.success(), "Command failed: {output:?}");
 
     let conn = Connection::open(&output_path).unwrap();
     let mut stmt = conn
@@ -492,8 +486,8 @@ fn test_duckdb_preserves_sorted_order() {
     ];
 
     for (i, ((cat, id), (exp_cat, exp_id))) in results.iter().zip(expected.iter()).enumerate() {
-        assert_eq!(cat, exp_cat, "Category mismatch at position {}", i);
-        assert_eq!(*id, *exp_id, "ID mismatch at position {}", i);
+        assert_eq!(cat, exp_cat, "Category mismatch at position {i}");
+        assert_eq!(*id, *exp_id, "ID mismatch at position {i}");
     }
 }
 
@@ -509,7 +503,7 @@ fn test_duckdb_preserves_order_with_limit_offset() {
     ]));
 
     let seq_nums: Vec<i32> = (0..100).collect();
-    let data: Vec<String> = seq_nums.iter().map(|i| format!("row_{:03}", i)).collect();
+    let data: Vec<String> = seq_nums.iter().map(|i| format!("row_{i:03}")).collect();
 
     let batch = RecordBatch::try_new(
         schema.clone(),
@@ -569,6 +563,6 @@ fn test_duckdb_preserves_order_with_limit_offset() {
         .unwrap();
 
     for (i, seq) in all_rows.iter().enumerate() {
-        assert_eq!(*seq, i as i32, "Sequence {} found at position {}", seq, i);
+        assert_eq!(*seq, i as i32, "Sequence {seq} found at position {i}");
     }
 }
