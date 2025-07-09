@@ -1,6 +1,6 @@
 [tasks.rust-build]
 command = "cargo"
-args = ["build", "--release", "--all-features"]
+args = ["build", "--release"]
 
 [tasks.rust-test]
 command = "cargo"
