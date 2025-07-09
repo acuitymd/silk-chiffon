@@ -3,13 +3,13 @@ use crate::converters::split::output_template::OutputTemplate;
 use crate::converters::split::partition_writer::{
     ArrowWriterBuilder, ParquetWriterBuilder, PartitionWriter,
 };
-use crate::converters::split::slice_coalescer::SliceCoalescer;
 use crate::{
     ArrowCompression, BloomFilterConfig, ParquetCompression, ParquetStatistics,
     ParquetWriterVersion, SortColumn, SortDirection, SortSpec,
 };
 use anyhow::{Result, anyhow};
-use arrow::array::{Array, AsArray, GenericByteArray, PrimitiveArray};
+use arrow::array::{Array, AsArray, GenericByteArray, PrimitiveArray, RecordBatch};
+use arrow::compute::BatchCoalescer;
 use arrow::datatypes::{
     DataType, Float32Type, Float64Type, GenericStringType, Int8Type, Int16Type, Int32Type,
     Int64Type, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
@@ -40,7 +40,7 @@ pub enum OutputFormat {
 struct ProcessingState {
     current_value: Value,
     writer: Option<PartitionWriter>,
-    coalescer: SliceCoalescer,
+    coalescer: BatchCoalescer,
     paths: Vec<PathBuf>,
 }
 
@@ -321,11 +321,7 @@ impl SplitConverter {
         }
     }
 
-    async fn process_batch(
-        &self,
-        batch: arrow::record_batch::RecordBatch,
-        state: &mut ProcessingState,
-    ) -> Result<()> {
+    async fn process_batch(&self, batch: RecordBatch, state: &mut ProcessingState) -> Result<()> {
         if batch.num_rows() == 0 {
             return Ok(());
         }
@@ -367,21 +363,15 @@ impl SplitConverter {
 
                 state.paths.push(new_path.clone());
                 state.writer = Some(self.create_writer(&new_path, &schema).await?);
-                state.coalescer = SliceCoalescer::new(schema.clone(), self.record_batch_size);
+                state.coalescer = BatchCoalescer::new(schema.clone(), self.record_batch_size);
             }
 
             state.current_value = value;
 
             let slice = batch.slice(from_row_index, to_row_index - from_row_index);
-            let completed_batches = state.coalescer.push_slice(slice)?;
+            state.coalescer.push_batch(slice)?;
 
-            for completed_batch in completed_batches {
-                state
-                    .writer
-                    .as_mut()
-                    .unwrap()
-                    .write_batch(&completed_batch)?;
-            }
+            self.write_pending_batches(state)?;
 
             from_row_index = to_row_index;
         }
@@ -389,10 +379,22 @@ impl SplitConverter {
         Ok(())
     }
 
-    fn finish_current_partition(&self, state: &mut ProcessingState) -> Result<()> {
-        if let Some(batch) = state.coalescer.flush()? {
-            state.writer.as_mut().unwrap().write_batch(&batch)?;
+    fn write_pending_batches(&self, state: &mut ProcessingState) -> Result<()> {
+        while let Some(completed_batch) = state.coalescer.next_completed_batch() {
+            state
+                .writer
+                .as_mut()
+                .unwrap()
+                .write_batch(&completed_batch)?;
         }
+
+        Ok(())
+    }
+
+    fn finish_current_partition(&self, state: &mut ProcessingState) -> Result<()> {
+        state.coalescer.finish_buffered_batch()?;
+
+        self.write_pending_batches(state)?;
 
         if let Some(w) = state.writer.take() {
             w.finish()?;
@@ -410,7 +412,7 @@ impl SplitConverter {
         let mut state = ProcessingState {
             current_value: Value::None,
             writer: None,
-            coalescer: SliceCoalescer::new(schema.clone(), self.record_batch_size),
+            coalescer: BatchCoalescer::new(schema.clone(), self.record_batch_size),
             paths: Vec::new(),
         };
 
