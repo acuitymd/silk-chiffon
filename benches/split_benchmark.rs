@@ -187,6 +187,7 @@ async fn run_datafusion_parquet(input_path: &std::path::Path, output_dir: &std::
 
     let ctx = SessionContext::new();
 
+    // A little trick I figured out: https://gist.github.com/corasaurus-hex/96574afd82780e48c4d0c679c116b23a
     let file = File::open(input_path).unwrap();
     let reader = StreamReader::try_new_buffered(file, None).unwrap();
     let stream_provider = Arc::new(ArrowIPCStreamProvider::new(
