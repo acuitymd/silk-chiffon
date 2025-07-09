@@ -40,6 +40,13 @@ jobs:
         run: |
           brew install duckdb
 
+      - name: Install tree
+        if: ${{ matrix.os == 'ubuntu-latest' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tree
+          tree /opt/duckdb
+
       - name: Install cargo-make
         run: cargo install cargo-make
 
