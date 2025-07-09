@@ -1,8 +1,9 @@
+from pathlib import Path
+
 import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-from pathlib import Path
 import silk_chiffon
 
 
