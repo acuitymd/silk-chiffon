@@ -64,10 +64,17 @@ jobs:
           rye pin $PYTHON_VERSION
           rye sync --no-lock
 
-      - name: Build and install Python module
+      - name: Build and install Python module (Linux)
+        if: matrix.os == 'ubuntu-latest'
         run: |
           rye run maturin build --release --features python
-          ls targets/wheels/*.whl | head -1 | xargs -I {} rye run python -m pip install --force-reinstall {}
+          rye run python -m pip install --force-reinstall target/wheels/*manylinux*.whl
+
+      - name: Build and install Python module (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          rye run maturin build --release --features python
+          rye run python -m pip install --force-reinstall target/wheels/*.whl
 
       - name: Check Python formatting
         run: rye fmt --check
