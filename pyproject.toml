@@ -29,6 +29,7 @@ dev-dependencies = [
     "ruff>=0.1.0",
     "pyright>=1.1.402",
     "pip>=25.1.1",
+    "pyarrow-stubs>=20.0.0.20250627",
 ]
 
 [tool.maturin]

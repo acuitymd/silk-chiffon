@@ -2,11 +2,12 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from pathlib import Path
 import silk_chiffon
 
 
 def make_test_file(path: str, rows: int = 1000):
-    t = pa.table(
+    t: pa.Table = pa.table( # type: ignore
         {
             "id": list(range(rows)),
             "name": [f"name_{i}" for i in range(rows)],
@@ -21,7 +22,7 @@ def make_test_file(path: str, rows: int = 1000):
 
 
 def make_test_file_nulls(path: str):
-    t = pa.table(
+    t: pa.Table = pa.table( # type: ignore
         {
             "id": list(range(100)),
             "name": [f"name_{i}" for i in range(100)],
@@ -36,7 +37,7 @@ def make_test_file_nulls(path: str):
 
 
 class TestArrowToParquet:
-    def test_conversion(self, tmp_path):
+    def test_conversion(self, tmp_path: Path):
         src = tmp_path / "test.arrow"
         dst = tmp_path / "test.parquet"
 
@@ -44,11 +45,11 @@ class TestArrowToParquet:
         silk_chiffon.arrow_to_parquet(str(src), str(dst))
 
         assert dst.exists()
-        t = pq.read_table(str(dst))
+        t: pa.Table = pq.read_table(str(dst)) # type: ignore
         assert len(t) == 1000
         assert set(t.column_names) == {"id", "name", "value", "category"}
 
-    def test_zstd_compression(self, tmp_path):
+    def test_zstd_compression(self, tmp_path: Path):
         src = tmp_path / "test.arrow"
         dst = tmp_path / "test.parquet"
 
@@ -56,18 +57,18 @@ class TestArrowToParquet:
         silk_chiffon.arrow_to_parquet(str(src), str(dst), compression="zstd")
 
         pf = pq.ParquetFile(str(dst))
-        assert pf.metadata.row_group(0).column(0).compression.lower() == "zstd"
+        assert pf.metadata.row_group(0).column(0).compression.lower() == "zstd" # type: ignore
 
-    def test_sorting(self, tmp_path):
+    def test_sorting(self, tmp_path: Path):
         src = tmp_path / "test.arrow"
         dst = tmp_path / "test.parquet"
 
         make_test_file(str(src))
         silk_chiffon.arrow_to_parquet(
-            str(src), str(dst), sort_by=["category", ("value", "desc")]
+            str(src), str(dst), sort_by=["category", ("value", "descending")]
         )
 
-        t = pq.read_table(str(dst))
+        t: pa.Table = pq.read_table(str(dst)) # type: ignore
         cats = t["category"].to_pylist()
         vals = t["value"].to_pylist()
 
@@ -76,10 +77,12 @@ class TestArrowToParquet:
             if last_cat and cat != last_cat:
                 assert cat >= last_cat
             elif last_cat == cat and i > 0:
-                assert vals[i] <= vals[i - 1]
+                current_val = vals[i]
+                prev_val = vals[i - 1]
+                assert current_val is not None and prev_val is not None and current_val <= prev_val
             last_cat = cat
 
-    def test_bloom_filter(self, tmp_path):
+    def test_bloom_filter(self, tmp_path: Path):
         src = tmp_path / "test.arrow"
         dst = tmp_path / "test.parquet"
 
@@ -92,7 +95,7 @@ class TestArrowToParquet:
         pf = pq.ParquetFile(str(dst))
         assert pf.metadata.num_rows == 1000
 
-    def test_small_row_groups(self, tmp_path):
+    def test_small_row_groups(self, tmp_path: Path):
         src = tmp_path / "test.arrow"
         dst = tmp_path / "test.parquet"
 
@@ -104,31 +107,31 @@ class TestArrowToParquet:
 
 
 class TestArrowToDuckDB:
-    def test_basic(self, tmp_path):
+    def test_basic(self, tmp_path: Path):
         src = tmp_path / "test.arrow"
         db = tmp_path / "test.db"
 
         make_test_file(str(src))
         silk_chiffon.arrow_to_duckdb(str(src), str(db), "test_table")
 
-        conn = duckdb.connect(str(db))
-        count = conn.execute("SELECT COUNT(*) FROM test_table").fetchone()[0]
+        conn: duckdb.DuckDBPyConnection = duckdb.connect(str(db)) # type: ignore
+        count = conn.execute("SELECT COUNT(*) FROM test_table").fetchone()[0] # type: ignore
         assert count == 1000
 
         cols = {col[0] for col in conn.execute("DESCRIBE test_table").fetchall()}
         assert cols == {"id", "name", "value", "category"}
         conn.close()
 
-    def test_sorted(self, tmp_path):
+    def test_sorted(self, tmp_path: Path):
         src = tmp_path / "test.arrow"
         db = tmp_path / "test.db"
 
         make_test_file(str(src))
         silk_chiffon.arrow_to_duckdb(
-            str(src), str(db), "sorted", sort_by=["category", ("id", "desc")]
+            str(src), str(db), "sorted", sort_by=["category", ("id", "descending")]
         )
 
-        conn = duckdb.connect(str(db))
+        conn: duckdb.DuckDBPyConnection = duckdb.connect(str(db)) # type: ignore
         rows = conn.execute("SELECT category, id FROM sorted").fetchall()
 
         prev_cat = None
@@ -148,7 +151,7 @@ class TestArrowToDuckDB:
 
         conn.close()
 
-    def test_drop_existing(self, tmp_path):
+    def test_drop_existing(self, tmp_path: Path):
         src = tmp_path / "test.arrow"
         db = tmp_path / "test.db"
 
@@ -161,14 +164,14 @@ class TestArrowToDuckDB:
 
         silk_chiffon.arrow_to_duckdb(str(src), str(db), "mytable", drop_table=True)
 
-        conn = duckdb.connect(str(db))
-        count = conn.execute("SELECT COUNT(*) FROM mytable").fetchone()[0]
+        conn: duckdb.DuckDBPyConnection = duckdb.connect(str(db)) # type: ignore
+        count = conn.execute("SELECT COUNT(*) FROM mytable").fetchone()[0] # type: ignore
         assert count == 1000
         conn.close()
 
 
 class TestArrowToArrow:
-    def test_file_conversion(self, tmp_path):
+    def test_file_conversion(self, tmp_path: Path):
         src = tmp_path / "test.arrow"
         dst = tmp_path / "output.arrow"
 
@@ -189,7 +192,7 @@ class TestArrowToArrow:
         assert len(t) == 1000
         assert set(t.column_names) == {"id", "name", "value", "category"}
 
-    def test_lz4_compression(self, tmp_path):
+    def test_lz4_compression(self, tmp_path: Path):
         src = tmp_path / "test.arrow"
         dst = tmp_path / "compressed.arrow"
 
@@ -201,7 +204,7 @@ class TestArrowToArrow:
             t = reader.read_all()
             assert len(t) == 1000
 
-    def test_custom_batch_size(self, tmp_path):
+    def test_custom_batch_size(self, tmp_path: Path):
         src = tmp_path / "test.arrow"
         dst = tmp_path / "batched.arrow"
 
@@ -222,25 +225,25 @@ class TestErrors:
         with pytest.raises(Exception):
             silk_chiffon.arrow_to_parquet("/does/not/exist.arrow", "out.parquet")
 
-    def test_bad_compression(self, tmp_path):
+    def test_bad_compression(self, tmp_path: Path):
         src = tmp_path / "test.arrow"
         make_test_file(str(src))
 
         with pytest.raises(Exception):
             silk_chiffon.arrow_to_parquet(str(src), "out.parquet", compression="bad")
 
-    def test_bad_sort_direction(self, tmp_path):
+    def test_bad_sort_direction(self, tmp_path: Path):
         src = tmp_path / "test.arrow"
         make_test_file(str(src))
 
         with pytest.raises(Exception):
             silk_chiffon.arrow_to_parquet(
-                str(src), "out.parquet", sort_by=[("id", "wrong")]
+                str(src), "out.parquet", sort_by=[("id", "wrong")] # type: ignore
             )
 
 
 class TestSplitToArrow:
-    def test_split_by_category(self, tmp_path):
+    def test_split_by_category(self, tmp_path: Path):
         src = tmp_path / "test.arrow"
         template = str(tmp_path / "split_{value}.arrow")
 
@@ -258,7 +261,7 @@ class TestSplitToArrow:
                 cats = t["category"].to_pylist()
                 assert all(c == f"cat_{i}" for c in cats)
 
-    def test_split_with_nulls(self, tmp_path):
+    def test_split_with_nulls(self, tmp_path: Path):
         src = tmp_path / "test.arrow"
         template = str(tmp_path / "split_{value}.arrow")
 
@@ -270,13 +273,13 @@ class TestSplitToArrow:
             f = tmp_path / f"split_{cat}.arrow"
             assert f.exists()
 
-    def test_split_sorted(self, tmp_path):
+    def test_split_sorted(self, tmp_path: Path):
         src = tmp_path / "test.arrow"
         template = str(tmp_path / "sorted_{value}.arrow")
 
         make_test_file(str(src))
         silk_chiffon.split_to_arrow(
-            str(src), template, "category", sort_by=[("value", "desc")]
+            str(src), template, "category", sort_by=[("value", "descending")]
         )
 
         for i in range(5):
@@ -285,9 +288,9 @@ class TestSplitToArrow:
                 reader = pa.ipc.open_file(source)
                 t = reader.read_all()
                 vals = t["value"].to_pylist()
-                assert all(vals[j] >= vals[j + 1] for j in range(len(vals) - 1))
+                assert all(vals[j] >= vals[j + 1] for j in range(len(vals) - 1)) # type: ignore
 
-    def test_create_dirs(self, tmp_path):
+    def test_create_dirs(self, tmp_path: Path):
         src = tmp_path / "test.arrow"
         out_dir = tmp_path / "out" / "nested"
         template = str(out_dir / "split_{value}.arrow")
@@ -300,7 +303,7 @@ class TestSplitToArrow:
         assert out_dir.exists()
         assert len(list(out_dir.glob("*.arrow"))) == 5
 
-    def test_overwrite_protection(self, tmp_path):
+    def test_overwrite_protection(self, tmp_path: Path):
         src = tmp_path / "test.arrow"
         template = str(tmp_path / "split_{value}.arrow")
 
@@ -315,7 +318,7 @@ class TestSplitToArrow:
 
 
 class TestSplitToParquet:
-    def test_basic_split(self, tmp_path):
+    def test_basic_split(self, tmp_path: Path):
         src = tmp_path / "test.arrow"
         template = str(tmp_path / "split_{value}.parquet")
 
@@ -326,12 +329,12 @@ class TestSplitToParquet:
             f = tmp_path / f"split_cat_{i}.parquet"
             assert f.exists()
 
-            t = pq.read_table(str(f))
+            t: pa.Table = pq.read_table(str(f)) # type: ignore
             assert len(t) == 200
             cats = t["category"].to_pylist()
             assert all(c == f"cat_{i}" for c in cats)
 
-    def test_snappy_compression(self, tmp_path):
+    def test_snappy_compression(self, tmp_path: Path):
         src = tmp_path / "test.arrow"
         template = str(tmp_path / "split_{value}.parquet")
 
@@ -342,9 +345,9 @@ class TestSplitToParquet:
 
         f = tmp_path / "split_cat_0.parquet"
         pf = pq.ParquetFile(str(f))
-        assert pf.metadata.row_group(0).column(0).compression.lower() == "snappy"
+        assert pf.metadata.row_group(0).column(0).compression.lower() == "snappy" # type: ignore
 
-    def test_with_bloom_filter(self, tmp_path):
+    def test_with_bloom_filter(self, tmp_path: Path):
         src = tmp_path / "test.arrow"
         template = str(tmp_path / "bloom_{value}.parquet")
 
@@ -357,7 +360,7 @@ class TestSplitToParquet:
             f = tmp_path / f"bloom_cat_{i}.parquet"
             assert f.exists()
 
-    def test_sorted_with_metadata(self, tmp_path):
+    def test_sorted_with_metadata(self, tmp_path: Path):
         src = tmp_path / "test.arrow"
         template = str(tmp_path / "sorted_{value}.parquet")
 
@@ -366,7 +369,7 @@ class TestSplitToParquet:
             str(src),
             template,
             "category",
-            sort_by=["id", ("value", "desc")],
+            sort_by=["id", ("value", "descending")],
             write_sorted_metadata=True,
         )
 
@@ -374,12 +377,12 @@ class TestSplitToParquet:
             f = tmp_path / f"sorted_cat_{i}.parquet"
             assert f.exists()
 
-            t = pq.read_table(str(f))
+            t: pa.Table = pq.read_table(str(f)) # type: ignore
             ids = t["id"].to_pylist()
             expected = [j for j in range(1000) if j % 5 == i]
             assert ids == expected
 
-    def test_small_row_groups(self, tmp_path):
+    def test_small_row_groups(self, tmp_path: Path):
         src = tmp_path / "test.arrow"
         template = str(tmp_path / "rg_{value}.parquet")
 
@@ -394,7 +397,7 @@ class TestSplitToParquet:
 
 
 class TestSplitErrors:
-    def test_missing_column(self, tmp_path):
+    def test_missing_column(self, tmp_path: Path):
         src = tmp_path / "test.arrow"
         template = str(tmp_path / "split_{value}.arrow")
 
@@ -403,7 +406,7 @@ class TestSplitErrors:
         with pytest.raises(Exception):
             silk_chiffon.split_to_arrow(str(src), template, "missing_col")
 
-    def test_bad_template(self, tmp_path):
+    def test_bad_template(self, tmp_path: Path):
         src = tmp_path / "test.arrow"
         template = str(tmp_path / "split_no_placeholder.arrow")
 
