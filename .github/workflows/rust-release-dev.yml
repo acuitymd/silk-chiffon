@@ -75,7 +75,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          SILK_CHIFFON_VERSION="$(cargo pkgid | cut -d# -f2 | cut -d@ -f2)-${{ github.sha }}-$(date -u +%Y-%m-%d_%H:%M:%S)"
+          SILK_CHIFFON_VERSION="$(cargo pkgid | cut -d# -f2 | cut -d@ -f2)-${{ github.sha }}-timestamp-$(date -u +%Y-%m-%d-%H-%M-%S)"
           ARCH="$(echo ${{ runner.arch }} | tr '[:upper:]' '[:lower:]')"
           OS="$(echo ${{ runner.os }} | tr '[:upper:]' '[:lower:]')"
           git tag -a "v${SILK_CHIFFON_VERSION}" -m "Release ${SILK_CHIFFON_VERSION}"
