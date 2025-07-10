@@ -24,7 +24,7 @@ jobs:
         if: ${{ matrix.os == 'ubuntu-latest' }}
         run: |
           sudo apt-get update
-          sudo apt-get install -y curl unzip build-essential
+          sudo apt-get install -y curl unzip
           curl -L -O https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/libduckdb-linux-amd64.zip
           unzip libduckdb-linux-amd64.zip -d libduckdb
           sudo mv libduckdb/duckdb.* /usr/local/include/
@@ -35,7 +35,7 @@ jobs:
         if: ${{ matrix.os == 'ubuntu-24.04-arm' }}
         run: |
           sudo apt-get update
-          sudo apt-get install -y curl unzip build-essential
+          sudo apt-get install -y curl unzip
           curl -L -O https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/libduckdb-linux-arm64.zip
           unzip libduckdb-linux-arm64.zip -d libduckdb
           sudo mv libduckdb/duckdb.* /usr/local/include/
