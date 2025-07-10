@@ -37,7 +37,7 @@ pub async fn run(args: SplitToArrowArgs) -> Result<()> {
         }
         ListOutputsFormat::Json => {
             let json = serde_json::to_string_pretty(&conversion_result)?;
-            println!("{}", json);
+            println!("{json}");
         }
         ListOutputsFormat::None => {}
     }
