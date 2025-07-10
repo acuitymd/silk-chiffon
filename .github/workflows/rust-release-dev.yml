@@ -55,8 +55,12 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Temporarily modify the rust toolchain version
+      - name: Modify the rust toolchain version
         run: rustup override set ${{ matrix.rust }}
+      - name: Update rustup and rust
+        run: rustup update
+      - name: Output rust toolchain version
+        run: rustup show
       - name: Output rust version for educational purposes
         run: rustup --version
 
