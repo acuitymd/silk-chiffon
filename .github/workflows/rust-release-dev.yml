@@ -75,4 +75,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create --generate-notes ./silk-chiffon/silk-chiffon#${{ runner.os }}-${{ runner.arch }}-rust-${{ matrix.rust }}-${{ matrix.BUILD_TARGET }}-${{ github.sha }} --prerelease
+          SILK_CHIFFON_VERSION="$(cargo pkgid | cut -d# -f2 | cut -d@ -f2)"
+          git tag -a "v${SILK_CHIFFON_VERSION}-${{ github.sha }}" -m "Release ${SILK_CHIFFON_VERSION}-${{ github.sha }}"
+          git push origin "v${SILK_CHIFFON_VERSION}-${{ github.sha }}"
+          gh release create "v${SILK_CHIFFON_VERSION}-${{ github.sha }}" --generate-notes ./silk-chiffon/silk-chiffon#${{ runner.os }}-${{ runner.arch }}-rust-${{ matrix.rust }}-${{ matrix.BUILD_TARGET }}-${{ github.sha }} --prerelease
