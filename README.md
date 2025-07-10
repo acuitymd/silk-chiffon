@@ -173,6 +173,7 @@ silk-chiffon arrow [OPTIONS] <INPUT> <OUTPUT>
 - `--compression`: Apply `zstd`, `lz4`, or keep uncompressed
 - `--sort-by`: Reorder your data
 - `--record-batch-size`: Control memory usage
+- `--output-ipc-format`: Choose output format (`file` or `stream`)
 
 ### 📂 Split Arrow → Multiple Arrow Files
 
@@ -190,6 +191,8 @@ silk-chiffon split-to-arrow [OPTIONS] --by <COLUMN> <INPUT>
 - `--compression`: Apply compression to output files
 - `--create-dirs`: Create output directories as needed
 - `--overwrite`: Replace existing files
+- `--output-ipc-format`: Output format for split files (`file` or `stream`)
+- `--list-outputs`: List created files after splitting (`json`, `text`, or none)
 
 **Example:**
 
@@ -204,6 +207,12 @@ silk-chiffon split-to-arrow events.arrow --by date \
   --sort-by "timestamp:desc" \
   --compression lz4 \
   --create-dirs
+
+# Split to Arrow IPC streaming format files with JSON output listing
+silk-chiffon split-to-arrow data.arrow --by region \
+  --output-template "streams/{value}.arrows" \
+  --output-ipc-format stream \
+  --list-outputs json
 ```
 
 ### 📁 Split Arrow → Multiple Parquet Files
@@ -285,6 +294,9 @@ silk-chiffon arrow large.arrow optimized.arrow \
   --compression lz4 \
   --sort-by "date" \
   --record-batch-size 50000
+
+# Convert Arrow IPC file format to streaming format
+silk-chiffon arrow data.arrow stream.arrow --output-ipc-format stream
 ```
 
 ### 🐍 Python Data Science

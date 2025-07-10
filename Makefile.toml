@@ -18,6 +18,18 @@ args = ["test", "--verbose"]
 command = "cargo"
 args = ["clippy", "--all-targets", "--all-features", "--", "-D", "warnings"]
 
+[tasks.rust-lint-fix]
+command = "cargo"
+args = [
+  "clippy",
+  "--all-targets",
+  "--all-features",
+  "--",
+  "-D",
+  "warnings",
+  "--fix",
+]
+
 [tasks.rust-type-check]
 command = "cargo"
 args = ["check", "--all-features"]
@@ -48,8 +60,31 @@ dependencies = ["python-install"]
 
 [tasks.python-lint]
 command = "uv"
+args = ["run", "ruff", "check", "--fix"]
+
+[tasks.python-lint-check]
+command = "uv"
 args = ["run", "ruff", "check"]
 
 [tasks.python-type-check]
 command = "uv"
 args = ["run", "pyright"]
+
+[tasks.benchmark]
+command = "cargo"
+args = ["bench"]
+
+[tasks.fmt]
+dependencies = ["python-fmt", "rust-fmt"]
+
+[tasks.fmt-check]
+dependencies = ["python-fmt-check", "rust-fmt-check"]
+
+[tasks.lint]
+dependencies = ["python-lint", "rust-lint"]
+
+[tasks.lint-check]
+dependencies = ["python-lint-check", "rust-lint-check"]
+
+[tasks.build]
+dependencies = ["python-build", "rust-build"]

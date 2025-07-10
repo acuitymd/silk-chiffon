@@ -290,3 +290,109 @@ async fn test_split_to_arrow_safe_value_placeholder() {
     assert!(output_dir.join("another_test.arrow").exists());
     assert!(output_dir.join("normal.arrow").exists());
 }
+
+#[tokio::test]
+async fn test_split_to_arrow_stream_format() {
+    let temp_dir = tempdir().unwrap();
+    let input_path = temp_dir.path().join("input.arrow");
+    let output_dir = temp_dir.path().join("output");
+
+    let (schema, batches) = create_test_data();
+    write_test_arrow_file(&input_path, &schema, batches);
+
+    let args = SplitToArrowArgs {
+        input: clio::Input::new(&input_path).unwrap(),
+        by: "category".to_string(),
+        output_template: format!("{}/{{value}}.arrows", output_dir.display()),
+        record_batch_size: 122_880,
+        sort_by: None,
+        create_dirs: true,
+        overwrite: false,
+        compression: ArrowCompression::None,
+        list_outputs: ListOutputsFormat::None,
+        output_ipc_format: ArrowIPCFormat::Stream,
+    };
+
+    silk_chiffon::commands::split_to_arrow::run(args)
+        .await
+        .unwrap();
+
+    assert!(output_dir.join("A.arrows").exists());
+    assert!(output_dir.join("B.arrows").exists());
+    assert!(output_dir.join("C.arrows").exists());
+
+    let reader_a = arrow::ipc::reader::StreamReader::try_new(
+        File::open(output_dir.join("A.arrows")).unwrap(),
+        None,
+    )
+    .unwrap();
+    let batches_a: Vec<_> = reader_a.collect::<Result<Vec<_>, _>>().unwrap();
+    assert_eq!(batches_a.len(), 1);
+    assert_eq!(batches_a[0].num_rows(), 4);
+
+    let reader_b = arrow::ipc::reader::StreamReader::try_new(
+        File::open(output_dir.join("B.arrows")).unwrap(),
+        None,
+    )
+    .unwrap();
+    let batches_b: Vec<_> = reader_b.collect::<Result<Vec<_>, _>>().unwrap();
+    assert_eq!(batches_b.len(), 1);
+    assert_eq!(batches_b[0].num_rows(), 3);
+
+    let reader_c = arrow::ipc::reader::StreamReader::try_new(
+        File::open(output_dir.join("C.arrows")).unwrap(),
+        None,
+    )
+    .unwrap();
+    let batches_c: Vec<_> = reader_c.collect::<Result<Vec<_>, _>>().unwrap();
+    assert_eq!(batches_c.len(), 1);
+    assert_eq!(batches_c[0].num_rows(), 3);
+}
+
+#[tokio::test]
+async fn test_split_to_arrow_stream_format_with_compression() {
+    let temp_dir = tempdir().unwrap();
+    let input_path = temp_dir.path().join("input.arrow");
+    let output_dir = temp_dir.path().join("output");
+
+    let (schema, batches) = create_test_data();
+    write_test_arrow_file(&input_path, &schema, batches);
+
+    let args = SplitToArrowArgs {
+        input: clio::Input::new(&input_path).unwrap(),
+        by: "category".to_string(),
+        output_template: format!("{}/{{value}}.arrows", output_dir.display()),
+        record_batch_size: 122_880,
+        sort_by: Some("value:asc".parse().unwrap()),
+        create_dirs: true,
+        overwrite: false,
+        compression: ArrowCompression::Lz4,
+        list_outputs: ListOutputsFormat::None,
+        output_ipc_format: ArrowIPCFormat::Stream,
+    };
+
+    silk_chiffon::commands::split_to_arrow::run(args)
+        .await
+        .unwrap();
+
+    assert!(output_dir.join("A.arrows").exists());
+    assert!(output_dir.join("B.arrows").exists());
+    assert!(output_dir.join("C.arrows").exists());
+
+    let reader_a = arrow::ipc::reader::StreamReader::try_new(
+        File::open(output_dir.join("A.arrows")).unwrap(),
+        None,
+    )
+    .unwrap();
+    let batches_a: Vec<_> = reader_a.collect::<Result<Vec<_>, _>>().unwrap();
+    let batch_a = &batches_a[0];
+
+    let values = batch_a
+        .column(2)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap();
+
+    let values_vec: Vec<_> = values.iter().flatten().collect();
+    assert_eq!(values_vec, vec![10, 30, 60, 100]);
+}

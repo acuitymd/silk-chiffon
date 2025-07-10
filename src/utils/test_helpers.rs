@@ -121,7 +121,7 @@ pub mod verify {
     use arrow::{
         array::{Array, Int32Array, RecordBatch, StringArray},
         datatypes::Schema,
-        ipc::reader::FileReader,
+        ipc::reader::{FileReader, StreamReader},
     };
     use std::{fs::File, path::Path};
 
@@ -130,6 +130,12 @@ pub mod verify {
     pub fn read_output_file(path: &Path) -> Result<Vec<RecordBatch>> {
         let file = File::open(path)?;
         let reader = FileReader::try_new_buffered(file, None)?;
+        reader.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn read_output_stream(path: &Path) -> Result<Vec<RecordBatch>> {
+        let file = File::open(path)?;
+        let reader = StreamReader::try_new(file, None)?;
         reader.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 

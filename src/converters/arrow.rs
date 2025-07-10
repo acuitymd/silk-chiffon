@@ -10,7 +10,7 @@ use arrow::{
     error::ArrowError,
     ipc::{
         CompressionType,
-        writer::{FileWriter, IpcWriteOptions},
+        writer::{FileWriter, IpcWriteOptions, StreamWriter},
     },
 };
 use datafusion::{
@@ -130,27 +130,54 @@ impl ArrowConverter {
         let mut stream = df.execute_stream().await?;
         let schema = stream.schema();
         let output_file = File::create(output_path)?;
-        let mut writer = FileWriter::try_new_with_options(output_file, &schema, write_options)?;
-
         let mut coalescer = BatchCoalescer::new(schema.clone(), record_batch_size);
 
-        while let Some(batch_result) = stream.next().await {
-            let batch = batch_result?;
+        match self.output_ipc_format {
+            ArrowIPCFormat::File => {
+                let mut writer =
+                    FileWriter::try_new_with_options(output_file, &schema, write_options)?;
 
-            coalescer.push_batch(batch)?;
+                while let Some(batch_result) = stream.next().await {
+                    let batch = batch_result?;
 
-            while let Some(completed_batch) = coalescer.next_completed_batch() {
-                writer.write(&completed_batch)?;
+                    coalescer.push_batch(batch)?;
+
+                    while let Some(completed_batch) = coalescer.next_completed_batch() {
+                        writer.write(&completed_batch)?;
+                    }
+                }
+
+                coalescer.finish_buffered_batch()?;
+
+                if let Some(final_batch) = coalescer.next_completed_batch() {
+                    writer.write(&final_batch)?;
+                }
+
+                writer.finish()?;
+            }
+            ArrowIPCFormat::Stream => {
+                let mut writer =
+                    StreamWriter::try_new_with_options(output_file, &schema, write_options)?;
+
+                while let Some(batch_result) = stream.next().await {
+                    let batch = batch_result?;
+
+                    coalescer.push_batch(batch)?;
+
+                    while let Some(completed_batch) = coalescer.next_completed_batch() {
+                        writer.write(&completed_batch)?;
+                    }
+                }
+
+                coalescer.finish_buffered_batch()?;
+
+                if let Some(final_batch) = coalescer.next_completed_batch() {
+                    writer.write(&final_batch)?;
+                }
+
+                writer.finish()?;
             }
         }
-
-        coalescer.finish_buffered_batch()?;
-
-        if let Some(final_batch) = coalescer.next_completed_batch() {
-            writer.write(&final_batch)?;
-        }
-
-        writer.finish()?;
 
         Ok(())
     }
@@ -160,59 +187,89 @@ impl ArrowConverter {
         match input.format() {
             ArrowIPCFormat::File => {
                 let file_reader = input.file_reader()?;
-                ArrowConverter::convert_arrow_reader_to_file_format(
+                ArrowConverter::convert_arrow_reader_to_format(
                     file_reader,
                     &self.output_path,
                     self.write_options.clone(),
                     self.record_batch_size,
+                    self.output_ipc_format.clone(),
                 )
                 .await
             }
             ArrowIPCFormat::Stream => {
                 let stream_reader = input.stream_reader()?;
-                ArrowConverter::convert_arrow_reader_to_file_format(
+                ArrowConverter::convert_arrow_reader_to_format(
                     stream_reader,
                     &self.output_path,
                     self.write_options.clone(),
                     self.record_batch_size,
+                    self.output_ipc_format.clone(),
                 )
                 .await
             }
         }
     }
 
-    async fn convert_arrow_reader_to_file_format<I>(
+    async fn convert_arrow_reader_to_format<I>(
         reader: I,
         output_path: &Path,
         write_options: IpcWriteOptions,
         record_batch_size: usize,
+        output_format: ArrowIPCFormat,
     ) -> Result<()>
     where
         I: Iterator<Item = Result<RecordBatch, ArrowError>> + HasSchema,
     {
         let schema = reader.schema();
         let output_file = File::create(output_path)?;
-        let mut writer = FileWriter::try_new_with_options(output_file, &schema, write_options)?;
-
         let mut coalescer = BatchCoalescer::new(schema.clone(), record_batch_size);
 
-        for batch_result in reader {
-            let batch = batch_result?;
+        match output_format {
+            ArrowIPCFormat::File => {
+                let mut writer =
+                    FileWriter::try_new_with_options(output_file, &schema, write_options)?;
 
-            coalescer.push_batch(batch)?;
+                for batch_result in reader {
+                    let batch = batch_result?;
 
-            while let Some(completed_batch) = coalescer.next_completed_batch() {
-                writer.write(&completed_batch)?;
+                    coalescer.push_batch(batch)?;
+
+                    while let Some(completed_batch) = coalescer.next_completed_batch() {
+                        writer.write(&completed_batch)?;
+                    }
+                }
+
+                coalescer.finish_buffered_batch()?;
+
+                if let Some(final_batch) = coalescer.next_completed_batch() {
+                    writer.write(&final_batch)?;
+                }
+
+                writer.finish()?;
+            }
+            ArrowIPCFormat::Stream => {
+                let mut writer =
+                    StreamWriter::try_new_with_options(output_file, &schema, write_options)?;
+
+                for batch_result in reader {
+                    let batch = batch_result?;
+
+                    coalescer.push_batch(batch)?;
+
+                    while let Some(completed_batch) = coalescer.next_completed_batch() {
+                        writer.write(&completed_batch)?;
+                    }
+                }
+
+                coalescer.finish_buffered_batch()?;
+
+                if let Some(final_batch) = coalescer.next_completed_batch() {
+                    writer.write(&final_batch)?;
+                }
+
+                writer.finish()?;
             }
         }
-
-        coalescer.finish_buffered_batch()?;
-
-        if let Some(final_batch) = coalescer.next_completed_batch() {
-            writer.write(&final_batch)?;
-        }
-
-        writer.finish()?;
 
         Ok(())
     }
@@ -223,11 +280,12 @@ impl ArrowConverter {
             ArrowIPCFormat::File => Ok(ArrowFileSource::Original(input.path().to_path_buf())),
             ArrowIPCFormat::Stream => {
                 let temp_file = tempfile::Builder::new().suffix(".arrow").tempfile()?;
-                ArrowConverter::convert_arrow_reader_to_file_format(
+                ArrowConverter::convert_arrow_reader_to_format(
                     input.stream_reader()?,
                     temp_file.path(),
                     IpcWriteOptions::default(),
                     self.record_batch_size,
+                    ArrowIPCFormat::File,
                 )
                 .await?;
 
@@ -270,6 +328,50 @@ mod tests {
             converter.convert().await.unwrap();
 
             let batches = verify::read_output_file(&output_path).unwrap();
+            assert_eq!(batches.len(), 1);
+            verify::assert_id_name_batch_data_matches(&batches[0], &test_ids, &test_names);
+        }
+
+        #[tokio::test]
+        async fn test_converter_file_to_stream_format() {
+            let temp_dir = tempdir().unwrap();
+            let input_path = temp_dir.path().join("input.arrow");
+            let output_path = temp_dir.path().join("output.arrows");
+
+            let test_ids = vec![1, 2, 3, 4, 5];
+            let test_names = vec!["Alice", "Bob", "Charlie", "David", "Eve"];
+
+            let schema = test_data::simple_schema();
+            let batch = test_data::create_batch_with_ids_and_names(&schema, &test_ids, &test_names);
+            file_helpers::write_arrow_file(&input_path, &schema, vec![batch]).unwrap();
+
+            let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path)
+                .with_output_ipc_format(crate::utils::arrow_io::ArrowIPCFormat::Stream);
+            converter.convert().await.unwrap();
+
+            let batches = verify::read_output_stream(&output_path).unwrap();
+            assert_eq!(batches.len(), 1);
+            verify::assert_id_name_batch_data_matches(&batches[0], &test_ids, &test_names);
+        }
+
+        #[tokio::test]
+        async fn test_converter_stream_to_stream_format() {
+            let temp_dir = tempdir().unwrap();
+            let input_path = temp_dir.path().join("input.arrows");
+            let output_path = temp_dir.path().join("output.arrows");
+
+            let test_ids = vec![1, 2, 3];
+            let test_names = vec!["A", "B", "C"];
+
+            let schema = test_data::simple_schema();
+            let batch = test_data::create_batch_with_ids_and_names(&schema, &test_ids, &test_names);
+            file_helpers::write_arrow_stream(&input_path, &schema, vec![batch]).unwrap();
+
+            let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path)
+                .with_output_ipc_format(crate::utils::arrow_io::ArrowIPCFormat::Stream);
+            converter.convert().await.unwrap();
+
+            let batches = verify::read_output_stream(&output_path).unwrap();
             assert_eq!(batches.len(), 1);
             verify::assert_id_name_batch_data_matches(&batches[0], &test_ids, &test_names);
         }
@@ -698,6 +800,43 @@ mod tests {
             let result = converter.convert().await;
 
             assert!(result.is_err());
+        }
+
+        #[tokio::test]
+        async fn test_sort_with_stream_output_format() {
+            let temp_dir = tempdir().unwrap();
+            let input_path = temp_dir.path().join("input.arrow");
+            let output_path = temp_dir.path().join("output.arrows");
+
+            let test_ids = vec![3, 1, 2];
+            let test_names = vec!["C", "A", "B"];
+
+            let schema = test_data::simple_schema();
+            let batch = test_data::create_batch_with_ids_and_names(&schema, &test_ids, &test_names);
+            file_helpers::write_arrow_file(&input_path, &schema, vec![batch]).unwrap();
+
+            let sort_spec = SortSpec {
+                columns: vec![crate::SortColumn {
+                    name: "id".to_string(),
+                    direction: SortDirection::Ascending,
+                }],
+            };
+
+            let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path)
+                .with_sorting(sort_spec)
+                .with_output_ipc_format(crate::utils::arrow_io::ArrowIPCFormat::Stream);
+            converter.convert().await.unwrap();
+
+            let batches = verify::read_output_stream(&output_path).unwrap();
+            assert_eq!(batches.len(), 1);
+            let ids = batches[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap();
+            assert_eq!(ids.value(0), 1);
+            assert_eq!(ids.value(1), 2);
+            assert_eq!(ids.value(2), 3);
         }
     }
 }
