@@ -43,10 +43,14 @@ jobs:
         run: |
           brew install duckdb
 
-      - name: Install Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: stable
+      - name: Modify the rust toolchain version
+        run: rustup override set stable
+      - name: Update rustup and rust
+        run: rustup update
+      - name: Output rust toolchain version
+        run: rustup show
+      - name: Output rust version for educational purposes
+        run: rustup --version
 
       - name: Install uv and set the python version
         uses: astral-sh/setup-uv@v6

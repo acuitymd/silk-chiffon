@@ -111,3 +111,70 @@ jobs:
           asset_path: ${{ env.ASSET_PATH }}
           asset_name: ${{ env.ASSET_PATH }}
           asset_content_type: application/octet-stream
+  build-wheels:
+    needs: create-release
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.11", "3.12", "3.13"]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup DuckDB (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl unzip build-essential
+          curl -L -O https://github.com/duckdb/duckdb/releases/download/v1.3.2/libduckdb-linux-amd64.zip
+          unzip libduckdb-linux-amd64.zip -d libduckdb
+          sudo mv libduckdb/duckdb.* /usr/local/include/
+          sudo mv libduckdb/libduckdb.so /usr/local/lib/
+          sudo ldconfig /usr/local/lib
+          rm -rf libduckdb libduckdb-linux-amd64.zip
+
+      - name: Setup DuckDB (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          brew install duckdb
+
+      # Setup Rust
+      - name: Setup Rust
+        run: |
+          rustup override set stable
+          rustup update
+          rustup show
+
+      - name: Install uv and set Python version
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Build Python wheel (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          uv run maturin build --release --features python
+
+      - name: Build Python wheel (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          uv run maturin build --release --features python
+
+      - name: Upload wheels to release
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for wheel in target/wheels/*.whl; do
+            echo "Uploading $wheel"
+            curl -X POST \
+              -H "Authorization: token $GITHUB_TOKEN" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary @"$wheel" \
+              "${{ needs.create-release.outputs.upload_url }}?name=$(basename $wheel)"
+          done
