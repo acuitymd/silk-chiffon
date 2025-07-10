@@ -2,6 +2,7 @@ pub mod commands;
 pub mod converters;
 pub mod utils;
 
+use crate::utils::arrow_io::ArrowIPCFormat;
 use anyhow::{Result, anyhow};
 use arrow::ipc::CompressionType;
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -50,6 +51,7 @@ pub enum Commands {
     ///   - Arrow IPC file format
     ///
     /// Output formats:
+    ///   - Arrow IPC stream format
     ///   - Arrow IPC file format
     #[command(verbatim_doc_comment)]
     Arrow(ArrowArgs),
@@ -60,6 +62,7 @@ pub enum Commands {
     ///   - Arrow IPC file format
     ///
     /// Output formats:
+    ///   - Arrow IPC stream format
     ///   - Arrow IPC file format
     #[command(name = "split-to-arrow", verbatim_doc_comment)]
     SplitToArrow(SplitToArrowArgs),
@@ -213,6 +216,10 @@ pub struct ArrowArgs {
     /// Size of Arrow record batches written to the output file.
     #[arg(long, default_value_t = 122_880)]
     pub record_batch_size: usize,
+
+    /// Sets the output Arrow IPC format.
+    #[arg(short, long, default_value_t = ArrowIPCFormat::default())]
+    pub output_ipc_format: ArrowIPCFormat,
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug, Default)]
@@ -281,6 +288,10 @@ pub struct SplitToArrowArgs {
     /// List the output files after creation.
     #[arg(short, long, value_enum, default_value_t = ListOutputsFormat::None)]
     pub list_outputs: ListOutputsFormat,
+
+    /// Sets the output Arrow IPC format.
+    #[arg(short, long, default_value_t = ArrowIPCFormat::default())]
+    pub output_ipc_format: ArrowIPCFormat,
 }
 
 #[derive(Args, Debug)]

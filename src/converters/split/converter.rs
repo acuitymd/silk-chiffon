@@ -3,6 +3,7 @@ use crate::converters::split::output_template::OutputTemplate;
 use crate::converters::split::partition_writer::{
     ArrowWriterBuilder, ParquetWriterBuilder, PartitionWriter,
 };
+use crate::utils::arrow_io::ArrowIPCFormat;
 use crate::{
     ArrowCompression, BloomFilterConfig, ParquetCompression, ParquetStatistics,
     ParquetWriterVersion, SortColumn, SortDirection, SortSpec,
@@ -27,6 +28,7 @@ pub const NULL_PLACEHOLDER: &str = "__NULL__";
 pub enum OutputFormat {
     Arrow {
         compression: Option<ArrowCompression>,
+        ipc_format: ArrowIPCFormat,
     },
     Parquet {
         compression: Option<ParquetCompression>,
@@ -193,7 +195,10 @@ impl SplitConverter {
             input_path,
             split_column,
             output_template: OutputTemplate::new(output_template),
-            output_format: OutputFormat::Arrow { compression: None },
+            output_format: OutputFormat::Arrow {
+                compression: None,
+                ipc_format: ArrowIPCFormat::default(),
+            },
             record_batch_size: 122_880,
             sort_spec: None,
             create_dirs: true,
@@ -271,8 +276,12 @@ impl SplitConverter {
         }
 
         match &self.output_format {
-            OutputFormat::Arrow { compression } => Ok(ArrowWriterBuilder::new(schema.clone())
+            OutputFormat::Arrow {
+                compression,
+                ipc_format,
+            } => Ok(ArrowWriterBuilder::new(schema.clone())
                 .with_compression(compression.clone())
+                .with_ipc_format(ipc_format.clone())
                 .build_arrow_writer(path)?),
             OutputFormat::Parquet {
                 compression,
@@ -427,7 +436,7 @@ impl SplitConverter {
 
         self.write_pending_batches(partitioning_state)?;
 
-        if let Some(w) = partitioning_state.writer.take() {
+        if let Some(mut w) = partitioning_state.writer.take() {
             w.finish()?;
         }
 

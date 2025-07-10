@@ -1,3 +1,4 @@
+use crate::utils::arrow_io::ArrowIPCFormat;
 use crate::{
     ArrowCompression, BloomFilterConfig, ParquetCompression, ParquetStatistics,
     ParquetWriterVersion, SortDirection, SortSpec,
@@ -5,7 +6,7 @@ use crate::{
 use anyhow::{Result, anyhow};
 use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
-use arrow::ipc::writer::{FileWriter, IpcWriteOptions};
+use arrow::ipc::writer::{FileWriter, IpcWriteOptions, StreamWriter};
 use parquet::arrow::arrow_writer::ArrowWriter;
 use parquet::file::properties::{WriterProperties, WriterPropertiesBuilder};
 use parquet::format::SortingColumn;
@@ -16,13 +17,22 @@ use std::path::PathBuf;
 
 const IO_BUFFER_SIZE: usize = 1024 * 1024;
 
+pub enum ArrowWriterInner {
+    File {
+        writer: FileWriter<BufWriter<File>>,
+    },
+    Stream {
+        writer: StreamWriter<BufWriter<File>>,
+    },
+}
+
 pub enum PartitionWriter {
     Arrow {
-        writer: FileWriter<BufWriter<File>>,
+        inner_writer: ArrowWriterInner,
         path: PathBuf,
     },
     Parquet {
-        writer: ArrowWriter<BufWriter<File>>,
+        inner_writer: ArrowWriter<BufWriter<File>>,
         path: PathBuf,
     },
 }
@@ -30,26 +40,40 @@ pub enum PartitionWriter {
 impl PartitionWriter {
     pub fn write_batch(&mut self, batch: &RecordBatch) -> Result<()> {
         match self {
-            PartitionWriter::Arrow { writer, .. } => {
-                writer.write(batch)?;
+            PartitionWriter::Arrow { inner_writer, .. } => {
+                match inner_writer {
+                    ArrowWriterInner::File { writer, .. } => {
+                        writer.write(batch)?;
+                    }
+                    ArrowWriterInner::Stream { writer, .. } => {
+                        writer.write(batch)?;
+                    }
+                }
                 Ok(())
             }
-            PartitionWriter::Parquet { writer, .. } => {
-                writer.write(batch)?;
+            PartitionWriter::Parquet { inner_writer, .. } => {
+                inner_writer.write(batch)?;
                 Ok(())
             }
         }
     }
 
-    pub fn finish(self) -> Result<PathBuf> {
+    pub fn finish(&mut self) -> Result<PathBuf> {
         match self {
-            PartitionWriter::Arrow { mut writer, path } => {
-                writer.finish()?;
-                Ok(path)
+            PartitionWriter::Arrow { inner_writer, path } => {
+                match inner_writer {
+                    ArrowWriterInner::File { writer, .. } => {
+                        writer.finish()?;
+                    }
+                    ArrowWriterInner::Stream { writer, .. } => {
+                        writer.finish()?;
+                    }
+                }
+                Ok(path.clone())
             }
-            PartitionWriter::Parquet { writer, path } => {
-                writer.close()?;
-                Ok(path)
+            PartitionWriter::Parquet { inner_writer, path } => {
+                inner_writer.finish()?;
+                Ok(path.clone())
             }
         }
     }
@@ -58,6 +82,7 @@ impl PartitionWriter {
 pub struct ArrowWriterBuilder {
     schema: SchemaRef,
     compression: Option<ArrowCompression>,
+    ipc_format: ArrowIPCFormat,
 }
 
 impl ArrowWriterBuilder {
@@ -65,6 +90,7 @@ impl ArrowWriterBuilder {
         Self {
             schema,
             compression: None,
+            ipc_format: ArrowIPCFormat::default(),
         }
     }
 
@@ -73,11 +99,16 @@ impl ArrowWriterBuilder {
         self
     }
 
+    pub fn with_ipc_format(mut self, ipc_format: ArrowIPCFormat) -> Self {
+        self.ipc_format = ipc_format;
+        self
+    }
+
     pub fn build_arrow_writer(&self, path: &PathBuf) -> Result<PartitionWriter> {
         let file = File::create(path)?;
         let buf_writer = BufWriter::with_capacity(IO_BUFFER_SIZE, file);
 
-        let writer = if let Some(compression) = &self.compression {
+        if let Some(compression) = &self.compression {
             let options = match compression {
                 ArrowCompression::Zstd => IpcWriteOptions::default()
                     .try_with_compression(Some(arrow::ipc::CompressionType::ZSTD))?,
@@ -85,15 +116,45 @@ impl ArrowWriterBuilder {
                     .try_with_compression(Some(arrow::ipc::CompressionType::LZ4_FRAME))?,
                 ArrowCompression::None => IpcWriteOptions::default(),
             };
-            FileWriter::try_new_with_options(buf_writer, &self.schema, options)?
-        } else {
-            FileWriter::try_new(buf_writer, &self.schema)?
-        };
 
-        Ok(PartitionWriter::Arrow {
-            writer,
-            path: path.clone(),
-        })
+            match self.ipc_format {
+                ArrowIPCFormat::File => Ok(PartitionWriter::Arrow {
+                    inner_writer: ArrowWriterInner::File {
+                        writer: FileWriter::try_new_with_options(
+                            buf_writer,
+                            &self.schema,
+                            options,
+                        )?,
+                    },
+                    path: path.clone(),
+                }),
+                ArrowIPCFormat::Stream => Ok(PartitionWriter::Arrow {
+                    inner_writer: ArrowWriterInner::Stream {
+                        writer: StreamWriter::try_new_with_options(
+                            buf_writer,
+                            &self.schema,
+                            options,
+                        )?,
+                    },
+                    path: path.clone(),
+                }),
+            }
+        } else {
+            match self.ipc_format {
+                ArrowIPCFormat::File => Ok(PartitionWriter::Arrow {
+                    inner_writer: ArrowWriterInner::File {
+                        writer: FileWriter::try_new(buf_writer, &self.schema)?,
+                    },
+                    path: path.clone(),
+                }),
+                ArrowIPCFormat::Stream => Ok(PartitionWriter::Arrow {
+                    inner_writer: ArrowWriterInner::Stream {
+                        writer: StreamWriter::try_new(buf_writer, &self.schema)?,
+                    },
+                    path: path.clone(),
+                }),
+            }
+        }
     }
 }
 
@@ -174,7 +235,7 @@ impl ParquetWriterBuilder {
             ArrowWriter::try_new(buf_writer, self.schema.clone(), Some(writer_properties))?;
 
         Ok(PartitionWriter::Parquet {
-            writer,
+            inner_writer: writer,
             path: path.clone(),
         })
     }

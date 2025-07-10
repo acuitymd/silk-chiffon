@@ -1,5 +1,7 @@
 use anyhow::{Result, anyhow};
+use clap::ValueEnum;
 use std::{
+    fmt::{Display, Formatter},
     io::BufReader,
     path::{Path, PathBuf},
 };
@@ -11,10 +13,23 @@ use arrow::{
 use std::fs::File;
 use tempfile::NamedTempFile;
 
-#[derive(PartialEq)]
+#[derive(ValueEnum, PartialEq, Clone, Debug, Default)]
 pub enum ArrowIPCFormat {
+    #[default]
+    #[value(name = "file")]
     File,
+    #[value(name = "stream")]
     Stream,
+}
+
+impl Display for ArrowIPCFormat {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Self::File => "file",
+            Self::Stream => "stream",
+        };
+        write!(f, "{s}")
+    }
 }
 
 pub struct ArrowIPCReader {

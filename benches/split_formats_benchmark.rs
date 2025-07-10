@@ -4,6 +4,7 @@ use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use duckdb::Connection;
+use silk_chiffon::utils::arrow_io::ArrowIPCFormat;
 use silk_chiffon::{ArrowCompression, ListOutputsFormat, SplitToArrowArgs, SplitToParquetArgs};
 use std::fs::{self, File};
 use std::sync::Arc;
@@ -93,6 +94,7 @@ async fn run_silk_arrow(input_path: &std::path::Path, output_dir: &std::path::Pa
         overwrite: false,
         compression: ArrowCompression::Lz4,
         list_outputs: ListOutputsFormat::None,
+        output_ipc_format: ArrowIPCFormat::File,
     };
 
     silk_chiffon::commands::split_to_arrow::run(args)

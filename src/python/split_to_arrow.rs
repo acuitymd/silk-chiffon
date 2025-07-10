@@ -3,7 +3,10 @@
 use pyo3::prelude::*;
 
 use super::common::{PySortColumn, create_input, parse_sort_spec, run_async_command};
-use crate::{ArrowCompression, ListOutputsFormat, SplitToArrowArgs, commands};
+use crate::{
+    ArrowCompression, ListOutputsFormat, SplitToArrowArgs, commands,
+    utils::arrow_io::ArrowIPCFormat,
+};
 
 #[pyfunction]
 #[pyo3(signature = (
@@ -42,6 +45,7 @@ pub fn split_to_arrow(
         overwrite,
         compression,
         list_outputs: ListOutputsFormat::None,
+        output_ipc_format: ArrowIPCFormat::File,
     };
 
     run_async_command(py, || commands::split_to_arrow::run(args))

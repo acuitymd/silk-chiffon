@@ -5,7 +5,7 @@ use pyo3::prelude::*;
 use super::common::{
     PySortColumn, create_input, create_output, parse_sort_spec, run_async_command,
 };
-use crate::{ArrowArgs, ArrowCompression, commands};
+use crate::{ArrowArgs, ArrowCompression, commands, utils::arrow_io::ArrowIPCFormat};
 
 #[pyfunction]
 #[pyo3(signature = (
@@ -33,6 +33,7 @@ pub fn arrow_to_arrow(
         sort_by: sort_spec,
         compression,
         record_batch_size,
+        output_ipc_format: ArrowIPCFormat::File,
     };
 
     run_async_command(py, || commands::arrow::run(args))
