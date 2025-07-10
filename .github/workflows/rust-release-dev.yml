@@ -3,6 +3,9 @@ name: Rust Release Dev
 on:
   workflow_dispatch:
 
+env:
+  DUCKDB_VERSION: 1.3.2
+
 jobs:
   rust-release-dev:
     name: Rust Release Dev
