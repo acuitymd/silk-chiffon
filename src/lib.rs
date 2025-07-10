@@ -215,6 +215,17 @@ pub struct ArrowArgs {
     pub record_batch_size: usize,
 }
 
+#[derive(ValueEnum, Clone, Copy, Debug, Default)]
+pub enum ListOutputsFormat {
+    #[default]
+    #[value(name = "none")]
+    None,
+    #[value(name = "text")]
+    Text,
+    #[value(name = "json")]
+    Json,
+}
+
 #[derive(Args, Debug)]
 pub struct SplitToArrowArgs {
     /// Input Arrow IPC file.
@@ -266,6 +277,10 @@ pub struct SplitToArrowArgs {
     /// The IPC compression to use for the output.
     #[arg(short, long, default_value_t = ArrowCompression::None)]
     pub compression: ArrowCompression,
+
+    /// List the output files after creation.
+    #[arg(short, long, value_enum, default_value_t = ListOutputsFormat::None)]
+    pub list_outputs: ListOutputsFormat,
 }
 
 #[derive(Args, Debug)]

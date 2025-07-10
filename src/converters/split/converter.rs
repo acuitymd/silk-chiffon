@@ -15,6 +15,8 @@ use arrow::datatypes::{
     Int64Type, SchemaRef, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
 };
 use arrow::ipc::reader::FileReader;
+use serde::Serialize;
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::path::PathBuf;
 use tempfile::NamedTempFile;
@@ -41,7 +43,7 @@ struct PartitioningState {
     current_value: Value,
     writer: Option<PartitionWriter>,
     coalescer: BatchCoalescer,
-    paths: Vec<PathBuf>,
+    path_map: HashMap<String, PathBuf>,
 }
 
 impl PartitioningState {
@@ -50,7 +52,7 @@ impl PartitioningState {
             current_value: Value::None,
             writer: None,
             coalescer: BatchCoalescer::new(schema, record_batch_size),
-            paths: Vec::new(),
+            path_map: HashMap::new(),
         }
     }
 }
@@ -178,6 +180,11 @@ impl<'a> ArrayValues<'a> {
             ArrayValues::Float64(array) => impl_get_value!(array, index, Float64),
         }
     }
+}
+
+#[derive(Debug, Serialize)]
+pub struct SplitConversionResult {
+    pub output_files: HashMap<String, PathBuf>,
 }
 
 impl SplitConverter {
@@ -355,7 +362,10 @@ impl SplitConverter {
                 &self.format_value(&partitioning_state.current_value),
             );
 
-            partitioning_state.paths.push(initial_path.clone());
+            partitioning_state.path_map.insert(
+                self.format_value(&partitioning_state.current_value),
+                initial_path.clone(),
+            );
             partitioning_state.writer = Some(self.create_writer(&initial_path, &schema).await?);
         }
 
@@ -379,7 +389,9 @@ impl SplitConverter {
                     .output_template
                     .resolve(&self.split_column, &self.format_value(&value));
 
-                partitioning_state.paths.push(new_path.clone());
+                partitioning_state
+                    .path_map
+                    .insert(self.format_value(&value), new_path.clone());
                 partitioning_state.writer = Some(self.create_writer(&new_path, &schema).await?);
                 partitioning_state.coalescer =
                     BatchCoalescer::new(schema.clone(), self.record_batch_size);
@@ -422,7 +434,7 @@ impl SplitConverter {
         Ok(())
     }
 
-    pub async fn convert(&self) -> Result<Vec<PathBuf>> {
+    pub async fn convert(&self) -> Result<SplitConversionResult> {
         let sorted_path = self.prepare_sorted_input().await?;
 
         let file_reader = FileReader::try_new_buffered(File::open(sorted_path.path())?, None)?;
@@ -437,8 +449,9 @@ impl SplitConverter {
 
         self.finish_current_partition(&mut partitioning_state)?;
 
-        partitioning_state.paths.sort();
-        Ok(partitioning_state.paths)
+        Ok(SplitConversionResult {
+            output_files: partitioning_state.path_map,
+        })
     }
 }
 
