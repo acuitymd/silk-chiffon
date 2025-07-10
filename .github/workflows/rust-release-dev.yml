@@ -177,5 +177,5 @@ jobs:
               -H "Authorization: token $GITHUB_TOKEN" \
               -H "Content-Type: application/octet-stream" \
               --data-binary @"$wheel" \
-              "${{ needs.create-release.outputs.upload_url }}?name=$(basename $wheel)"
+              "${{ needs.create-release.outputs.upload_url }}?name=$(basename $wheel)&label=$(basename $wheel)"
           done
