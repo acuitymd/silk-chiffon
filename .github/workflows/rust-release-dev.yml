@@ -12,28 +12,22 @@ jobs:
     permissions:
       contents: write
     outputs:
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
       tag: ${{ steps.tag.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Generate tag
+      - name: Generate tag and create release
         id: tag
-        run: |
-          echo "tag=dev-$(date -u +%Y%m%d%H%M%S)-$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
-
-      - name: Create Release
-        id: create_release
-        uses: actions/create-release@v1
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ steps.tag.outputs.tag }}
-          release_name: Dev Build ${{ steps.tag.outputs.tag }}
-          draft: false
-          prerelease: true
-          body: |
-            Development build from commit ${{ github.sha }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="dev-$(date -u +%Y%m%d%H%M%S)-$(git rev-parse --short HEAD)"
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+
+          # Create the release
+          gh release create "$TAG" \
+            --title "Dev Build $TAG" \
+            --notes "Development build from commit ${{ github.sha }}" \
+            --prerelease
   build-and-upload:
     needs: create-release
     strategy:
@@ -102,15 +96,11 @@ jobs:
           cd target/${{ matrix.target }}/release
           tar czf ../../../${{ matrix.artifact_name }}.tar.gz silk-chiffon
           echo "ASSET_PATH=${{ matrix.artifact_name }}.tar.gz" >> $GITHUB_ENV
-      - name: Upload Release Asset
-        uses: actions/upload-release-asset@v1
+      - name: Upload to release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: ${{ env.ASSET_PATH }}
-          asset_name: ${{ env.ASSET_PATH }}
-          asset_content_type: application/octet-stream
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ needs.create-release.outputs.tag }}" "${{ env.ASSET_PATH }}" --clobber
   build-wheels:
     needs: create-release
     strategy:
@@ -167,15 +157,9 @@ jobs:
           uv run maturin build --release --features python
 
       - name: Upload wheels to release
-        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           for wheel in target/wheels/*.whl; do
-            echo "Uploading $wheel"
-            curl -X POST \
-              -H "Authorization: token $GITHUB_TOKEN" \
-              -H "Content-Type: application/octet-stream" \
-              --data-binary @"$wheel" \
-              "${{ needs.create-release.outputs.upload_url }}?name=$(basename $wheel)&label=$(basename $wheel)"
+            gh release upload "${{ needs.create-release.outputs.tag }}" "$wheel" --clobber
           done
