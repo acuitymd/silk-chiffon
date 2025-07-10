@@ -2,6 +2,7 @@ use arrow::array::{ArrayRef, Int32Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::FileWriter;
 use arrow::record_batch::RecordBatch;
+use silk_chiffon::utils::arrow_io::ArrowIPCFormat;
 use silk_chiffon::{ArrowCompression, ListOutputsFormat, SplitToArrowArgs};
 use std::fs::File;
 use std::path::Path;
@@ -66,6 +67,7 @@ async fn test_split_to_arrow_basic() {
         overwrite: false,
         compression: ArrowCompression::None,
         list_outputs: ListOutputsFormat::None,
+        output_ipc_format: ArrowIPCFormat::File,
     };
 
     silk_chiffon::commands::split_to_arrow::run(args)
@@ -123,6 +125,7 @@ async fn test_split_to_arrow_with_template_placeholders() {
         overwrite: false,
         compression: ArrowCompression::None,
         list_outputs: ListOutputsFormat::None,
+        output_ipc_format: ArrowIPCFormat::File,
     };
 
     silk_chiffon::commands::split_to_arrow::run(args)
@@ -153,6 +156,7 @@ async fn test_split_to_arrow_with_sorting() {
         overwrite: false,
         compression: ArrowCompression::None,
         list_outputs: ListOutputsFormat::None,
+        output_ipc_format: ArrowIPCFormat::File,
     };
 
     silk_chiffon::commands::split_to_arrow::run(args)
@@ -196,6 +200,7 @@ async fn test_split_to_arrow_with_int_column() {
         overwrite: false,
         compression: ArrowCompression::None,
         list_outputs: ListOutputsFormat::None,
+        output_ipc_format: ArrowIPCFormat::File,
     };
 
     silk_chiffon::commands::split_to_arrow::run(args)
@@ -225,6 +230,7 @@ async fn test_split_to_arrow_error_nonexistent_column() {
         overwrite: false,
         compression: ArrowCompression::None,
         list_outputs: ListOutputsFormat::None,
+        output_ipc_format: ArrowIPCFormat::File,
     };
 
     let result = silk_chiffon::commands::split_to_arrow::run(args).await;
@@ -273,6 +279,7 @@ async fn test_split_to_arrow_safe_value_placeholder() {
         overwrite: false,
         compression: ArrowCompression::None,
         list_outputs: ListOutputsFormat::None,
+        output_ipc_format: ArrowIPCFormat::File,
     };
 
     silk_chiffon::commands::split_to_arrow::run(args)

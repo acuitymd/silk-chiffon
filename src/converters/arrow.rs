@@ -32,6 +32,7 @@ pub struct ArrowConverter {
     sort_spec: SortSpec,
     record_batch_size: usize,
     datafusion_batch_size: usize,
+    output_ipc_format: ArrowIPCFormat,
 }
 
 impl ArrowConverter {
@@ -45,6 +46,7 @@ impl ArrowConverter {
             sort_spec: SortSpec::default(),
             record_batch_size: 122_880,
             datafusion_batch_size: 8192,
+            output_ipc_format: ArrowIPCFormat::default(),
         }
     }
 
@@ -69,6 +71,11 @@ impl ArrowConverter {
 
     pub fn with_record_batch_size(mut self, record_batch_size: usize) -> Self {
         self.record_batch_size = record_batch_size;
+        self
+    }
+
+    pub fn with_output_ipc_format(mut self, output_ipc_format: ArrowIPCFormat) -> Self {
+        self.output_ipc_format = output_ipc_format;
         self
     }
 

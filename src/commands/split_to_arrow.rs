@@ -9,6 +9,7 @@ pub async fn run(args: SplitToArrowArgs) -> Result<()> {
             ArrowCompression::None => None,
             other => Some(other),
         },
+        ipc_format: args.output_ipc_format,
     };
 
     let converter = SplitConverter::new(
