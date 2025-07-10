@@ -3249,6 +3249,8 @@ dependencies = [
  "pyo3",
  "rand 0.9.1",
  "sanitize-filename",
+ "serde",
+ "serde_json",
  "sha2",
  "tempfile",
  "tokio",

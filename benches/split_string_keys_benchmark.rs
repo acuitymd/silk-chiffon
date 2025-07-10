@@ -3,6 +3,7 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use silk_chiffon::{ArrowCompression, ListOutputsFormat, SplitToArrowArgs};
 use std::fs::{self, File};
 use std::sync::Arc;
 use std::time::Duration;
@@ -88,7 +89,7 @@ fn setup_benchmark_data(scenario: &StringKeyScenario) -> (TempDir, std::path::Pa
 }
 
 async fn run_silk_chiffon(input_path: &std::path::Path, output_dir: &std::path::Path) {
-    let args = silk_chiffon::SplitToArrowArgs {
+    let args = SplitToArrowArgs {
         input: clio::Input::new(input_path).unwrap(),
         by: "split_col".to_string(),
         output_template: format!("{}/{{value}}.arrow", output_dir.display()),
@@ -96,7 +97,8 @@ async fn run_silk_chiffon(input_path: &std::path::Path, output_dir: &std::path::
         sort_by: None,
         create_dirs: true,
         overwrite: false,
-        compression: silk_chiffon::ArrowCompression::Lz4,
+        compression: ArrowCompression::Lz4,
+        list_outputs: ListOutputsFormat::None,
     };
 
     silk_chiffon::commands::split_to_arrow::run(args)

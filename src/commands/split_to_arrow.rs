@@ -1,6 +1,7 @@
 use crate::converters::split::{OutputFormat, SplitConverter};
-use crate::{ArrowCompression, SplitToArrowArgs};
+use crate::{ArrowCompression, ListOutputsFormat, SplitToArrowArgs};
 use anyhow::Result;
+use std::path::PathBuf;
 
 pub async fn run(args: SplitToArrowArgs) -> Result<()> {
     let output_format = OutputFormat::Arrow {
@@ -21,7 +22,25 @@ pub async fn run(args: SplitToArrowArgs) -> Result<()> {
     .with_create_dirs(args.create_dirs)
     .with_overwrite(args.overwrite);
 
-    let _created_files = converter.convert().await?;
+    let conversion_result = converter.convert().await?;
+
+    match args.list_outputs {
+        ListOutputsFormat::Text => {
+            // grab the file paths into a vector so we can sort them, to provide a stable output order
+            let mut files: Vec<PathBuf> =
+                conversion_result.output_files.values().cloned().collect();
+            files.sort();
+
+            for file in files {
+                println!("{}", file.as_path().display());
+            }
+        }
+        ListOutputsFormat::Json => {
+            let json = serde_json::to_string_pretty(&conversion_result)?;
+            println!("{json}");
+        }
+        ListOutputsFormat::None => {}
+    }
 
     Ok(())
 }
