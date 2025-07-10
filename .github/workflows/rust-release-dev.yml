@@ -14,7 +14,7 @@ jobs:
       # This defaults to true so we need to explicitly set it to false
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
         rust: [stable]
         BUILD_TARGET: [release]
     steps:
@@ -42,6 +42,10 @@ jobs:
           sudo mv libduckdb/libduckdb.so /usr/local/lib/
           sudo ldconfig /usr/local/lib
           rm -rf libduckdb libduckdb-linux-arm64.zip
+      - name: Setup DuckDB (macOS only)
+        if: ${{ matrix.os == 'macos-latest' }}
+        run: |
+          brew install duckdb
       - name: Cache
         uses: actions/cache@v4
         with:
@@ -63,5 +67,5 @@ jobs:
       - name: Upload release artifact
         uses: actions/upload-artifact@v4
         with:
-          name: silk-chiffon-${{ matrix.os }}-${{ matrix.rust }}-${{ matrix.BUILD_TARGET }}
+          name: silk-chiffon-${{ runner.os }}-${{ runner.arch }}-rust-${{ matrix.rust }}-${{ matrix.BUILD_TARGET }}-${{ github.sha }}
           path: target/${{ matrix.BUILD_TARGET }}/silk-chiffon
