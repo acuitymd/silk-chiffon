@@ -72,5 +72,7 @@ jobs:
           name: silk-chiffon-${{ runner.os }}-${{ runner.arch }}-rust-${{ matrix.rust }}-${{ matrix.BUILD_TARGET }}-${{ github.sha }}
           path: target/${{ matrix.BUILD_TARGET }}/silk-chiffon
       - name: Publish built binary to GitHub releases
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           gh release create --generate-notes ./silk-chiffon/silk-chiffon#${{ runner.os }}-${{ runner.arch }}-rust-${{ matrix.rust }}-${{ matrix.BUILD_TARGET }}-${{ github.sha }} --prerelease
