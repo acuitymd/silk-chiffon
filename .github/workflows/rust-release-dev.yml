@@ -3,45 +3,53 @@ name: Rust Release Dev
 on:
   workflow_dispatch:
 
-permissions:
-  contents: write
-
 env:
   DUCKDB_VERSION: 1.3.2
 
 jobs:
-  create-tag:
+  create-release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
       tag: ${{ steps.tag.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
-      - name: Create tag
+
+      - name: Generate tag
         id: tag
         run: |
-          TAG="dev-$(date -u +%Y%m%d%H%M%S)-$(git rev-parse --short HEAD)"
-          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "tag=dev-$(date -u +%Y%m%d%H%M%S)-$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
 
-          # Create and push tag
-          git config user.name github-actions
-          git config user.email github-actions@github.com
-          git tag "${TAG}"
-          git push origin "${TAG}"
-  rust-release-dev:
-    name: Rust Release Dev
-    runs-on: ${{ matrix.os }}
-    strategy:
-      # This defaults to true so we need to explicitly set it to false
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-        rust: [stable]
-        BUILD_TARGET: [release]
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          ref: ${{ needs.create-tag.outputs.tag }}
+          tag_name: ${{ steps.tag.outputs.tag }}
+          release_name: Dev Build ${{ steps.tag.outputs.tag }}
+          draft: false
+          prerelease: true
+          body: |
+            Development build from commit ${{ github.sha }}
+  build-and-upload:
+    needs: create-release
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_name: silk-chiffon-linux-x64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact_name: silk-chiffon-macos-arm64
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
       - name: Setup DuckDB (Ubuntu amd64 only)
         if: ${{ matrix.os == 'ubuntu-latest' }}
         run: |
@@ -78,7 +86,7 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Modify the rust toolchain version
-        run: rustup override set ${{ matrix.rust }}
+        run: rustup override set stable
       - name: Update rustup and rust
         run: rustup update
       - name: Output rust toolchain version
@@ -86,17 +94,20 @@ jobs:
       - name: Output rust version for educational purposes
         run: rustup --version
 
-      - name: Build binaries in "${{ matrix.BUILD_TARGET }}" mode
-        run: cargo build --profile ${{ matrix.BUILD_TARGET }}
-      - name: Upload release artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: silk-chiffon-${{ runner.os }}-${{ runner.arch }}-rust-${{ matrix.rust }}-${{ matrix.BUILD_TARGET }}-${{ github.sha }}
-          path: target/${{ matrix.BUILD_TARGET }}/silk-chiffon
-      - name: Publish built binary to GitHub releases
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+      - name: Package
+        shell: bash
         run: |
-          ARCH="$(echo ${{ runner.arch }} | tr '[:upper:]' '[:lower:]')"
-          OS="$(echo ${{ runner.os }} | tr '[:upper:]' '[:lower:]')"
-          gh release create "v${{ needs.create-tag.outputs.tag }}" --generate-notes ./target/release/silk-chiffon#${OS}-${ARCH} --prerelease
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../${{ matrix.artifact_name }}.tar.gz silk-chiffon
+          echo "ASSET_PATH=${{ matrix.artifact_name }}.tar.gz" >> $GITHUB_ENV
+      - name: Upload Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: ${{ env.ASSET_PATH }}
+          asset_name: ${{ env.ASSET_PATH }}
+          asset_content_type: application/octet-stream
