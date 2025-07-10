@@ -14,7 +14,7 @@ jobs:
       # This defaults to true so we need to explicitly set it to false
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+        os: [ubuntu-latest, macos-latest]
         rust: [stable]
         BUILD_TARGET: [release]
     steps:
