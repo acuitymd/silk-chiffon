@@ -31,7 +31,7 @@ dev-dependencies = [
 ]
 
 [tool.maturin]
-features = ["pyo3/extension-module"]
+features = ["python"]
 
 [tool.ruff]
 line-length = 88
