@@ -1,0 +1,64 @@
+name: Rust Release Dev
+
+on:
+  workflow_dispatch:
+
+jobs:
+  rust-release-dev:
+    name: Rust Release Dev
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # This defaults to true so we need to explicitly set it to false
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+        rust: [stable]
+        BUILD_TARGET: [release]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Setup DuckDB (Ubuntu amd64 only)
+        if: ${{ matrix.os == 'ubuntu-latest' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl unzip build-essential
+          curl -L -O https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/libduckdb-linux-amd64.zip
+          unzip libduckdb-linux-amd64.zip -d libduckdb
+          sudo mv libduckdb/duckdb.* /usr/local/include/
+          sudo mv libduckdb/libduckdb.so /usr/local/lib/
+          sudo ldconfig /usr/local/lib
+          rm -rf libduckdb libduckdb-linux-amd64.zip
+      - name: Setup DuckDB (Ubuntu arm64 only)
+        if: ${{ matrix.os == 'ubuntu-24.04-arm' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl unzip build-essential
+          curl -L -O https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/libduckdb-linux-arm64.zip
+          unzip libduckdb-linux-arm64.zip -d libduckdb
+          sudo mv libduckdb/duckdb.* /usr/local/include/
+          sudo mv libduckdb/libduckdb.so /usr/local/lib/
+          sudo ldconfig /usr/local/lib
+          rm -rf libduckdb libduckdb-linux-arm64.zip
+      - name: Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Temporarily modify the rust toolchain version
+        run: rustup override set ${{ matrix.rust }}
+      - name: Output rust version for educational purposes
+        run: rustup --version
+
+      - name: Build binaries in "${{ matrix.BUILD_TARGET }}" mode
+        run: cargo build --profile ${{ matrix.BUILD_TARGET }}
+      - name: Run tests in "${{ matrix.BUILD_TARGET }}" mode
+        run: cargo test --profile ${{ matrix.BUILD_TARGET }}
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: silk-chiffon-${{ matrix.os }}-${{ matrix.rust }}-${{ matrix.BUILD_TARGET }}
+          path: target/${{ matrix.BUILD_TARGET }}/silk-chiffon
