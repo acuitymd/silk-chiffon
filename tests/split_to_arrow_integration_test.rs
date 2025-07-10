@@ -2,6 +2,7 @@ use arrow::array::{ArrayRef, Int32Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::FileWriter;
 use arrow::record_batch::RecordBatch;
+use silk_chiffon::{ArrowCompression, ListOutputsFormat, SplitToArrowArgs};
 use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
@@ -55,7 +56,7 @@ async fn test_split_to_arrow_basic() {
     let (schema, batches) = create_test_data();
     write_test_arrow_file(&input_path, &schema, batches);
 
-    let args = silk_chiffon::SplitToArrowArgs {
+    let args = SplitToArrowArgs {
         input: clio::Input::new(&input_path).unwrap(),
         by: "category".to_string(),
         output_template: format!("{}/{{value}}.arrow", output_dir.display()),
@@ -63,7 +64,8 @@ async fn test_split_to_arrow_basic() {
         sort_by: None,
         create_dirs: true,
         overwrite: false,
-        compression: silk_chiffon::ArrowCompression::None,
+        compression: ArrowCompression::None,
+        list_outputs: ListOutputsFormat::None,
     };
 
     silk_chiffon::commands::split_to_arrow::run(args)
@@ -111,7 +113,7 @@ async fn test_split_to_arrow_with_template_placeholders() {
     let (schema, batches) = create_test_data();
     write_test_arrow_file(&input_path, &schema, batches);
 
-    let args = silk_chiffon::SplitToArrowArgs {
+    let args = SplitToArrowArgs {
         input: clio::Input::new(&input_path).unwrap(),
         by: "category".to_string(),
         output_template: format!("{}/{{column}}_{{value}}_data.arrow", output_dir.display()),
@@ -119,7 +121,8 @@ async fn test_split_to_arrow_with_template_placeholders() {
         sort_by: None,
         create_dirs: true,
         overwrite: false,
-        compression: silk_chiffon::ArrowCompression::None,
+        compression: ArrowCompression::None,
+        list_outputs: ListOutputsFormat::None,
     };
 
     silk_chiffon::commands::split_to_arrow::run(args)
@@ -140,7 +143,7 @@ async fn test_split_to_arrow_with_sorting() {
     let (schema, batches) = create_test_data();
     write_test_arrow_file(&input_path, &schema, batches);
 
-    let args = silk_chiffon::SplitToArrowArgs {
+    let args = SplitToArrowArgs {
         input: clio::Input::new(&input_path).unwrap(),
         by: "category".to_string(),
         output_template: format!("{}/{{value}}.arrow", output_dir.display()),
@@ -148,7 +151,8 @@ async fn test_split_to_arrow_with_sorting() {
         sort_by: Some("value:desc".parse().unwrap()),
         create_dirs: true,
         overwrite: false,
-        compression: silk_chiffon::ArrowCompression::None,
+        compression: ArrowCompression::None,
+        list_outputs: ListOutputsFormat::None,
     };
 
     silk_chiffon::commands::split_to_arrow::run(args)
@@ -182,7 +186,7 @@ async fn test_split_to_arrow_with_int_column() {
     let (schema, batches) = create_test_data();
     write_test_arrow_file(&input_path, &schema, batches);
 
-    let args = silk_chiffon::SplitToArrowArgs {
+    let args = SplitToArrowArgs {
         input: clio::Input::new(&input_path).unwrap(),
         by: "id".to_string(),
         output_template: format!("{}/item_{{value}}.arrow", output_dir.display()),
@@ -190,7 +194,8 @@ async fn test_split_to_arrow_with_int_column() {
         sort_by: None,
         create_dirs: true,
         overwrite: false,
-        compression: silk_chiffon::ArrowCompression::None,
+        compression: ArrowCompression::None,
+        list_outputs: ListOutputsFormat::None,
     };
 
     silk_chiffon::commands::split_to_arrow::run(args)
@@ -210,7 +215,7 @@ async fn test_split_to_arrow_error_nonexistent_column() {
     let (schema, batches) = create_test_data();
     write_test_arrow_file(&input_path, &schema, batches);
 
-    let args = silk_chiffon::SplitToArrowArgs {
+    let args = SplitToArrowArgs {
         input: clio::Input::new(&input_path).unwrap(),
         by: "nonexistent".to_string(),
         output_template: "{value}.arrow".to_string(),
@@ -218,7 +223,8 @@ async fn test_split_to_arrow_error_nonexistent_column() {
         sort_by: None,
         create_dirs: true,
         overwrite: false,
-        compression: silk_chiffon::ArrowCompression::None,
+        compression: ArrowCompression::None,
+        list_outputs: ListOutputsFormat::None,
     };
 
     let result = silk_chiffon::commands::split_to_arrow::run(args).await;
@@ -257,7 +263,7 @@ async fn test_split_to_arrow_safe_value_placeholder() {
 
     write_test_arrow_file(&input_path, &schema, vec![batch]);
 
-    let args = silk_chiffon::SplitToArrowArgs {
+    let args = SplitToArrowArgs {
         input: clio::Input::new(&input_path).unwrap(),
         by: "path".to_string(),
         output_template: format!("{}/{{safe_value}}.arrow", output_dir.display()),
@@ -265,7 +271,8 @@ async fn test_split_to_arrow_safe_value_placeholder() {
         sort_by: None,
         create_dirs: true,
         overwrite: false,
-        compression: silk_chiffon::ArrowCompression::None,
+        compression: ArrowCompression::None,
+        list_outputs: ListOutputsFormat::None,
     };
 
     silk_chiffon::commands::split_to_arrow::run(args)

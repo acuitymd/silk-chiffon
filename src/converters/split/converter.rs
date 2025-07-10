@@ -524,7 +524,7 @@ mod tests {
 
         let created_files = converter.convert().await.unwrap();
 
-        assert_eq!(created_files.len(), 3);
+        assert_eq!(created_files.output_files.len(), 3);
         assert!(output_dir.join("1.arrow").exists());
         assert!(output_dir.join("2.arrow").exists());
         assert!(output_dir.join("3.arrow").exists());
@@ -568,7 +568,7 @@ mod tests {
 
         let created_files = converter.convert().await.unwrap();
 
-        assert_eq!(created_files.len(), 3);
+        assert_eq!(created_files.output_files.len(), 3);
         assert!(output_dir.join("1.arrow").exists());
         assert!(output_dir.join("2.arrow").exists());
         assert!(output_dir.join("__NULL__.arrow").exists());
@@ -592,7 +592,7 @@ mod tests {
 
         let created_files = converter.convert().await.unwrap();
 
-        assert_eq!(created_files.len(), 3);
+        assert_eq!(created_files.output_files.len(), 3);
 
         let file = File::open(output_dir.join("1.arrow")).unwrap();
         let reader = FileReader::try_new(file, None).unwrap();
@@ -691,7 +691,7 @@ mod tests {
 
         let created_files = converter.convert().await.unwrap();
 
-        assert_eq!(created_files.len(), 3);
+        assert_eq!(created_files.output_files.len(), 3);
         assert!(output_dir.join("north.arrow").exists());
         assert!(output_dir.join("south.arrow").exists());
         assert!(output_dir.join("east.arrow").exists());
@@ -723,7 +723,7 @@ mod tests {
 
         let created_files = converter.convert().await.unwrap();
 
-        assert_eq!(created_files.len(), 3);
+        assert_eq!(created_files.output_files.len(), 3);
         assert!(output_dir.join("1.parquet").exists());
         assert!(output_dir.join("2.parquet").exists());
         assert!(output_dir.join("3.parquet").exists());
@@ -748,7 +748,7 @@ mod tests {
 
         let created_files = converter.convert().await.unwrap();
 
-        assert_eq!(created_files.len(), 100);
+        assert_eq!(created_files.output_files.len(), 100);
     }
 
     #[tokio::test]
@@ -770,7 +770,7 @@ mod tests {
 
         let created_files = converter.convert().await.unwrap();
 
-        assert_eq!(created_files.len(), 3);
+        assert_eq!(created_files.output_files.len(), 3);
 
         for i in 1..=3 {
             let file = File::open(output_dir.join(format!("{i}.arrow"))).unwrap();
@@ -878,7 +878,7 @@ mod tests {
         assert!(result.is_ok());
 
         let created_files = result.unwrap();
-        assert_eq!(created_files.len(), 1);
+        assert_eq!(created_files.output_files.len(), 1);
         assert!(output_dir.join("1.arrow").exists());
     }
 }

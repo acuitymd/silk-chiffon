@@ -4,6 +4,7 @@ use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use duckdb::Connection;
+use silk_chiffon::{ArrowCompression, ListOutputsFormat, SplitToArrowArgs, SplitToParquetArgs};
 use std::fs::{self, File};
 use std::sync::Arc;
 use std::time::Duration;
@@ -82,7 +83,7 @@ fn setup_benchmark_data(scenario: &FormatScenario) -> (TempDir, std::path::PathB
 }
 
 async fn run_silk_arrow(input_path: &std::path::Path, output_dir: &std::path::Path) {
-    let args = silk_chiffon::SplitToArrowArgs {
+    let args = SplitToArrowArgs {
         input: clio::Input::new(input_path).unwrap(),
         by: "split_col".to_string(),
         output_template: format!("{}/{{value}}.arrow", output_dir.display()),
@@ -90,7 +91,8 @@ async fn run_silk_arrow(input_path: &std::path::Path, output_dir: &std::path::Pa
         sort_by: None,
         create_dirs: true,
         overwrite: false,
-        compression: silk_chiffon::ArrowCompression::Lz4,
+        compression: ArrowCompression::Lz4,
+        list_outputs: ListOutputsFormat::None,
     };
 
     silk_chiffon::commands::split_to_arrow::run(args)
@@ -99,7 +101,7 @@ async fn run_silk_arrow(input_path: &std::path::Path, output_dir: &std::path::Pa
 }
 
 async fn run_silk_parquet(input_path: &std::path::Path, output_dir: &std::path::Path) {
-    let args = silk_chiffon::SplitToParquetArgs {
+    let args = SplitToParquetArgs {
         input: clio::Input::new(input_path).unwrap(),
         by: "split_col".to_string(),
         output_template: format!("{}/{{value}}.parquet", output_dir.display()),
