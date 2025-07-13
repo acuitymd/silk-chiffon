@@ -80,3 +80,7 @@ harness = false
 [[bench]]
 name = "split_sorting_benchmark"
 harness = false
+
+[[bench]]
+name = "query_benchmark"
+harness = false
