@@ -14,7 +14,7 @@ def arrow_to_arrow(
     compression: str = "none",
     record_batch_size: int = 122_880,
 ) -> None:
-    """Convert Arrow IPC stream or file format to Arrow IPC file format with optional SQL query, sorting and compression."""
+    """Convert Arrow IPC stream or file format to Arrow IPC file format with optional SQL query, sorting, and compression."""
     ...
 
 def arrow_to_parquet(
