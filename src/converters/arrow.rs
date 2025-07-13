@@ -902,7 +902,7 @@ mod tests {
             let ids = batch
                 .column(0)
                 .as_any()
-                .downcast_ref::<arrow::array::Int64Array>()
+                .downcast_ref::<arrow::array::Int32Array>()
                 .unwrap();
             assert_eq!(ids.value(0), 4);
             assert_eq!(ids.value(1), 5);
@@ -942,7 +942,7 @@ mod tests {
             let ids = batch
                 .column(0)
                 .as_any()
-                .downcast_ref::<arrow::array::Int64Array>()
+                .downcast_ref::<arrow::array::Int32Array>()
                 .unwrap();
             assert_eq!(ids.value(0), 1);
             assert_eq!(ids.value(1), 2);

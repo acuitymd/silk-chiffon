@@ -18,6 +18,7 @@ use crate::{DuckDbArgs, commands};
     truncate = false,
     drop_table = false
 ))]
+#[allow(clippy::too_many_arguments)]
 pub fn arrow_to_duckdb(
     py: Python<'_>,
     input_path: String,

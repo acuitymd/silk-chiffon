@@ -177,7 +177,7 @@ mod tests {
 
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("nonexistent") || err_msg.contains("Schema error"));
+        assert!(err_msg.contains("Failed to parse SQL query"));
     }
 
     #[test]
