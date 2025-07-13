@@ -68,6 +68,7 @@ pub struct SplitConverter {
     sort_spec: Option<SortSpec>,
     create_dirs: bool,
     overwrite: bool,
+    query: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -203,6 +204,7 @@ impl SplitConverter {
             sort_spec: None,
             create_dirs: true,
             overwrite: false,
+            query: None,
         }
     }
 
@@ -257,6 +259,11 @@ impl SplitConverter {
         self
     }
 
+    pub fn with_query(mut self, query: Option<String>) -> Self {
+        self.query = query;
+        self
+    }
+
     async fn create_writer(
         &self,
         path: &PathBuf,
@@ -307,7 +314,7 @@ impl SplitConverter {
 
     async fn prepare_sorted_input(&self) -> Result<NamedTempFile> {
         let sorted_path = NamedTempFile::new()?;
-        let arrow_converter = ArrowConverter::new(&self.input_path, sorted_path.path());
+        let mut arrow_converter = ArrowConverter::new(&self.input_path, sorted_path.path());
 
         let mut sort_columns = vec![SortColumn {
             name: self.split_column.clone(),
@@ -318,12 +325,15 @@ impl SplitConverter {
             sort_columns.extend(user_sort.columns.clone());
         }
 
-        arrow_converter
-            .with_sorting(SortSpec {
-                columns: sort_columns,
-            })
-            .convert()
-            .await?;
+        arrow_converter = arrow_converter.with_sorting(SortSpec {
+            columns: sort_columns,
+        });
+
+        if let Some(query) = &self.query {
+            arrow_converter = arrow_converter.with_query(Some(query.clone()));
+        }
+
+        arrow_converter.convert().await?;
 
         Ok(sorted_path)
     }
@@ -889,5 +899,64 @@ mod tests {
         let created_files = result.unwrap();
         assert_eq!(created_files.output_files.len(), 1);
         assert!(output_dir.join("1.arrow").exists());
+    }
+
+    #[tokio::test]
+    async fn test_split_with_query() {
+        let temp_dir = TempDir::new().unwrap();
+        let output_dir = temp_dir.path().join("output");
+
+        // create test data with mixed categories
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("category", DataType::Int32, false),
+            Field::new("status", DataType::Utf8, false),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(vec![1, 2, 3, 4, 5, 6])),
+                Arc::new(Int32Array::from(vec![1, 2, 1, 2, 1, 2])),
+                Arc::new(StringArray::from(vec![
+                    "active", "inactive", "active", "active", "inactive", "active",
+                ])),
+            ],
+        )
+        .unwrap();
+
+        let input_path = create_test_file(&temp_dir, vec![batch]);
+
+        // filter to only active records before splitting
+        let converter = SplitConverter::new(
+            input_path.to_str().unwrap().to_string(),
+            "category".to_string(),
+            format!("{}/{{value}}.arrow", output_dir.display()),
+        )
+        .with_query(Some(
+            "SELECT * FROM data WHERE status = 'active'".to_string(),
+        ))
+        .with_create_dirs(true);
+
+        let created_files = converter.convert().await.unwrap();
+
+        // should have 2 categories but only active records
+        assert_eq!(created_files.output_files.len(), 2);
+        assert!(output_dir.join("1.arrow").exists());
+        assert!(output_dir.join("2.arrow").exists());
+
+        // check category 1 file
+        let file = File::open(output_dir.join("1.arrow")).unwrap();
+        let reader = FileReader::try_new(file, None).unwrap();
+        let batches: Vec<_> = reader.collect::<Result<Vec<_>, _>>().unwrap();
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 2); // only active records with category 1
+
+        // check category 2 file
+        let file = File::open(output_dir.join("2.arrow")).unwrap();
+        let reader = FileReader::try_new(file, None).unwrap();
+        let batches: Vec<_> = reader.collect::<Result<Vec<_>, _>>().unwrap();
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 2); // only active records with category 2
     }
 }
