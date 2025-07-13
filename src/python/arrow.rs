@@ -12,6 +12,7 @@ use crate::{ArrowArgs, ArrowCompression, commands, utils::arrow_io::ArrowIPCForm
     input_path,
     output_path,
     *,
+    query = None,
     sort_by = None,
     compression = "none",
     record_batch_size = 122_880
@@ -20,6 +21,7 @@ pub fn arrow_to_arrow(
     py: Python<'_>,
     input_path: String,
     output_path: String,
+    query: Option<String>,
     sort_by: Option<Vec<PySortColumn>>,
     compression: &str,
     record_batch_size: usize,
@@ -30,6 +32,7 @@ pub fn arrow_to_arrow(
     let args = ArrowArgs {
         input: create_input(&input_path)?,
         output: create_output(&output_path)?,
+        query,
         sort_by: sort_spec,
         compression,
         record_batch_size,

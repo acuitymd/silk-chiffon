@@ -13,6 +13,7 @@ pub struct DuckDbConverter {
     sort_spec: SortSpec,
     truncate: bool,
     drop_table: bool,
+    query: Option<String>,
 }
 
 impl DuckDbConverter {
@@ -24,6 +25,7 @@ impl DuckDbConverter {
             sort_spec: SortSpec::default(),
             truncate: false,
             drop_table: false,
+            query: None,
         }
     }
 
@@ -42,12 +44,18 @@ impl DuckDbConverter {
         self
     }
 
+    pub fn with_query(mut self, query: Option<String>) -> Self {
+        self.query = query;
+        self
+    }
+
     pub async fn convert(&self) -> Result<()> {
         let temp_file = NamedTempFile::new()?;
         let parquet_path = temp_file.path().with_extension("parquet");
 
         ParquetConverter::new(self.input_path.clone(), parquet_path.clone())
             .with_sort_spec(self.sort_spec.clone())
+            .with_query(self.query.clone())
             .convert()
             .await?;
 

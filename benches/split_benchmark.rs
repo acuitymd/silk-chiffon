@@ -129,6 +129,7 @@ async fn run_silk_arrow(input_path: &std::path::Path, output_dir: &std::path::Pa
         compression: ArrowCompression::Lz4,
         list_outputs: ListOutputsFormat::None,
         output_ipc_format: ArrowIPCFormat::File,
+        query: None,
     };
 
     silk_chiffon::commands::split_to_arrow::run(args)

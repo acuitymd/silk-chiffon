@@ -27,7 +27,8 @@ pub async fn run(args: ParquetArgs) -> Result<()> {
         .with_statistics(args.statistics)
         .with_no_dictionary(args.no_dictionary)
         .with_writer_version(args.writer_version)
-        .with_write_sorted_metadata(args.write_sorted_metadata);
+        .with_write_sorted_metadata(args.write_sorted_metadata)
+        .with_query(args.query);
 
     converter.convert().await
 }
@@ -54,6 +55,7 @@ mod tests {
         let args = ParquetArgs {
             input: Input::new(&input_path).unwrap(),
             output: OutputPath::new(&output_path).unwrap(),
+            query: None,
             sort_by: SortSpec::default(),
             compression: ParquetCompression::None,
             write_sorted_metadata: false,
@@ -83,6 +85,7 @@ mod tests {
         let args = ParquetArgs {
             input: Input::new(&input_path).unwrap(),
             output: OutputPath::new(&output_path).unwrap(),
+            query: None,
             sort_by: SortSpec::default(),
             compression: ParquetCompression::Zstd,
             write_sorted_metadata: false,

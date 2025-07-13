@@ -26,6 +26,7 @@ pub struct ParquetConverter {
     no_dictionary: bool,
     writer_version: ParquetWriterVersion,
     write_sorted_metadata: bool,
+    query: Option<String>,
 }
 
 impl ParquetConverter {
@@ -42,6 +43,7 @@ impl ParquetConverter {
             no_dictionary: false,
             writer_version: ParquetWriterVersion::V2,
             write_sorted_metadata: false,
+            query: None,
         }
     }
 
@@ -90,6 +92,11 @@ impl ParquetConverter {
         self
     }
 
+    pub fn with_query(mut self, query: Option<String>) -> Self {
+        self.query = query;
+        self
+    }
+
     pub async fn convert(&self) -> Result<()> {
         let (arrow_file_path, _temp_variable_to_keep_file_on_disk_until_end_of_function) =
             self.prepare_arrow_file().await?;
@@ -126,6 +133,10 @@ impl ParquetConverter {
                 arrow_converter = arrow_converter.with_sorting(self.sort_spec.clone());
             }
 
+            if self.query.is_some() {
+                arrow_converter = arrow_converter.with_query(self.query.clone());
+            }
+
             arrow_converter = arrow_converter.with_record_batch_size(self.record_batch_size);
 
             arrow_converter.convert().await?;
@@ -139,6 +150,7 @@ impl ParquetConverter {
     fn needs_intermediate_arrow_file(&self) -> bool {
         ArrowIPCReader::is_stream_format(&self.input_path)
             || self.sort_spec.is_configured()
+            || self.query.is_some()
             || NdvCalculator::new(self.bloom_filters.clone(), self.parquet_row_group_size)
                 .needs_calculation()
     }

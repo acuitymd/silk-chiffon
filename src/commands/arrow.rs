@@ -13,7 +13,8 @@ pub async fn run(args: ArrowArgs) -> Result<()> {
         .with_compression(args.compression)
         .with_sorting(args.sort_by.unwrap_or_default())
         .with_record_batch_size(args.record_batch_size)
-        .with_output_ipc_format(args.output_ipc_format);
+        .with_output_ipc_format(args.output_ipc_format)
+        .with_query(args.query);
 
     converter.convert().await
 }
@@ -58,6 +59,7 @@ mod tests {
             let args = ArrowArgs {
                 input: clio::Input::new(&input_path).unwrap(),
                 output: clio::OutputPath::new(&output_path).unwrap(),
+                query: None,
                 sort_by: None,
                 compression: ArrowCompression::None,
                 record_batch_size: 122_880,
@@ -96,6 +98,7 @@ mod tests {
             let args = ArrowArgs {
                 input: clio::Input::new(&input_path).unwrap(),
                 output: clio::OutputPath::new(&output_path).unwrap(),
+                query: None,
                 sort_by: Some(sort_spec),
                 compression: ArrowCompression::Zstd,
                 record_batch_size: 122_880,

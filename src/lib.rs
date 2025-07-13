@@ -88,6 +88,16 @@ pub struct ParquetArgs {
     #[arg(value_parser)]
     pub output: clio::OutputPath,
 
+    /// SQL query to apply to the data. The input data is available as table 'data'.
+    ///
+    /// Examples:
+    ///   --query "SELECT * FROM data WHERE status = 'active'"
+    ///   --query "SELECT id, name, amount FROM data"
+    ///   --query "SELECT region, SUM(amount) FROM data GROUP BY region"
+    ///   --query "SELECT *, amount * 1.1 as adjusted FROM data"
+    #[arg(short, long, verbatim_doc_comment)]
+    pub query: Option<String>,
+
     /// Sort the data by one or more columns before writing.
     ///
     /// Format: A comma-separated list like "col_a,col_b:desc,col_c".
@@ -178,6 +188,16 @@ pub struct DuckDbArgs {
     #[arg(short, long)]
     pub table_name: String,
 
+    /// SQL query to apply to the data. The input data is available as table 'data'.
+    ///
+    /// Examples:
+    ///   --query "SELECT * FROM data WHERE status = 'active'"
+    ///   --query "SELECT id, name, amount FROM data"
+    ///   --query "SELECT region, SUM(amount) FROM data GROUP BY region"
+    ///   --query "SELECT *, amount * 1.1 as adjusted FROM data"
+    #[arg(short, long, verbatim_doc_comment)]
+    pub query: Option<String>,
+
     /// Sort the data by one or more columns before writing.
     ///
     /// Format: A comma-separated list like "col_a,col_b:desc,col_c".
@@ -202,6 +222,16 @@ pub struct ArrowArgs {
     /// Output Arrow IPC file path.
     #[arg(value_parser)]
     pub output: clio::OutputPath,
+
+    /// SQL query to apply to the data. The input data is available as table 'data'.
+    ///
+    /// Examples:
+    ///   --query "SELECT * FROM data WHERE status = 'active'"
+    ///   --query "SELECT id, name, amount FROM data"
+    ///   --query "SELECT region, SUM(amount) FROM data GROUP BY region"
+    ///   --query "SELECT *, amount * 1.1 as adjusted FROM data"
+    #[arg(short, long, verbatim_doc_comment)]
+    pub query: Option<String>,
 
     /// Sort the data by one or more columns before writing.
     ///
@@ -263,6 +293,16 @@ pub struct SplitToArrowArgs {
     )]
     pub output_template: String,
 
+    /// SQL query to apply to the data. The input data is available as table 'data'.
+    ///
+    /// Examples:
+    ///   --query "SELECT * FROM data WHERE status = 'active'"
+    ///   --query "SELECT id, name, amount FROM data"
+    ///   --query "SELECT region, SUM(amount) FROM data GROUP BY region"
+    ///   --query "SELECT *, amount * 1.1 as adjusted FROM data"
+    #[arg(short, long, verbatim_doc_comment)]
+    pub query: Option<String>,
+
     /// Target number of rows per record batch.
     #[arg(long, default_value_t = 122_880)]
     pub record_batch_size: usize,
@@ -323,6 +363,16 @@ pub struct SplitToParquetArgs {
         verbatim_doc_comment
     )]
     pub output_template: String,
+
+    /// SQL query to apply to the data. The input data is available as table 'data'.
+    ///
+    /// Examples:
+    ///   --query "SELECT * FROM data WHERE status = 'active'"
+    ///   --query "SELECT id, name, amount FROM data"
+    ///   --query "SELECT region, SUM(amount) FROM data GROUP BY region"
+    ///   --query "SELECT *, amount * 1.1 as adjusted FROM data"
+    #[arg(short, long, verbatim_doc_comment)]
+    pub query: Option<String>,
 
     /// Target number of rows per record batch.
     #[arg(long, default_value_t = 122_880)]

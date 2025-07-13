@@ -21,7 +21,10 @@ use futures::StreamExt;
 
 use crate::{
     ArrowCompression, SortDirection, SortSpec,
-    utils::arrow_io::{ArrowFileSource, ArrowIPCFormat, ArrowIPCReader, HasSchema},
+    utils::{
+        arrow_io::{ArrowFileSource, ArrowIPCFormat, ArrowIPCReader, HasSchema},
+        query_executor::{QueryExecutor, build_query_with_sort},
+    },
 };
 use anyhow::Result;
 
@@ -33,6 +36,7 @@ pub struct ArrowConverter {
     record_batch_size: usize,
     datafusion_batch_size: usize,
     output_ipc_format: ArrowIPCFormat,
+    query: Option<String>,
 }
 
 impl ArrowConverter {
@@ -47,6 +51,7 @@ impl ArrowConverter {
             record_batch_size: 122_880,
             datafusion_batch_size: 8192,
             output_ipc_format: ArrowIPCFormat::default(),
+            query: None,
         }
     }
 
@@ -79,15 +84,20 @@ impl ArrowConverter {
         self
     }
 
+    pub fn with_query(mut self, query: Option<String>) -> Self {
+        self.query = query;
+        self
+    }
+
     pub async fn convert(&self) -> Result<()> {
-        if self.sort_spec.columns.is_empty() {
-            self.convert_direct().await
+        if self.query.is_some() || !self.sort_spec.columns.is_empty() {
+            self.convert_with_query_or_sorting().await
         } else {
-            self.convert_with_sorting().await
+            self.convert_direct().await
         }
     }
 
-    async fn convert_with_sorting(&self) -> Result<()> {
+    async fn convert_with_query_or_sorting(&self) -> Result<()> {
         let mut config = SessionConfig::new();
         let options = config.options_mut();
         options.execution.batch_size = self.datafusion_batch_size;
@@ -96,46 +106,68 @@ impl ArrowConverter {
         let runtime_env = runtime_config.build()?;
         let ctx = SessionContext::new_with_config_rt(config, Arc::new(runtime_env));
 
-        let output_path = self.output_path.clone();
-        let write_options = self.write_options.clone();
-        let sort_spec = self.sort_spec.clone();
-        let record_batch_size = self.record_batch_size;
-
         let file_format = self.as_file_format().await?;
 
-        ctx.register_arrow(
-            "input_table",
-            file_format.path_str(),
-            ArrowReadOptions::default(),
-        )
-        .await?;
-        let df = ctx.table("input_table").await?;
+        let mut stream = if let Some(query) = &self.query {
+            let final_query = if !self.sort_spec.columns.is_empty() {
+                let sort_columns: Vec<(String, bool)> = self
+                    .sort_spec
+                    .columns
+                    .iter()
+                    .map(|col| {
+                        (
+                            col.name.clone(),
+                            matches!(col.direction, SortDirection::Ascending),
+                        )
+                    })
+                    .collect();
+                build_query_with_sort(query, &sort_columns)
+            } else {
+                query.clone()
+            };
 
-        let sort_exprs = sort_spec
-            .columns
-            .iter()
-            .map(|sort_column| {
-                col(&sort_column.name).sort(
-                    matches!(sort_column.direction, SortDirection::Ascending),
-                    // match the behavior of postgres here, where nulls are first for descending
-                    // and last for ascending
-                    // https://www.postgresql.org/docs/current/queries-order.html#:~:text=The%20NULLS%20FIRST%20and%20NULLS%20LAST%20options%20can%20be%20used%20to%20determine%20whether%20nulls%20appear%20before%20or%20after%20non%2Dnull%20values%20in%20the%20sort%20ordering.%20By%20default%2C%20null%20values%20sort%20as%20if%20larger%20than%20any%20non%2Dnull%20value%3B%20that%20is%2C%20NULLS%20FIRST%20is%20the%20default%20for%20DESC%20order%2C%20and%20NULLS%20LAST%20otherwise
-                    matches!(sort_column.direction, SortDirection::Descending),
-                )
-            })
-            .collect();
+            let executor = QueryExecutor::new(final_query);
+            executor
+                .execute_on_file(file_format.path_str(), "data")
+                .await?
+        } else {
+            ctx.register_arrow(
+                "input_table",
+                file_format.path_str(),
+                ArrowReadOptions::default(),
+            )
+            .await?;
+            let df = ctx.table("input_table").await?;
 
-        let df = df.sort(sort_exprs)?;
+            let sort_exprs = self
+                .sort_spec
+                .columns
+                .iter()
+                .map(|sort_column| {
+                    col(&sort_column.name).sort(
+                        matches!(sort_column.direction, SortDirection::Ascending),
+                        // match the behavior of postgres here, where nulls are first for descending
+                        // and last for ascending
+                        // https://www.postgresql.org/docs/current/queries-order.html#:~:text=The%20NULLS%20FIRST%20and%20NULLS%20LAST%20options%20can%20be%20used%20to%20determine%20whether%20nulls%20appear%20before%20or%20after%20non%2Dnull%20values%20in%20the%20sort%20ordering.%20By%20default%2C%20null%20values%20sort%20as%20if%20larger%20than%20any%20non%2Dnull%20value%3B%20that%20is%2C%20NULLS%20FIRST%20is%20the%20default%20for%20DESC%20order%2C%20and%20NULLS%20LAST%20otherwise
+                        matches!(sort_column.direction, SortDirection::Descending),
+                    )
+                })
+                .collect();
 
-        let mut stream = df.execute_stream().await?;
+            let df = df.sort(sort_exprs)?;
+            df.execute_stream().await?
+        };
         let schema = stream.schema();
-        let output_file = File::create(output_path)?;
-        let mut coalescer = BatchCoalescer::new(schema.clone(), record_batch_size);
+        let output_file = File::create(&self.output_path)?;
+        let mut coalescer = BatchCoalescer::new(schema.clone(), self.record_batch_size);
 
         match self.output_ipc_format {
             ArrowIPCFormat::File => {
-                let mut writer =
-                    FileWriter::try_new_with_options(output_file, &schema, write_options)?;
+                let mut writer = FileWriter::try_new_with_options(
+                    output_file,
+                    &schema,
+                    self.write_options.clone(),
+                )?;
 
                 while let Some(batch_result) = stream.next().await {
                     let batch = batch_result?;
@@ -156,8 +188,11 @@ impl ArrowConverter {
                 writer.finish()?;
             }
             ArrowIPCFormat::Stream => {
-                let mut writer =
-                    StreamWriter::try_new_with_options(output_file, &schema, write_options)?;
+                let mut writer = StreamWriter::try_new_with_options(
+                    output_file,
+                    &schema,
+                    self.write_options.clone(),
+                )?;
 
                 while let Some(batch_result) = stream.next().await {
                     let batch = batch_result?;
@@ -833,6 +868,81 @@ mod tests {
                 .column(0)
                 .as_any()
                 .downcast_ref::<Int32Array>()
+                .unwrap();
+            assert_eq!(ids.value(0), 1);
+            assert_eq!(ids.value(1), 2);
+            assert_eq!(ids.value(2), 3);
+        }
+
+        #[tokio::test]
+        async fn test_converter_with_query() {
+            let temp_dir = tempdir().unwrap();
+            let input_path = temp_dir.path().join("input.arrow");
+            let output_path = temp_dir.path().join("output.arrow");
+
+            let schema = test_data::simple_schema();
+            let batch = test_data::create_batch_with_ids_and_names(
+                &schema,
+                &[1, 2, 3, 4, 5],
+                &["Alice", "Bob", "Charlie", "David", "Eve"],
+            );
+            file_helpers::write_arrow_file(&input_path, &schema, vec![batch]).unwrap();
+
+            let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path)
+                .with_query(Some("SELECT * FROM data WHERE id > 3".to_string()));
+
+            converter.convert().await.unwrap();
+
+            let batches = verify::read_output_file(&output_path).unwrap();
+            assert_eq!(batches.len(), 1);
+
+            let batch = &batches[0];
+            assert_eq!(batch.num_rows(), 2);
+
+            let ids = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow::array::Int32Array>()
+                .unwrap();
+            assert_eq!(ids.value(0), 4);
+            assert_eq!(ids.value(1), 5);
+        }
+
+        #[tokio::test]
+        async fn test_converter_with_query_and_sort() {
+            let temp_dir = tempdir().unwrap();
+            let input_path = temp_dir.path().join("input.arrow");
+            let output_path = temp_dir.path().join("output.arrow");
+
+            let schema = test_data::simple_schema();
+            let batch = test_data::create_batch_with_ids_and_names(
+                &schema,
+                &[5, 3, 1, 4, 2],
+                &["Eve", "Charlie", "Alice", "David", "Bob"],
+            );
+            file_helpers::write_arrow_file(&input_path, &schema, vec![batch]).unwrap();
+
+            let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path)
+                .with_query(Some("SELECT id, name FROM data WHERE id <= 3".to_string()))
+                .with_sorting(crate::SortSpec {
+                    columns: vec![crate::SortColumn {
+                        name: "id".to_string(),
+                        direction: crate::SortDirection::Ascending,
+                    }],
+                });
+
+            converter.convert().await.unwrap();
+
+            let batches = verify::read_output_file(&output_path).unwrap();
+            assert_eq!(batches.len(), 1);
+
+            let batch = &batches[0];
+            assert_eq!(batch.num_rows(), 3);
+
+            let ids = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow::array::Int32Array>()
                 .unwrap();
             assert_eq!(ids.value(0), 1);
             assert_eq!(ids.value(1), 2);

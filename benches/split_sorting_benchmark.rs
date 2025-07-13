@@ -108,6 +108,7 @@ async fn run_silk_chiffon(
         write_sorted_metadata: sort_columns.is_some(),
         bloom_all: None,
         bloom_column: vec![],
+        query: None,
     };
 
     silk_chiffon::commands::split_to_parquet::run(args)
