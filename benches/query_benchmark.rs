@@ -32,8 +32,8 @@ fn generate_query_test_data(num_rows: usize) -> Vec<RecordBatch> {
     let mut batches = Vec::with_capacity(num_batches);
     let mut id_counter = 0i64;
 
-    let categories = vec!["A", "B", "C", "D", "E"];
-    let statuses = vec!["active", "inactive", "pending"];
+    let categories = ["A", "B", "C", "D", "E"];
+    let statuses = ["active", "inactive", "pending"];
 
     for batch_idx in 0..num_batches {
         let rows_in_batch = batch_size.min(num_rows - batch_idx * batch_size);
