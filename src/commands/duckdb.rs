@@ -12,7 +12,8 @@ pub async fn run(args: DuckDbArgs) -> Result<()> {
     let converter = DuckDbConverter::new(input_path, output_path, args.table_name)
         .with_sort_spec(args.sort_by.clone())
         .with_truncate(args.truncate)
-        .with_drop_table(args.drop_table);
+        .with_drop_table(args.drop_table)
+        .with_query(args.query);
 
     converter.convert().await
 }
@@ -46,6 +47,7 @@ mod tests {
             input: Input::new(&input_path).unwrap(),
             output: OutputPath::new(&output_path).unwrap(),
             table_name: "test_table".to_string(),
+            query: None,
             sort_by: SortSpec::default(),
             truncate: false,
             drop_table: false,
@@ -78,6 +80,7 @@ mod tests {
             input: Input::new(&input_path).unwrap(),
             output: OutputPath::new(&output_path).unwrap(),
             table_name: "test_table".to_string(),
+            query: None,
             sort_by: "id:asc".parse().unwrap(),
             truncate: false,
             drop_table: false,

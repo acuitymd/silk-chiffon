@@ -33,7 +33,8 @@ pub async fn run(args: SplitToParquetArgs) -> Result<()> {
     .with_record_batch_size(args.record_batch_size)
     .with_sort_spec(args.sort_by)
     .with_create_dirs(args.create_dirs)
-    .with_overwrite(args.overwrite);
+    .with_overwrite(args.overwrite)
+    .with_query(args.query);
 
     let _created_files = converter.convert().await?;
 
