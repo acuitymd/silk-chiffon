@@ -35,6 +35,7 @@ pub enum PyBloomFilterColumn {
     input_path,
     output_path,
     *,
+    query = None,
     sort_by = None,
     compression = "none",
     write_sorted_metadata = false,
@@ -51,6 +52,7 @@ pub fn arrow_to_parquet(
     py: Python<'_>,
     input_path: String,
     output_path: String,
+    query: Option<String>,
     sort_by: Option<Vec<PySortColumn>>,
     compression: &str,
     write_sorted_metadata: bool,
@@ -161,6 +163,7 @@ pub fn arrow_to_parquet(
     let args = ParquetArgs {
         input: create_input(&input_path)?,
         output: create_output(&output_path)?,
+        query,
         sort_by: sort_spec,
         compression,
         write_sorted_metadata,

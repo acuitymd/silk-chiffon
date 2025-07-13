@@ -13,6 +13,7 @@ use crate::{DuckDbArgs, commands};
     output_path,
     table_name,
     *,
+    query = None,
     sort_by = None,
     truncate = false,
     drop_table = false
@@ -22,6 +23,7 @@ pub fn arrow_to_duckdb(
     input_path: String,
     output_path: String,
     table_name: String,
+    query: Option<String>,
     sort_by: Option<Vec<PySortColumn>>,
     truncate: bool,
     drop_table: bool,
@@ -32,6 +34,7 @@ pub fn arrow_to_duckdb(
         input: create_input(&input_path)?,
         output: create_output(&output_path)?,
         table_name,
+        query,
         sort_by: sort_spec,
         truncate,
         drop_table,

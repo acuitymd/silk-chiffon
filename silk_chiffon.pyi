@@ -9,17 +9,19 @@ def arrow_to_arrow(
     input_path: str,
     output_path: str,
     *,
+    query: Optional[str] = None,
     sort_by: Optional[List[SortColumn]] = None,
     compression: str = "none",
     record_batch_size: int = 122_880,
 ) -> None:
-    """Convert Arrow IPC stream or file format to Arrow IPC file format with optional sorting and compression."""
+    """Convert Arrow IPC stream or file format to Arrow IPC file format with optional SQL query, sorting and compression."""
     ...
 
 def arrow_to_parquet(
     input_path: str,
     output_path: str,
     *,
+    query: Optional[str] = None,
     sort_by: Optional[List[SortColumn]] = None,
     compression: str = "none",
     write_sorted_metadata: bool = False,
@@ -31,7 +33,7 @@ def arrow_to_parquet(
     enable_dictionary: bool = True,
     writer_version: str = "v2",
 ) -> None:
-    """Convert Arrow IPC stream or file format to Parquet file format with advanced options."""
+    """Convert Arrow IPC stream or file format to Parquet file format with optional SQL query and advanced options."""
     ...
 
 def arrow_to_duckdb(
@@ -39,11 +41,12 @@ def arrow_to_duckdb(
     output_path: str,
     table_name: str,
     *,
+    query: Optional[str] = None,
     sort_by: Optional[List[SortColumn]] = None,
     truncate: bool = False,
     drop_table: bool = False,
 ) -> None:
-    """Convert Arrow IPC stream or file format to DuckDB database."""
+    """Convert Arrow IPC stream or file format to DuckDB database with optional SQL query."""
     ...
 
 def split_to_arrow(
@@ -51,6 +54,7 @@ def split_to_arrow(
     output_template: str,
     split_column: str,
     *,
+    query: Optional[str] = None,
     sort_by: Optional[List[SortColumn]] = None,
     compression: str = "none",
     create_dirs: bool = True,
@@ -64,6 +68,7 @@ def split_to_arrow(
         input_path: Path to input Arrow IPC file
         output_template: Output file template with {value} placeholder
         split_column: Column name to split by
+        query: Optional SQL query to apply before splitting
         sort_by: Optional list of columns to sort by (name or (name, direction))
         compression: Compression type (none/zstd/lz4)
         create_dirs: Create output directories if they don't exist
@@ -77,6 +82,7 @@ def split_to_parquet(
     output_template: str,
     split_column: str,
     *,
+    query: Optional[str] = None,
     sort_by: Optional[List[SortColumn]] = None,
     compression: str = "none",
     create_dirs: bool = True,
@@ -97,6 +103,7 @@ def split_to_parquet(
         input_path: Path to input Arrow IPC file
         output_template: Output file template with {value} placeholder
         split_column: Column name to split by
+        query: Optional SQL query to apply before splitting
         sort_by: Optional list of columns to sort by (name or (name, direction))
         compression: Compression type (none/zstd/snappy/gzip/lz4)
         create_dirs: Create output directories if they don't exist
