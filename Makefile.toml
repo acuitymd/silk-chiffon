@@ -1,10 +1,10 @@
-[tasks.rust-fmt]
-command = "cargo"
-args = ["fmt"]
-
 [tasks.rust-fmt-check]
 command = "cargo"
 args = ["fmt", "--check"]
+
+[tasks.rust-fmt-fix]
+command = "cargo"
+args = ["fmt"]
 
 [tasks.rust-build]
 command = "cargo"
@@ -14,7 +14,7 @@ args = ["build", "--release"]
 command = "cargo"
 args = ["test", "--verbose"]
 
-[tasks.rust-lint]
+[tasks.rust-lint-check]
 command = "cargo"
 args = ["clippy", "--all-targets", "--all-features", "--", "-D", "warnings"]
 
@@ -24,23 +24,23 @@ args = [
   "clippy",
   "--all-targets",
   "--all-features",
+  "--fix",
   "--",
   "-D",
   "warnings",
-  "--fix",
 ]
 
 [tasks.rust-type-check]
 command = "cargo"
 args = ["check", "--all-features"]
 
-[tasks.python-fmt]
-command = "uv"
-args = ["run", "ruff", "format"]
-
 [tasks.python-fmt-check]
 command = "uv"
 args = ["run", "ruff", "format", "--check"]
+
+[tasks.python-fmt-fix]
+command = "uv"
+args = ["run", "ruff", "format"]
 
 [tasks.python-build]
 command = "uv"
@@ -58,13 +58,13 @@ command = "uv"
 args = ["run", "pytest"]
 dependencies = ["python-install"]
 
-[tasks.python-lint]
-command = "uv"
-args = ["run", "ruff", "check", "--fix"]
-
 [tasks.python-lint-check]
 command = "uv"
 args = ["run", "ruff", "check"]
+
+[tasks.python-lint-fix]
+command = "uv"
+args = ["run", "ruff", "check", "--fix"]
 
 [tasks.python-type-check]
 command = "uv"
@@ -74,17 +74,22 @@ args = ["run", "pyright"]
 command = "cargo"
 args = ["bench"]
 
-[tasks.fmt]
-dependencies = ["python-fmt", "rust-fmt"]
-
 [tasks.fmt-check]
 dependencies = ["python-fmt-check", "rust-fmt-check"]
 
-[tasks.lint]
-dependencies = ["python-lint", "rust-lint"]
+[tasks.fmt-fix]
+dependencies = ["python-fmt-fix", "rust-fmt-fix"]
 
 [tasks.lint-check]
 dependencies = ["python-lint-check", "rust-lint-check"]
 
+[tasks.lint-fix]
+dependencies = ["python-lint-fix", "rust-lint-fix"]
+
 [tasks.build]
+clear = true
 dependencies = ["python-build", "rust-build"]
+
+[tasks.test]
+clear = true
+dependencies = ["python-test", "rust-test"]

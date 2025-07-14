@@ -1,9 +1,15 @@
-use arrow::array::Int32Array;
+use arrow::array::{Int32Array, Int64Array};
+use arrow::datatypes::{DataType, Field, Schema};
+use arrow::ipc::writer::FileWriter;
+use arrow::record_batch::RecordBatch;
+use clio::{Input, OutputPath};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use silk_chiffon::{
     ArrowArgs, ArrowCompression, ParquetArgs, ParquetCompression, ParquetStatistics,
     ParquetWriterVersion, SortColumn, SortDirection, SortSpec, utils::arrow_io::ArrowIPCFormat,
 };
+use std::fs::File;
+use std::sync::Arc;
 use tempfile::TempDir;
 
 mod test_helpers {
@@ -79,8 +85,8 @@ async fn test_arrow_with_filter_query() {
     test_helpers::write_test_arrow_file(&input_path).unwrap();
 
     let args = ArrowArgs {
-        input: clio::Input::new(&input_path).unwrap(),
-        output: clio::OutputPath::new(&output_path).unwrap(),
+        input: Input::new(&input_path).unwrap(),
+        output: OutputPath::new(&output_path).unwrap(),
         query: Some("SELECT * FROM data WHERE amount > 100".to_string()),
         sort_by: None,
         compression: ArrowCompression::None,
@@ -115,8 +121,8 @@ async fn test_arrow_with_projection_query() {
     test_helpers::write_test_arrow_file(&input_path).unwrap();
 
     let args = ArrowArgs {
-        input: clio::Input::new(&input_path).unwrap(),
-        output: clio::OutputPath::new(&output_path).unwrap(),
+        input: Input::new(&input_path).unwrap(),
+        output: OutputPath::new(&output_path).unwrap(),
         query: Some("SELECT id, name FROM data".to_string()),
         sort_by: None,
         compression: ArrowCompression::None,
@@ -145,8 +151,8 @@ async fn test_arrow_with_aggregation_query() {
     test_helpers::write_test_arrow_file(&input_path).unwrap();
 
     let args = ArrowArgs {
-        input: clio::Input::new(&input_path).unwrap(),
-        output: clio::OutputPath::new(&output_path).unwrap(),
+        input: Input::new(&input_path).unwrap(),
+        output: OutputPath::new(&output_path).unwrap(),
         query: Some(
             "SELECT COUNT(*) as total_count, SUM(amount) as total_amount FROM data".to_string(),
         ),
@@ -186,8 +192,8 @@ async fn test_arrow_with_query_and_sort() {
     test_helpers::write_test_arrow_file(&input_path).unwrap();
 
     let args = ArrowArgs {
-        input: clio::Input::new(&input_path).unwrap(),
-        output: clio::OutputPath::new(&output_path).unwrap(),
+        input: Input::new(&input_path).unwrap(),
+        output: OutputPath::new(&output_path).unwrap(),
         query: Some("SELECT * FROM data WHERE amount > 100".to_string()),
         sort_by: Some(SortSpec {
             columns: vec![SortColumn {
@@ -231,8 +237,8 @@ async fn test_parquet_with_query() {
     test_helpers::write_test_arrow_file(&input_path).unwrap();
 
     let args = ParquetArgs {
-        input: clio::Input::new(&input_path).unwrap(),
-        output: clio::OutputPath::new(&output_path).unwrap(),
+        input: Input::new(&input_path).unwrap(),
+        output: OutputPath::new(&output_path).unwrap(),
         query: Some(
             "SELECT id, name, amount * 1.1 as adjusted_amount FROM data WHERE amount >= 100"
                 .to_string(),
@@ -278,8 +284,8 @@ async fn test_invalid_query_returns_error() {
     test_helpers::write_test_arrow_file(&input_path).unwrap();
 
     let args = ArrowArgs {
-        input: clio::Input::new(&input_path).unwrap(),
-        output: clio::OutputPath::new(&output_path).unwrap(),
+        input: Input::new(&input_path).unwrap(),
+        output: OutputPath::new(&output_path).unwrap(),
         query: Some("SELECT nonexistent_column FROM data".to_string()),
         sort_by: None,
         compression: ArrowCompression::None,
@@ -294,4 +300,68 @@ async fn test_invalid_query_returns_error() {
     assert!(
         err_msg.contains("Failed to parse SQL query") || err_msg.contains("nonexistent_column")
     );
+}
+
+#[tokio::test]
+async fn test_type_casting_int64_to_int32() {
+    let temp_dir = TempDir::new().unwrap();
+    let input_path = temp_dir.path().join("input.arrow");
+    let output_path = temp_dir.path().join("output.arrow");
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("value", DataType::Int64, false),
+    ]));
+
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(Int64Array::from(vec![1i64, 2, 3, 4, 5])),
+            Arc::new(Int64Array::from(vec![100i64, 200, 300, 400, 500])),
+        ],
+    )
+    .unwrap();
+
+    let file = File::create(&input_path).unwrap();
+    let mut writer = FileWriter::try_new(file, &schema).unwrap();
+    writer.write(&batch).unwrap();
+    writer.finish().unwrap();
+
+    let args = ArrowArgs {
+        input: Input::new(&input_path).unwrap(),
+        output: OutputPath::new(&output_path).unwrap(),
+        query: Some(
+            "SELECT CAST(id AS INT) as id, CAST(value AS INT) as value FROM data".to_string(),
+        ),
+        sort_by: None,
+        compression: ArrowCompression::None,
+        record_batch_size: 122_880,
+        output_ipc_format: ArrowIPCFormat::File,
+    };
+
+    silk_chiffon::commands::arrow::run(args).await.unwrap();
+
+    let results = test_helpers::read_arrow_file(&output_path).unwrap();
+    assert!(!results.is_empty());
+
+    for batch in results {
+        assert_eq!(batch.num_columns(), 2);
+
+        assert_eq!(batch.column(0).data_type(), &DataType::Int32);
+        assert_eq!(batch.column(1).data_type(), &DataType::Int32);
+
+        let id_array = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        let value_array = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+
+        assert_eq!(id_array.values(), &[1i32, 2, 3, 4, 5]);
+        assert_eq!(value_array.values(), &[100i32, 200, 300, 400, 500]);
+    }
 }
