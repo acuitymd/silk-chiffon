@@ -297,10 +297,70 @@ fn bench_query_with_sorting(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_query_overhead(c: &mut Criterion) {
+    let scenarios = vec![
+        QueryScenario {
+            name: "no_query",
+            query: None,
+            num_rows: 1_000_000,
+        },
+        QueryScenario {
+            name: "with_noop_query",
+            query: Some("SELECT * FROM data".to_string()),
+            num_rows: 1_000_000,
+        },
+    ];
+
+    let mut group = c.benchmark_group("query_overhead");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(30));
+    group.warm_up_time(Duration::from_secs(5));
+
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+
+    for scenario in scenarios {
+        group.throughput(Throughput::Elements(scenario.num_rows as u64));
+
+        group.bench_with_input(
+            BenchmarkId::new("arrow_to_arrow", scenario.name),
+            &scenario,
+            |b, scenario| {
+                b.to_async(&runtime).iter_batched(
+                    || setup_query_benchmark(scenario.num_rows),
+                    |(temp_dir, input_path)| async move {
+                        let output_path = temp_dir.path().join("output.arrow");
+                        run_arrow_conversion(&input_path, &output_path, scenario.query.clone())
+                            .await;
+                    },
+                    criterion::BatchSize::SmallInput,
+                );
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("arrow_to_parquet", scenario.name),
+            &scenario,
+            |b, scenario| {
+                b.to_async(&runtime).iter_batched(
+                    || setup_query_benchmark(scenario.num_rows),
+                    |(temp_dir, input_path)| async move {
+                        let output_path = temp_dir.path().join("output.parquet");
+                        run_parquet_conversion(&input_path, &output_path, scenario.query.clone())
+                            .await;
+                    },
+                    criterion::BatchSize::SmallInput,
+                );
+            },
+        );
+    }
+
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default();
-    targets = bench_query_vs_no_query, bench_query_types, bench_query_with_sorting
+    targets = bench_query_vs_no_query, bench_query_types, bench_query_with_sorting, bench_query_overhead
 }
 
 criterion_main!(benches);
