@@ -269,10 +269,10 @@ impl SplitConverter {
         path: &PathBuf,
         schema: &arrow::datatypes::SchemaRef,
     ) -> Result<PartitionWriter> {
-        if let Some(parent) = path.parent()
-            && self.create_dirs
-        {
-            fs::create_dir_all(parent)?;
+        let parent = path.parent();
+
+        if self.create_dirs && parent.is_some() {
+            fs::create_dir_all(parent.unwrap())?;
         }
 
         if path.exists() && !self.overwrite {
