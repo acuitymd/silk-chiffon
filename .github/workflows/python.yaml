@@ -32,12 +32,18 @@ jobs:
       matrix:
         platform:
           - runner: ubuntu-22.04
+            os: linux
+            short_target: x86_64
             target: x86_64-unknown-linux-gnu
             duckdb_target: linux-amd64
           - runner: ubuntu-22.04-arm
+            os: linux
+            short_target: aarch64
             target: aarch64-unknown-linux-gnu
             duckdb_target: linux-arm64
           - runner: macos-latest
+            os: macos
+            short_target: arm64
             target: universal2-apple-darwin
             duckdb_target: macos-arm64
     steps:
@@ -51,11 +57,11 @@ jobs:
           enable-cache: true
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Setup DuckDB (macOS only)
-        if: ${{ matrix.platform.runner == 'macos-latest' }}
+        if: ${{ matrix.platform.os == 'macos' }}
         run: |
           brew install duckdb
-      - name: Setup DuckDB (Ubuntu only)
-        if: ${{ matrix.platform.runner == 'ubuntu-22.04' }}
+      - name: Setup DuckDB (Linux only)
+        if: ${{ matrix.platform.os == 'linux' }}
         run: |
           curl -L -O https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/libduckdb-${{ matrix.platform.duckdb_target }}.zip && echo "Downloaded DuckDB" || echo "Failed to download DuckDB"
           unzip libduckdb-${{ matrix.platform.duckdb_target }}.zip -d libduckdb
@@ -67,20 +73,20 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
-          args: --release --out dist ${{ matrix.platform.runner != 'macos-latest' && '--zig' || '' }}
+          args: --release --out dist ${{ matrix.platform.os != 'macos' && '--zig' || '' }}
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
           manylinux: auto
       - name: Build free-threaded wheels
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
-          args: --release --out dist ${{ matrix.platform.runner != 'macos-latest' && '--zig' || '' }} --interpreter python${{ env.PYTHON_VERSION }} --features python
+          args: --release --out dist ${{ matrix.platform.os != 'macos' && '--zig' || '' }} --interpreter python${{ env.PYTHON_VERSION }} --features python
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
           manylinux: "2014" # Ensures glibc 2.17+ compatibility
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
-          name: wheels-linux-${{ matrix.platform.target }}
+          name: wheels-${{ matrix.platform.os }}-${{ matrix.platform.short_target }}
           path: dist
       - name: Sync uv
         run: uv sync --frozen
