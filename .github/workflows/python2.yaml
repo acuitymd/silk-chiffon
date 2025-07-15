@@ -79,7 +79,7 @@ jobs:
           path: dist
       - name: Sync uv
         shell: bash
-        run: uv sync --locked
+        run: uv sync --frozen
       - name: Install silk_chiffon
         shell: bash
         run: uv pip install silk_chiffon --find-links dist --force-reinstall
