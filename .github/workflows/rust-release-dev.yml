@@ -41,7 +41,7 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            artifact_name: silk-chiffon-linux-x64
+            artifact_name: silk-chiffon-linux-amd64
             duckdb_target: linux-amd64
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
