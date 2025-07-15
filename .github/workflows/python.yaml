@@ -39,7 +39,7 @@ jobs:
             duckdb_target: linux-arm64
           - runner: macos-latest
             target: universal2
-            duckdb_target: macos-amd64
+            duckdb_target: macos-arm64
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -67,7 +67,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
-          args: --release --out dist --zig
+          args: --release --out dist ${{ matrix.platform.runner != 'macos-latest' && '--zig' || '' }}
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
           manylinux: auto
       - name: Build free-threaded wheels
