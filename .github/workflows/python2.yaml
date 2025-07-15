@@ -40,9 +40,6 @@ jobs:
           - runner: ubuntu-22.04
             target: aarch64
             duckdb_target: linux-arm64
-          - runner: ubuntu-22.04
-            target: armv7
-            duckdb_target: linux-arm64
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
