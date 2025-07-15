@@ -13,6 +13,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+env:
+  DUCKDB_VERSION: 1.3.2
+
 permissions:
   contents: read
 
@@ -44,8 +47,6 @@ jobs:
         if: ${{ matrix.platform.runner == 'ubuntu-22.04' }}
         run: |
           curl -L -O https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/libduckdb-${{ matrix.platform.duckdb_target }}.zip && echo "Downloaded DuckDB" || echo "Failed to download DuckDB"
-          ls -lah
-          cat libduckdb-${{ matrix.platform.duckdb_target }}.zip
           unzip libduckdb-${{ matrix.platform.duckdb_target }}.zip -d libduckdb
           sudo mv libduckdb/duckdb.* /usr/local/include/
           sudo mv libduckdb/libduckdb.so /usr/local/lib/
