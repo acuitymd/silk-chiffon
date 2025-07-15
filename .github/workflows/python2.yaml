@@ -35,9 +35,6 @@ jobs:
             target: x86_64
             duckdb_target: linux-amd64
           - runner: ubuntu-22.04
-            target: x86
-            duckdb_target: linux-amd64
-          - runner: ubuntu-22.04
             target: aarch64
             duckdb_target: linux-arm64
     steps:
