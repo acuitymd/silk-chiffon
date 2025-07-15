@@ -43,9 +43,8 @@ jobs:
       - name: Setup DuckDB (Ubuntu only)
         if: ${{ matrix.platform.runner == 'ubuntu-22.04' }}
         run: |
-          sudo apt-get update
-          sudo apt-get install -y curl unzip build-essential
-          curl -L -O https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/libduckdb-${{ matrix.platform.duckdb_target }}.zip
+          curl -L -O https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/libduckdb-${{ matrix.platform.duckdb_target }}.zip && echo "Downloaded DuckDB" || echo "Failed to download DuckDB"
+          ls
           unzip libduckdb-${{ matrix.platform.duckdb_target }}.zip -d libduckdb
           sudo mv libduckdb/duckdb.* /usr/local/include/
           sudo mv libduckdb/libduckdb.so /usr/local/lib/
