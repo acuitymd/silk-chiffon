@@ -2,7 +2,7 @@
 #
 #    maturin generate-ci github --zig --platform manylinux --pytest
 #
-name: New Python CI
+name: Python CI
 
 on:
   push:
