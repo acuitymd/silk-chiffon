@@ -39,7 +39,7 @@ parquet = { version = "55.2.0", features = [
   "arrow_canonical_extension_types",
 ] }
 pyo3 = { version = "0.25", features = [
-  "abi3-py311",
+  "abi3-py39",
   "anyhow",
   "extension-module",
 ], optional = true }
