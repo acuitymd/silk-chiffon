@@ -29,7 +29,7 @@ arrow = { version = "55.2.0", features = ["default", "ipc_compression"] }
 clap = { version = "4.5.41", features = ["default", "derive"] }
 clio = { version = "0.3.5", features = ["clap-parse"] }
 datafusion = "48.0.1"
-duckdb = "1.3.2"
+duckdb = { version = "1.3.2", features = ["bundled"] }
 futures = "0.3.31"
 pg_escape = "0.1.1"
 parquet = { version = "55.2.0", features = [
