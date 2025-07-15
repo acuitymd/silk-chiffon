@@ -38,7 +38,7 @@ jobs:
             target: aarch64
             duckdb_target: linux-arm64
           - runner: macos-latest
-            target: universal2-apple-darwin
+            target: universal2
             duckdb_target: macos-amd64
     steps:
       - uses: actions/checkout@v4
