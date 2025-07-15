@@ -77,13 +77,15 @@ jobs:
         with:
           name: wheels-linux-${{ matrix.platform.target }}
           path: dist
+      - name: Sync uv
+        shell: bash
+        run: uv sync --locked
+      - name: Install silk_chiffon
+        shell: bash
+        run: uv pip install silk_chiffon --find-links dist --force-reinstall
       - name: pytest
         shell: bash
-        run: |
-          set -e
-          uv sync --locked
-          uv run pip install silk_chiffon --find-links dist --force-reinstall
-          uv run pytest
+        run: uv run pytest
   sdist:
     runs-on: ubuntu-latest
     steps:
