@@ -32,13 +32,13 @@ jobs:
       matrix:
         platform:
           - runner: ubuntu-22.04
-            target: x86_64
+            target: x86_64-unknown-linux-gnu
             duckdb_target: linux-amd64
           - runner: ubuntu-22.04
-            target: aarch64
+            target: aarch64-unknown-linux-gnu
             duckdb_target: linux-arm64
           - runner: macos-latest
-            target: universal2
+            target: universal2-apple-darwin
             duckdb_target: macos-arm64
     steps:
       - uses: actions/checkout@v4
