@@ -3,6 +3,10 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use silk_chiffon::{
+    ListOutputsFormat, ParquetCompression, ParquetStatistics, ParquetWriterVersion,
+    SplitToParquetArgs,
+};
 use std::fs::{self, File};
 use std::sync::Arc;
 use std::time::Duration;
@@ -92,7 +96,7 @@ async fn run_silk_chiffon(
 ) {
     let sort_by = sort_columns.map(|s| s.parse().unwrap());
 
-    let args = silk_chiffon::SplitToParquetArgs {
+    let args = SplitToParquetArgs {
         input: clio::Input::new(input_path).unwrap(),
         by: "split_col".to_string(),
         output_template: format!("{}/{{value}}.parquet", output_dir.display()),
@@ -100,15 +104,16 @@ async fn run_silk_chiffon(
         sort_by,
         create_dirs: true,
         overwrite: false,
-        compression: silk_chiffon::ParquetCompression::Snappy,
-        statistics: silk_chiffon::ParquetStatistics::Page,
+        compression: ParquetCompression::Snappy,
+        statistics: ParquetStatistics::Page,
         max_row_group_size: 1_048_576,
-        writer_version: silk_chiffon::ParquetWriterVersion::V2,
+        writer_version: ParquetWriterVersion::V2,
         no_dictionary: false,
         write_sorted_metadata: sort_columns.is_some(),
         bloom_all: None,
         bloom_column: vec![],
         query: None,
+        list_outputs: ListOutputsFormat::None,
     };
 
     silk_chiffon::commands::split_to_parquet::run(args)

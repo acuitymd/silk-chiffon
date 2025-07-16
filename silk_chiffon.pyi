@@ -13,8 +13,20 @@ def arrow_to_arrow(
     sort_by: Optional[List[SortColumn]] = None,
     compression: str = "none",
     record_batch_size: int = 122_880,
+    output_ipc_format: str = "file",
 ) -> None:
-    """Convert Arrow IPC stream or file format to Arrow IPC file format with optional SQL query, sorting, and compression."""
+    """
+    Convert Arrow IPC stream or file format to Arrow IPC stream or file format with optional SQL query, sorting, and compression.
+
+    Args:
+        input_path: Path to input Arrow IPC file
+        output_path: Path to output Arrow IPC file
+        query: Optional SQL query to apply
+        sort_by: Optional list of columns to sort by (name or (name, direction))
+        compression: Compression type (none/zstd/lz4)
+        record_batch_size: Number of rows per batch
+        output_ipc_format: Output IPC format (file/stream)
+    """
     ...
 
 def arrow_to_parquet(
@@ -33,7 +45,24 @@ def arrow_to_parquet(
     enable_dictionary: bool = True,
     writer_version: str = "v2",
 ) -> None:
-    """Convert Arrow IPC stream or file format to Parquet file format with optional SQL query and advanced options."""
+    """
+    Convert Arrow IPC stream or file format to Parquet file format with optional SQL query and advanced options.
+
+    Args:
+        input_path: Path to input Arrow IPC file
+        output_path: Path to output Parquet file
+        query: Optional SQL query to apply before conversion
+        sort_by: Optional list of columns to sort by (name or (name, direction))
+        compression: Compression type (none/zstd/snappy/gzip/lz4)
+        write_sorted_metadata: Embed sorted metadata in Parquet file
+        bloom_filter_all: Enable bloom filters for all columns
+        bloom_filter_columns: Enable bloom filters for specific columns
+        max_row_group_size: Maximum rows per row group
+        statistics: Statistics level (none/chunk/page)
+        record_batch_size: Number of rows per batch
+        enable_dictionary: Enable dictionary encoding
+        writer_version: Parquet writer version (v1/v2)
+    """
     ...
 
 def arrow_to_duckdb(
@@ -46,7 +75,18 @@ def arrow_to_duckdb(
     truncate: bool = False,
     drop_table: bool = False,
 ) -> None:
-    """Convert Arrow IPC stream or file format to DuckDB database with optional SQL query."""
+    """
+    Convert Arrow IPC stream or file format to DuckDB database with optional SQL query.
+
+    Args:
+        input_path: Path to input Arrow IPC file
+        output_path: Path to output DuckDB database file
+        table_name: Name of the table to create in DuckDB
+        query: Optional SQL query to apply before conversion
+        sort_by: Optional list of columns to sort by (name or (name, direction))
+        truncate: Truncate the table before inserting data
+        drop_table: Drop and recreate the table before inserting data
+    """
     ...
 
 def split_to_arrow(
@@ -60,7 +100,9 @@ def split_to_arrow(
     create_dirs: bool = True,
     overwrite: bool = False,
     record_batch_size: int = 122_880,
-) -> None:
+    list_outputs: str = "none",
+    output_ipc_format: str = "file",
+) -> Dict[str, str]:
     """
     Split Arrow IPC file into multiple Arrow files based on column values.
 
@@ -74,6 +116,11 @@ def split_to_arrow(
         create_dirs: Create output directories if they don't exist
         overwrite: Overwrite existing output files
         record_batch_size: Number of rows per batch
+        list_outputs: Output listing format (none/text/json)
+        output_ipc_format: Output IPC format (file/stream)
+
+    Returns:
+        Dictionary mapping split values to output file paths
     """
     ...
 
@@ -95,7 +142,8 @@ def split_to_parquet(
     statistics: str = "page",
     enable_dictionary: bool = True,
     writer_version: str = "v2",
-) -> None:
+    list_outputs: str = "none",
+) -> Dict[str, str]:
     """
     Split Arrow IPC file into multiple Parquet files based on column values.
 
@@ -116,5 +164,9 @@ def split_to_parquet(
         statistics: Statistics level (none/chunk/page)
         enable_dictionary: Enable dictionary encoding
         writer_version: Parquet writer version (v1/v2)
+        list_outputs: Output listing format (none/text/json)
+
+    Returns:
+        Dictionary mapping split values to output file paths
     """
     ...

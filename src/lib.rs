@@ -263,6 +263,22 @@ pub enum ListOutputsFormat {
     Json,
 }
 
+impl FromStr for ListOutputsFormat {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "none" => Ok(ListOutputsFormat::None),
+            "text" => Ok(ListOutputsFormat::Text),
+            "json" => Ok(ListOutputsFormat::Json),
+            _ => Err(anyhow::anyhow!(
+                "Invalid list outputs format: {}. Valid options: none, text, json",
+                s
+            )),
+        }
+    }
+}
+
 #[derive(Args, Debug)]
 pub struct SplitToArrowArgs {
     /// Input Arrow IPC file.
@@ -439,6 +455,10 @@ pub struct SplitToParquetArgs {
         verbatim_doc_comment
     )]
     pub bloom_column: Vec<ColumnSpecificBloomFilterConfig>,
+
+    /// List the output files after creation.
+    #[arg(short, long, value_enum, default_value_t = ListOutputsFormat::None)]
+    pub list_outputs: ListOutputsFormat,
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug, Default)]

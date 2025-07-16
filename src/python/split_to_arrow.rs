@@ -1,8 +1,9 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 
-use super::common::{PySortColumn, create_input, parse_sort_spec, run_async_command};
+use super::common::{PySortColumn, create_input, parse_sort_spec};
 use crate::{
     ArrowCompression, ListOutputsFormat, SplitToArrowArgs, commands,
     utils::arrow_io::ArrowIPCFormat,
@@ -20,6 +21,8 @@ use crate::{
     create_dirs = true,
     overwrite = false,
     record_batch_size = 122_880,
+    list_outputs = "none",
+    output_ipc_format = "file"
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn split_to_arrow(
@@ -33,9 +36,13 @@ pub fn split_to_arrow(
     create_dirs: bool,
     overwrite: bool,
     record_batch_size: usize,
-) -> anyhow::Result<()> {
+    list_outputs: &str,
+    output_ipc_format: &str,
+) -> anyhow::Result<Py<PyDict>> {
     let sort_spec = parse_sort_spec(sort_by)?;
     let compression = compression.parse::<ArrowCompression>()?;
+    let list_outputs = list_outputs.parse::<ListOutputsFormat>()?;
+    let output_ipc_format = output_ipc_format.parse::<ArrowIPCFormat>()?;
 
     let args = SplitToArrowArgs {
         input: create_input(&input_path)?,
@@ -47,9 +54,21 @@ pub fn split_to_arrow(
         create_dirs,
         overwrite,
         compression,
-        list_outputs: ListOutputsFormat::None,
-        output_ipc_format: ArrowIPCFormat::File,
+        list_outputs,
+        output_ipc_format,
     };
 
-    run_async_command(py, || commands::split_to_arrow::run(args))
+    let result = py.allow_threads(|| {
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(commands::split_to_arrow::run_with_result(args))
+    })?;
+
+    let py_dict = PyDict::new(py);
+
+    for (key, path) in result.output_files {
+        py_dict.set_item(key, path.to_string_lossy().to_string())?;
+    }
+
+    Ok(py_dict.into())
 }
