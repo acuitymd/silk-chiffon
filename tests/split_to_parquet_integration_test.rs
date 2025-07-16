@@ -72,6 +72,7 @@ async fn test_split_to_parquet_basic() {
         write_sorted_metadata: false,
         bloom_all: None,
         bloom_column: vec![],
+        list_outputs: silk_chiffon::ListOutputsFormat::None,
     };
 
     silk_chiffon::commands::split_to_parquet::run(args)
@@ -118,6 +119,7 @@ async fn test_split_to_parquet_with_bloom_filters() {
         write_sorted_metadata: false,
         bloom_all: Some(silk_chiffon::AllColumnsBloomFilterConfig { fpp: 0.01 }),
         bloom_column: vec![],
+        list_outputs: silk_chiffon::ListOutputsFormat::None,
     };
 
     silk_chiffon::commands::split_to_parquet::run(args)
@@ -155,6 +157,7 @@ async fn test_split_to_parquet_with_sorted_metadata() {
         write_sorted_metadata: true,
         bloom_all: None,
         bloom_column: vec![],
+        list_outputs: silk_chiffon::ListOutputsFormat::None,
     };
 
     silk_chiffon::commands::split_to_parquet::run(args)

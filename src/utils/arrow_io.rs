@@ -4,6 +4,7 @@ use std::{
     fmt::{Display, Formatter},
     io::BufReader,
     path::{Path, PathBuf},
+    str::FromStr,
 };
 
 use arrow::{
@@ -29,6 +30,21 @@ impl Display for ArrowIPCFormat {
             Self::Stream => "stream",
         };
         write!(f, "{s}")
+    }
+}
+
+impl FromStr for ArrowIPCFormat {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "file" => Ok(ArrowIPCFormat::File),
+            "stream" => Ok(ArrowIPCFormat::Stream),
+            _ => Err(anyhow!(
+                "Invalid Arrow IPC format: {}. Valid options: file, stream",
+                s
+            )),
+        }
     }
 }
 

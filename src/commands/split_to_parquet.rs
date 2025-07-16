@@ -1,8 +1,9 @@
-use crate::converters::split::{OutputFormat, SplitConverter};
-use crate::{BloomFilterConfig, ParquetCompression, SplitToParquetArgs};
+use crate::converters::split::{OutputFormat, SplitConversionResult, SplitConverter};
+use crate::{BloomFilterConfig, ListOutputsFormat, ParquetCompression, SplitToParquetArgs};
 use anyhow::Result;
+use std::path::PathBuf;
 
-pub async fn run(args: SplitToParquetArgs) -> Result<()> {
+pub async fn run_with_result(args: SplitToParquetArgs) -> Result<SplitConversionResult> {
     let bloom_config = if args.bloom_all.is_some() {
         BloomFilterConfig::All(args.bloom_all.unwrap())
     } else if !args.bloom_column.is_empty() {
@@ -36,7 +37,30 @@ pub async fn run(args: SplitToParquetArgs) -> Result<()> {
     .with_overwrite(args.overwrite)
     .with_query(args.query);
 
-    let _created_files = converter.convert().await?;
+    let conversion_result = converter.convert().await?;
 
+    match args.list_outputs {
+        ListOutputsFormat::Text => {
+            // grab the file paths into a vector so we can sort them, to provide a stable output order
+            let mut files: Vec<PathBuf> =
+                conversion_result.output_files.values().cloned().collect();
+            files.sort();
+
+            for file in files {
+                println!("{}", file.as_path().display());
+            }
+        }
+        ListOutputsFormat::Json => {
+            let json = serde_json::to_string_pretty(&conversion_result)?;
+            println!("{json}");
+        }
+        ListOutputsFormat::None => {}
+    }
+
+    Ok(conversion_result)
+}
+
+pub async fn run(args: SplitToParquetArgs) -> Result<()> {
+    run_with_result(args).await?;
     Ok(())
 }

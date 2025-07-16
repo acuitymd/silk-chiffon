@@ -1,13 +1,14 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 use std::collections::HashMap;
 
-use super::common::{PySortColumn, create_input, parse_sort_spec, run_async_command};
+use super::common::{PySortColumn, create_input, parse_sort_spec};
 use crate::{
     AllColumnsBloomFilterConfig, BloomFilterConfig, ColumnBloomFilterConfig,
-    ColumnSpecificBloomFilterConfig, DEFAULT_BLOOM_FILTER_FPP, ParquetCompression,
-    ParquetStatistics, ParquetWriterVersion, SplitToParquetArgs, commands,
+    ColumnSpecificBloomFilterConfig, DEFAULT_BLOOM_FILTER_FPP, ListOutputsFormat,
+    ParquetCompression, ParquetStatistics, ParquetWriterVersion, SplitToParquetArgs, commands,
 };
 
 #[derive(FromPyObject)]
@@ -46,7 +47,8 @@ pub enum PyBloomFilterColumn {
     max_row_group_size = 1_048_576,
     statistics = "page",
     enable_dictionary = true,
-    writer_version = "v2"
+    writer_version = "v2",
+    list_outputs = "none"
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn split_to_parquet(
@@ -67,9 +69,11 @@ pub fn split_to_parquet(
     statistics: &str,
     enable_dictionary: bool,
     writer_version: &str,
-) -> anyhow::Result<()> {
+    list_outputs: &str,
+) -> anyhow::Result<Py<PyDict>> {
     let sort_spec = parse_sort_spec(sort_by)?;
     let compression = compression.parse::<ParquetCompression>()?;
+    let list_outputs = list_outputs.parse::<ListOutputsFormat>()?;
 
     let bloom_config = match (bloom_filter_all, bloom_filter_columns) {
         (Some(all_config), None) => match all_config {
@@ -166,7 +170,20 @@ pub fn split_to_parquet(
         write_sorted_metadata,
         bloom_all,
         bloom_column,
+        list_outputs,
     };
 
-    run_async_command(py, || commands::split_to_parquet::run(args))
+    let result = py.allow_threads(|| {
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(commands::split_to_parquet::run_with_result(args))
+    })?;
+
+    let py_dict = PyDict::new(py);
+
+    for (key, path) in result.output_files {
+        py_dict.set_item(key, path.to_string_lossy().to_string())?;
+    }
+
+    Ok(py_dict.into())
 }

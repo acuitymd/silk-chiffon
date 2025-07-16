@@ -1,9 +1,9 @@
-use crate::converters::split::{OutputFormat, SplitConverter};
+use crate::converters::split::{OutputFormat, SplitConversionResult, SplitConverter};
 use crate::{ArrowCompression, ListOutputsFormat, SplitToArrowArgs};
 use anyhow::Result;
 use std::path::PathBuf;
 
-pub async fn run(args: SplitToArrowArgs) -> Result<()> {
+pub async fn run_with_result(args: SplitToArrowArgs) -> Result<SplitConversionResult> {
     let output_format = OutputFormat::Arrow {
         compression: match args.compression {
             ArrowCompression::None => None,
@@ -44,5 +44,10 @@ pub async fn run(args: SplitToArrowArgs) -> Result<()> {
         ListOutputsFormat::None => {}
     }
 
+    Ok(conversion_result)
+}
+
+pub async fn run(args: SplitToArrowArgs) -> Result<()> {
+    run_with_result(args).await?;
     Ok(())
 }
