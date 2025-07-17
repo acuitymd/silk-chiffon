@@ -9,7 +9,7 @@ pub async fn run(args: DuckDbArgs) -> Result<()> {
     let input_path = args.input.path().to_string_lossy().to_string();
     let output_path = args.output.path().to_path_buf();
 
-    let converter = DuckDbConverter::new(input_path, output_path, args.table_name)
+    let converter = DuckDbConverter::new(input_path, output_path, args.table_name)?
         .with_sort_spec(args.sort_by.clone())
         .with_truncate(args.truncate)
         .with_drop_table(args.drop_table)

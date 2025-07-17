@@ -1,4 +1,8 @@
-use crate::{SortSpec, converters::parquet::ParquetConverter};
+use crate::{
+    SortSpec,
+    converters::parquet::ParquetConverter,
+    utils::arrow_io::{ArrowIPCReader, RecordBatchIterator},
+};
 use anyhow::{Context, Result, anyhow};
 use duckdb::Connection;
 use pg_escape::{quote_identifier, quote_literal};
@@ -7,7 +11,7 @@ use tempfile::NamedTempFile;
 use tokio::fs::remove_file;
 
 pub struct DuckDbConverter {
-    input_path: String,
+    input: Box<dyn RecordBatchIterator>,
     output_path: PathBuf,
     table_name: String,
     sort_spec: SortSpec,
@@ -17,9 +21,19 @@ pub struct DuckDbConverter {
 }
 
 impl DuckDbConverter {
-    pub fn new(input_path: String, output_path: PathBuf, table_name: String) -> Self {
+    pub fn new(input_path: String, output_path: PathBuf, table_name: String) -> Result<Self> {
+        let reader = ArrowIPCReader::from_path(input_path)?;
+        let input = reader.into_batch_iterator()?;
+        Ok(Self::from_iterator(input, output_path, table_name))
+    }
+
+    pub fn from_iterator(
+        input: Box<dyn RecordBatchIterator>,
+        output_path: PathBuf,
+        table_name: String,
+    ) -> Self {
         Self {
-            input_path,
+            input,
             output_path,
             table_name,
             sort_spec: SortSpec::default(),
@@ -49,11 +63,11 @@ impl DuckDbConverter {
         self
     }
 
-    pub async fn convert(&self) -> Result<()> {
-        let temp_file = NamedTempFile::new()?;
-        let parquet_path = temp_file.path().with_extension("parquet");
+    pub async fn convert(self) -> Result<()> {
+        let temp_file = NamedTempFile::with_suffix(".parquet")?;
+        let parquet_path = temp_file.path().to_path_buf();
 
-        ParquetConverter::new(self.input_path.clone(), parquet_path.clone())
+        ParquetConverter::from_iterator(self.input.clone()?, parquet_path.clone())
             .with_sort_spec(self.sort_spec.clone())
             .with_query(self.query.clone())
             .convert()
@@ -66,7 +80,7 @@ impl DuckDbConverter {
 
     async fn load_into_duckdb(&self, parquet_path: &Path) -> Result<()> {
         if self.truncate {
-            remove_file(&self.output_path).await.ok();
+            remove_file(self.output_path.clone()).await.ok();
         }
 
         let conn = Connection::open(&self.output_path).with_context(|| {
@@ -134,7 +148,8 @@ mod tests {
             input_path.to_string_lossy().to_string(),
             output_path.clone(),
             "test_table".to_string(),
-        );
+        )
+        .unwrap();
 
         assert!(converter.convert().await.is_ok());
 
@@ -164,6 +179,7 @@ mod tests {
             output_path.clone(),
             "test_table".to_string(),
         )
+        .unwrap()
         .with_sort_spec("id:asc".parse().unwrap());
 
         assert!(converter.convert().await.is_ok());
@@ -197,14 +213,16 @@ mod tests {
             input_path.to_string_lossy().to_string(),
             output_path.clone(),
             "test_table".to_string(),
-        );
+        )
+        .unwrap();
         converter.convert().await.unwrap();
 
         let converter = DuckDbConverter::new(
             input_path.to_string_lossy().to_string(),
             output_path.clone(),
             "test_table".to_string(),
-        );
+        )
+        .unwrap();
         let result = converter.convert().await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already exists"));
@@ -224,7 +242,8 @@ mod tests {
             input_path.to_string_lossy().to_string(),
             output_path.clone(),
             "test_table".to_string(),
-        );
+        )
+        .unwrap();
         converter.convert().await.unwrap();
 
         let batch2 =
@@ -236,6 +255,7 @@ mod tests {
             output_path.clone(),
             "test_table".to_string(),
         )
+        .unwrap()
         .with_drop_table(true);
         converter.convert().await.unwrap();
 
@@ -260,7 +280,8 @@ mod tests {
             input_path.to_string_lossy().to_string(),
             output_path.clone(),
             "old_table".to_string(),
-        );
+        )
+        .unwrap();
         converter.convert().await.unwrap();
 
         let converter = DuckDbConverter::new(
@@ -268,6 +289,7 @@ mod tests {
             output_path.clone(),
             "new_table".to_string(),
         )
+        .unwrap()
         .with_truncate(true);
         converter.convert().await.unwrap();
 

@@ -18,7 +18,7 @@ pub async fn run(args: ParquetArgs) -> Result<()> {
         BloomFilterConfig::None
     };
 
-    let converter = ParquetConverter::new(input_path, output_path)
+    let converter = ParquetConverter::new(input_path, output_path)?
         .with_sort_spec(args.sort_by)
         .with_record_batch_size(args.record_batch_size)
         .with_parquet_row_group_size(args.max_row_group_size)

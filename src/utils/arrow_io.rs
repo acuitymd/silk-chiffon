@@ -192,9 +192,10 @@ impl ArrowIPCReader {
     }
 }
 
-pub trait RecordBatchIterator: Send {
+pub trait RecordBatchIterator: Send + Sync {
     fn schema(&self) -> Arc<arrow::datatypes::Schema>;
     fn next_batch(&mut self) -> Result<Option<RecordBatch>>;
+    fn clone(&self) -> Result<Box<dyn RecordBatchIterator>>;
 
     fn as_file_format(&mut self) -> Result<ArrowFileSource> {
         let temp_file = tempfile::Builder::new().suffix(".arrow").tempfile()?;
@@ -237,6 +238,10 @@ impl RecordBatchIterator for FileReaderIterator {
         self.reader.schema()
     }
 
+    fn clone(&self) -> Result<Box<dyn RecordBatchIterator>> {
+        Ok(Box::new(Self::new(self.path.clone())?))
+    }
+
     fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
         match self.reader.next() {
             Some(Ok(batch)) => Ok(Some(batch)),
@@ -252,12 +257,14 @@ impl RecordBatchIterator for FileReaderIterator {
 
 pub struct StreamReaderIterator {
     reader: StreamReader<BufReader<File>>,
+    path: PathBuf,
 }
 
 impl StreamReaderIterator {
     pub fn new(path: PathBuf) -> Result<Self> {
         Ok(Self {
             reader: StreamReader::try_new_buffered(File::open(&path)?, None)?,
+            path,
         })
     }
 }
@@ -265,6 +272,10 @@ impl StreamReaderIterator {
 impl RecordBatchIterator for StreamReaderIterator {
     fn schema(&self) -> Arc<arrow::datatypes::Schema> {
         self.reader.schema()
+    }
+
+    fn clone(&self) -> Result<Box<dyn RecordBatchIterator>> {
+        Ok(Box::new(Self::new(self.path.clone())?))
     }
 
     fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
@@ -282,6 +293,7 @@ pub struct MultiFileIterator {
     current_reader: Option<Box<dyn RecordBatchIterator>>,
     schema: Arc<arrow::datatypes::Schema>,
     coalescer: BatchCoalescer,
+    batch_size: usize,
 }
 
 impl MultiFileIterator {
@@ -298,6 +310,7 @@ impl MultiFileIterator {
             current_reader: None,
             schema: schema.clone(),
             coalescer: BatchCoalescer::new(schema, batch_size),
+            batch_size,
         })
     }
 
@@ -337,6 +350,10 @@ impl MultiFileIterator {
 impl RecordBatchIterator for MultiFileIterator {
     fn schema(&self) -> Arc<arrow::datatypes::Schema> {
         self.schema.clone()
+    }
+
+    fn clone(&self) -> Result<Box<dyn RecordBatchIterator>> {
+        Ok(Box::new(Self::new(self.paths.clone(), self.batch_size)?))
     }
 
     fn next_batch(&mut self) -> Result<Option<RecordBatch>> {

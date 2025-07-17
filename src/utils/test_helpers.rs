@@ -126,11 +126,23 @@ pub mod verify {
     use std::{fs::File, path::Path};
 
     use crate::utils::test_helpers::test_data;
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
     pub fn read_output_file(path: &Path) -> Result<Vec<RecordBatch>> {
         let file = File::open(path)?;
         let reader = FileReader::try_new_buffered(file, None)?;
         reader.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn read_parquet_file(path: &Path) -> Result<Vec<RecordBatch>> {
+        let file = File::open(path)?;
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+        let reader = builder.build()?;
+        let mut batches = Vec::new();
+        for batch in reader {
+            batches.push(batch?);
+        }
+        Ok(batches)
     }
 
     pub fn read_output_stream(path: &Path) -> Result<Vec<RecordBatch>> {
@@ -172,5 +184,11 @@ pub mod verify {
         for (i, expected_name) in expected_names.iter().enumerate() {
             assert_eq!(names.value(i), *expected_name);
         }
+    }
+
+    pub fn extract_column_as_i32_vec(batch: &RecordBatch, column_name: &str) -> Vec<i32> {
+        let column = batch.column_by_name(column_name).unwrap();
+        let array = column.as_any().downcast_ref::<Int32Array>().unwrap();
+        (0..array.len()).map(|i| array.value(i)).collect()
     }
 }
