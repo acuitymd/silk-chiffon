@@ -14,6 +14,7 @@ async fn main() -> Result<()> {
         silk_chiffon::Commands::SplitToParquet(args) => {
             commands::split_to_parquet::run(args).await?
         }
+        silk_chiffon::Commands::MergeToArrow(args) => commands::merge_to_arrow::run(args).await?,
     };
     Ok(())
 }

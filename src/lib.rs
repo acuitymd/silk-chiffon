@@ -76,6 +76,17 @@ pub enum Commands {
     ///   - Parquet file format
     #[command(name = "split-to-parquet", verbatim_doc_comment)]
     SplitToParquet(SplitToParquetArgs),
+    /// Merge multiple Arrow files into a single Arrow file.
+    ///
+    /// Input formats:
+    ///   - Multiple Arrow IPC files (file or stream format)
+    ///   - Supports glob patterns
+    ///
+    /// Output formats:
+    ///   - Arrow IPC stream format
+    ///   - Arrow IPC file format
+    #[command(name = "merge-to-arrow", verbatim_doc_comment)]
+    MergeToArrow(MergeToArrowArgs),
 }
 
 #[derive(Args, Debug)]
@@ -459,6 +470,45 @@ pub struct SplitToParquetArgs {
     /// List the output files after creation.
     #[arg(short, long, value_enum, default_value_t = ListOutputsFormat::None)]
     pub list_outputs: ListOutputsFormat,
+}
+
+#[derive(Args, Debug)]
+pub struct MergeToArrowArgs {
+    /// Input Arrow IPC files (supports multiple files and glob patterns).
+    #[arg(required = true, value_name = "INPUTS")]
+    pub inputs: Vec<String>,
+
+    /// Output Arrow IPC file path.
+    #[arg(short, long, value_parser)]
+    pub output: clio::OutputPath,
+
+    /// SQL query to apply to the data. The input data is available as table 'data'.
+    ///
+    /// Examples:
+    ///   --query "SELECT * FROM data WHERE status = 'active'"
+    ///   --query "SELECT id, name, amount FROM data"
+    ///   --query "SELECT region, SUM(amount) FROM data GROUP BY region"
+    ///   --query "SELECT *, amount * 1.1 as adjusted FROM data"
+    #[arg(short, long, verbatim_doc_comment)]
+    pub query: Option<String>,
+
+    /// Sort the data by one or more columns before writing.
+    ///
+    /// Format: A comma-separated list like "col_a,col_b:desc,col_c".
+    #[arg(short, long)]
+    pub sort_by: Option<SortSpec>,
+
+    /// The IPC compression to use for the output.
+    #[arg(long, default_value_t = ArrowCompression::None)]
+    pub compression: ArrowCompression,
+
+    /// Size of Arrow record batches written to the output file.
+    #[arg(long, default_value_t = 122_880)]
+    pub record_batch_size: usize,
+
+    /// Sets the output Arrow IPC format.
+    #[arg(short = 'f', long, default_value_t = ArrowIPCFormat::default())]
+    pub output_ipc_format: ArrowIPCFormat,
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug, Default)]

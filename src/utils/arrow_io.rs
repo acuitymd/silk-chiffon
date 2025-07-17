@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use clap::ValueEnum;
 use std::{
     fmt::{Display, Formatter},
@@ -8,10 +8,16 @@ use std::{
 };
 
 use arrow::{
+    array::RecordBatch,
+    compute::BatchCoalescer,
     datatypes::SchemaRef,
-    ipc::reader::{FileReader, StreamReader},
+    ipc::{
+        reader::{FileReader, StreamReader},
+        writer::{FileWriter, IpcWriteOptions},
+    },
 };
 use std::fs::File;
+use std::sync::Arc;
 use tempfile::NamedTempFile;
 
 #[derive(ValueEnum, PartialEq, Clone, Debug, Default)]
@@ -186,6 +192,183 @@ impl ArrowIPCReader {
     }
 }
 
+pub trait RecordBatchIterator: Send {
+    fn schema(&self) -> Arc<arrow::datatypes::Schema>;
+    fn next_batch(&mut self) -> Result<Option<RecordBatch>>;
+
+    fn as_file_format(&mut self) -> Result<ArrowFileSource> {
+        let temp_file = tempfile::Builder::new().suffix(".arrow").tempfile()?;
+        let schema = self.schema();
+
+        let mut writer = FileWriter::try_new_with_options(
+            temp_file.as_file(),
+            &schema,
+            IpcWriteOptions::default(),
+        )?;
+
+        while let Some(batch) = self.next_batch()? {
+            writer.write(&batch)?;
+        }
+        writer.finish()?;
+
+        Ok(ArrowFileSource::Temp {
+            original_path: PathBuf::from("iterator_conversion"),
+            temp_file,
+        })
+    }
+}
+
+pub struct FileReaderIterator {
+    reader: FileReader<BufReader<File>>,
+    path: PathBuf,
+}
+
+impl FileReaderIterator {
+    pub fn new(path: PathBuf) -> Result<Self> {
+        let file = File::open(&path)?;
+        let reader = FileReader::try_new_buffered(file, None)
+            .with_context(|| format!("Failed to create FileReader for {}", path.display()))?;
+        Ok(Self { reader, path })
+    }
+}
+
+impl RecordBatchIterator for FileReaderIterator {
+    fn schema(&self) -> Arc<arrow::datatypes::Schema> {
+        self.reader.schema()
+    }
+
+    fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
+        match self.reader.next() {
+            Some(Ok(batch)) => Ok(Some(batch)),
+            Some(Err(e)) => Err(e.into()),
+            None => Ok(None),
+        }
+    }
+
+    fn as_file_format(&mut self) -> Result<ArrowFileSource> {
+        Ok(ArrowFileSource::Original(self.path.clone()))
+    }
+}
+
+pub struct StreamReaderIterator {
+    reader: StreamReader<BufReader<File>>,
+}
+
+impl StreamReaderIterator {
+    pub fn new(path: PathBuf) -> Result<Self> {
+        Ok(Self {
+            reader: StreamReader::try_new_buffered(File::open(&path)?, None)?,
+        })
+    }
+}
+
+impl RecordBatchIterator for StreamReaderIterator {
+    fn schema(&self) -> Arc<arrow::datatypes::Schema> {
+        self.reader.schema()
+    }
+
+    fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
+        match self.reader.next() {
+            Some(Ok(batch)) => Ok(Some(batch)),
+            Some(Err(e)) => Err(e.into()),
+            None => Ok(None),
+        }
+    }
+}
+
+pub struct MultiFileIterator {
+    paths: Vec<String>,
+    current_idx: usize,
+    current_reader: Option<Box<dyn RecordBatchIterator>>,
+    schema: Arc<arrow::datatypes::Schema>,
+    coalescer: BatchCoalescer,
+}
+
+impl MultiFileIterator {
+    pub fn new(paths: Vec<String>, batch_size: usize) -> Result<Self> {
+        if paths.is_empty() {
+            return Err(anyhow!("No input files provided"));
+        }
+
+        let schema = Self::validate_schemas(&paths)?;
+
+        Ok(Self {
+            paths,
+            current_idx: 0,
+            current_reader: None,
+            schema: schema.clone(),
+            coalescer: BatchCoalescer::new(schema, batch_size),
+        })
+    }
+
+    fn validate_schemas(paths: &[String]) -> Result<Arc<arrow::datatypes::Schema>> {
+        let mut schemas = Vec::new();
+
+        for path in paths {
+            schemas.push(ArrowIPCReader::from_path(path)?.schema()?);
+        }
+
+        let first = &schemas[0];
+        for (idx, schema) in schemas.iter().enumerate().skip(1) {
+            if schema != first {
+                return Err(anyhow!(
+                    "Schema mismatch: {} has different schema than {}",
+                    paths[idx],
+                    paths[0]
+                ));
+            }
+        }
+
+        Ok(first.clone())
+    }
+
+    fn advance_to_next_file(&mut self) -> Result<bool> {
+        if self.current_idx >= self.paths.len() {
+            return Ok(false);
+        }
+
+        let reader = ArrowIPCReader::from_path(&self.paths[self.current_idx])?;
+        self.current_reader = Some(reader.into_batch_iterator()?);
+        self.current_idx += 1;
+        Ok(true)
+    }
+}
+
+impl RecordBatchIterator for MultiFileIterator {
+    fn schema(&self) -> Arc<arrow::datatypes::Schema> {
+        self.schema.clone()
+    }
+
+    fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
+        loop {
+            if let Some(batch) = self.coalescer.next_completed_batch() {
+                return Ok(Some(batch));
+            }
+
+            if let Some(reader) = &mut self.current_reader {
+                if let Some(batch) = reader.next_batch()? {
+                    self.coalescer.push_batch(batch)?;
+                    continue;
+                }
+            }
+
+            if !self.advance_to_next_file()? {
+                self.coalescer.finish_buffered_batch()?;
+                return Ok(self.coalescer.next_completed_batch());
+            }
+        }
+    }
+}
+
+impl ArrowIPCReader {
+    pub fn into_batch_iterator(self) -> Result<Box<dyn RecordBatchIterator>> {
+        match self.inner {
+            ArrowIPCReaderInner::File { path } => Ok(Box::new(FileReaderIterator::new(path)?)),
+            ArrowIPCReaderInner::Stream { path } => Ok(Box::new(StreamReaderIterator::new(path)?)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{
@@ -332,7 +515,8 @@ mod tests {
             let batch = test_data::create_batch_with_ids_and_names(&schema, &test_ids, &test_names);
             file_helpers::write_arrow_file(&input_path, &schema, vec![batch]).unwrap();
 
-            let converter = ArrowConverter::new(input_path.to_str().unwrap(), Path::new("unused"));
+            let mut converter =
+                ArrowConverter::new(input_path.to_str().unwrap(), Path::new("unused")).unwrap();
             let file_source = converter.as_file_format().await.unwrap();
 
             match file_source {
@@ -355,7 +539,8 @@ mod tests {
             let batch = test_data::create_batch_with_ids_and_names(&schema, &test_ids, &test_names);
             file_helpers::write_arrow_stream(&input_path, &schema, vec![batch]).unwrap();
 
-            let converter = ArrowConverter::new(input_path.to_str().unwrap(), Path::new("unused"));
+            let mut converter =
+                ArrowConverter::new(input_path.to_str().unwrap(), Path::new("unused")).unwrap();
             let file_source = converter.as_file_format().await.unwrap();
 
             match file_source {
@@ -363,7 +548,7 @@ mod tests {
                     original_path,
                     temp_file,
                 } => {
-                    assert_eq!(original_path, input_path);
+                    assert_eq!(original_path.to_str().unwrap(), "iterator_conversion");
                     assert!(temp_file.path().exists());
 
                     let reader = ArrowIPCReader::from_path(temp_file.path()).unwrap();
@@ -388,7 +573,8 @@ mod tests {
             let batch = test_data::create_batch_with_ids_and_names(&schema, &test_ids, &test_names);
             file_helpers::write_arrow_stream(&input_path, &schema, vec![batch]).unwrap();
 
-            let converter = ArrowConverter::new(input_path.to_str().unwrap(), Path::new("unused"));
+            let mut converter =
+                ArrowConverter::new(input_path.to_str().unwrap(), Path::new("unused")).unwrap();
             let file_source = converter.as_file_format().await.unwrap();
 
             let temp_path = match &file_source {

@@ -5,13 +5,9 @@ use std::{
 };
 
 use arrow::compute::BatchCoalescer;
-use arrow::{
-    array::RecordBatch,
-    error::ArrowError,
-    ipc::{
-        CompressionType,
-        writer::{FileWriter, IpcWriteOptions, StreamWriter},
-    },
+use arrow::ipc::{
+    CompressionType,
+    writer::{FileWriter, IpcWriteOptions, StreamWriter},
 };
 use datafusion::{
     execution::{options::ArrowReadOptions, runtime_env::RuntimeEnvBuilder},
@@ -22,14 +18,14 @@ use futures::StreamExt;
 use crate::{
     ArrowCompression, SortDirection, SortSpec,
     utils::{
-        arrow_io::{ArrowFileSource, ArrowIPCFormat, ArrowIPCReader, HasSchema},
+        arrow_io::{ArrowFileSource, ArrowIPCFormat, ArrowIPCReader, RecordBatchIterator},
         query_executor::{QueryExecutor, build_query_with_sort},
     },
 };
 use anyhow::Result;
 
 pub struct ArrowConverter {
-    input_path: String,
+    input: Box<dyn RecordBatchIterator>,
     output_path: PathBuf,
     write_options: IpcWriteOptions,
     sort_spec: SortSpec,
@@ -40,11 +36,18 @@ pub struct ArrowConverter {
 }
 
 impl ArrowConverter {
-    pub fn new(input_path: &str, output_path: &Path) -> Self {
+    pub fn new(input_path: &str, output_path: &Path) -> Result<Self> {
+        let reader = ArrowIPCReader::from_path(input_path)?;
+        let input = reader.into_batch_iterator()?;
+
+        Ok(Self::from_iterator(input, output_path))
+    }
+
+    pub fn from_iterator(input: Box<dyn RecordBatchIterator>, output_path: &Path) -> Self {
         let output_path = output_path.to_path_buf();
         let write_options = IpcWriteOptions::default();
         Self {
-            input_path: input_path.to_string(),
+            input,
             output_path,
             write_options,
             sort_spec: SortSpec::default(),
@@ -89,7 +92,7 @@ impl ArrowConverter {
         self
     }
 
-    pub async fn convert(&self) -> Result<()> {
+    pub async fn convert(mut self) -> Result<()> {
         if self.query.is_some() || !self.sort_spec.columns.is_empty() {
             self.convert_with_query_or_sorting().await
         } else {
@@ -97,7 +100,7 @@ impl ArrowConverter {
         }
     }
 
-    async fn convert_with_query_or_sorting(&self) -> Result<()> {
+    async fn convert_with_query_or_sorting(&mut self) -> Result<()> {
         let mut config = SessionConfig::new();
         let options = config.options_mut();
         options.execution.batch_size = self.datafusion_batch_size;
@@ -217,56 +220,20 @@ impl ArrowConverter {
         Ok(())
     }
 
-    async fn convert_direct(&self) -> Result<()> {
-        let input = ArrowIPCReader::from_path(&self.input_path)?;
-        match input.format() {
+    async fn convert_direct(&mut self) -> Result<()> {
+        let output_file = File::create(&self.output_path)?;
+        let schema = self.input.schema();
+        let mut coalescer = BatchCoalescer::new(schema.clone(), self.record_batch_size);
+
+        match self.output_ipc_format {
             ArrowIPCFormat::File => {
-                let file_reader = input.file_reader()?;
-                ArrowConverter::convert_arrow_reader_to_format(
-                    file_reader,
-                    &self.output_path,
+                let mut writer = FileWriter::try_new_with_options(
+                    output_file,
+                    &schema,
                     self.write_options.clone(),
-                    self.record_batch_size,
-                    self.output_ipc_format.clone(),
-                )
-                .await
-            }
-            ArrowIPCFormat::Stream => {
-                let stream_reader = input.stream_reader()?;
-                ArrowConverter::convert_arrow_reader_to_format(
-                    stream_reader,
-                    &self.output_path,
-                    self.write_options.clone(),
-                    self.record_batch_size,
-                    self.output_ipc_format.clone(),
-                )
-                .await
-            }
-        }
-    }
+                )?;
 
-    async fn convert_arrow_reader_to_format<I>(
-        reader: I,
-        output_path: &Path,
-        write_options: IpcWriteOptions,
-        record_batch_size: usize,
-        output_format: ArrowIPCFormat,
-    ) -> Result<()>
-    where
-        I: Iterator<Item = Result<RecordBatch, ArrowError>> + HasSchema,
-    {
-        let schema = reader.schema();
-        let output_file = File::create(output_path)?;
-        let mut coalescer = BatchCoalescer::new(schema.clone(), record_batch_size);
-
-        match output_format {
-            ArrowIPCFormat::File => {
-                let mut writer =
-                    FileWriter::try_new_with_options(output_file, &schema, write_options)?;
-
-                for batch_result in reader {
-                    let batch = batch_result?;
-
+                while let Some(batch) = self.input.next_batch()? {
                     coalescer.push_batch(batch)?;
 
                     while let Some(completed_batch) = coalescer.next_completed_batch() {
@@ -283,12 +250,13 @@ impl ArrowConverter {
                 writer.finish()?;
             }
             ArrowIPCFormat::Stream => {
-                let mut writer =
-                    StreamWriter::try_new_with_options(output_file, &schema, write_options)?;
+                let mut writer = StreamWriter::try_new_with_options(
+                    output_file,
+                    &schema,
+                    self.write_options.clone(),
+                )?;
 
-                for batch_result in reader {
-                    let batch = batch_result?;
-
+                while let Some(batch) = self.input.next_batch()? {
                     coalescer.push_batch(batch)?;
 
                     while let Some(completed_batch) = coalescer.next_completed_batch() {
@@ -309,27 +277,8 @@ impl ArrowConverter {
         Ok(())
     }
 
-    pub async fn as_file_format(&self) -> Result<ArrowFileSource> {
-        let input = ArrowIPCReader::from_path(&self.input_path)?;
-        match input.format() {
-            ArrowIPCFormat::File => Ok(ArrowFileSource::Original(input.path().to_path_buf())),
-            ArrowIPCFormat::Stream => {
-                let temp_file = tempfile::Builder::new().suffix(".arrow").tempfile()?;
-                ArrowConverter::convert_arrow_reader_to_format(
-                    input.stream_reader()?,
-                    temp_file.path(),
-                    IpcWriteOptions::default(),
-                    self.record_batch_size,
-                    ArrowIPCFormat::File,
-                )
-                .await?;
-
-                Ok(ArrowFileSource::Temp {
-                    original_path: input.path().to_path_buf(),
-                    temp_file,
-                })
-            }
-        }
+    pub async fn as_file_format(&mut self) -> Result<ArrowFileSource> {
+        self.input.as_file_format()
     }
 }
 
@@ -359,7 +308,8 @@ mod tests {
             let batch = test_data::create_batch_with_ids_and_names(&schema, &test_ids, &test_names);
             file_helpers::write_arrow_file(&input_path, &schema, vec![batch]).unwrap();
 
-            let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path);
+            let converter =
+                ArrowConverter::new(input_path.to_str().unwrap(), &output_path).unwrap();
             converter.convert().await.unwrap();
 
             let batches = verify::read_output_file(&output_path).unwrap();
@@ -381,6 +331,7 @@ mod tests {
             file_helpers::write_arrow_file(&input_path, &schema, vec![batch]).unwrap();
 
             let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path)
+                .unwrap()
                 .with_output_ipc_format(crate::utils::arrow_io::ArrowIPCFormat::Stream);
             converter.convert().await.unwrap();
 
@@ -403,6 +354,7 @@ mod tests {
             file_helpers::write_arrow_stream(&input_path, &schema, vec![batch]).unwrap();
 
             let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path)
+                .unwrap()
                 .with_output_ipc_format(crate::utils::arrow_io::ArrowIPCFormat::Stream);
             converter.convert().await.unwrap();
 
@@ -424,7 +376,8 @@ mod tests {
             let batch = test_data::create_batch_with_ids_and_names(&schema, &test_ids, &test_names);
             file_helpers::write_arrow_stream(&input_path, &schema, vec![batch]).unwrap();
 
-            let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path);
+            let converter =
+                ArrowConverter::new(input_path.to_str().unwrap(), &output_path).unwrap();
             converter.convert().await.unwrap();
 
             let batches = verify::read_output_file(&output_path).unwrap();
@@ -446,6 +399,7 @@ mod tests {
             file_helpers::write_arrow_file(&input_path, &schema, vec![batch]).unwrap();
 
             let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path)
+                .unwrap()
                 .with_compression(ArrowCompression::Zstd);
             converter.convert().await.unwrap();
 
@@ -468,6 +422,7 @@ mod tests {
             file_helpers::write_arrow_file(&input_path, &schema, vec![batch]).unwrap();
 
             let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path)
+                .unwrap()
                 .with_compression(ArrowCompression::Lz4);
             converter.convert().await.unwrap();
 
@@ -501,6 +456,7 @@ mod tests {
             file_helpers::write_arrow_stream(&input_path, &schema, vec![batch1, batch2]).unwrap();
 
             let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path)
+                .unwrap()
                 .with_record_batch_size(3);
             converter.convert().await.unwrap();
 
@@ -519,7 +475,8 @@ mod tests {
             let schema = test_data::simple_schema();
             file_helpers::write_arrow_stream(&input_path, &schema, vec![]).unwrap();
 
-            let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path);
+            let converter =
+                ArrowConverter::new(input_path.to_str().unwrap(), &output_path).unwrap();
             converter.convert().await.unwrap();
 
             let batches = verify::read_output_file(&output_path).unwrap();
@@ -531,9 +488,7 @@ mod tests {
             let temp_dir = tempdir().unwrap();
             let output_path = temp_dir.path().join("output.arrow");
 
-            let converter = ArrowConverter::new("/nonexistent/file.arrow", &output_path);
-            let result = converter.convert().await;
-
+            let result = ArrowConverter::new("/nonexistent/file.arrow", &output_path);
             assert!(result.is_err());
         }
 
@@ -545,9 +500,7 @@ mod tests {
 
             file_helpers::write_invalid_file(&input_path).unwrap();
 
-            let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path);
-            let result = converter.convert().await;
-
+            let result = ArrowConverter::new(input_path.to_str().unwrap(), &output_path);
             assert!(result.is_err());
         }
     }
@@ -576,6 +529,7 @@ mod tests {
             };
 
             let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path)
+                .unwrap()
                 .with_sorting(sort_spec);
             converter.convert().await.unwrap();
 
@@ -615,6 +569,7 @@ mod tests {
             };
 
             let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path)
+                .unwrap()
                 .with_sorting(sort_spec);
             converter.convert().await.unwrap();
 
@@ -660,6 +615,7 @@ mod tests {
             };
 
             let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path)
+                .unwrap()
                 .with_sorting(sort_spec);
             converter.convert().await.unwrap();
 
@@ -714,6 +670,7 @@ mod tests {
             };
 
             let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path)
+                .unwrap()
                 .with_sorting(sort_spec);
             converter.convert().await.unwrap();
 
@@ -756,6 +713,7 @@ mod tests {
             };
 
             let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path)
+                .unwrap()
                 .with_sorting(sort_spec);
             converter.convert().await.unwrap();
 
@@ -794,6 +752,7 @@ mod tests {
             };
 
             let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path)
+                .unwrap()
                 .with_sorting(sort_spec)
                 .with_compression(ArrowCompression::Zstd);
             converter.convert().await.unwrap();
@@ -831,6 +790,7 @@ mod tests {
             };
 
             let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path)
+                .unwrap()
                 .with_sorting(sort_spec);
             let result = converter.convert().await;
 
@@ -858,6 +818,7 @@ mod tests {
             };
 
             let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path)
+                .unwrap()
                 .with_sorting(sort_spec)
                 .with_output_ipc_format(crate::utils::arrow_io::ArrowIPCFormat::Stream);
             converter.convert().await.unwrap();
@@ -889,6 +850,7 @@ mod tests {
             file_helpers::write_arrow_file(&input_path, &schema, vec![batch]).unwrap();
 
             let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path)
+                .unwrap()
                 .with_query(Some("SELECT * FROM data WHERE id > 3".to_string()));
 
             converter.convert().await.unwrap();
@@ -923,6 +885,7 @@ mod tests {
             file_helpers::write_arrow_file(&input_path, &schema, vec![batch]).unwrap();
 
             let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path)
+                .unwrap()
                 .with_query(Some("SELECT id, name FROM data WHERE id <= 3".to_string()))
                 .with_sorting(crate::SortSpec {
                     columns: vec![crate::SortColumn {

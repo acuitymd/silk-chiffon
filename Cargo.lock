@@ -3244,6 +3244,7 @@ dependencies = [
  "datafusion",
  "duckdb",
  "futures",
+ "glob",
  "parquet",
  "pg_escape",
  "predicates",

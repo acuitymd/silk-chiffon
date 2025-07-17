@@ -127,7 +127,7 @@ impl ParquetConverter {
             let temp_file = NamedTempFile::new()?;
             let temp_path = temp_file.path().with_extension("arrow").to_path_buf();
 
-            let mut arrow_converter = ArrowConverter::new(&self.input_path, &temp_path);
+            let mut arrow_converter = ArrowConverter::new(&self.input_path, &temp_path)?;
 
             if self.sort_spec.is_configured() {
                 arrow_converter = arrow_converter.with_sorting(self.sort_spec.clone());

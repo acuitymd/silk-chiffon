@@ -314,7 +314,7 @@ impl SplitConverter {
 
     async fn prepare_sorted_input(&self) -> Result<NamedTempFile> {
         let sorted_path = NamedTempFile::new()?;
-        let mut arrow_converter = ArrowConverter::new(&self.input_path, sorted_path.path());
+        let mut arrow_converter = ArrowConverter::new(&self.input_path, sorted_path.path())?;
 
         let mut sort_columns = vec![SortColumn {
             name: self.split_column.clone(),

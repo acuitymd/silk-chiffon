@@ -9,7 +9,7 @@ pub async fn run(args: ArrowArgs) -> Result<()> {
     let input_path = args.input.path().to_str().unwrap();
     let output_path = args.output.path();
 
-    let converter = ArrowConverter::new(input_path, output_path)
+    let converter = ArrowConverter::new(input_path, output_path)?
         .with_compression(args.compression)
         .with_sorting(args.sort_by.unwrap_or_default())
         .with_record_batch_size(args.record_batch_size)
