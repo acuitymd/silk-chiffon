@@ -76,6 +76,37 @@ pub enum Commands {
     ///   - Parquet file format
     #[command(name = "split-to-parquet", verbatim_doc_comment)]
     SplitToParquet(SplitToParquetArgs),
+    /// Merge multiple Arrow files into a single Arrow file.
+    ///
+    /// Input formats:
+    ///   - Multiple Arrow IPC files (file or stream format)
+    ///   - Supports glob patterns
+    ///
+    /// Output formats:
+    ///   - Arrow IPC stream format
+    ///   - Arrow IPC file format
+    #[command(name = "merge-to-arrow", verbatim_doc_comment)]
+    MergeToArrow(MergeToArrowArgs),
+    /// Merge multiple Arrow files into a single Parquet file.
+    ///
+    /// Input formats:
+    ///   - Multiple Arrow IPC files (file or stream format)
+    ///   - Supports glob patterns
+    ///
+    /// Output formats:
+    ///   - Parquet file format
+    #[command(name = "merge-to-parquet", verbatim_doc_comment)]
+    MergeToParquet(MergeToParquetArgs),
+    /// Merge multiple Arrow files into a single DuckDB database.
+    ///
+    /// Input formats:
+    ///   - Multiple Arrow IPC files (file or stream format)
+    ///   - Supports glob patterns
+    ///
+    /// Output formats:
+    ///   - DuckDB database file format
+    #[command(name = "merge-to-duckdb", verbatim_doc_comment)]
+    MergeToDuckdb(MergeToDuckdbArgs),
 }
 
 #[derive(Args, Debug)]
@@ -459,6 +490,184 @@ pub struct SplitToParquetArgs {
     /// List the output files after creation.
     #[arg(short, long, value_enum, default_value_t = ListOutputsFormat::None)]
     pub list_outputs: ListOutputsFormat,
+}
+
+#[derive(Args, Debug)]
+pub struct MergeToArrowArgs {
+    /// Input Arrow IPC files (supports multiple files and glob patterns).
+    #[arg(required = true, value_name = "INPUTS")]
+    pub inputs: Vec<String>,
+
+    /// Output Arrow IPC file path.
+    #[arg(short, long, value_parser)]
+    pub output: clio::OutputPath,
+
+    /// SQL query to apply to the data. The input data is available as table 'data'.
+    ///
+    /// Examples:
+    ///   --query "SELECT * FROM data WHERE status = 'active'"
+    ///   --query "SELECT id, name, amount FROM data"
+    ///   --query "SELECT region, SUM(amount) FROM data GROUP BY region"
+    ///   --query "SELECT *, amount * 1.1 as adjusted FROM data"
+    #[arg(short, long, verbatim_doc_comment)]
+    pub query: Option<String>,
+
+    /// Sort the data by one or more columns before writing.
+    ///
+    /// Format: A comma-separated list like "col_a,col_b:desc,col_c".
+    #[arg(short, long)]
+    pub sort_by: Option<SortSpec>,
+
+    /// The IPC compression to use for the output.
+    #[arg(long, default_value_t = ArrowCompression::None)]
+    pub compression: ArrowCompression,
+
+    /// Size of Arrow record batches written to the output file.
+    #[arg(long, default_value_t = 122_880)]
+    pub record_batch_size: usize,
+
+    /// Sets the output Arrow IPC format.
+    #[arg(short = 'f', long, default_value_t = ArrowIPCFormat::default())]
+    pub output_ipc_format: ArrowIPCFormat,
+}
+
+#[derive(Args, Debug)]
+pub struct MergeToParquetArgs {
+    /// Input Arrow IPC files (supports multiple files and glob patterns).
+    #[arg(required = true, value_name = "INPUTS")]
+    pub inputs: Vec<String>,
+
+    /// Output Parquet file path.
+    #[arg(short, long, value_parser)]
+    pub output: clio::OutputPath,
+
+    /// SQL query to apply to the data. The input data is available as table 'data'.
+    ///
+    /// Examples:
+    ///   --query "SELECT * FROM data WHERE status = 'active'"
+    ///   --query "SELECT id, name, amount FROM data"
+    ///   --query "SELECT region, SUM(amount) FROM data GROUP BY region"
+    ///   --query "SELECT *, amount * 1.1 as adjusted FROM data"
+    #[arg(short, long, verbatim_doc_comment)]
+    pub query: Option<String>,
+
+    /// Sort the data by one or more columns before writing.
+    ///
+    /// Format: A comma-separated list like "col_a,col_b:desc,col_c".
+    #[arg(short, long, default_value_t = SortSpec::default())]
+    pub sort_by: SortSpec,
+
+    /// The compression algorithm to use.
+    #[arg(short, long, default_value_t = ParquetCompression::None)]
+    pub compression: ParquetCompression,
+
+    /// Embed metadata indicating that the file's data is sorted.
+    ///
+    /// Requires --sort-by to be set.
+    #[arg(long, default_value_t = false, requires = "sort_by")]
+    pub write_sorted_metadata: bool,
+
+    /// Enable bloom filters for all columns with optional custom settings.
+    /// Mutually exclusive with --bloom-column.
+    ///
+    /// Formats:
+    ///   --bloom-all             # Use default FPP (0.01)
+    ///   --bloom-all "fpp=VALUE" # Custom FPP
+    ///
+    /// Examples:
+    ///   --bloom-all             # Use default FPP (0.01)
+    ///   --bloom-all "fpp=0.001" # Custom FPP (0.001)
+    #[arg(
+        long,
+        value_name = "[fpp=VALUE]",
+        conflicts_with = "bloom_column",
+        num_args = 0..=1,
+        default_missing_value = "",
+        verbatim_doc_comment
+    )]
+    pub bloom_all: Option<AllColumnsBloomFilterConfig>,
+
+    /// Enable bloom filter for specific columns with optional custom settings.
+    /// Can be specified multiple times. Mutually exclusive with --bloom-all.
+    ///
+    /// Formats:
+    ///   COLUMN           # Use default FPP (0.01)
+    ///   COLUMN:fpp=VALUE # Custom FPP
+    ///
+    /// Examples:
+    ///   --bloom-column "user_id"            # Use default FPP (0.01)
+    ///   --bloom-column "user_id:fpp=0.001"  # Custom FPP (0.001)
+    ///   --bloom-column "user_id" --bloom-column "name:fpp=0.05" # Multiple columns
+    #[arg(
+        long,
+        value_name = "COLUMN[:fpp=VALUE]",
+        conflicts_with = "bloom_all",
+        verbatim_doc_comment
+    )]
+    pub bloom_column: Vec<ColumnSpecificBloomFilterConfig>,
+
+    /// The maximum number of rows per Parquet row group.
+    #[arg(long, default_value_t = 1_048_576)]
+    pub max_row_group_size: usize,
+
+    /// Control column statistics level.
+    #[arg(long, default_value_t = ParquetStatistics::Page)]
+    pub statistics: ParquetStatistics,
+
+    /// Size of Arrow record batches written to the output file.
+    #[arg(long, default_value_t = 122_880)]
+    pub record_batch_size: usize,
+
+    /// Disable dictionary encoding for columns.
+    #[arg(long, default_value_t = false)]
+    pub no_dictionary: bool,
+
+    /// Set writer version.
+    #[arg(long, default_value_t = ParquetWriterVersion::V2)]
+    pub writer_version: ParquetWriterVersion,
+}
+
+#[derive(Args, Debug)]
+pub struct MergeToDuckdbArgs {
+    /// Input Arrow IPC files (supports multiple files and glob patterns).
+    #[arg(required = true, value_name = "INPUTS")]
+    pub inputs: Vec<String>,
+
+    /// Output DuckDB database file path.
+    #[arg(short, long, value_parser)]
+    pub output: clio::OutputPath,
+
+    /// Name of the table to create.
+    #[arg(short, long)]
+    pub table_name: String,
+
+    /// SQL query to apply to the data. The input data is available as table 'data'.
+    ///
+    /// Examples:
+    ///   --query "SELECT * FROM data WHERE status = 'active'"
+    ///   --query "SELECT id, name, amount FROM data"
+    ///   --query "SELECT region, SUM(amount) FROM data GROUP BY region"
+    ///   --query "SELECT *, amount * 1.1 as adjusted FROM data"
+    #[arg(short, long, verbatim_doc_comment)]
+    pub query: Option<String>,
+
+    /// Sort the data by one or more columns before writing.
+    ///
+    /// Format: A comma-separated list like "col_a,col_b:desc,col_c".
+    #[arg(short, long, default_value_t = SortSpec::default())]
+    pub sort_by: SortSpec,
+
+    /// Truncate the database file before writing (removes entire file).
+    #[arg(long, default_value_t = false)]
+    pub truncate: bool,
+
+    /// Drop the table if it already exists before creating.
+    #[arg(long, default_value_t = false, conflicts_with = "truncate")]
+    pub drop_table: bool,
+
+    /// Size of Arrow record batches written to the output file.
+    #[arg(long, default_value_t = 122_880)]
+    pub record_batch_size: usize,
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug, Default)]

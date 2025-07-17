@@ -9,13 +9,13 @@ use tempfile::NamedTempFile;
 use crate::{
     BloomFilterConfig, ParquetCompression, ParquetStatistics, ParquetWriterVersion, SortSpec,
     converters::arrow::ArrowConverter,
-    utils::arrow_io::{ArrowIPCFormat, ArrowIPCReader},
+    utils::arrow_io::{ArrowFileSource, ArrowIPCFormat, ArrowIPCReader, RecordBatchIterator},
 };
 
 use super::{ndv_calculator::NdvCalculator, writer_builder::ParquetWritePropertiesBuilder};
 
 pub struct ParquetConverter {
-    input_path: String,
+    input: Box<dyn RecordBatchIterator>,
     output_path: PathBuf,
     sort_spec: SortSpec,
     record_batch_size: usize,
@@ -30,9 +30,15 @@ pub struct ParquetConverter {
 }
 
 impl ParquetConverter {
-    pub fn new(input_path: String, output_path: PathBuf) -> Self {
+    pub fn new(input_path: String, output_path: PathBuf) -> Result<Self> {
+        let reader = ArrowIPCReader::from_path(input_path)?;
+        let input = reader.into_batch_iterator()?;
+        Ok(Self::from_iterator(input, output_path))
+    }
+
+    pub fn from_iterator(input: Box<dyn RecordBatchIterator>, output_path: PathBuf) -> Self {
         Self {
-            input_path,
+            input,
             output_path,
             sort_spec: SortSpec::default(),
             record_batch_size: 122_880,
@@ -97,7 +103,7 @@ impl ParquetConverter {
         self
     }
 
-    pub async fn convert(&self) -> Result<()> {
+    pub async fn convert(mut self) -> Result<()> {
         let (arrow_file_path, _temp_variable_to_keep_file_on_disk_until_end_of_function) =
             self.prepare_arrow_file().await?;
 
@@ -122,12 +128,13 @@ impl ParquetConverter {
         Ok(())
     }
 
-    async fn prepare_arrow_file(&self) -> Result<(PathBuf, Option<NamedTempFile>)> {
+    async fn prepare_arrow_file(&mut self) -> Result<(PathBuf, Option<ArrowFileSource>)> {
         if self.needs_intermediate_arrow_file() {
-            let temp_file = NamedTempFile::new()?;
-            let temp_path = temp_file.path().with_extension("arrow").to_path_buf();
+            let temp_file = NamedTempFile::with_suffix(".arrow")?;
+            let temp_path = temp_file.path().to_path_buf();
 
-            let mut arrow_converter = ArrowConverter::new(&self.input_path, &temp_path);
+            let mut arrow_converter =
+                ArrowConverter::from_iterator(self.input.clone()?, &temp_path);
 
             if self.sort_spec.is_configured() {
                 arrow_converter = arrow_converter.with_sorting(self.sort_spec.clone());
@@ -141,15 +148,23 @@ impl ParquetConverter {
 
             arrow_converter.convert().await?;
 
-            Ok((temp_path, Some(temp_file)))
+            Ok((
+                temp_path,
+                Some(ArrowFileSource::Temp {
+                    original_path: PathBuf::from("dummy"),
+                    temp_file,
+                }),
+            ))
         } else {
-            Ok((PathBuf::from(&self.input_path), None))
+            // try to use the input directly as a file if possible
+            let file_source = self.input.as_file_format()?;
+            let path = file_source.path().to_path_buf();
+            Ok((path, Some(file_source)))
         }
     }
 
     fn needs_intermediate_arrow_file(&self) -> bool {
-        ArrowIPCReader::is_stream_format(&self.input_path)
-            || self.sort_spec.is_configured()
+        self.sort_spec.is_configured()
             || self.query.is_some()
             || NdvCalculator::new(self.bloom_filters.clone(), self.parquet_row_group_size)
                 .needs_calculation()
@@ -223,7 +238,8 @@ mod tests {
         let converter = ParquetConverter::new(
             input_path.to_str().unwrap().to_string(),
             output_path.clone(),
-        );
+        )
+        .unwrap();
         converter.convert().await.unwrap();
 
         assert!(output_path.exists());
@@ -253,7 +269,8 @@ mod tests {
         let converter = ParquetConverter::new(
             input_path.to_str().unwrap().to_string(),
             output_path.clone(),
-        );
+        )
+        .unwrap();
         converter.convert().await.unwrap();
 
         assert!(output_path.exists());
@@ -290,6 +307,7 @@ mod tests {
                 .join(format!("output_{compression:?}.parquet"));
             let converter =
                 ParquetConverter::new(input_path.to_str().unwrap().to_string(), output.clone())
+                    .unwrap()
                     .with_compression(compression);
             converter.convert().await.unwrap();
             assert!(output.exists());
@@ -320,6 +338,7 @@ mod tests {
             input_path.to_str().unwrap().to_string(),
             output_path.clone(),
         )
+        .unwrap()
         .with_sort_spec(sort_spec);
         converter.convert().await.unwrap();
 
@@ -363,6 +382,7 @@ mod tests {
             let output = temp_dir.path().join(format!("output_{stats:?}.parquet"));
             let converter =
                 ParquetConverter::new(input_path.to_str().unwrap().to_string(), output.clone())
+                    .unwrap()
                     .with_statistics(stats);
             converter.convert().await.unwrap();
             assert!(output.exists());
@@ -385,6 +405,7 @@ mod tests {
             let output = temp_dir.path().join(format!("output_{version:?}.parquet"));
             let converter =
                 ParquetConverter::new(input_path.to_str().unwrap().to_string(), output.clone())
+                    .unwrap()
                     .with_writer_version(version);
             converter.convert().await.unwrap();
             assert!(output.exists());
@@ -408,6 +429,7 @@ mod tests {
             input_path.to_str().unwrap().to_string(),
             output_path.clone(),
         )
+        .unwrap()
         .with_no_dictionary(true);
         converter.convert().await.unwrap();
 
@@ -437,6 +459,7 @@ mod tests {
             input_path.to_str().unwrap().to_string(),
             output_path.clone(),
         )
+        .unwrap()
         .with_parquet_row_group_size(10);
         converter.convert().await.unwrap();
 
@@ -458,7 +481,8 @@ mod tests {
         let converter = ParquetConverter::new(
             input_path.to_str().unwrap().to_string(),
             output_path.clone(),
-        );
+        )
+        .unwrap();
         converter.convert().await.unwrap();
 
         let file = std::fs::File::open(&output_path).unwrap();
@@ -476,9 +500,8 @@ mod tests {
         let output_path = temp_dir.path().join("output.parquet");
 
         let converter = ParquetConverter::new("/nonexistent/file.arrow".to_string(), output_path);
-        let result = converter.convert().await;
 
-        assert!(result.is_err());
+        assert!(converter.is_err());
     }
 
     #[tokio::test]
@@ -491,9 +514,8 @@ mod tests {
 
         let converter =
             ParquetConverter::new(input_path.to_str().unwrap().to_string(), output_path);
-        let result = converter.convert().await;
 
-        assert!(result.is_err());
+        assert!(converter.is_err());
     }
 
     #[tokio::test]
@@ -515,6 +537,7 @@ mod tests {
             input_path.to_str().unwrap().to_string(),
             output_path.clone(),
         )
+        .unwrap()
         .with_bloom_filters(bloom_config);
         converter.convert().await.unwrap();
 
@@ -549,6 +572,7 @@ mod tests {
             input_path.to_str().unwrap().to_string(),
             output_path.clone(),
         )
+        .unwrap()
         .with_bloom_filters(bloom_config);
         converter.convert().await.unwrap();
 
@@ -575,6 +599,7 @@ mod tests {
 
         let converter =
             ParquetConverter::new(input_path.to_str().unwrap().to_string(), output_path)
+                .unwrap()
                 .with_bloom_filters(bloom_config);
         let result = converter.convert().await;
 
@@ -611,6 +636,7 @@ mod tests {
             input_path.to_str().unwrap().to_string(),
             output_path.clone(),
         )
+        .unwrap()
         .with_sort_spec(sort_spec)
         .with_write_sorted_metadata(true);
         converter.convert().await.unwrap();
@@ -650,6 +676,7 @@ mod tests {
             input_path.to_str().unwrap().to_string(),
             output_path.clone(),
         )
+        .unwrap()
         .with_sort_spec(sort_spec)
         .with_write_sorted_metadata(true);
         converter.convert().await.unwrap();
@@ -679,6 +706,7 @@ mod tests {
 
         let converter =
             ParquetConverter::new(input_path.to_str().unwrap().to_string(), output_path)
+                .unwrap()
                 .with_sort_spec(sort_spec)
                 .with_write_sorted_metadata(true);
         let result = converter.convert().await;
@@ -715,6 +743,7 @@ mod tests {
             input_path.to_str().unwrap().to_string(),
             output_path.clone(),
         )
+        .unwrap()
         .with_sort_spec(sort_spec)
         .with_compression(ParquetCompression::Zstd)
         .with_bloom_filters(bloom_config)
