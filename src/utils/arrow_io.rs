@@ -362,6 +362,7 @@ impl RecordBatchIterator for MultiFileIterator {
                 return Ok(Some(batch));
             }
 
+            #[allow(clippy::collapsible_if)]
             if let Some(reader) = &mut self.current_reader {
                 if let Some(batch) = reader.next_batch()? {
                     self.coalescer.push_batch(batch)?;
