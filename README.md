@@ -110,6 +110,17 @@ sc.split_to_parquet(
 
 ## 🗒️ Command Reference
 
+### Available Commands
+
+- **[`parquet`](#-arrow--parquet)** - Convert Arrow to Parquet format
+- **[`duckdb`](#-arrow--duckdb)** - Convert Arrow to DuckDB database
+- **[`arrow`](#-arrow--arrow)** - Convert between Arrow formats (file ↔ stream)
+- **[`split-to-arrow`](#-split-arrow--multiple-arrow-files)** - Split Arrow data into multiple Arrow files
+- **[`split-to-parquet`](#-split-arrow--multiple-parquet-files)** - Split Arrow data into multiple Parquet files
+- **[`merge-to-arrow`](#-merge-arrow--arrow)** - Merge multiple Arrow files into single Arrow file
+- **[`merge-to-parquet`](#-merge-arrow--parquet)** - Merge multiple Arrow files into single Parquet file
+- **[`merge-to-duckdb`](#-merge-arrow--duckdb)** - Merge multiple Arrow files into DuckDB table
+
 ### 🪶 Arrow → Parquet
 
 Transform your Arrow data into optimized Parquet files:
