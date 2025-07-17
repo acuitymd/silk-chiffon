@@ -421,3 +421,397 @@ class TestSplitErrors:
 
         with pytest.raises(Exception):
             silk_chiffon.split_to_arrow(str(src), template, "category")
+
+
+class TestMergeToArrow:
+    def test_basic_merge(self, tmp_path: Path):
+        src1 = tmp_path / "input1.arrow"
+        src2 = tmp_path / "input2.arrow"
+        dst = tmp_path / "merged.arrow"
+
+        make_test_file(str(src1), rows=100)
+        make_test_file(str(src2), rows=100)
+
+        silk_chiffon.merge_to_arrow([str(src1), str(src2)], str(dst))
+
+        assert dst.exists()
+
+        with pa.OSFile(str(dst), "rb") as f:
+            reader = pa.ipc.open_file(f)
+            t = reader.read_all()
+            assert len(t) == 200
+            assert set(t.column_names) == {"id", "name", "value", "category"}
+
+    def test_merge_with_sorting(self, tmp_path: Path):
+        src1 = tmp_path / "input1.arrow"
+        src2 = tmp_path / "input2.arrow"
+        dst = tmp_path / "sorted.arrow"
+
+        t1: pa.Table = pa.table(  # type: ignore
+            {
+                "id": [5, 6, 7, 8],
+                "name": ["E", "F", "G", "H"],
+                "value": [5.0, 6.0, 7.0, 8.0],
+                "category": ["cat_0", "cat_1", "cat_2", "cat_3"],
+            }
+        )
+
+        t2: pa.Table = pa.table(  # type: ignore
+            {
+                "id": [1, 2, 3, 4],
+                "name": ["A", "B", "C", "D"],
+                "value": [1.0, 2.0, 3.0, 4.0],
+                "category": ["cat_0", "cat_1", "cat_2", "cat_3"],
+            }
+        )
+
+        with pa.OSFile(str(src1), "wb") as sink:
+            with pa.ipc.new_file(sink, t1.schema) as writer:
+                writer.write_table(t1)
+
+        with pa.OSFile(str(src2), "wb") as sink:
+            with pa.ipc.new_file(sink, t2.schema) as writer:
+                writer.write_table(t2)
+
+        silk_chiffon.merge_to_arrow(
+            [str(src1), str(src2)], str(dst), sort_by=[("id", "asc")]
+        )
+
+        with pa.OSFile(str(dst), "rb") as f:
+            reader = pa.ipc.open_file(f)
+            t = reader.read_all()
+            ids = t["id"].to_pylist()
+            assert ids == [1, 2, 3, 4, 5, 6, 7, 8]
+
+    def test_merge_with_query(self, tmp_path: Path):
+        src1 = tmp_path / "input1.arrow"
+        src2 = tmp_path / "input2.arrow"
+        dst = tmp_path / "filtered.arrow"
+
+        t1: pa.Table = pa.table(  # type: ignore
+            {
+                "id": list(range(0, 50)),
+                "name": [f"name_{i}" for i in range(0, 50)],
+                "value": [float(i) * 1.5 for i in range(0, 50)],
+                "category": [f"cat_{i % 5}" for i in range(0, 50)],
+            }
+        )
+
+        t2: pa.Table = pa.table(  # type: ignore
+            {
+                "id": list(range(50, 100)),
+                "name": [f"name_{i}" for i in range(50, 100)],
+                "value": [float(i) * 1.5 for i in range(50, 100)],
+                "category": [f"cat_{i % 5}" for i in range(50, 100)],
+            }
+        )
+
+        with pa.OSFile(str(src1), "wb") as sink:
+            with pa.ipc.new_file(sink, t1.schema) as writer:
+                writer.write_table(t1)
+
+        with pa.OSFile(str(src2), "wb") as sink:
+            with pa.ipc.new_file(sink, t2.schema) as writer:
+                writer.write_table(t2)
+
+        silk_chiffon.merge_to_arrow(
+            [str(src1), str(src2)], str(dst), query="SELECT * FROM data WHERE id < 25"
+        )
+
+        with pa.OSFile(str(dst), "rb") as f:
+            reader = pa.ipc.open_file(f)
+            t = reader.read_all()
+            assert t.num_rows == 25
+            assert max(t["id"].to_pylist()) < 25  # type: ignore
+
+    def test_merge_with_glob_pattern(self, tmp_path: Path):
+        dst = tmp_path / "merged_glob.arrow"
+
+        for i in range(3):
+            src = tmp_path / f"data_{i}.arrow"
+            make_test_file(str(src), rows=33)
+
+        glob_pattern = str(tmp_path / "data_*.arrow")
+        silk_chiffon.merge_to_arrow([glob_pattern], str(dst))
+
+        with pa.OSFile(str(dst), "rb") as f:
+            reader = pa.ipc.open_file(f)
+            t = reader.read_all()
+            assert len(t) == 99  # 3 files x 33 rows
+
+    def test_merge_with_compression(self, tmp_path: Path):
+        src1 = tmp_path / "input1.arrow"
+        src2 = tmp_path / "input2.arrow"
+        dst = tmp_path / "compressed.arrow"
+
+        make_test_file(str(src1), rows=1000)
+        make_test_file(str(src2), rows=1000)
+
+        silk_chiffon.merge_to_arrow(
+            [str(src1), str(src2)], str(dst), compression="zstd"
+        )
+
+        assert dst.exists()
+        with pa.OSFile(str(dst), "rb") as f:
+            reader = pa.ipc.open_file(f)
+            t = reader.read_all()
+            assert len(t) == 2000
+
+
+class TestMergeToParquet:
+    def test_basic_merge(self, tmp_path: Path):
+        src1 = tmp_path / "input1.arrow"
+        src2 = tmp_path / "input2.arrow"
+        dst = tmp_path / "merged.parquet"
+
+        make_test_file(str(src1), rows=100)
+        make_test_file(str(src2), rows=100)
+
+        silk_chiffon.merge_to_parquet([str(src1), str(src2)], str(dst))
+
+        assert dst.exists()
+        t: pa.Table = pq.read_table(str(dst))  # type: ignore
+        assert len(t) == 200
+        assert set(t.column_names) == {"id", "name", "value", "category"}
+
+    def test_merge_with_compression(self, tmp_path: Path):
+        src1 = tmp_path / "input1.arrow"
+        src2 = tmp_path / "input2.arrow"
+        dst = tmp_path / "compressed.parquet"
+
+        make_test_file(str(src1), rows=500)
+        make_test_file(str(src2), rows=500)
+
+        silk_chiffon.merge_to_parquet(
+            [str(src1), str(src2)], str(dst), compression="zstd"
+        )
+
+        pf = pq.ParquetFile(str(dst))
+        assert pf.metadata.row_group(0).column(0).compression.lower() == "zstd"  # type: ignore
+        assert pf.metadata.num_rows == 1000
+
+    def test_merge_with_bloom_filters(self, tmp_path: Path):
+        src1 = tmp_path / "input1.arrow"
+        src2 = tmp_path / "input2.arrow"
+        dst = tmp_path / "bloom.parquet"
+
+        make_test_file(str(src1), rows=100)
+        make_test_file(str(src2), rows=100)
+
+        silk_chiffon.merge_to_parquet(
+            [str(src1), str(src2)], str(dst), bloom_filter_columns=["id", "category"]
+        )
+
+        assert dst.exists()
+        pf = pq.ParquetFile(str(dst))
+        assert pf.metadata.num_rows == 200
+
+    def test_merge_sorted_with_metadata(self, tmp_path: Path):
+        src1 = tmp_path / "input1.arrow"
+        src2 = tmp_path / "input2.arrow"
+        dst = tmp_path / "sorted.parquet"
+
+        make_test_file(str(src1), rows=50)
+        make_test_file(str(src2), rows=50)
+
+        silk_chiffon.merge_to_parquet(
+            [str(src1), str(src2)],
+            str(dst),
+            sort_by=[("category", "asc"), ("id", "desc")],
+            write_sorted_metadata=True,
+        )
+
+        t: pa.Table = pq.read_table(str(dst))  # type: ignore
+        assert len(t) == 100
+
+        cats = t["category"].to_pylist()
+        ids = t["id"].to_pylist()
+
+        last_cat = None
+        for i, cat in enumerate(cats):
+            if last_cat and cat != last_cat:
+                assert cat >= last_cat
+            elif last_cat == cat and i > 0:
+                assert ids[i] <= ids[i - 1]  # type: ignore
+            last_cat = cat
+
+    def test_merge_with_row_groups(self, tmp_path: Path):
+        src1 = tmp_path / "input1.arrow"
+        src2 = tmp_path / "input2.arrow"
+        dst = tmp_path / "row_groups.parquet"
+
+        make_test_file(str(src1), rows=1000)
+        make_test_file(str(src2), rows=1000)
+
+        silk_chiffon.merge_to_parquet(
+            [str(src1), str(src2)], str(dst), max_row_group_size=500
+        )
+
+        pf = pq.ParquetFile(str(dst))
+        assert pf.metadata.num_row_groups == 4  # 2000 rows / 500
+        assert pf.metadata.num_rows == 2000
+
+
+class TestMergeToDuckDB:
+    def test_basic_merge(self, tmp_path: Path):
+        src1 = tmp_path / "input1.arrow"
+        src2 = tmp_path / "input2.arrow"
+        db = tmp_path / "merged.db"
+
+        make_test_file(str(src1), rows=100)
+        make_test_file(str(src2), rows=100)
+
+        silk_chiffon.merge_to_duckdb([str(src1), str(src2)], str(db), "merged_table")
+
+        conn: duckdb.DuckDBPyConnection = duckdb.connect(str(db))  # type: ignore
+        count = conn.execute("SELECT COUNT(*) FROM merged_table").fetchone()[0]  # type: ignore
+        assert count == 200
+
+        cols = {col[0] for col in conn.execute("DESCRIBE merged_table").fetchall()}
+        assert cols == {"id", "name", "value", "category"}
+        conn.close()
+
+    def test_merge_with_sorting(self, tmp_path: Path):
+        src1 = tmp_path / "input1.arrow"
+        src2 = tmp_path / "input2.arrow"
+        db = tmp_path / "sorted.db"
+
+        make_test_file(str(src1), rows=50)
+        make_test_file(str(src2), rows=50)
+
+        silk_chiffon.merge_to_duckdb(
+            [str(src1), str(src2)], str(db), "sorted_table", sort_by=[("value", "desc")]
+        )
+
+        conn: duckdb.DuckDBPyConnection = duckdb.connect(str(db))  # type: ignore
+        values = [
+            row[0] for row in conn.execute("SELECT value FROM sorted_table").fetchall()
+        ]
+
+        for i in range(1, len(values)):
+            assert values[i] <= values[i - 1]
+
+        conn.close()
+
+    def test_merge_with_drop_table(self, tmp_path: Path):
+        src = tmp_path / "input.arrow"
+        db = tmp_path / "test.db"
+
+        make_test_file(str(src), rows=50)
+
+        silk_chiffon.merge_to_duckdb([str(src)], str(db), "test_table")
+
+        with pytest.raises(Exception):
+            silk_chiffon.merge_to_duckdb([str(src)], str(db), "test_table")
+
+        silk_chiffon.merge_to_duckdb([str(src)], str(db), "test_table", drop_table=True)
+
+        conn: duckdb.DuckDBPyConnection = duckdb.connect(str(db))  # type: ignore
+        count = conn.execute("SELECT COUNT(*) FROM test_table").fetchone()[0]  # type: ignore
+        assert count == 50
+        conn.close()
+
+    def test_merge_with_query(self, tmp_path: Path):
+        src1 = tmp_path / "input1.arrow"
+        src2 = tmp_path / "input2.arrow"
+        db = tmp_path / "filtered.db"
+
+        t1: pa.Table = pa.table(  # type: ignore
+            {
+                "id": list(range(0, 100)),
+                "name": [f"name_{i}" for i in range(0, 100)],
+                "value": [float(i) * 1.5 for i in range(0, 100)],
+                "category": [f"cat_{i % 5}" for i in range(0, 100)],
+            }
+        )
+
+        t2: pa.Table = pa.table(  # type: ignore
+            {
+                "id": list(range(100, 200)),
+                "name": [f"name_{i}" for i in range(100, 200)],
+                "value": [float(i) * 1.5 for i in range(100, 200)],
+                "category": [f"cat_{i % 5}" for i in range(100, 200)],
+            }
+        )
+
+        with pa.OSFile(str(src1), "wb") as sink:
+            with pa.ipc.new_file(sink, t1.schema) as writer:
+                writer.write_table(t1)
+
+        with pa.OSFile(str(src2), "wb") as sink:
+            with pa.ipc.new_file(sink, t2.schema) as writer:
+                writer.write_table(t2)
+
+        silk_chiffon.merge_to_duckdb(
+            [str(src1), str(src2)],
+            str(db),
+            "filtered_table",
+            query="SELECT * FROM data WHERE id >= 50 AND id < 150",
+        )
+
+        conn: duckdb.DuckDBPyConnection = duckdb.connect(str(db))  # type: ignore
+        count = conn.execute("SELECT COUNT(*) FROM filtered_table").fetchone()[0]  # type: ignore
+        assert count == 100
+
+        min_id = conn.execute("SELECT MIN(id) FROM filtered_table").fetchone()[0]  # type: ignore
+        max_id = conn.execute("SELECT MAX(id) FROM filtered_table").fetchone()[0]  # type: ignore
+        assert min_id == 50
+        assert max_id == 149
+        conn.close()
+
+    def test_merge_with_truncate(self, tmp_path: Path):
+        src = tmp_path / "input.arrow"
+        db = tmp_path / "test.db"
+
+        make_test_file(str(src), rows=50)
+
+        conn: duckdb.DuckDBPyConnection = duckdb.connect(str(db))  # type: ignore
+        conn.execute("CREATE TABLE other_table (x INT)")  # type: ignore
+        conn.execute("INSERT INTO other_table VALUES (42)")  # type: ignore
+        conn.close()
+
+        silk_chiffon.merge_to_duckdb([str(src)], str(db), "new_table", truncate=True)
+
+        conn = duckdb.connect(str(db))  # type: ignore
+
+        count = conn.execute("SELECT COUNT(*) FROM new_table").fetchone()[0]  # type: ignore
+        assert count == 50
+
+        with pytest.raises(Exception):
+            conn.execute("SELECT * FROM other_table")
+
+        conn.close()
+
+
+class TestMergeErrors:
+    def test_empty_input_list(self, tmp_path: Path):
+        dst = tmp_path / "output.arrow"
+
+        with pytest.raises(Exception):
+            silk_chiffon.merge_to_arrow([], str(dst))
+
+    def test_nonexistent_files(self, tmp_path: Path):
+        dst = tmp_path / "output.arrow"
+
+        with pytest.raises(Exception):
+            silk_chiffon.merge_to_arrow(
+                ["/nonexistent/file1.arrow", "/nonexistent/file2.arrow"], str(dst)
+            )
+
+    def test_schema_mismatch(self, tmp_path: Path):
+        src1 = tmp_path / "input1.arrow"
+        src2 = tmp_path / "input2.arrow"
+        dst = tmp_path / "output.arrow"
+
+        make_test_file(str(src1), rows=10)
+
+        t2: pa.Table = pa.table(  # type: ignore
+            {"id": [1, 2, 3], "different_column": ["A", "B", "C"]}
+        )
+
+        with pa.OSFile(str(src2), "wb") as sink:
+            with pa.ipc.new_file(sink, t2.schema) as writer:
+                writer.write_table(t2)
+
+        with pytest.raises(Exception):
+            silk_chiffon.merge_to_arrow([str(src1), str(src2)], str(dst))

@@ -1,9 +1,10 @@
 pub mod test_data {
-    use std::sync::Arc;
+    use std::{fs::File, sync::Arc};
 
     use arrow::{
-        array::{Int32Array, RecordBatch, StringArray},
+        array::{Float64Array, Int32Array, RecordBatch, StringArray},
         datatypes::{DataType, Field, Schema, SchemaRef},
+        ipc::writer::FileWriter,
     };
 
     pub fn simple_schema() -> SchemaRef {
@@ -70,6 +71,33 @@ pub mod test_data {
             ],
         )
         .unwrap()
+    }
+
+    pub fn create_arrow_file_with_range_of_ids(path: &std::path::Path, start_id: i32, count: i32) {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("name", DataType::Utf8, false),
+            Field::new("value", DataType::Float64, false),
+        ]));
+
+        let ids: Vec<i32> = (start_id..start_id + count).collect();
+        let names: Vec<String> = ids.iter().map(|id| format!("Person_{id}")).collect();
+        let values: Vec<f64> = ids.iter().map(|id| *id as f64 * 1.5).collect();
+
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int32Array::from(ids)),
+                Arc::new(StringArray::from(names)),
+                Arc::new(Float64Array::from(values)),
+            ],
+        )
+        .unwrap();
+
+        let file = File::create(path).unwrap();
+        let mut writer = FileWriter::try_new(file, &schema).unwrap();
+        writer.write(&batch).unwrap();
+        writer.finish().unwrap();
     }
 }
 
