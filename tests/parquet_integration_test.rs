@@ -4,8 +4,8 @@ use arrow::{
     ipc::writer::FileWriter,
     record_batch::RecordBatch,
 };
+use assert_cmd::Command;
 use std::fs::File;
-use std::process::Command;
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -34,11 +34,9 @@ fn test_parquet_conversion_basic() {
     writer.write(&batch).unwrap();
     writer.finish().unwrap();
 
-    let output = Command::new("cargo")
+    let output = Command::cargo_bin("silk-chiffon")
+        .unwrap()
         .args([
-            "run",
-            "--release",
-            "--",
             "parquet",
             input_path.to_str().unwrap(),
             output_path.to_str().unwrap(),
@@ -85,11 +83,9 @@ fn test_parquet_conversion_with_sorting() {
     writer.write(&batch).unwrap();
     writer.finish().unwrap();
 
-    let output = Command::new("cargo")
+    let output = Command::cargo_bin("silk-chiffon")
+        .unwrap()
         .args([
-            "run",
-            "--release",
-            "--",
             "parquet",
             input_path.to_str().unwrap(),
             output_path.to_str().unwrap(),
@@ -146,11 +142,9 @@ fn test_parquet_conversion_with_compression() {
     writer.write(&batch).unwrap();
     writer.finish().unwrap();
 
-    let output = Command::new("cargo")
+    let output = Command::cargo_bin("silk-chiffon")
+        .unwrap()
         .args([
-            "run",
-            "--release",
-            "--",
             "parquet",
             input_path.to_str().unwrap(),
             output_path.to_str().unwrap(),
@@ -198,11 +192,9 @@ fn test_parquet_conversion_with_bloom_filter_all() {
     writer.finish().unwrap();
 
     // Test with default FPP
-    let output = Command::new("cargo")
+    let output = Command::cargo_bin("silk-chiffon")
+        .unwrap()
         .args([
-            "run",
-            "--release",
-            "--",
             "parquet",
             input_path.to_str().unwrap(),
             output_path.to_str().unwrap(),
@@ -216,11 +208,9 @@ fn test_parquet_conversion_with_bloom_filter_all() {
 
     // Test with custom FPP
     let output_path2 = temp_dir.path().join("output2.parquet");
-    let output = Command::new("cargo")
+    let output = Command::cargo_bin("silk-chiffon")
+        .unwrap()
         .args([
-            "run",
-            "--release",
-            "--",
             "parquet",
             input_path.to_str().unwrap(),
             output_path2.to_str().unwrap(),
@@ -261,11 +251,9 @@ fn test_parquet_conversion_with_bloom_filter_columns() {
     writer.write(&batch).unwrap();
     writer.finish().unwrap();
 
-    let output = Command::new("cargo")
+    let output = Command::cargo_bin("silk-chiffon")
+        .unwrap()
         .args([
-            "run",
-            "--release",
-            "--",
             "parquet",
             input_path.to_str().unwrap(),
             output_path.to_str().unwrap(),

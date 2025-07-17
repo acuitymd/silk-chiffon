@@ -4,9 +4,9 @@ use arrow::{
     ipc::writer::FileWriter,
     record_batch::RecordBatch,
 };
+use assert_cmd::Command;
 use duckdb::Connection;
 use std::fs::File;
-use std::process::Command;
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -35,11 +35,9 @@ fn test_duckdb_conversion_basic() {
     writer.write(&batch).unwrap();
     writer.finish().unwrap();
 
-    let output = Command::new("cargo")
+    let output = Command::cargo_bin("silk-chiffon")
+        .unwrap()
         .args([
-            "run",
-            "--release",
-            "--",
             "duckdb",
             input_path.to_str().unwrap(),
             output_path.to_str().unwrap(),
@@ -84,11 +82,9 @@ fn test_duckdb_table_already_exists() {
     writer.write(&batch).unwrap();
     writer.finish().unwrap();
 
-    let output = Command::new("cargo")
+    let output = Command::cargo_bin("silk-chiffon")
+        .unwrap()
         .args([
-            "run",
-            "--release",
-            "--",
             "duckdb",
             input_path.to_str().unwrap(),
             output_path.to_str().unwrap(),
@@ -100,11 +96,9 @@ fn test_duckdb_table_already_exists() {
 
     assert!(output.status.success());
 
-    let output = Command::new("cargo")
+    let output = Command::cargo_bin("silk-chiffon")
+        .unwrap()
         .args([
-            "run",
-            "--release",
-            "--",
             "duckdb",
             input_path.to_str().unwrap(),
             output_path.to_str().unwrap(),
@@ -144,11 +138,9 @@ fn test_duckdb_with_drop_table() {
     writer.write(&batch1).unwrap();
     writer.finish().unwrap();
 
-    Command::new("cargo")
+    Command::cargo_bin("silk-chiffon")
+        .unwrap()
         .args([
-            "run",
-            "--release",
-            "--",
             "duckdb",
             input_path.to_str().unwrap(),
             output_path.to_str().unwrap(),
@@ -172,11 +164,9 @@ fn test_duckdb_with_drop_table() {
     writer.write(&batch2).unwrap();
     writer.finish().unwrap();
 
-    let output = Command::new("cargo")
+    let output = Command::cargo_bin("silk-chiffon")
+        .unwrap()
         .args([
-            "run",
-            "--release",
-            "--",
             "duckdb",
             input_path.to_str().unwrap(),
             output_path.to_str().unwrap(),
@@ -221,11 +211,9 @@ fn test_duckdb_with_sorting() {
     writer.write(&batch).unwrap();
     writer.finish().unwrap();
 
-    let output = Command::new("cargo")
+    let output = Command::cargo_bin("silk-chiffon")
+        .unwrap()
         .args([
-            "run",
-            "--release",
-            "--",
             "duckdb",
             input_path.to_str().unwrap(),
             output_path.to_str().unwrap(),
@@ -292,11 +280,9 @@ fn test_duckdb_add_multiple_tables() {
     writer.finish().unwrap();
 
     let output_path = temp_dir.path().join("multi_table.db");
-    let output = Command::new("cargo")
+    let output = Command::cargo_bin("silk-chiffon")
+        .unwrap()
         .args([
-            "run",
-            "--release",
-            "--",
             "duckdb",
             users_path.to_str().unwrap(),
             output_path.to_str().unwrap(),
@@ -311,11 +297,9 @@ fn test_duckdb_add_multiple_tables() {
         "Failed to create users table: {output:?}"
     );
 
-    let output = Command::new("cargo")
+    let output = Command::cargo_bin("silk-chiffon")
+        .unwrap()
         .args([
-            "run",
-            "--release",
-            "--",
             "duckdb",
             products_path.to_str().unwrap(),
             output_path.to_str().unwrap(),
@@ -380,11 +364,9 @@ fn test_duckdb_preserves_insertion_order() {
     writer.write(&batch).unwrap();
     writer.finish().unwrap();
 
-    let output = Command::new("cargo")
+    let output = Command::cargo_bin("silk-chiffon")
+        .unwrap()
         .args([
-            "run",
-            "--release",
-            "--",
             "duckdb",
             input_path.to_str().unwrap(),
             output_path.to_str().unwrap(),
@@ -445,11 +427,9 @@ fn test_duckdb_preserves_sorted_order() {
     writer.write(&batch).unwrap();
     writer.finish().unwrap();
 
-    let output = Command::new("cargo")
+    let output = Command::cargo_bin("silk-chiffon")
+        .unwrap()
         .args([
-            "run",
-            "--release",
-            "--",
             "duckdb",
             input_path.to_str().unwrap(),
             output_path.to_str().unwrap(),
@@ -519,11 +499,9 @@ fn test_duckdb_preserves_order_with_limit_offset() {
     writer.write(&batch).unwrap();
     writer.finish().unwrap();
 
-    let output = Command::new("cargo")
+    let output = Command::cargo_bin("silk-chiffon")
+        .unwrap()
         .args([
-            "run",
-            "--release",
-            "--",
             "duckdb",
             input_path.to_str().unwrap(),
             output_path.to_str().unwrap(),
