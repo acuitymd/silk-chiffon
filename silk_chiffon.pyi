@@ -170,3 +170,89 @@ def split_to_parquet(
         Dictionary mapping split values to output file paths
     """
     ...
+
+def merge_to_arrow(
+    input_paths: List[str],
+    output_path: str,
+    *,
+    query: Optional[str] = None,
+    sort_by: Optional[List[SortColumn]] = None,
+    compression: str = "none",
+    record_batch_size: int = 122_880,
+    output_ipc_format: str = "file",
+) -> None:
+    """
+    Merge multiple Arrow IPC files into a single Arrow IPC file.
+
+    Args:
+        input_paths: List of input Arrow IPC file paths (supports glob patterns)
+        output_path: Path to output Arrow IPC file
+        query: Optional SQL query to apply to the merged data
+        sort_by: Optional list of columns to sort by (name or (name, direction))
+        compression: Compression type (none/zstd/lz4)
+        record_batch_size: Number of rows per batch
+        output_ipc_format: Output IPC format (file/stream)
+    """
+    ...
+
+def merge_to_parquet(
+    input_paths: List[str],
+    output_path: str,
+    *,
+    query: Optional[str] = None,
+    sort_by: Optional[List[SortColumn]] = None,
+    compression: str = "none",
+    write_sorted_metadata: bool = False,
+    bloom_filter_all: Optional[Union[bool, float, Dict[str, float]]] = None,
+    bloom_filter_columns: Optional[List[Union[str, Dict[str, float]]]] = None,
+    max_row_group_size: int = 1_048_576,
+    statistics: str = "page",
+    record_batch_size: int = 122_880,
+    enable_dictionary: bool = True,
+    writer_version: str = "v2",
+) -> None:
+    """
+    Merge multiple Arrow IPC files into a single Parquet file.
+
+    Args:
+        input_paths: List of input Arrow IPC file paths (supports glob patterns)
+        output_path: Path to output Parquet file
+        query: Optional SQL query to apply to the merged data
+        sort_by: Optional list of columns to sort by (name or (name, direction))
+        compression: Compression type (none/zstd/snappy/gzip/lz4)
+        write_sorted_metadata: Embed sorted metadata in Parquet file
+        bloom_filter_all: Enable bloom filters for all columns
+        bloom_filter_columns: Enable bloom filters for specific columns
+        max_row_group_size: Maximum rows per row group
+        statistics: Statistics level (none/chunk/page)
+        record_batch_size: Number of rows per batch
+        enable_dictionary: Enable dictionary encoding
+        writer_version: Parquet writer version (v1/v2)
+    """
+    ...
+
+def merge_to_duckdb(
+    input_paths: List[str],
+    output_path: str,
+    table_name: str,
+    *,
+    query: Optional[str] = None,
+    sort_by: Optional[List[SortColumn]] = None,
+    truncate: bool = False,
+    drop_table: bool = False,
+    record_batch_size: int = 122_880,
+) -> None:
+    """
+    Merge multiple Arrow IPC files into a single DuckDB database.
+
+    Args:
+        input_paths: List of input Arrow IPC file paths (supports glob patterns)
+        output_path: Path to output DuckDB database file
+        table_name: Name of the table to create in DuckDB
+        query: Optional SQL query to apply to the merged data
+        sort_by: Optional list of columns to sort by (name or (name, direction))
+        truncate: Truncate the database file before writing (removes entire file)
+        drop_table: Drop and recreate the table before inserting data
+        record_batch_size: Number of rows per batch
+    """
+    ...
