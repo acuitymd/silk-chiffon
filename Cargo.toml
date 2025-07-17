@@ -84,3 +84,8 @@ harness = false
 [[bench]]
 name = "query_benchmark"
 harness = false
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
