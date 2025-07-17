@@ -259,6 +259,99 @@ silk-chiffon split-to-parquet logs.arrow --by log_level \
 - `{safe_value}`: Sanitized value safe for filenames
 - `{hash}`: First 8 characters of SHA256 hash of the value
 
+### 🔗 Merge Arrow → Arrow
+
+Merge multiple Arrow files into a single Arrow file:
+
+```bash
+silk-chiffon merge-to-arrow [OPTIONS] <INPUTS...> <OUTPUT>
+```
+
+**Key Options:**
+
+- `--sort-by`: Sort the merged data
+- `--compression`: Apply `zstd`, `lz4`, or keep uncompressed
+- `--record-batch-size`: Control memory usage
+- `--output-ipc-format`: Choose output format (`file` or `stream`)
+
+**Example:**
+
+```bash
+# Merge all Arrow files in a directory
+silk-chiffon merge-to-arrow data/*.arrow merged.arrow
+
+# Merge with sorting and compression
+silk-chiffon merge-to-arrow events_*.arrow merged_events.arrow \
+  --sort-by "timestamp:asc" \
+  --compression lz4
+
+# Merge to streaming format
+silk-chiffon merge-to-arrow region_*.arrow all_regions.arrows \
+  --output-ipc-format stream
+```
+
+### 🔗 Merge Arrow → Parquet
+
+Merge multiple Arrow files into a single Parquet file:
+
+```bash
+silk-chiffon merge-to-parquet [OPTIONS] <INPUTS...> <OUTPUT>
+```
+
+**Key Options:**
+
+- `--compression`: Choose from `zstd`, `snappy`, `gzip`, `lz4`, or `none`
+- `--sort-by`: Sort the merged data
+- `--bloom-all` / `--bloom-column`: Configure bloom filters
+- `--max-row-group-size`: Control Parquet row group sizing
+- `--statistics`: Set statistics level (`none`, `chunk`, `page`)
+- `--writer-version`: Choose Parquet format version (`v1`, `v2`)
+
+**Example:**
+
+```bash
+# Merge partitioned data back into single file
+silk-chiffon merge-to-parquet customers/*.arrow all_customers.parquet \
+  --compression zstd \
+  --bloom-column "customer_id"
+
+# Merge with sorting and optimizations
+silk-chiffon merge-to-parquet daily_*.arrow yearly.parquet \
+  --sort-by "date,amount:desc" \
+  --statistics page \
+  --write-sorted-metadata
+```
+
+### 🔗 Merge Arrow → DuckDB
+
+Merge multiple Arrow files into a single DuckDB table:
+
+```bash
+silk-chiffon merge-to-duckdb [OPTIONS] --table-name <TABLE_NAME> <INPUTS...> <OUTPUT>
+```
+
+**Key Options:**
+
+- `--table-name`: Required table name for merged data
+- `--sort-by`: Pre-sort data before insertion
+- `--drop-table`: Replace existing table of the same name
+- `--truncate`: Start fresh with an empty database
+
+**Example:**
+
+```bash
+# Merge regional data into unified table
+silk-chiffon merge-to-duckdb regions/*.arrow analytics.db \
+  --table-name sales_data \
+  --sort-by "date,region"
+
+# Merge with table replacement
+silk-chiffon merge-to-duckdb monthly_*.arrow yearly.db \
+  --table-name transactions \
+  --drop-table \
+  --sort-by "timestamp"
+```
+
 ## 🎯 Use Cases
 
 ### 📊 Data Pipeline Integration
