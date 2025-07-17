@@ -107,7 +107,7 @@ mod tests {
 
         let schema = test_data::simple_schema();
         for i in 0..3 {
-            let path = temp_dir.path().join(format!("data_{}.arrow", i));
+            let path = temp_dir.path().join(format!("data_{i}.arrow"));
             let batch = test_data::create_batch_with_ids_and_names(
                 &schema,
                 &[i * 2 + 1, i * 2 + 2],
