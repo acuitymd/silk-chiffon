@@ -7,7 +7,7 @@ test: install
 
 # build -> install
 install: build
-    uv run python -m pip install --force-reinstall target/wheels/silk_chiffon-*.whl
+    uv pip install --force-reinstall target/wheels/silk_chiffon-*.whl
 
 type-check:
     uv run pyright

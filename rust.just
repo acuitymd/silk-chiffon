@@ -2,7 +2,7 @@ build:
     cargo build --release
 
 test:
-    cargo test --verbose
+    RUST_BACKTRACE=1 cargo test --verbose
 
 type-check:
     cargo check --all-features
