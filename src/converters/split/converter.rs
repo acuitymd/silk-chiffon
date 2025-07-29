@@ -43,7 +43,7 @@ pub enum OutputFormat {
 
 struct PartitioningState {
     current_value: Value,
-    writer: Option<PartitionWriter>,
+    writer: Option<Box<dyn PartitionWriter>>,
     coalescer: BatchCoalescer,
     path_map: HashMap<String, PathBuf>,
 }
@@ -268,7 +268,7 @@ impl SplitConverter {
         &self,
         path: &PathBuf,
         schema: &arrow::datatypes::SchemaRef,
-    ) -> Result<PartitionWriter> {
+    ) -> Result<Box<dyn PartitionWriter>> {
         let parent = path.parent();
 
         if self.create_dirs && parent.is_some() {
