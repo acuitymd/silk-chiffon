@@ -49,7 +49,7 @@ pub enum PyBloomFilterColumn {
     enable_dictionary = true,
     writer_version = "v2",
     list_outputs = "none",
-    exclude_columns = Vec::new::<Vec<String>>()
+    exclude_columns = vec![]
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn split_to_parquet(
