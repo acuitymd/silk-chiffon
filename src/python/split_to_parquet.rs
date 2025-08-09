@@ -70,6 +70,7 @@ pub fn split_to_parquet(
     enable_dictionary: bool,
     writer_version: &str,
     list_outputs: &str,
+    exclude_columns: Vec<String>,
 ) -> anyhow::Result<Py<PyDict>> {
     let sort_spec = parse_sort_spec(sort_by)?;
     let compression = compression.parse::<ParquetCompression>()?;
@@ -171,6 +172,7 @@ pub fn split_to_parquet(
         bloom_all,
         bloom_column,
         list_outputs,
+        exclude_columns,
     };
 
     let result = py.allow_threads(|| {

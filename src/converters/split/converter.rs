@@ -8,18 +8,19 @@ use crate::{
     ArrowCompression, BloomFilterConfig, ParquetCompression, ParquetStatistics,
     ParquetWriterVersion, SortColumn, SortDirection, SortSpec,
 };
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use arrow::array::{Array, AsArray, GenericByteArray, PrimitiveArray, RecordBatch};
 use arrow::compute::BatchCoalescer;
 use arrow::datatypes::{
     DataType, Float32Type, Float64Type, GenericStringType, Int8Type, Int16Type, Int32Type,
-    Int64Type, SchemaRef, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
+    Int64Type, SchemaBuilder, SchemaRef, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
 };
 use arrow::ipc::reader::FileReader;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::path::PathBuf;
+use std::sync::Arc;
 use tempfile::NamedTempFile;
 
 pub const NULL_PLACEHOLDER: &str = "__NULL__";
@@ -69,6 +70,7 @@ pub struct SplitConverter {
     create_dirs: bool,
     overwrite: bool,
     query: Option<String>,
+    exclude_columns: Vec<String>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -205,6 +207,7 @@ impl SplitConverter {
             create_dirs: true,
             overwrite: false,
             query: None,
+            exclude_columns: vec![],
         }
     }
 
@@ -261,6 +264,11 @@ impl SplitConverter {
 
     pub fn with_query(mut self, query: Option<String>) -> Self {
         self.query = query;
+        self
+    }
+
+    pub fn with_exclude_columns(mut self, exclude_columns: Vec<String>) -> Self {
+        self.exclude_columns = exclude_columns;
         self
     }
 
@@ -360,6 +368,7 @@ impl SplitConverter {
 
     async fn process_batch(
         &self,
+        schema: SchemaRef,
         batch: RecordBatch,
         partitioning_state: &mut PartitioningState,
     ) -> Result<()> {
@@ -372,7 +381,6 @@ impl SplitConverter {
             .ok_or_else(|| anyhow!("Split column '{}' not found in schema", self.split_column))?;
 
         let array = self.create_array_values(column)?;
-        let schema = batch.schema();
 
         if partitioning_state.current_value.is_none() {
             partitioning_state.current_value = array.get_value(0);
@@ -418,7 +426,12 @@ impl SplitConverter {
 
             partitioning_state.current_value = value;
 
-            let slice = batch.slice(from_row_index, to_row_index - from_row_index);
+            let slice = self.slice_batch(
+                &batch,
+                schema.clone(),
+                from_row_index,
+                to_row_index - from_row_index,
+            )?;
             partitioning_state.coalescer.push_batch(slice)?;
 
             self.write_pending_batches(partitioning_state)?;
@@ -427,6 +440,41 @@ impl SplitConverter {
         }
 
         Ok(())
+    }
+
+    fn slice_batch(
+        &self,
+        batch: &RecordBatch,
+        schema: SchemaRef,
+        offset: usize,
+        length: usize,
+    ) -> Result<RecordBatch> {
+        assert!((offset + length) <= batch.num_rows());
+
+        let columns = schema
+            .fields()
+            .iter()
+            .map(|field| {
+                let column = batch
+                    .column_by_name(field.name())
+                    .ok_or_else(|| anyhow!("Column not found in batch: {}", field.name()))?;
+                Ok(column.slice(offset, length))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        RecordBatch::try_new(schema, columns).context("Failed to slice batch")
+    }
+
+    fn exclude_columns(&self, schema: &SchemaRef) -> Result<SchemaRef> {
+        let mut builder = SchemaBuilder::new();
+
+        for column in schema.fields() {
+            if !self.exclude_columns.contains(column.name()) {
+                builder.push(column.clone());
+            }
+        }
+
+        Ok(Arc::new(builder.finish()))
     }
 
     fn write_pending_batches(&self, partitioning_state: &mut PartitioningState) -> Result<()> {
@@ -457,13 +505,14 @@ impl SplitConverter {
         let sorted_path = self.prepare_sorted_input().await?;
 
         let file_reader = FileReader::try_new_buffered(File::open(sorted_path.path())?, None)?;
-        let schema = file_reader.schema();
+        let schema = self.exclude_columns(&file_reader.schema())?;
 
         let mut partitioning_state = PartitioningState::new(schema.clone(), self.record_batch_size);
 
         for batch in file_reader {
             let batch = batch?;
-            self.process_batch(batch, &mut partitioning_state).await?;
+            self.process_batch(schema.clone(), batch, &mut partitioning_state)
+                .await?;
         }
 
         self.finish_current_partition(&mut partitioning_state)?;
@@ -958,5 +1007,39 @@ mod tests {
         let batches: Vec<_> = reader.collect::<Result<Vec<_>, _>>().unwrap();
         let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total_rows, 2); // only active records with category 2
+    }
+
+    #[tokio::test]
+    async fn test_exclude_columns() {
+        let temp_dir = TempDir::new().unwrap();
+        let output_dir = temp_dir.path().join("output");
+
+        let batch = create_test_batch(3, vec![1, 1, 1]);
+        let input_path = create_test_file(&temp_dir, vec![batch.clone()]);
+
+        let converter = SplitConverter::new(
+            input_path.to_str().unwrap().to_string(),
+            "category".to_string(),
+            format!("{}/{{value}}.arrow", output_dir.display()),
+        )
+        .with_exclude_columns(vec!["value".to_string()]);
+
+        let created_files = converter.convert().await.unwrap();
+
+        assert_eq!(created_files.output_files.len(), 1);
+        assert!(output_dir.join("1.arrow").exists());
+
+        let file = File::open(output_dir.join("1.arrow")).unwrap();
+        let reader = FileReader::try_new(file, None).unwrap();
+        let batches: Vec<_> = reader.collect::<Result<Vec<_>, _>>().unwrap();
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+
+        assert_eq!(total_rows, 3);
+        assert_eq!(batch.num_columns(), 4);
+        assert_eq!(batches[0].num_columns(), 3);
+        assert!(batches[0].column_by_name("category").is_some());
+        assert!(batches[0].column_by_name("id").is_some());
+        assert!(batches[0].column_by_name("name").is_some());
+        assert!(batches[0].column_by_name("value").is_none());
     }
 }

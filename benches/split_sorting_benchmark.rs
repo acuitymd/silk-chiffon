@@ -114,6 +114,7 @@ async fn run_silk_chiffon(
         bloom_column: vec![],
         query: None,
         list_outputs: ListOutputsFormat::None,
+        exclude_columns: vec![],
     };
 
     silk_chiffon::commands::split_to_parquet::run(args)

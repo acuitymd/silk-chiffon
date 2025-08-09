@@ -99,6 +99,7 @@ async fn run_silk_arrow(input_path: &std::path::Path, output_dir: &std::path::Pa
         list_outputs: ListOutputsFormat::None,
         output_ipc_format: ArrowIPCFormat::File,
         query: None,
+        exclude_columns: vec![],
     };
 
     silk_chiffon::commands::split_to_arrow::run(args)
@@ -125,6 +126,7 @@ async fn run_silk_parquet(input_path: &std::path::Path, output_dir: &std::path::
         bloom_column: vec![],
         query: None,
         list_outputs: ListOutputsFormat::None,
+        exclude_columns: vec![],
     };
 
     silk_chiffon::commands::split_to_parquet::run(args)
