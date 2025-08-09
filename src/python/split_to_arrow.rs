@@ -23,7 +23,7 @@ use crate::{
     record_batch_size = 122_880,
     list_outputs = "none",
     output_ipc_format = "file",
-    exclude_columns = []
+    exclude_columns = Vec::new::<Vec<String>>()
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn split_to_arrow(
