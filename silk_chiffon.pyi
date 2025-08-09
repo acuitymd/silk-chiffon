@@ -102,6 +102,7 @@ def split_to_arrow(
     record_batch_size: int = 122_880,
     list_outputs: str = "none",
     output_ipc_format: str = "file",
+    exclude_columns: List[str] = [],
 ) -> Dict[str, str]:
     """
     Split Arrow IPC file into multiple Arrow files based on column values.
@@ -143,6 +144,7 @@ def split_to_parquet(
     enable_dictionary: bool = True,
     writer_version: str = "v2",
     list_outputs: str = "none",
+    exclude_columns: List[str] = [],
 ) -> Dict[str, str]:
     """
     Split Arrow IPC file into multiple Parquet files based on column values.

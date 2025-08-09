@@ -379,6 +379,10 @@ pub struct SplitToArrowArgs {
     /// Sets the output Arrow IPC format.
     #[arg(short, long, default_value_t = ArrowIPCFormat::default())]
     pub output_ipc_format: ArrowIPCFormat,
+
+    /// Names of columns to exclude from the output.
+    #[arg(short, long)]
+    pub exclude_columns: Vec<String>,
 }
 
 #[derive(Args, Debug)]
@@ -490,6 +494,10 @@ pub struct SplitToParquetArgs {
     /// List the output files after creation.
     #[arg(short, long, value_enum, default_value_t = ListOutputsFormat::None)]
     pub list_outputs: ListOutputsFormat,
+
+    /// Names of columns to exclude from the output.
+    #[arg(short, long)]
+    pub exclude_columns: Vec<String>,
 }
 
 #[derive(Args, Debug)]

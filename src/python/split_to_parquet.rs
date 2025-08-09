@@ -48,7 +48,8 @@ pub enum PyBloomFilterColumn {
     statistics = "page",
     enable_dictionary = true,
     writer_version = "v2",
-    list_outputs = "none"
+    list_outputs = "none",
+    exclude_columns = vec![]
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn split_to_parquet(
@@ -70,6 +71,7 @@ pub fn split_to_parquet(
     enable_dictionary: bool,
     writer_version: &str,
     list_outputs: &str,
+    exclude_columns: Vec<String>,
 ) -> anyhow::Result<Py<PyDict>> {
     let sort_spec = parse_sort_spec(sort_by)?;
     let compression = compression.parse::<ParquetCompression>()?;
@@ -171,6 +173,7 @@ pub fn split_to_parquet(
         bloom_all,
         bloom_column,
         list_outputs,
+        exclude_columns,
     };
 
     let result = py.allow_threads(|| {

@@ -69,6 +69,7 @@ async fn test_split_to_arrow_basic() {
         compression: ArrowCompression::None,
         list_outputs: ListOutputsFormat::None,
         output_ipc_format: ArrowIPCFormat::File,
+        exclude_columns: vec![],
     };
 
     silk_chiffon::commands::split_to_arrow::run(args)
@@ -128,6 +129,7 @@ async fn test_split_to_arrow_with_template_placeholders() {
         compression: ArrowCompression::None,
         list_outputs: ListOutputsFormat::None,
         output_ipc_format: ArrowIPCFormat::File,
+        exclude_columns: vec![],
     };
 
     silk_chiffon::commands::split_to_arrow::run(args)
@@ -160,6 +162,7 @@ async fn test_split_to_arrow_with_sorting() {
         compression: ArrowCompression::None,
         list_outputs: ListOutputsFormat::None,
         output_ipc_format: ArrowIPCFormat::File,
+        exclude_columns: vec![],
     };
 
     silk_chiffon::commands::split_to_arrow::run(args)
@@ -205,6 +208,7 @@ async fn test_split_to_arrow_with_int_column() {
         compression: ArrowCompression::None,
         list_outputs: ListOutputsFormat::None,
         output_ipc_format: ArrowIPCFormat::File,
+        exclude_columns: vec![],
     };
 
     silk_chiffon::commands::split_to_arrow::run(args)
@@ -236,6 +240,7 @@ async fn test_split_to_arrow_error_nonexistent_column() {
         compression: ArrowCompression::None,
         list_outputs: ListOutputsFormat::None,
         output_ipc_format: ArrowIPCFormat::File,
+        exclude_columns: vec![],
     };
 
     let result = silk_chiffon::commands::split_to_arrow::run(args).await;
@@ -286,6 +291,7 @@ async fn test_split_to_arrow_safe_value_placeholder() {
         compression: ArrowCompression::None,
         list_outputs: ListOutputsFormat::None,
         output_ipc_format: ArrowIPCFormat::File,
+        exclude_columns: vec![],
     };
 
     silk_chiffon::commands::split_to_arrow::run(args)
@@ -318,6 +324,7 @@ async fn test_split_to_arrow_stream_format() {
         compression: ArrowCompression::None,
         list_outputs: ListOutputsFormat::None,
         output_ipc_format: ArrowIPCFormat::Stream,
+        exclude_columns: vec![],
     };
 
     silk_chiffon::commands::split_to_arrow::run(args)
@@ -377,6 +384,7 @@ async fn test_split_to_arrow_stream_format_with_compression() {
         compression: ArrowCompression::Lz4,
         list_outputs: ListOutputsFormat::None,
         output_ipc_format: ArrowIPCFormat::Stream,
+        exclude_columns: vec![],
     };
 
     silk_chiffon::commands::split_to_arrow::run(args)

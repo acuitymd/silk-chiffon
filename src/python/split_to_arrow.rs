@@ -22,7 +22,8 @@ use crate::{
     overwrite = false,
     record_batch_size = 122_880,
     list_outputs = "none",
-    output_ipc_format = "file"
+    output_ipc_format = "file",
+    exclude_columns = vec![]
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn split_to_arrow(
@@ -38,6 +39,7 @@ pub fn split_to_arrow(
     record_batch_size: usize,
     list_outputs: &str,
     output_ipc_format: &str,
+    exclude_columns: Vec<String>,
 ) -> anyhow::Result<Py<PyDict>> {
     let sort_spec = parse_sort_spec(sort_by)?;
     let compression = compression.parse::<ArrowCompression>()?;
@@ -56,6 +58,7 @@ pub fn split_to_arrow(
         compression,
         list_outputs,
         output_ipc_format,
+        exclude_columns,
     };
 
     let result = py.allow_threads(|| {
