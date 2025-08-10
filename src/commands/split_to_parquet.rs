@@ -42,8 +42,11 @@ pub async fn run_with_result(args: SplitToParquetArgs) -> Result<SplitConversion
     match args.list_outputs {
         ListOutputsFormat::Text => {
             // grab the file paths into a vector so we can sort them, to provide a stable output order
-            let mut files: Vec<PathBuf> =
-                conversion_result.output_files.values().cloned().collect();
+            let mut files: Vec<PathBuf> = conversion_result
+                .output_files
+                .values()
+                .map(|result| result.path.clone())
+                .collect();
             files.sort();
 
             for file in files {
