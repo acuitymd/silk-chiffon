@@ -69,8 +69,11 @@ pub fn split_to_arrow(
 
     let py_dict = PyDict::new(py);
 
-    for (key, path) in result.output_files {
-        py_dict.set_item(key, path.to_string_lossy().to_string())?;
+    for (key, result_info) in result.output_files {
+        let info_dict = PyDict::new(py);
+        info_dict.set_item("path", result_info.path.to_string_lossy().to_string())?;
+        info_dict.set_item("row_count", result_info.row_count)?;
+        py_dict.set_item(key, info_dict)?;
     }
 
     Ok(py_dict.into())
