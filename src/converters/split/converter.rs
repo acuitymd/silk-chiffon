@@ -42,11 +42,18 @@ pub enum OutputFormat {
     },
 }
 
+#[derive(Debug, Serialize, Clone)]
+pub struct PartitioningResult {
+    pub path: PathBuf,
+    pub row_count: usize,
+}
+
 struct PartitioningState {
     current_value: Value,
     writer: Option<PartitionWriter>,
     coalescer: BatchCoalescer,
-    path_map: HashMap<String, PathBuf>,
+    result_map: HashMap<String, PartitioningResult>,
+    current_row_count: usize,
 }
 
 impl PartitioningState {
@@ -55,7 +62,8 @@ impl PartitioningState {
             current_value: Value::None,
             writer: None,
             coalescer: BatchCoalescer::new(schema, record_batch_size),
-            path_map: HashMap::new(),
+            result_map: HashMap::new(),
+            current_row_count: 0,
         }
     }
 }
@@ -189,7 +197,7 @@ impl<'a> ArrayValues<'a> {
 
 #[derive(Debug, Serialize)]
 pub struct SplitConversionResult {
-    pub output_files: HashMap<String, PathBuf>,
+    pub output_files: HashMap<String, PartitioningResult>,
 }
 
 impl SplitConverter {
@@ -389,9 +397,12 @@ impl SplitConverter {
                 &self.format_value(&partitioning_state.current_value),
             );
 
-            partitioning_state.path_map.insert(
+            partitioning_state.result_map.insert(
                 self.format_value(&partitioning_state.current_value),
-                initial_path.clone(),
+                PartitioningResult {
+                    path: initial_path.clone(),
+                    row_count: 0,
+                },
             );
             partitioning_state.writer = Some(self.create_writer(&initial_path, &schema).await?);
         }
@@ -416,9 +427,13 @@ impl SplitConverter {
                     .output_template
                     .resolve(&self.split_column, &self.format_value(&value));
 
-                partitioning_state
-                    .path_map
-                    .insert(self.format_value(&value), new_path.clone());
+                partitioning_state.result_map.insert(
+                    self.format_value(&value),
+                    PartitioningResult {
+                        path: new_path.clone(),
+                        row_count: 0,
+                    },
+                );
                 partitioning_state.writer = Some(self.create_writer(&new_path, &schema).await?);
                 partitioning_state.coalescer =
                     BatchCoalescer::new(schema.clone(), self.record_batch_size);
@@ -432,6 +447,7 @@ impl SplitConverter {
                 from_row_index,
                 to_row_index - from_row_index,
             )?;
+            partitioning_state.current_row_count += slice.num_rows();
             partitioning_state.coalescer.push_batch(slice)?;
 
             self.write_pending_batches(partitioning_state)?;
@@ -496,8 +512,14 @@ impl SplitConverter {
 
         if let Some(mut w) = partitioning_state.writer.take() {
             w.finish()?;
+
+            let value_key = self.format_value(&partitioning_state.current_value);
+            if let Some(result) = partitioning_state.result_map.get_mut(&value_key) {
+                result.row_count = partitioning_state.current_row_count;
+            }
         }
 
+        partitioning_state.current_row_count = 0;
         Ok(())
     }
 
@@ -518,7 +540,7 @@ impl SplitConverter {
         self.finish_current_partition(&mut partitioning_state)?;
 
         Ok(SplitConversionResult {
-            output_files: partitioning_state.path_map,
+            output_files: partitioning_state.result_map,
         })
     }
 }
