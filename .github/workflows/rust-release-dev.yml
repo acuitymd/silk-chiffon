@@ -53,6 +53,8 @@ jobs:
             artifact_name: silk-chiffon-macos-arm64
             duckdb_target: macos-arm64
     runs-on: ${{ matrix.os }}
+    container:
+      image: ghcr.io/rust-cross/cargo-zigbuild
     permissions:
       contents: write
     steps:
@@ -91,7 +93,7 @@ jobs:
         run: rustup --version
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo zigbuild --release --target ${{ matrix.target }}
       - name: Package
         shell: bash
         run: |
