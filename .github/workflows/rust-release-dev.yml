@@ -62,13 +62,13 @@ jobs:
       - name: Setup DuckDB (Linux only)
         if: ${{ startsWith(matrix.os, 'ubuntu') }}
         run: |
-          sudo apt-get update
-          sudo apt-get install -y curl unzip
+          apt-get update
+          apt-get install -y curl unzip
           curl -L -O https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/libduckdb-${{ matrix.duckdb_target }}.zip && echo "Downloaded DuckDB" || echo "Failed to download DuckDB"
           unzip libduckdb-${{ matrix.duckdb_target }}.zip -d libduckdb
-          sudo mv libduckdb/duckdb.* /usr/local/include/
-          sudo mv libduckdb/libduckdb.so /usr/local/lib/
-          sudo ldconfig /usr/local/lib
+          mv libduckdb/duckdb.* /usr/local/include/
+          mv libduckdb/libduckdb.so /usr/local/lib/
+          ldconfig /usr/local/lib
           rm -rf libduckdb libduckdb-${{ matrix.duckdb_target }}.zip
       - name: Setup DuckDB (macOS only)
         if: ${{ matrix.os == 'macos-latest' }}
