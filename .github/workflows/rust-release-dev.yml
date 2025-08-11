@@ -53,8 +53,6 @@ jobs:
             artifact_name: silk-chiffon-macos-arm64
             duckdb_target: macos-arm64
     runs-on: ${{ matrix.os }}
-    container:
-      image: ghcr.io/rust-cross/cargo-zigbuild
     permissions:
       contents: write
     steps:
@@ -82,7 +80,9 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
       - name: Modify the rust toolchain version
         run: rustup override set stable
       - name: Update rustup and rust
