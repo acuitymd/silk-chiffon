@@ -94,7 +94,7 @@ jobs:
       - name: Install zig
         run: |
           curl https://raw.githubusercontent.com/tristanisham/zvm/master/install.sh | bash
-          source ~/.zprofile
+          source /home/runner/.bashrc
           zvm i master
 
       - name: Build
