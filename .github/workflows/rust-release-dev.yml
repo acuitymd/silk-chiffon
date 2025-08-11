@@ -92,11 +92,7 @@ jobs:
       - name: Output rust version for educational purposes
         run: rustup --version
       - name: Install zig
-        run: |
-          curl https://raw.githubusercontent.com/tristanisham/zvm/master/install.sh | bash
-          source /home/runner/.bashrc
-          zvm i master
-
+        uses: mlugg/setup-zig@v2
       - name: Build
         run: cargo zigbuild --release --target ${{ matrix.target }}
       - name: Package
