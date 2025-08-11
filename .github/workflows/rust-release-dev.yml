@@ -91,6 +91,11 @@ jobs:
         run: rustup show
       - name: Output rust version for educational purposes
         run: rustup --version
+      - name: Install zig
+        run: |
+          curl https://raw.githubusercontent.com/tristanisham/zvm/master/install.sh | bash
+          source ~/.zprofile
+          zvm i master
 
       - name: Build
         run: cargo zigbuild --release --target ${{ matrix.target }}
