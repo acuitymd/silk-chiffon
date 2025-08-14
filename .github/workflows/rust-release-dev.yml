@@ -81,6 +81,7 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
       - uses: taiki-e/install-action@v2
+        if: ${{ matrix.os != 'macos-latest' }}
         with:
           tool: cargo-zigbuild
       - name: Modify the rust toolchain version
@@ -92,9 +93,14 @@ jobs:
       - name: Output rust version for educational purposes
         run: rustup --version
       - name: Install zig
+        if: ${{ matrix.os != 'macos-latest' }}
         uses: mlugg/setup-zig@v2
       - name: Build
+        if: ${{ matrix.os != 'macos-latest' }}
         run: cargo zigbuild --release --target ${{ matrix.target }}
+      - name: Build (macOS)
+        if: ${{ matrix.os == 'macos-latest' }}
+        run: cargo build --release
       - name: Package
         shell: bash
         run: |
