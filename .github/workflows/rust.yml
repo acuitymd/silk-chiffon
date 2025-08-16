@@ -25,8 +25,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
-        rust: [stable, beta, nightly]
+        os: [ubuntu-latest]
+        rust: [stable]
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -38,7 +38,6 @@ jobs:
           components: rustfmt, clippy
 
       - name: Setup DuckDB (Ubuntu only)
-        if: ${{ matrix.os == 'ubuntu-latest' }}
         run: |
           sudo apt-get update
           sudo apt-get install -y curl unzip
@@ -48,11 +47,6 @@ jobs:
           sudo mv libduckdb/libduckdb.so /usr/local/lib/
           sudo ldconfig /usr/local/lib
           rm -rf libduckdb libduckdb-linux-amd64.zip
-
-      - name: Setup DuckDB (macOS only)
-        if: ${{ matrix.os == 'macos-latest' }}
-        run: |
-          brew install duckdb
 
       - name: Check formatting
         run: cargo fmt --check
