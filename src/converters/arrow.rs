@@ -141,6 +141,35 @@ impl ArrowConverter {
         Ok(writer)
     }
 
+    async fn write_stream_to_output(
+        &mut self,
+        stream: &mut Pin<Box<dyn RecordBatchStream + Send>>,
+        schema: &SchemaRef,
+        writer: &mut dyn RecordBatchWriterWithFinish,
+    ) -> Result<()> {
+        let mut coalescer = BatchCoalescer::new(schema.clone(), self.record_batch_size);
+
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result?;
+
+            coalescer.push_batch(batch)?;
+
+            while let Some(completed_batch) = coalescer.next_completed_batch() {
+                writer.write(&completed_batch)?;
+            }
+        }
+
+        coalescer.finish_buffered_batch()?;
+
+        if let Some(final_batch) = coalescer.next_completed_batch() {
+            writer.write(&final_batch)?;
+        }
+
+        writer.finish()?;
+
+        Ok(())
+    }
+
     async fn convert_with_query_or_sorting(&mut self) -> Result<()> {
         let mut config = SessionConfig::new();
         let options = config.options_mut();
@@ -208,35 +237,6 @@ impl ArrowConverter {
 
         self.write_stream_to_output(&mut stream, &schema, writer.as_mut())
             .await?;
-
-        Ok(())
-    }
-
-    async fn write_stream_to_output(
-        &mut self,
-        stream: &mut Pin<Box<dyn RecordBatchStream + Send>>,
-        schema: &SchemaRef,
-        writer: &mut dyn RecordBatchWriterWithFinish,
-    ) -> Result<()> {
-        let mut coalescer = BatchCoalescer::new(schema.clone(), self.record_batch_size);
-
-        while let Some(batch_result) = stream.next().await {
-            let batch = batch_result?;
-
-            coalescer.push_batch(batch)?;
-
-            while let Some(completed_batch) = coalescer.next_completed_batch() {
-                writer.write(&completed_batch)?;
-            }
-        }
-
-        coalescer.finish_buffered_batch()?;
-
-        if let Some(final_batch) = coalescer.next_completed_batch() {
-            writer.write(&final_batch)?;
-        }
-
-        writer.finish()?;
 
         Ok(())
     }
