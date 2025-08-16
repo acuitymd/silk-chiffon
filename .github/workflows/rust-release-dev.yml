@@ -62,7 +62,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y curl unzip
-          curl -L -O https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/libduckdb-${{ matrix.duckdb_target }}.zip && echo "Downloaded DuckDB" || echo "Failed to download DuckDB"
+          curl -L -O https://github.com/duckdb/duckdb/releases/download/v${{env.DUCKDB_VERSION}}/libduckdb-${{ matrix.duckdb_target }}.zip && echo "Downloaded DuckDB" || echo "Failed to download DuckDB"
           unzip libduckdb-${{ matrix.duckdb_target }}.zip -d libduckdb
           sudo mv libduckdb/duckdb.* /usr/local/include/
           sudo mv libduckdb/libduckdb.so /usr/local/lib/
