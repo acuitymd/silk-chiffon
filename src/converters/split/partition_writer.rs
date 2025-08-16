@@ -7,88 +7,99 @@ use anyhow::{Result, anyhow};
 use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use arrow::ipc::writer::{FileWriter, IpcWriteOptions, StreamWriter};
+use async_trait::async_trait;
 use parquet::arrow::arrow_writer::ArrowWriter;
 use parquet::file::properties::{WriterProperties, WriterPropertiesBuilder};
 use parquet::format::SortingColumn;
 use parquet::schema::types::ColumnPath;
 use std::fs::File;
 use std::io::BufWriter;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const IO_BUFFER_SIZE: usize = 1024 * 1024;
 
-pub enum ArrowWriterInner {
-    File {
-        writer: FileWriter<BufWriter<File>>,
-    },
-    Stream {
-        writer: StreamWriter<BufWriter<File>>,
-    },
+pub trait PartitionWriter: Send {
+    fn write_batch(&mut self, batch: &RecordBatch) -> Result<()>;
+    fn finish(&mut self) -> Result<PathBuf>;
 }
 
-pub enum PartitionWriter {
-    Arrow {
-        inner_writer: ArrowWriterInner,
-        path: PathBuf,
-    },
-    Parquet {
-        inner_writer: ArrowWriter<BufWriter<File>>,
-        path: PathBuf,
-    },
+#[async_trait]
+pub trait WriterBuilder: Send + Sync {
+    async fn build_writer(
+        &self,
+        path: &Path,
+        schema: &SchemaRef,
+    ) -> Result<Box<dyn PartitionWriter>>;
 }
 
-impl PartitionWriter {
-    pub fn write_batch(&mut self, batch: &RecordBatch) -> Result<()> {
-        match self {
-            PartitionWriter::Arrow { inner_writer, .. } => {
-                match inner_writer {
-                    ArrowWriterInner::File { writer, .. } => {
-                        writer.write(batch)?;
-                    }
-                    ArrowWriterInner::Stream { writer, .. } => {
-                        writer.write(batch)?;
-                    }
-                }
-                Ok(())
-            }
-            PartitionWriter::Parquet { inner_writer, .. } => {
-                inner_writer.write(batch)?;
-                Ok(())
-            }
-        }
+pub struct ArrowFileWriter {
+    writer: FileWriter<BufWriter<File>>,
+    path: PathBuf,
+}
+
+impl PartitionWriter for ArrowFileWriter {
+    fn write_batch(&mut self, batch: &RecordBatch) -> Result<()> {
+        self.writer
+            .write(batch)
+            .map_err(|e| anyhow!("Failed to write batch: {}", e))
     }
 
-    pub fn finish(&mut self) -> Result<PathBuf> {
-        match self {
-            PartitionWriter::Arrow { inner_writer, path } => {
-                match inner_writer {
-                    ArrowWriterInner::File { writer, .. } => {
-                        writer.finish()?;
-                    }
-                    ArrowWriterInner::Stream { writer, .. } => {
-                        writer.finish()?;
-                    }
-                }
-                Ok(path.clone())
-            }
-            PartitionWriter::Parquet { inner_writer, path } => {
-                inner_writer.finish()?;
-                Ok(path.clone())
-            }
-        }
+    fn finish(&mut self) -> Result<PathBuf> {
+        self.writer
+            .finish()
+            .map_err(|e| anyhow!("Failed to finish writer: {}", e))?;
+        Ok(self.path.clone())
+    }
+}
+
+pub struct ArrowStreamWriter {
+    writer: StreamWriter<BufWriter<File>>,
+    path: PathBuf,
+}
+
+impl PartitionWriter for ArrowStreamWriter {
+    fn write_batch(&mut self, batch: &RecordBatch) -> Result<()> {
+        self.writer
+            .write(batch)
+            .map_err(|e| anyhow!("Failed to write batch: {}", e))
+    }
+
+    fn finish(&mut self) -> Result<PathBuf> {
+        self.writer
+            .finish()
+            .map_err(|e| anyhow!("Failed to finish writer: {}", e))?;
+        Ok(self.path.clone())
+    }
+}
+
+pub struct ParquetWriter {
+    writer: ArrowWriter<BufWriter<File>>,
+    path: PathBuf,
+}
+
+impl PartitionWriter for ParquetWriter {
+    fn write_batch(&mut self, batch: &RecordBatch) -> Result<()> {
+        self.writer
+            .write(batch)
+            .map_err(|e| anyhow!("Failed to write batch: {}", e))
+    }
+
+    fn finish(&mut self) -> Result<PathBuf> {
+        self.writer
+            .finish()
+            .map_err(|e| anyhow!("Failed to finish writer: {}", e))?;
+        Ok(self.path.clone())
     }
 }
 
 pub struct ArrowWriterBuilder {
-    schema: SchemaRef,
     compression: Option<ArrowCompression>,
     ipc_format: ArrowIPCFormat,
 }
 
 impl ArrowWriterBuilder {
-    pub fn new(schema: SchemaRef) -> Self {
+    pub fn new() -> Self {
         Self {
-            schema,
             compression: None,
             ipc_format: ArrowIPCFormat::default(),
         }
@@ -103,63 +114,50 @@ impl ArrowWriterBuilder {
         self.ipc_format = ipc_format;
         self
     }
+}
 
-    pub fn build_arrow_writer(&self, path: &PathBuf) -> Result<PartitionWriter> {
+#[async_trait]
+impl WriterBuilder for ArrowWriterBuilder {
+    async fn build_writer(
+        &self,
+        path: &std::path::Path,
+        schema: &SchemaRef,
+    ) -> Result<Box<dyn PartitionWriter>> {
         let file = File::create(path)?;
         let buf_writer = BufWriter::with_capacity(IO_BUFFER_SIZE, file);
 
-        if let Some(compression) = &self.compression {
-            let options = match compression {
+        let options = if let Some(compression) = &self.compression {
+            match compression {
                 ArrowCompression::Zstd => IpcWriteOptions::default()
                     .try_with_compression(Some(arrow::ipc::CompressionType::ZSTD))?,
                 ArrowCompression::Lz4 => IpcWriteOptions::default()
                     .try_with_compression(Some(arrow::ipc::CompressionType::LZ4_FRAME))?,
                 ArrowCompression::None => IpcWriteOptions::default(),
-            };
-
-            match self.ipc_format {
-                ArrowIPCFormat::File => Ok(PartitionWriter::Arrow {
-                    inner_writer: ArrowWriterInner::File {
-                        writer: FileWriter::try_new_with_options(
-                            buf_writer,
-                            &self.schema,
-                            options,
-                        )?,
-                    },
-                    path: path.clone(),
-                }),
-                ArrowIPCFormat::Stream => Ok(PartitionWriter::Arrow {
-                    inner_writer: ArrowWriterInner::Stream {
-                        writer: StreamWriter::try_new_with_options(
-                            buf_writer,
-                            &self.schema,
-                            options,
-                        )?,
-                    },
-                    path: path.clone(),
-                }),
             }
         } else {
-            match self.ipc_format {
-                ArrowIPCFormat::File => Ok(PartitionWriter::Arrow {
-                    inner_writer: ArrowWriterInner::File {
-                        writer: FileWriter::try_new(buf_writer, &self.schema)?,
-                    },
-                    path: path.clone(),
-                }),
-                ArrowIPCFormat::Stream => Ok(PartitionWriter::Arrow {
-                    inner_writer: ArrowWriterInner::Stream {
-                        writer: StreamWriter::try_new(buf_writer, &self.schema)?,
-                    },
-                    path: path.clone(),
-                }),
+            IpcWriteOptions::default()
+        };
+
+        match self.ipc_format {
+            ArrowIPCFormat::File => {
+                let writer = FileWriter::try_new_with_options(buf_writer, schema, options)?;
+                Ok(Box::new(ArrowFileWriter {
+                    writer,
+                    path: path.to_path_buf(),
+                }))
+            }
+            ArrowIPCFormat::Stream => {
+                let writer = StreamWriter::try_new_with_options(buf_writer, schema, options)?;
+                Ok(Box::new(ArrowStreamWriter {
+                    writer,
+                    path: path.to_path_buf(),
+                }))
             }
         }
     }
 }
 
 pub struct ParquetWriterBuilder {
-    schema: SchemaRef,
     compression: Option<ParquetCompression>,
     statistics: ParquetStatistics,
     max_row_group_size: usize,
@@ -171,9 +169,8 @@ pub struct ParquetWriterBuilder {
 }
 
 impl ParquetWriterBuilder {
-    pub fn new(schema: SchemaRef) -> Self {
+    pub fn new() -> Self {
         Self {
-            schema,
             compression: None,
             statistics: ParquetStatistics::Page,
             max_row_group_size: 1_048_576,
@@ -225,22 +222,7 @@ impl ParquetWriterBuilder {
         self
     }
 
-    pub async fn build_parquet_writer(&self, path: &PathBuf) -> Result<PartitionWriter> {
-        let file = File::create(path)?;
-        let buf_writer = BufWriter::with_capacity(IO_BUFFER_SIZE, file);
-
-        let writer_properties = self.build_writer_properties().await?;
-
-        let writer =
-            ArrowWriter::try_new(buf_writer, self.schema.clone(), Some(writer_properties))?;
-
-        Ok(PartitionWriter::Parquet {
-            inner_writer: writer,
-            path: path.clone(),
-        })
-    }
-
-    async fn build_writer_properties(&self) -> Result<WriterProperties> {
+    async fn build_writer_properties(&self, schema: &SchemaRef) -> Result<WriterProperties> {
         let mut builder = WriterProperties::builder()
             .set_max_row_group_size(self.max_row_group_size)
             .set_dictionary_enabled(!self.no_dictionary);
@@ -257,7 +239,7 @@ impl ParquetWriterBuilder {
         }
 
         if self.write_sorted_metadata && self.sort_spec.is_some() {
-            builder = self.apply_sort_metadata(builder)?;
+            builder = self.apply_sort_metadata(builder, schema)?;
         }
 
         Ok(builder.build())
@@ -286,6 +268,7 @@ impl ParquetWriterBuilder {
     fn apply_sort_metadata(
         &self,
         builder: WriterPropertiesBuilder,
+        schema: &SchemaRef,
     ) -> Result<WriterPropertiesBuilder> {
         if let Some(sort_spec) = &self.sort_spec {
             if sort_spec.is_empty() {
@@ -295,8 +278,7 @@ impl ParquetWriterBuilder {
             let mut sorting_columns = Vec::new();
 
             for sort_col in &sort_spec.columns {
-                let column_idx = self
-                    .schema
+                let column_idx = schema
                     .index_of(&sort_col.name)
                     .map_err(|_| anyhow!("Sort column '{}' not found in schema", sort_col.name))?;
 
@@ -313,6 +295,26 @@ impl ParquetWriterBuilder {
         } else {
             Ok(builder)
         }
+    }
+}
+
+#[async_trait]
+impl WriterBuilder for ParquetWriterBuilder {
+    async fn build_writer(
+        &self,
+        path: &std::path::Path,
+        schema: &SchemaRef,
+    ) -> Result<Box<dyn PartitionWriter>> {
+        let file = File::create(path)?;
+        let buf_writer = BufWriter::with_capacity(IO_BUFFER_SIZE, file);
+
+        let writer_properties = self.build_writer_properties(schema).await?;
+        let writer = ArrowWriter::try_new(buf_writer, schema.clone(), Some(writer_properties))?;
+
+        Ok(Box::new(ParquetWriter {
+            writer,
+            path: path.to_path_buf(),
+        }))
     }
 }
 
@@ -348,8 +350,8 @@ mod tests {
         let path = temp_dir.path().join("test.arrow");
         let schema = create_test_schema();
 
-        let builder = ArrowWriterBuilder::new(schema.clone());
-        let mut writer = builder.build_arrow_writer(&path).unwrap();
+        let builder = ArrowWriterBuilder::new();
+        let mut writer = builder.build_writer(&path, &schema).await.unwrap();
 
         let batch = create_test_batch(schema);
         writer.write_batch(&batch).unwrap();
@@ -368,9 +370,8 @@ mod tests {
         for compression in [ArrowCompression::Lz4, ArrowCompression::Zstd] {
             let path = temp_dir.path().join(format!("test_{compression:?}.arrow"));
 
-            let builder =
-                ArrowWriterBuilder::new(schema.clone()).with_compression(Some(compression));
-            let mut writer = builder.build_arrow_writer(&path).unwrap();
+            let builder = ArrowWriterBuilder::new().with_compression(Some(compression));
+            let mut writer = builder.build_writer(&path, &schema).await.unwrap();
 
             writer.write_batch(&batch).unwrap();
             writer.finish().unwrap();
@@ -385,8 +386,8 @@ mod tests {
         let path = temp_dir.path().join("test.parquet");
         let schema = create_test_schema();
 
-        let builder = ParquetWriterBuilder::new(schema.clone());
-        let mut writer = builder.build_parquet_writer(&path).await.unwrap();
+        let builder = ParquetWriterBuilder::new();
+        let mut writer = builder.build_writer(&path, &schema).await.unwrap();
 
         let batch = create_test_batch(schema);
         writer.write_batch(&batch).unwrap();
@@ -406,14 +407,14 @@ mod tests {
         let path = temp_dir.path().join("test_options.parquet");
         let schema = create_test_schema();
 
-        let builder = ParquetWriterBuilder::new(schema.clone())
+        let builder = ParquetWriterBuilder::new()
             .with_compression(Some(ParquetCompression::Snappy))
             .with_statistics(ParquetStatistics::Page)
             .with_max_row_group_size(100)
             .with_writer_version(ParquetWriterVersion::V2)
             .with_no_dictionary(true);
 
-        let mut writer = builder.build_parquet_writer(&path).await.unwrap();
+        let mut writer = builder.build_writer(&path, &schema).await.unwrap();
 
         for _ in 0..50 {
             let batch = create_test_batch(schema.clone());
@@ -439,9 +440,9 @@ mod tests {
 
         let bloom_config = BloomFilterConfig::All(crate::AllColumnsBloomFilterConfig { fpp: 0.01 });
 
-        let builder = ParquetWriterBuilder::new(schema.clone()).with_bloom_filters(bloom_config);
+        let builder = ParquetWriterBuilder::new().with_bloom_filters(bloom_config);
 
-        let mut writer = builder.build_parquet_writer(&path).await.unwrap();
+        let mut writer = builder.build_writer(&path, &schema).await.unwrap();
         let batch = create_test_batch(schema);
         writer.write_batch(&batch).unwrap();
         writer.finish().unwrap();
@@ -462,11 +463,11 @@ mod tests {
             }],
         });
 
-        let builder = ParquetWriterBuilder::new(schema.clone())
+        let builder = ParquetWriterBuilder::new()
             .with_sort_spec(sort_spec)
             .with_write_sorted_metadata(true);
 
-        let mut writer = builder.build_parquet_writer(&path).await.unwrap();
+        let mut writer = builder.build_writer(&path, &schema).await.unwrap();
         let batch = create_test_batch(schema);
         writer.write_batch(&batch).unwrap();
         writer.finish().unwrap();

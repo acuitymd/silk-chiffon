@@ -1,7 +1,7 @@
 use crate::converters::arrow::ArrowConverter;
 use crate::converters::split::output_template::OutputTemplate;
 use crate::converters::split::partition_writer::{
-    ArrowWriterBuilder, ParquetWriterBuilder, PartitionWriter,
+    ArrowWriterBuilder, ParquetWriterBuilder, PartitionWriter, WriterBuilder,
 };
 use crate::utils::arrow_io::ArrowIPCFormat;
 use crate::{
@@ -19,7 +19,7 @@ use arrow::ipc::reader::FileReader;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tempfile::NamedTempFile;
 
@@ -50,7 +50,7 @@ pub struct PartitioningResult {
 
 struct PartitioningState {
     current_value: Value,
-    writer: Option<PartitionWriter>,
+    writer: Option<Box<dyn PartitionWriter>>,
     coalescer: BatchCoalescer,
     result_map: HashMap<String, PartitioningResult>,
     current_row_count: usize,
@@ -282,9 +282,9 @@ impl SplitConverter {
 
     async fn create_writer(
         &self,
-        path: &PathBuf,
-        schema: &arrow::datatypes::SchemaRef,
-    ) -> Result<PartitionWriter> {
+        path: &Path,
+        schema: &SchemaRef,
+    ) -> Result<Box<dyn PartitionWriter>> {
         let parent = path.parent();
 
         if self.create_dirs && parent.is_some() {
@@ -302,10 +302,13 @@ impl SplitConverter {
             OutputFormat::Arrow {
                 compression,
                 ipc_format,
-            } => Ok(ArrowWriterBuilder::new(schema.clone())
-                .with_compression(compression.clone())
-                .with_ipc_format(ipc_format.clone())
-                .build_arrow_writer(path)?),
+            } => {
+                ArrowWriterBuilder::new()
+                    .with_compression(compression.clone())
+                    .with_ipc_format(ipc_format.clone())
+                    .build_writer(path, schema)
+                    .await
+            }
             OutputFormat::Parquet {
                 compression,
                 statistics,
@@ -314,17 +317,19 @@ impl SplitConverter {
                 no_dictionary,
                 bloom_filters,
                 write_sorted_metadata,
-            } => Ok(ParquetWriterBuilder::new(schema.clone())
-                .with_compression(*compression)
-                .with_statistics(*statistics)
-                .with_max_row_group_size(*max_row_group_size)
-                .with_writer_version(*writer_version)
-                .with_no_dictionary(*no_dictionary)
-                .with_bloom_filters(bloom_filters.clone())
-                .with_write_sorted_metadata(*write_sorted_metadata)
-                .with_sort_spec(self.sort_spec.clone())
-                .build_parquet_writer(path)
-                .await?),
+            } => {
+                ParquetWriterBuilder::new()
+                    .with_compression(*compression)
+                    .with_statistics(*statistics)
+                    .with_max_row_group_size(*max_row_group_size)
+                    .with_writer_version(*writer_version)
+                    .with_no_dictionary(*no_dictionary)
+                    .with_bloom_filters(bloom_filters.clone())
+                    .with_write_sorted_metadata(*write_sorted_metadata)
+                    .with_sort_spec(self.sort_spec.clone())
+                    .build_writer(path, schema)
+                    .await
+            }
         }
     }
 
