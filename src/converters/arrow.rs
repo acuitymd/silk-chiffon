@@ -216,6 +216,7 @@ impl ArrowConverter {
         }
 
         writer.finish()?;
+
         Ok(())
     }
 
