@@ -1,16 +1,20 @@
 use std::{
     fs::File,
     path::{Path, PathBuf},
+    pin::Pin,
     sync::Arc,
 };
 
-use arrow::compute::BatchCoalescer;
-use arrow::ipc::{
-    CompressionType,
-    writer::{FileWriter, IpcWriteOptions, StreamWriter},
+use arrow::{array::RecordBatchWriter, compute::BatchCoalescer, error::ArrowError};
+use arrow::{
+    datatypes::SchemaRef,
+    ipc::{
+        CompressionType,
+        writer::{FileWriter, IpcWriteOptions, StreamWriter},
+    },
 };
 use datafusion::{
-    execution::{options::ArrowReadOptions, runtime_env::RuntimeEnvBuilder},
+    execution::{RecordBatchStream, options::ArrowReadOptions, runtime_env::RuntimeEnvBuilder},
     prelude::{SessionConfig, SessionContext, col},
 };
 use futures::StreamExt;
@@ -33,6 +37,22 @@ pub struct ArrowConverter {
     datafusion_batch_size: usize,
     output_ipc_format: ArrowIPCFormat,
     query: Option<String>,
+}
+
+trait RecordBatchWriterWithFinish: RecordBatchWriter + Send {
+    fn finish(&mut self) -> Result<(), ArrowError>;
+}
+
+impl RecordBatchWriterWithFinish for FileWriter<File> {
+    fn finish(&mut self) -> Result<(), ArrowError> {
+        self.finish()
+    }
+}
+
+impl RecordBatchWriterWithFinish for StreamWriter<File> {
+    fn finish(&mut self) -> Result<(), ArrowError> {
+        self.finish()
+    }
 }
 
 impl ArrowConverter {
@@ -162,60 +182,65 @@ impl ArrowConverter {
         };
         let schema = stream.schema();
         let output_file = File::create(&self.output_path)?;
+
+        let mut writer = self.new_writer(output_file, schema.clone())?;
+
+        self.write_stream_to_output(&mut stream, &schema, writer.as_mut())
+            .await?;
+
+        Ok(())
+    }
+
+    async fn write_stream_to_output(
+        &mut self,
+        stream: &mut Pin<Box<dyn RecordBatchStream + Send>>,
+        schema: &SchemaRef,
+        writer: &mut dyn RecordBatchWriterWithFinish,
+    ) -> Result<()> {
         let mut coalescer = BatchCoalescer::new(schema.clone(), self.record_batch_size);
 
-        match self.output_ipc_format {
-            ArrowIPCFormat::File => {
-                let mut writer = FileWriter::try_new_with_options(
-                    output_file,
-                    &schema,
-                    self.write_options.clone(),
-                )?;
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result?;
 
-                while let Some(batch_result) = stream.next().await {
-                    let batch = batch_result?;
+            coalescer.push_batch(batch)?;
 
-                    coalescer.push_batch(batch)?;
-
-                    while let Some(completed_batch) = coalescer.next_completed_batch() {
-                        writer.write(&completed_batch)?;
-                    }
-                }
-
-                coalescer.finish_buffered_batch()?;
-
-                if let Some(final_batch) = coalescer.next_completed_batch() {
-                    writer.write(&final_batch)?;
-                }
-
-                writer.finish()?;
-            }
-            ArrowIPCFormat::Stream => {
-                let mut writer = StreamWriter::try_new_with_options(
-                    output_file,
-                    &schema,
-                    self.write_options.clone(),
-                )?;
-
-                while let Some(batch_result) = stream.next().await {
-                    let batch = batch_result?;
-
-                    coalescer.push_batch(batch)?;
-
-                    while let Some(completed_batch) = coalescer.next_completed_batch() {
-                        writer.write(&completed_batch)?;
-                    }
-                }
-
-                coalescer.finish_buffered_batch()?;
-
-                if let Some(final_batch) = coalescer.next_completed_batch() {
-                    writer.write(&final_batch)?;
-                }
-
-                writer.finish()?;
+            while let Some(completed_batch) = coalescer.next_completed_batch() {
+                writer.write(&completed_batch)?;
             }
         }
+
+        coalescer.finish_buffered_batch()?;
+
+        if let Some(final_batch) = coalescer.next_completed_batch() {
+            writer.write(&final_batch)?;
+        }
+
+        writer.finish()?;
+        Ok(())
+    }
+
+    async fn write_input_to_output(
+        &mut self,
+        schema: &SchemaRef,
+        writer: &mut dyn RecordBatchWriterWithFinish,
+    ) -> Result<()> {
+        let mut coalescer = BatchCoalescer::new(schema.clone(), self.record_batch_size);
+
+        while let Some(batch) = self.input.next_batch()? {
+            coalescer.push_batch(batch)?;
+
+            while let Some(completed_batch) = coalescer.next_completed_batch() {
+                writer.write(&completed_batch)?;
+            }
+        }
+
+        coalescer.finish_buffered_batch()?;
+
+        if let Some(final_batch) = coalescer.next_completed_batch() {
+            writer.write(&final_batch)?;
+        }
+
+        writer.finish()?;
 
         Ok(())
     }
@@ -223,58 +248,32 @@ impl ArrowConverter {
     async fn convert_direct(&mut self) -> Result<()> {
         let output_file = File::create(&self.output_path)?;
         let schema = self.input.schema();
-        let mut coalescer = BatchCoalescer::new(schema.clone(), self.record_batch_size);
+        let mut writer = self.new_writer(output_file, schema.clone())?;
 
-        match self.output_ipc_format {
-            ArrowIPCFormat::File => {
-                let mut writer = FileWriter::try_new_with_options(
-                    output_file,
-                    &schema,
-                    self.write_options.clone(),
-                )?;
-
-                while let Some(batch) = self.input.next_batch()? {
-                    coalescer.push_batch(batch)?;
-
-                    while let Some(completed_batch) = coalescer.next_completed_batch() {
-                        writer.write(&completed_batch)?;
-                    }
-                }
-
-                coalescer.finish_buffered_batch()?;
-
-                if let Some(final_batch) = coalescer.next_completed_batch() {
-                    writer.write(&final_batch)?;
-                }
-
-                writer.finish()?;
-            }
-            ArrowIPCFormat::Stream => {
-                let mut writer = StreamWriter::try_new_with_options(
-                    output_file,
-                    &schema,
-                    self.write_options.clone(),
-                )?;
-
-                while let Some(batch) = self.input.next_batch()? {
-                    coalescer.push_batch(batch)?;
-
-                    while let Some(completed_batch) = coalescer.next_completed_batch() {
-                        writer.write(&completed_batch)?;
-                    }
-                }
-
-                coalescer.finish_buffered_batch()?;
-
-                if let Some(final_batch) = coalescer.next_completed_batch() {
-                    writer.write(&final_batch)?;
-                }
-
-                writer.finish()?;
-            }
-        }
+        self.write_input_to_output(&schema, writer.as_mut()).await?;
 
         Ok(())
+    }
+
+    fn new_writer(
+        &self,
+        output_file: File,
+        schema: SchemaRef,
+    ) -> Result<Box<dyn RecordBatchWriterWithFinish>> {
+        let writer: Box<dyn RecordBatchWriterWithFinish> = match self.output_ipc_format {
+            ArrowIPCFormat::File => Box::new(FileWriter::try_new_with_options(
+                output_file,
+                &schema,
+                self.write_options.clone(),
+            )?),
+            ArrowIPCFormat::Stream => Box::new(StreamWriter::try_new_with_options(
+                output_file,
+                &schema,
+                self.write_options.clone(),
+            )?),
+        };
+
+        Ok(writer)
     }
 
     pub async fn as_file_format(&mut self) -> Result<ArrowFileSource> {
