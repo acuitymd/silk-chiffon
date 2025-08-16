@@ -120,6 +120,27 @@ impl ArrowConverter {
         }
     }
 
+    fn new_writer(
+        &self,
+        output_file: File,
+        schema: SchemaRef,
+    ) -> Result<Box<dyn RecordBatchWriterWithFinish>> {
+        let writer: Box<dyn RecordBatchWriterWithFinish> = match self.output_ipc_format {
+            ArrowIPCFormat::File => Box::new(FileWriter::try_new_with_options(
+                output_file,
+                &schema,
+                self.write_options.clone(),
+            )?),
+            ArrowIPCFormat::Stream => Box::new(StreamWriter::try_new_with_options(
+                output_file,
+                &schema,
+                self.write_options.clone(),
+            )?),
+        };
+
+        Ok(writer)
+    }
+
     async fn convert_with_query_or_sorting(&mut self) -> Result<()> {
         let mut config = SessionConfig::new();
         let options = config.options_mut();
@@ -243,27 +264,6 @@ impl ArrowConverter {
         writer.finish()?;
 
         Ok(())
-    }
-
-    fn new_writer(
-        &self,
-        output_file: File,
-        schema: SchemaRef,
-    ) -> Result<Box<dyn RecordBatchWriterWithFinish>> {
-        let writer: Box<dyn RecordBatchWriterWithFinish> = match self.output_ipc_format {
-            ArrowIPCFormat::File => Box::new(FileWriter::try_new_with_options(
-                output_file,
-                &schema,
-                self.write_options.clone(),
-            )?),
-            ArrowIPCFormat::Stream => Box::new(StreamWriter::try_new_with_options(
-                output_file,
-                &schema,
-                self.write_options.clone(),
-            )?),
-        };
-
-        Ok(writer)
     }
 
     pub async fn as_file_format(&mut self) -> Result<ArrowFileSource> {
