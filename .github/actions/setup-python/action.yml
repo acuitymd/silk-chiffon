@@ -29,5 +29,5 @@ runs:
         path: .venv
         key: uv-linux-amd64-${{ hashFiles('uv.lock') }}
     - name: Sync uv
-      run: uv sync --frozen
+      run: uv sync --frozen -vv
       shell: bash
