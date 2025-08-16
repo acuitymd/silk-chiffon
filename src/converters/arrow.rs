@@ -5,7 +5,11 @@ use std::{
     sync::Arc,
 };
 
-use arrow::{array::RecordBatchWriter, compute::BatchCoalescer, error::ArrowError};
+use arrow::{
+    array::{RecordBatch, RecordBatchWriter},
+    compute::BatchCoalescer,
+    error::ArrowError,
+};
 use arrow::{
     datatypes::SchemaRef,
     ipc::{
@@ -13,11 +17,11 @@ use arrow::{
         writer::{FileWriter, IpcWriteOptions, StreamWriter},
     },
 };
+use async_trait::async_trait;
 use datafusion::{
     execution::{RecordBatchStream, options::ArrowReadOptions, runtime_env::RuntimeEnvBuilder},
     prelude::{SessionConfig, SessionContext, col},
 };
-use futures::StreamExt;
 
 use crate::{
     ArrowCompression, SortDirection, SortSpec,
@@ -52,6 +56,28 @@ impl RecordBatchWriterWithFinish for FileWriter<File> {
 impl RecordBatchWriterWithFinish for StreamWriter<File> {
     fn finish(&mut self) -> Result<(), ArrowError> {
         self.finish()
+    }
+}
+
+#[async_trait]
+trait UniversalRecordBatchIterator {
+    async fn next(&mut self) -> Result<Option<RecordBatch>>;
+}
+
+#[async_trait]
+impl UniversalRecordBatchIterator for Box<dyn RecordBatchIterator> {
+    async fn next(&mut self) -> Result<Option<RecordBatch>> {
+        self.next_batch()
+    }
+}
+
+#[async_trait]
+impl UniversalRecordBatchIterator for Pin<Box<dyn RecordBatchStream + Send>> {
+    async fn next(&mut self) -> Result<Option<RecordBatch>> {
+        futures::StreamExt::next(&mut *self)
+            .await
+            .transpose()
+            .map_err(Into::into)
     }
 }
 
@@ -141,17 +167,15 @@ impl ArrowConverter {
         Ok(writer)
     }
 
-    async fn write_stream_to_output(
-        &mut self,
-        stream: &mut Pin<Box<dyn RecordBatchStream + Send>>,
+    async fn write_to_output<T: UniversalRecordBatchIterator>(
+        input: &mut T,
         schema: &SchemaRef,
         writer: &mut dyn RecordBatchWriterWithFinish,
+        record_batch_size: usize,
     ) -> Result<()> {
-        let mut coalescer = BatchCoalescer::new(schema.clone(), self.record_batch_size);
+        let mut coalescer = BatchCoalescer::new(schema.clone(), record_batch_size);
 
-        while let Some(batch_result) = stream.next().await {
-            let batch = batch_result?;
-
+        while let Some(batch) = input.next().await? {
             coalescer.push_batch(batch)?;
 
             while let Some(completed_batch) = coalescer.next_completed_batch() {
@@ -235,8 +259,13 @@ impl ArrowConverter {
 
         let mut writer = self.new_writer(output_file, schema.clone())?;
 
-        self.write_stream_to_output(&mut stream, &schema, writer.as_mut())
-            .await?;
+        Self::write_to_output(
+            &mut stream,
+            &schema,
+            writer.as_mut(),
+            self.record_batch_size,
+        )
+        .await?;
 
         Ok(())
     }
@@ -245,23 +274,14 @@ impl ArrowConverter {
         let output_file = File::create(&self.output_path)?;
         let schema = self.input.schema();
         let mut writer = self.new_writer(output_file, schema.clone())?;
-        let mut coalescer = BatchCoalescer::new(schema.clone(), self.record_batch_size);
 
-        while let Some(batch) = self.input.next_batch()? {
-            coalescer.push_batch(batch)?;
-
-            while let Some(completed_batch) = coalescer.next_completed_batch() {
-                writer.write(&completed_batch)?;
-            }
-        }
-
-        coalescer.finish_buffered_batch()?;
-
-        if let Some(final_batch) = coalescer.next_completed_batch() {
-            writer.write(&final_batch)?;
-        }
-
-        writer.finish()?;
+        Self::write_to_output(
+            &mut self.input,
+            &schema,
+            writer.as_mut(),
+            self.record_batch_size,
+        )
+        .await?;
 
         Ok(())
     }
