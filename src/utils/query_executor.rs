@@ -18,7 +18,9 @@ pub struct QueryExecutor {
 
 impl QueryExecutor {
     pub fn new(query: String) -> Self {
-        let ctx = SessionContext::new();
+        let cfg = SessionConfig::new()
+            .set_bool("datafusion.sql_parser.map_string_types_to_utf8view", false);
+        let ctx = SessionContext::new_with_config(cfg);
         Self { ctx, query }
     }
 
@@ -199,5 +201,37 @@ mod tests {
 
         let result = build_query_with_sort(base_query, &sort_columns);
         assert_eq!(result, "SELECT * FROM data");
+    }
+
+    #[tokio::test]
+    async fn test_build_query_with_string_types_that_are_not_utf8view() {
+        let base_query = "SELECT CAST('foo' AS STRING)";
+
+        // Check that it defaults to utf8view, so that we can be sure we are
+        // disabling it correctly and detect if behavior changes.
+        let cfg = SessionConfig::new();
+        let ctx = SessionContext::new_with_config(cfg);
+        let result_schema = ctx
+            .sql(base_query)
+            .await
+            .unwrap()
+            .execute_stream()
+            .await
+            .unwrap()
+            .schema();
+        assert_eq!(result_schema.field(0).data_type(), &DataType::Utf8View);
+
+        // Check that we actually disable the behavior, as a contrast
+        let executor = QueryExecutor::new(base_query.to_string());
+        let result = executor
+            .sql_to_dataframe(base_query)
+            .await
+            .unwrap()
+            .execute_stream()
+            .await
+            .unwrap();
+
+        let result = result.schema();
+        assert_eq!(result.field(0).data_type(), &DataType::Utf8);
     }
 }
