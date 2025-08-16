@@ -23,6 +23,11 @@ runs:
       with:
         enable-cache: true
         python-version: 3.12
+    - name: Cache uv environment
+      uses: actions/cache@v4
+      with:
+        path: .venv
+        key: uv-linux-amd64-${{ hashFiles('uv.lock') }}
     - name: Sync uv
       run: uv sync --frozen
       shell: bash
