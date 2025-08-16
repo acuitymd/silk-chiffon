@@ -9,7 +9,15 @@ runs:
     - uses: actions/setup-python@v5
       with:
         python-version: 3.12
+    - name: Cache DuckDB
+      id: cache-duckdb
+      uses: actions/cache@v4
+      with:
+        path: /usr/local/lib/libduckdb.so
+        key: duckdb-${{ env.DUCKDB_VERSION }}-linux-amd64
+
     - name: Setup DuckDB
+      if: steps.cache-duckdb.outputs.cache-hit != 'true'
       shell: bash
       run: |
         curl -L -O https://github.com/duckdb/duckdb/releases/download/v1.3.2/libduckdb-linux-amd64.zip && echo "Downloaded DuckDB" || echo "Failed to download DuckDB"
@@ -23,7 +31,8 @@ runs:
       with:
         enable-cache: true
         python-version: 3.12
-    - name: Cache uv environment
+
+    - name: Cache Python dependencies
       uses: actions/cache@v4
       with:
         path: |
@@ -33,6 +42,7 @@ runs:
         restore-keys: |
           uv-linux-amd64-python3.12-
           uv-linux-amd64
+
     - name: Sync uv
       run: uv sync --frozen -vv
       shell: bash
