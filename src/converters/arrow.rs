@@ -220,11 +220,10 @@ impl ArrowConverter {
         Ok(())
     }
 
-    async fn write_input_to_output(
-        &mut self,
-        schema: &SchemaRef,
-        writer: &mut dyn RecordBatchWriterWithFinish,
-    ) -> Result<()> {
+    async fn convert_direct(&mut self) -> Result<()> {
+        let output_file = File::create(&self.output_path)?;
+        let schema = self.input.schema();
+        let mut writer = self.new_writer(output_file, schema.clone())?;
         let mut coalescer = BatchCoalescer::new(schema.clone(), self.record_batch_size);
 
         while let Some(batch) = self.input.next_batch()? {
@@ -242,16 +241,6 @@ impl ArrowConverter {
         }
 
         writer.finish()?;
-
-        Ok(())
-    }
-
-    async fn convert_direct(&mut self) -> Result<()> {
-        let output_file = File::create(&self.output_path)?;
-        let schema = self.input.schema();
-        let mut writer = self.new_writer(output_file, schema.clone())?;
-
-        self.write_input_to_output(&schema, writer.as_mut()).await?;
 
         Ok(())
     }
