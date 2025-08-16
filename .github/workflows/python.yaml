@@ -29,24 +29,24 @@ jobs:
   check_format:
     runs-on: ubuntu-latest
     steps:
-      - uses: ./.github/actions/setup-python-env
+      - uses: ./.github/actions/setup-python
       - name: Check Python formatting
         run: uv run ruff format --check
   check_lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: ./.github/actions/setup-python-env
+      - uses: ./.github/actions/setup-python
       - name: Check Python linting
         run: uv run ruff check
   check_types:
     runs-on: ubuntu-latest
     steps:
-      - uses: ./.github/actions/setup-python-env
+      - uses: ./.github/actions/setup-python
       - name: Check Python types
         run: uv run pyright
   run_tests:
     runs-on: ubuntu-latest
     steps:
-      - uses: ./.github/actions/setup-python-env
+      - uses: ./.github/actions/setup-python
       - name: Run pytest
         run: uv run pytest
