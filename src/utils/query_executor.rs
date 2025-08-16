@@ -18,6 +18,9 @@ pub struct QueryExecutor {
 
 impl QueryExecutor {
     pub fn new(query: String) -> Self {
+        // DuckDB doesn't like joining Datatype::Utf8View to Datatype::Utf8, so we disable
+        // the automatic mapping of all string types to Datatype::Utf8View.
+        // https://datafusion.apache.org/library-user-guide/upgrading.html#new-map-string-types-to-utf8view-configuration-option
         let cfg = SessionConfig::new()
             .set_bool("datafusion.sql_parser.map_string_types_to_utf8view", false);
         let ctx = SessionContext::new_with_config(cfg);
