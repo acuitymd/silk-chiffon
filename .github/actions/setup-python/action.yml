@@ -9,7 +9,6 @@ runs:
     - uses: actions/setup-python@v5
       with:
         python-version: 3.12
-      shell: bash
     - name: Setup DuckDB
       shell: bash
       run: |
@@ -24,7 +23,6 @@ runs:
       with:
         enable-cache: true
         python-version: 3.12
-      shell: bash
     - name: Sync uv
       run: uv sync --frozen
       shell: bash
