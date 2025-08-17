@@ -124,6 +124,7 @@ mod tests {
     use super::*;
     use arrow::array::{Int32Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
+    use futures::StreamExt;
     use tempfile::TempDir;
 
     fn create_test_batch() -> RecordBatch {
@@ -250,28 +251,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_alternative_query_dialects_with_failures() {
+    async fn test_alternative_query_dialects() {
         let temp_dir = TempDir::new().unwrap();
         let input1_path = temp_dir.path().join("input1.arrow");
         let input1_path_str = input1_path.to_str().unwrap();
 
         create_arrow_file_with_range_of_ids(&input1_path, 1, 5);
 
-        let duckdb_query = "SELECT `id` FROM `data`";
-        // let mysql_query = "SELECT \"id\" FROM \"data\"";
+        let query = "SELECT [id] FROM data";
 
-        // let mysql_executor = QueryExecutor::new(mysql_query.to_string(), QueryDialect::MySQL);
-        let duckdb_executor = QueryExecutor::new(duckdb_query.to_string(), QueryDialect::DuckDb);
+        let mssql_executor = QueryExecutor::new(query.to_string(), QueryDialect::MsSQL);
+        let duckdb_executor = QueryExecutor::new(query.to_string(), QueryDialect::DuckDb);
 
-        // let mysql_result = mysql_executor
-        //     .execute_on_file(input1_path_str, "data")
-        //     .await;
+        let mssql_result = mssql_executor
+            .execute_on_file(input1_path_str, "data")
+            .await
+            .unwrap();
         let duckdb_result = duckdb_executor
             .execute_on_file(input1_path_str, "data")
-            .await;
+            .await
+            .unwrap();
 
-        // assert!(mysql_result.is_err());
-        println!("{:?}", duckdb_result.is_ok());
-        assert!(duckdb_result.is_err());
+        assert!(mssql_result.schema().field(0).data_type() == &DataType::Int32);
+
+        match duckdb_result.schema().field(0).data_type() {
+            DataType::List(inner) => {
+                assert!(inner.data_type() == &DataType::Int32);
+            }
+            _ => panic!("Expected a list"),
+        }
     }
 }
