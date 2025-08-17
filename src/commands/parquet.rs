@@ -19,7 +19,7 @@ pub async fn run(args: ParquetArgs) -> Result<()> {
     };
 
     let converter = ParquetConverter::new(input_path, output_path)?
-        .with_sort_spec(args.sort_by)
+        .with_sort_spec(args.sort_by.unwrap_or_default())
         .with_record_batch_size(args.record_batch_size)
         .with_parquet_row_group_size(args.max_row_group_size)
         .with_compression(args.compression)
@@ -28,7 +28,8 @@ pub async fn run(args: ParquetArgs) -> Result<()> {
         .with_no_dictionary(args.no_dictionary)
         .with_writer_version(args.writer_version)
         .with_write_sorted_metadata(args.write_sorted_metadata)
-        .with_query(args.query);
+        .with_query(args.query)
+        .with_dialect(args.dialect);
 
     converter.convert().await
 }
@@ -37,7 +38,7 @@ pub async fn run(args: ParquetArgs) -> Result<()> {
 mod tests {
     use super::*;
     use crate::utils::test_helpers::{file_helpers, test_data};
-    use crate::{ParquetCompression, ParquetStatistics, ParquetWriterVersion, SortSpec};
+    use crate::{ParquetCompression, ParquetStatistics, ParquetWriterVersion, QueryDialect};
     use clio::{Input, OutputPath};
     use tempfile::TempDir;
 
@@ -56,7 +57,8 @@ mod tests {
             input: Input::new(&input_path).unwrap(),
             output: OutputPath::new(&output_path).unwrap(),
             query: None,
-            sort_by: SortSpec::default(),
+            sort_by: None,
+            dialect: QueryDialect::default(),
             compression: ParquetCompression::None,
             write_sorted_metadata: false,
             bloom_all: None,
@@ -86,7 +88,8 @@ mod tests {
             input: Input::new(&input_path).unwrap(),
             output: OutputPath::new(&output_path).unwrap(),
             query: None,
-            sort_by: SortSpec::default(),
+            sort_by: None,
+            dialect: QueryDialect::default(),
             compression: ParquetCompression::Zstd,
             write_sorted_metadata: false,
             bloom_all: None,

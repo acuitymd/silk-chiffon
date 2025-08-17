@@ -12,7 +12,7 @@ use datafusion::error::DataFusionError;
 use datafusion::physical_plan::DisplayFormatType;
 use duckdb::Connection;
 use silk_chiffon::utils::arrow_io::ArrowIPCFormat;
-use silk_chiffon::{ArrowCompression, ListOutputsFormat, SplitToArrowArgs};
+use silk_chiffon::{ArrowCompression, ListOutputsFormat, QueryDialect, SplitToArrowArgs};
 use std::fmt::Formatter;
 use std::fs::{self, File};
 use std::path::PathBuf;
@@ -130,6 +130,7 @@ async fn run_silk_arrow(input_path: &std::path::Path, output_dir: &std::path::Pa
         list_outputs: ListOutputsFormat::None,
         output_ipc_format: ArrowIPCFormat::File,
         query: None,
+        dialect: QueryDialect::default(),
         exclude_columns: vec![],
     };
 

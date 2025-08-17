@@ -45,8 +45,9 @@ pub async fn run(args: MergeToParquetArgs) -> Result<()> {
 
     let parquet_converter =
         ParquetConverter::from_iterator(iterator, args.output.path().to_path_buf())
-            .with_sort_spec(args.sort_by.clone())
+            .with_sort_spec(args.sort_by.unwrap_or_default())
             .with_query(args.query.clone())
+            .with_dialect(args.dialect)
             .with_compression(args.compression)
             .with_bloom_filters(bloom_filters)
             .with_statistics(args.statistics)
@@ -63,7 +64,7 @@ pub async fn run(args: MergeToParquetArgs) -> Result<()> {
 mod tests {
     use super::*;
     use crate::{
-        ParquetCompression, ParquetStatistics, ParquetWriterVersion, SortSpec,
+        ParquetCompression, ParquetStatistics, ParquetWriterVersion, QueryDialect,
         utils::test_helpers::{file_helpers, test_data, verify},
     };
     use clio::OutputPath;
@@ -98,7 +99,8 @@ mod tests {
             ],
             output: OutputPath::new(&output_path).unwrap(),
             query: None,
-            sort_by: SortSpec::default(),
+            dialect: QueryDialect::default(),
+            sort_by: None,
             compression: ParquetCompression::None,
             write_sorted_metadata: false,
             bloom_all: None,
@@ -146,7 +148,8 @@ mod tests {
             ],
             output: OutputPath::new(&output_path).unwrap(),
             query: None,
-            sort_by: "id".parse().unwrap(),
+            dialect: QueryDialect::default(),
+            sort_by: Some("id".parse().unwrap()),
             compression: ParquetCompression::None,
             write_sorted_metadata: true,
             bloom_all: None,

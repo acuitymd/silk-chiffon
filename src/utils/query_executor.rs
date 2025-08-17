@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use clap::ValueEnum;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::datasource::empty::EmptyTable;
 use datafusion::execution::SendableRecordBatchStream;
@@ -11,18 +12,25 @@ use arrow::array::RecordBatch;
 #[cfg(test)]
 use datafusion::datasource::MemTable;
 
+use crate::QueryDialect;
+
 pub struct QueryExecutor {
     ctx: SessionContext,
     query: String,
 }
 
 impl QueryExecutor {
-    pub fn new(query: String) -> Self {
+    pub fn new(query: String, dialect: QueryDialect) -> Self {
         // DuckDB doesn't like joining Datatype::Utf8View to Datatype::Utf8, so we disable
         // the automatic mapping of all string types to Datatype::Utf8View.
         // https://datafusion.apache.org/library-user-guide/upgrading.html#new-map-string-types-to-utf8view-configuration-option
         let cfg = SessionConfig::new()
-            .set_bool("datafusion.sql_parser.map_string_types_to_utf8view", false);
+            .set_bool("datafusion.sql_parser.map_string_types_to_utf8view", false)
+            .set_str(
+                "datafusion.sql_parser.dialect",
+                dialect.to_possible_value().unwrap().get_name(),
+            );
+
         let ctx = SessionContext::new_with_config(cfg);
         Self { ctx, query }
     }
@@ -111,9 +119,12 @@ pub fn build_query_with_sort(base_query: &str, sort_columns: &[(String, bool)]) 
 
 #[cfg(test)]
 mod tests {
+    use crate::utils::test_helpers::test_data::create_arrow_file_with_range_of_ids;
+
     use super::*;
     use arrow::array::{Int32Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
+    use tempfile::TempDir;
 
     fn create_test_batch() -> RecordBatch {
         let id_array = Int32Array::from(vec![1, 5, 10, 15, 20]);
@@ -134,7 +145,7 @@ mod tests {
     #[tokio::test]
     async fn test_simple_filter_query() {
         let query = "SELECT * FROM data WHERE id > 10";
-        let executor = QueryExecutor::new(query.to_string());
+        let executor = QueryExecutor::new(query.to_string(), QueryDialect::default());
 
         let batch = create_test_batch();
         let results = executor
@@ -158,7 +169,7 @@ mod tests {
     #[tokio::test]
     async fn test_projection_query() {
         let query = "SELECT name FROM data";
-        let executor = QueryExecutor::new(query.to_string());
+        let executor = QueryExecutor::new(query.to_string(), QueryDialect::default());
 
         let batch = create_test_batch();
         let results = executor
@@ -175,7 +186,7 @@ mod tests {
     #[tokio::test]
     async fn test_invalid_column_query() {
         let query = "SELECT nonexistent FROM data";
-        let executor = QueryExecutor::new(query.to_string());
+        let executor = QueryExecutor::new(query.to_string(), QueryDialect::default());
 
         let batch = create_test_batch();
         let result = executor.execute_on_batches(vec![batch], "data").await;
@@ -225,7 +236,7 @@ mod tests {
         assert_eq!(result_schema.field(0).data_type(), &DataType::Utf8View);
 
         // Check that we actually disable the behavior, as a contrast
-        let executor = QueryExecutor::new(base_query.to_string());
+        let executor = QueryExecutor::new(base_query.to_string(), QueryDialect::default());
         let result = executor
             .sql_to_dataframe(base_query)
             .await
@@ -236,5 +247,37 @@ mod tests {
 
         let result = result.schema();
         assert_eq!(result.field(0).data_type(), &DataType::Utf8);
+    }
+
+    #[tokio::test]
+    async fn test_alternative_query_dialects() {
+        let temp_dir = TempDir::new().unwrap();
+        let input1_path = temp_dir.path().join("input1.arrow");
+        let input1_path_str = input1_path.to_str().unwrap();
+
+        create_arrow_file_with_range_of_ids(&input1_path, 1, 5);
+
+        let query = "SELECT [id] FROM data";
+
+        let mssql_executor = QueryExecutor::new(query.to_string(), QueryDialect::MsSQL);
+        let duckdb_executor = QueryExecutor::new(query.to_string(), QueryDialect::DuckDb);
+
+        let mssql_result = mssql_executor
+            .execute_on_file(input1_path_str, "data")
+            .await
+            .unwrap();
+        let duckdb_result = duckdb_executor
+            .execute_on_file(input1_path_str, "data")
+            .await
+            .unwrap();
+
+        assert!(mssql_result.schema().field(0).data_type() == &DataType::Int32);
+
+        match duckdb_result.schema().field(0).data_type() {
+            DataType::List(inner) => {
+                assert!(inner.data_type() == &DataType::Int32);
+            }
+            _ => panic!("Expected a list"),
+        }
     }
 }

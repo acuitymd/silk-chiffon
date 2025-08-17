@@ -2,6 +2,7 @@ use arrow::array::{ArrayRef, Int32Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::FileWriter;
 use arrow::record_batch::RecordBatch;
+use silk_chiffon::{QueryDialect, SplitToParquetArgs};
 use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
@@ -55,11 +56,12 @@ async fn test_split_to_parquet_basic() {
     let (schema, batches) = create_test_data();
     write_test_arrow_file(&input_path, &schema, batches);
 
-    let args = silk_chiffon::SplitToParquetArgs {
+    let args = SplitToParquetArgs {
         input: clio::Input::new(&input_path).unwrap(),
         by: "category".to_string(),
         output_template: format!("{}/{{value}}.parquet", output_dir.display()),
         query: None,
+        dialect: QueryDialect::default(),
         record_batch_size: 122_880,
         sort_by: None,
         create_dirs: true,
@@ -103,11 +105,12 @@ async fn test_split_to_parquet_with_bloom_filters() {
     let (schema, batches) = create_test_data();
     write_test_arrow_file(&input_path, &schema, batches);
 
-    let args = silk_chiffon::SplitToParquetArgs {
+    let args = SplitToParquetArgs {
         input: clio::Input::new(&input_path).unwrap(),
         by: "category".to_string(),
         output_template: format!("{}/{{value}}.parquet", output_dir.display()),
         query: None,
+        dialect: QueryDialect::default(),
         record_batch_size: 122_880,
         sort_by: None,
         create_dirs: true,
@@ -142,11 +145,12 @@ async fn test_split_to_parquet_with_sorted_metadata() {
     let (schema, batches) = create_test_data();
     write_test_arrow_file(&input_path, &schema, batches);
 
-    let args = silk_chiffon::SplitToParquetArgs {
+    let args = SplitToParquetArgs {
         input: clio::Input::new(&input_path).unwrap(),
         by: "category".to_string(),
         output_template: format!("{}/{{value}}.parquet", output_dir.display()),
         query: None,
+        dialect: QueryDialect::default(),
         record_batch_size: 122_880,
         sort_by: Some("value".parse().unwrap()),
         create_dirs: true,

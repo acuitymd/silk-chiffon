@@ -1,4 +1,5 @@
 use crate::{SortColumn, SortDirection, SortSpec};
+use clap::ValueEnum;
 use pyo3::prelude::*;
 
 #[derive(FromPyObject)]
@@ -21,7 +22,8 @@ pub fn parse_sort_spec(sort_by: Option<Vec<PySortColumn>>) -> anyhow::Result<Opt
                     }),
                     PySortColumn::NameAndDirection((name, dir)) => Ok(SortColumn {
                         name,
-                        direction: dir.parse()?,
+                        direction: SortDirection::from_str(&dir, true)
+                            .map_err(|e| anyhow::anyhow!(e))?,
                     }),
                 }
             })

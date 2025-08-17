@@ -6,7 +6,7 @@ use crate::converters::split::partition_writer::{
 use crate::utils::arrow_io::ArrowIPCFormat;
 use crate::{
     ArrowCompression, BloomFilterConfig, ParquetCompression, ParquetStatistics,
-    ParquetWriterVersion, SortColumn, SortDirection, SortSpec,
+    ParquetWriterVersion, QueryDialect, SortColumn, SortDirection, SortSpec,
 };
 use anyhow::{Context, Result, anyhow};
 use arrow::array::{Array, AsArray, GenericByteArray, PrimitiveArray, RecordBatch};
@@ -78,6 +78,7 @@ pub struct SplitConverter {
     create_dirs: bool,
     overwrite: bool,
     query: Option<String>,
+    dialect: QueryDialect,
     exclude_columns: Vec<String>,
 }
 
@@ -215,6 +216,7 @@ impl SplitConverter {
             create_dirs: true,
             overwrite: false,
             query: None,
+            dialect: QueryDialect::default(),
             exclude_columns: vec![],
         }
     }
@@ -272,6 +274,11 @@ impl SplitConverter {
 
     pub fn with_query(mut self, query: Option<String>) -> Self {
         self.query = query;
+        self
+    }
+
+    pub fn with_dialect(mut self, dialect: QueryDialect) -> Self {
+        self.dialect = dialect;
         self
     }
 
@@ -351,7 +358,9 @@ impl SplitConverter {
         });
 
         if let Some(query) = &self.query {
-            arrow_converter = arrow_converter.with_query(Some(query.clone()));
+            arrow_converter = arrow_converter
+                .with_query(Some(query.clone()))
+                .with_dialect(self.dialect);
         }
 
         arrow_converter.convert().await?;

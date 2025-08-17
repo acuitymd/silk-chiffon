@@ -4,7 +4,7 @@ use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use silk_chiffon::utils::arrow_io::ArrowIPCFormat;
-use silk_chiffon::{ArrowCompression, ListOutputsFormat, SplitToArrowArgs};
+use silk_chiffon::{ArrowCompression, ListOutputsFormat, QueryDialect, SplitToArrowArgs};
 use std::fs::{self, File};
 use std::sync::Arc;
 use std::time::Duration;
@@ -136,6 +136,7 @@ async fn run_silk_chiffon(input_path: &std::path::Path, output_dir: &std::path::
         list_outputs: ListOutputsFormat::None,
         output_ipc_format: ArrowIPCFormat::File,
         query: None,
+        dialect: QueryDialect::default(),
         exclude_columns: vec![],
     };
 
