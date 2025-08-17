@@ -35,7 +35,8 @@ pub async fn run_with_result(args: SplitToParquetArgs) -> Result<SplitConversion
     .with_sort_spec(args.sort_by)
     .with_create_dirs(args.create_dirs)
     .with_overwrite(args.overwrite)
-    .with_query(args.query);
+    .with_query(args.query)
+    .with_dialect(args.dialect);
 
     let conversion_result = converter.convert().await?;
 

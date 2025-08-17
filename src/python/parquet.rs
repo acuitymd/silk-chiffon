@@ -1,5 +1,7 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
+use anyhow::Result;
+use clap::ValueEnum;
 use pyo3::prelude::*;
 use std::collections::HashMap;
 
@@ -9,7 +11,7 @@ use super::common::{
 use crate::{
     AllColumnsBloomFilterConfig, BloomFilterConfig, ColumnBloomFilterConfig,
     ColumnSpecificBloomFilterConfig, DEFAULT_BLOOM_FILTER_FPP, ParquetArgs, ParquetCompression,
-    ParquetStatistics, ParquetWriterVersion, commands,
+    ParquetStatistics, ParquetWriterVersion, QueryDialect, commands,
 };
 
 #[derive(FromPyObject)]
@@ -36,6 +38,7 @@ pub enum PyBloomFilterColumn {
     output_path,
     *,
     query = None,
+    dialect = "duckdb",
     sort_by = None,
     compression = "none",
     write_sorted_metadata = false,
@@ -53,6 +56,7 @@ pub fn arrow_to_parquet(
     input_path: String,
     output_path: String,
     query: Option<String>,
+    dialect: &str,
     sort_by: Option<Vec<PySortColumn>>,
     compression: &str,
     write_sorted_metadata: bool,
@@ -63,7 +67,7 @@ pub fn arrow_to_parquet(
     record_batch_size: usize,
     enable_dictionary: bool,
     writer_version: &str,
-) -> anyhow::Result<()> {
+) -> Result<()> {
     let sort_spec = parse_sort_spec(sort_by)?.unwrap_or_default();
 
     let bloom_config = match (bloom_filter_all, bloom_filter_columns) {
@@ -160,11 +164,14 @@ pub fn arrow_to_parquet(
         BloomFilterConfig::Columns(columns) => (None, columns),
     };
 
+    let dialect = QueryDialect::from_str(dialect, true).map_err(|e| anyhow::anyhow!(e))?;
+
     let args = ParquetArgs {
         input: create_input(&input_path)?,
         output: create_output(&output_path)?,
         query,
-        sort_by: sort_spec,
+        dialect,
+        sort_by: Some(sort_spec),
         compression,
         write_sorted_metadata,
         bloom_all,

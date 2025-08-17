@@ -4,7 +4,7 @@ use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use silk_chiffon::{
-    ListOutputsFormat, ParquetCompression, ParquetStatistics, ParquetWriterVersion,
+    ListOutputsFormat, ParquetCompression, ParquetStatistics, ParquetWriterVersion, QueryDialect,
     SplitToParquetArgs,
 };
 use std::fs::{self, File};
@@ -113,6 +113,7 @@ async fn run_silk_chiffon(
         bloom_all: None,
         bloom_column: vec![],
         query: None,
+        dialect: QueryDialect::default(),
         list_outputs: ListOutputsFormat::None,
         exclude_columns: vec![],
     };

@@ -4,7 +4,7 @@ use arrow::ipc::writer::FileWriter;
 use arrow::record_batch::RecordBatch;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use silk_chiffon::utils::arrow_io::ArrowIPCFormat;
-use silk_chiffon::{ArrowArgs, ArrowCompression, ParquetArgs, ParquetCompression, SortSpec};
+use silk_chiffon::{ArrowArgs, ArrowCompression, ParquetArgs, ParquetCompression, QueryDialect};
 use std::fs::File;
 use std::sync::Arc;
 use std::time::Duration;
@@ -99,6 +99,7 @@ async fn run_arrow_conversion(
         output: clio::OutputPath::new(output_path).unwrap(),
         query,
         sort_by: None,
+        dialect: QueryDialect::default(),
         compression: ArrowCompression::None,
         record_batch_size: 122_880,
         output_ipc_format: ArrowIPCFormat::File,
@@ -116,7 +117,8 @@ async fn run_parquet_conversion(
         input: clio::Input::new(input_path).unwrap(),
         output: clio::OutputPath::new(output_path).unwrap(),
         query,
-        sort_by: SortSpec::default(),
+        dialect: QueryDialect::default(),
+        sort_by: None,
         compression: ParquetCompression::None,
         statistics: silk_chiffon::ParquetStatistics::Page,
         max_row_group_size: 1_048_576,

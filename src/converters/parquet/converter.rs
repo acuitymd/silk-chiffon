@@ -7,7 +7,8 @@ use std::{
 use tempfile::NamedTempFile;
 
 use crate::{
-    BloomFilterConfig, ParquetCompression, ParquetStatistics, ParquetWriterVersion, SortSpec,
+    BloomFilterConfig, ParquetCompression, ParquetStatistics, ParquetWriterVersion, QueryDialect,
+    SortSpec,
     converters::arrow::ArrowConverter,
     utils::arrow_io::{ArrowFileSource, ArrowIPCFormat, ArrowIPCReader, RecordBatchIterator},
 };
@@ -27,6 +28,7 @@ pub struct ParquetConverter {
     writer_version: ParquetWriterVersion,
     write_sorted_metadata: bool,
     query: Option<String>,
+    dialect: QueryDialect,
 }
 
 impl ParquetConverter {
@@ -50,6 +52,7 @@ impl ParquetConverter {
             writer_version: ParquetWriterVersion::V2,
             write_sorted_metadata: false,
             query: None,
+            dialect: QueryDialect::default(),
         }
     }
 
@@ -103,6 +106,11 @@ impl ParquetConverter {
         self
     }
 
+    pub fn with_dialect(mut self, dialect: QueryDialect) -> Self {
+        self.dialect = dialect;
+        self
+    }
+
     pub async fn convert(mut self) -> Result<()> {
         let (arrow_file_path, _temp_variable_to_keep_file_on_disk_until_end_of_function) =
             self.prepare_arrow_file().await?;
@@ -141,7 +149,9 @@ impl ParquetConverter {
             }
 
             if self.query.is_some() {
-                arrow_converter = arrow_converter.with_query(self.query.clone());
+                arrow_converter = arrow_converter
+                    .with_query(self.query.clone())
+                    .with_dialect(self.dialect);
             }
 
             arrow_converter = arrow_converter.with_record_batch_size(self.record_batch_size);

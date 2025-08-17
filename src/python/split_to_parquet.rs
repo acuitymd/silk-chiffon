@@ -1,5 +1,6 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
+use clap::ValueEnum;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::collections::HashMap;
@@ -8,7 +9,8 @@ use super::common::{PySortColumn, create_input, parse_sort_spec};
 use crate::{
     AllColumnsBloomFilterConfig, BloomFilterConfig, ColumnBloomFilterConfig,
     ColumnSpecificBloomFilterConfig, DEFAULT_BLOOM_FILTER_FPP, ListOutputsFormat,
-    ParquetCompression, ParquetStatistics, ParquetWriterVersion, SplitToParquetArgs, commands,
+    ParquetCompression, ParquetStatistics, ParquetWriterVersion, QueryDialect, SplitToParquetArgs,
+    commands,
 };
 
 #[derive(FromPyObject)]
@@ -36,6 +38,7 @@ pub enum PyBloomFilterColumn {
     split_column,
     *,
     query = None,
+    dialect = "duckdb",
     sort_by = None,
     compression = "none",
     create_dirs = true,
@@ -58,6 +61,7 @@ pub fn split_to_parquet(
     output_template: String,
     split_column: String,
     query: Option<String>,
+    dialect: &str,
     sort_by: Option<Vec<PySortColumn>>,
     compression: &str,
     create_dirs: bool,
@@ -74,8 +78,10 @@ pub fn split_to_parquet(
     exclude_columns: Vec<String>,
 ) -> anyhow::Result<Py<PyDict>> {
     let sort_spec = parse_sort_spec(sort_by)?;
-    let compression = compression.parse::<ParquetCompression>()?;
-    let list_outputs = list_outputs.parse::<ListOutputsFormat>()?;
+    let compression =
+        ParquetCompression::from_str(compression, true).map_err(|e| anyhow::anyhow!(e))?;
+    let list_outputs =
+        ListOutputsFormat::from_str(list_outputs, true).map_err(|e| anyhow::anyhow!(e))?;
 
     let bloom_config = match (bloom_filter_all, bloom_filter_columns) {
         (Some(all_config), None) => match all_config {
@@ -155,11 +161,14 @@ pub fn split_to_parquet(
         }
     };
 
+    let dialect = QueryDialect::from_str(dialect, true).map_err(|e| anyhow::anyhow!(e))?;
+
     let args = SplitToParquetArgs {
         input: create_input(&input_path)?,
         by: split_column,
         output_template,
         query,
+        dialect,
         record_batch_size,
         sort_by: sort_spec,
         create_dirs,

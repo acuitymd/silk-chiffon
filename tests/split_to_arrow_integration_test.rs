@@ -3,7 +3,7 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::FileWriter;
 use arrow::record_batch::RecordBatch;
 use silk_chiffon::utils::arrow_io::ArrowIPCFormat;
-use silk_chiffon::{ArrowCompression, ListOutputsFormat, SplitToArrowArgs};
+use silk_chiffon::{ArrowCompression, ListOutputsFormat, QueryDialect, SplitToArrowArgs};
 use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
@@ -62,6 +62,7 @@ async fn test_split_to_arrow_basic() {
         by: "category".to_string(),
         output_template: format!("{}/{{value}}.arrow", output_dir.display()),
         query: None,
+        dialect: QueryDialect::default(),
         record_batch_size: 122_880,
         sort_by: None,
         create_dirs: true,
@@ -122,6 +123,7 @@ async fn test_split_to_arrow_with_template_placeholders() {
         by: "category".to_string(),
         output_template: format!("{}/{{column}}_{{value}}_data.arrow", output_dir.display()),
         query: None,
+        dialect: QueryDialect::default(),
         record_batch_size: 122_880,
         sort_by: None,
         create_dirs: true,
@@ -155,6 +157,7 @@ async fn test_split_to_arrow_with_sorting() {
         by: "category".to_string(),
         output_template: format!("{}/{{value}}.arrow", output_dir.display()),
         query: None,
+        dialect: QueryDialect::default(),
         record_batch_size: 122_880,
         sort_by: Some("value:desc".parse().unwrap()),
         create_dirs: true,
@@ -201,6 +204,7 @@ async fn test_split_to_arrow_with_int_column() {
         by: "id".to_string(),
         output_template: format!("{}/item_{{value}}.arrow", output_dir.display()),
         query: None,
+        dialect: QueryDialect::default(),
         record_batch_size: 122_880,
         sort_by: None,
         create_dirs: true,
@@ -233,6 +237,7 @@ async fn test_split_to_arrow_error_nonexistent_column() {
         by: "nonexistent".to_string(),
         output_template: "{value}.arrow".to_string(),
         query: None,
+        dialect: QueryDialect::default(),
         record_batch_size: 122_880,
         sort_by: None,
         create_dirs: true,
@@ -284,6 +289,7 @@ async fn test_split_to_arrow_safe_value_placeholder() {
         by: "path".to_string(),
         output_template: format!("{}/{{safe_value}}.arrow", output_dir.display()),
         query: None,
+        dialect: QueryDialect::default(),
         record_batch_size: 122_880,
         sort_by: None,
         create_dirs: true,
@@ -317,6 +323,7 @@ async fn test_split_to_arrow_stream_format() {
         by: "category".to_string(),
         output_template: format!("{}/{{value}}.arrows", output_dir.display()),
         query: None,
+        dialect: QueryDialect::default(),
         record_batch_size: 122_880,
         sort_by: None,
         create_dirs: true,
@@ -377,6 +384,7 @@ async fn test_split_to_arrow_stream_format_with_compression() {
         by: "category".to_string(),
         output_template: format!("{}/{{value}}.arrows", output_dir.display()),
         query: None,
+        dialect: QueryDialect::default(),
         record_batch_size: 122_880,
         sort_by: Some("value:asc".parse().unwrap()),
         create_dirs: true,

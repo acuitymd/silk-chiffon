@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use clap::ValueEnum;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::datasource::empty::EmptyTable;
 use datafusion::execution::SendableRecordBatchStream;
@@ -11,18 +12,25 @@ use arrow::array::RecordBatch;
 #[cfg(test)]
 use datafusion::datasource::MemTable;
 
+use crate::QueryDialect;
+
 pub struct QueryExecutor {
     ctx: SessionContext,
     query: String,
 }
 
 impl QueryExecutor {
-    pub fn new(query: String) -> Self {
+    pub fn new(query: String, dialect: QueryDialect) -> Self {
         // DuckDB doesn't like joining Datatype::Utf8View to Datatype::Utf8, so we disable
         // the automatic mapping of all string types to Datatype::Utf8View.
         // https://datafusion.apache.org/library-user-guide/upgrading.html#new-map-string-types-to-utf8view-configuration-option
         let cfg = SessionConfig::new()
-            .set_bool("datafusion.sql_parser.map_string_types_to_utf8view", false);
+            .set_bool("datafusion.sql_parser.map_string_types_to_utf8view", false)
+            .set_str(
+                "datafusion.sql_parser.dialect",
+                dialect.to_possible_value().unwrap().get_name(),
+            );
+
         let ctx = SessionContext::new_with_config(cfg);
         Self { ctx, query }
     }
@@ -134,7 +142,7 @@ mod tests {
     #[tokio::test]
     async fn test_simple_filter_query() {
         let query = "SELECT * FROM data WHERE id > 10";
-        let executor = QueryExecutor::new(query.to_string());
+        let executor = QueryExecutor::new(query.to_string(), QueryDialect::default());
 
         let batch = create_test_batch();
         let results = executor
@@ -158,7 +166,7 @@ mod tests {
     #[tokio::test]
     async fn test_projection_query() {
         let query = "SELECT name FROM data";
-        let executor = QueryExecutor::new(query.to_string());
+        let executor = QueryExecutor::new(query.to_string(), QueryDialect::default());
 
         let batch = create_test_batch();
         let results = executor
@@ -175,7 +183,7 @@ mod tests {
     #[tokio::test]
     async fn test_invalid_column_query() {
         let query = "SELECT nonexistent FROM data";
-        let executor = QueryExecutor::new(query.to_string());
+        let executor = QueryExecutor::new(query.to_string(), QueryDialect::default());
 
         let batch = create_test_batch();
         let result = executor.execute_on_batches(vec![batch], "data").await;
@@ -225,7 +233,7 @@ mod tests {
         assert_eq!(result_schema.field(0).data_type(), &DataType::Utf8View);
 
         // Check that we actually disable the behavior, as a contrast
-        let executor = QueryExecutor::new(base_query.to_string());
+        let executor = QueryExecutor::new(base_query.to_string(), QueryDialect::default());
         let result = executor
             .sql_to_dataframe(base_query)
             .await

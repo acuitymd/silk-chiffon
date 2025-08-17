@@ -24,7 +24,7 @@ use datafusion::{
 };
 
 use crate::{
-    ArrowCompression, SortDirection, SortSpec,
+    ArrowCompression, QueryDialect, SortDirection, SortSpec,
     utils::{
         arrow_io::{ArrowFileSource, ArrowIPCFormat, ArrowIPCReader, RecordBatchIterator},
         query_executor::{QueryExecutor, build_query_with_sort},
@@ -41,6 +41,7 @@ pub struct ArrowConverter {
     datafusion_batch_size: usize,
     output_ipc_format: ArrowIPCFormat,
     query: Option<String>,
+    dialect: QueryDialect,
 }
 
 trait RecordBatchWriterWithFinish: RecordBatchWriter + Send {
@@ -101,6 +102,7 @@ impl ArrowConverter {
             datafusion_batch_size: 8192,
             output_ipc_format: ArrowIPCFormat::default(),
             query: None,
+            dialect: QueryDialect::default(),
         }
     }
 
@@ -135,6 +137,11 @@ impl ArrowConverter {
 
     pub fn with_query(mut self, query: Option<String>) -> Self {
         self.query = query;
+        self
+    }
+
+    pub fn with_dialect(mut self, dialect: QueryDialect) -> Self {
+        self.dialect = dialect;
         self
     }
 
@@ -223,7 +230,7 @@ impl ArrowConverter {
                 query.clone()
             };
 
-            let executor = QueryExecutor::new(final_query);
+            let executor = QueryExecutor::new(final_query, self.dialect);
             executor
                 .execute_on_file(file_format.path_str(), "data")
                 .await?

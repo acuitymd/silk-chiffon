@@ -38,8 +38,9 @@ pub async fn run(args: MergeToDuckdbArgs) -> Result<()> {
 
     let duckdb_converter =
         DuckDbConverter::from_iterator(iterator, args.output.path().to_path_buf(), args.table_name)
-            .with_sort_spec(args.sort_by.clone())
+            .with_sort_spec(args.sort_by.unwrap_or_default())
             .with_query(args.query.clone())
+            .with_dialect(args.dialect)
             .with_truncate(args.truncate)
             .with_drop_table(args.drop_table);
 
@@ -50,7 +51,7 @@ pub async fn run(args: MergeToDuckdbArgs) -> Result<()> {
 mod tests {
     use super::*;
     use crate::{
-        SortSpec,
+        QueryDialect,
         utils::test_helpers::{file_helpers, test_data},
     };
     use clio::OutputPath;
@@ -87,7 +88,8 @@ mod tests {
             output: OutputPath::new(&output_path).unwrap(),
             table_name: "merged_data".to_string(),
             query: None,
-            sort_by: SortSpec::default(),
+            dialect: QueryDialect::default(),
+            sort_by: None,
             truncate: false,
             drop_table: false,
             record_batch_size: 122_880,
@@ -132,7 +134,8 @@ mod tests {
             output: OutputPath::new(&output_path).unwrap(),
             table_name: "filtered_data".to_string(),
             query: Some("SELECT * FROM data WHERE id > 3".to_string()),
-            sort_by: SortSpec::default(),
+            dialect: QueryDialect::default(),
+            sort_by: None,
             truncate: false,
             drop_table: false,
             record_batch_size: 122_880,

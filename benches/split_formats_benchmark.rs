@@ -7,7 +7,7 @@ use duckdb::Connection;
 use silk_chiffon::utils::arrow_io::ArrowIPCFormat;
 use silk_chiffon::{
     ArrowCompression, ListOutputsFormat, ParquetCompression, ParquetStatistics,
-    ParquetWriterVersion, SplitToArrowArgs, SplitToParquetArgs,
+    ParquetWriterVersion, QueryDialect, SplitToArrowArgs, SplitToParquetArgs,
 };
 use std::fs::{self, File};
 use std::sync::Arc;
@@ -99,6 +99,7 @@ async fn run_silk_arrow(input_path: &std::path::Path, output_dir: &std::path::Pa
         list_outputs: ListOutputsFormat::None,
         output_ipc_format: ArrowIPCFormat::File,
         query: None,
+        dialect: QueryDialect::default(),
         exclude_columns: vec![],
     };
 
@@ -125,6 +126,7 @@ async fn run_silk_parquet(input_path: &std::path::Path, output_dir: &std::path::
         bloom_all: None,
         bloom_column: vec![],
         query: None,
+        dialect: QueryDialect::default(),
         list_outputs: ListOutputsFormat::None,
         exclude_columns: vec![],
     };

@@ -1,5 +1,5 @@
 use crate::{
-    SortSpec,
+    QueryDialect, SortSpec,
     converters::parquet::ParquetConverter,
     utils::arrow_io::{ArrowIPCReader, RecordBatchIterator},
 };
@@ -18,6 +18,7 @@ pub struct DuckDbConverter {
     truncate: bool,
     drop_table: bool,
     query: Option<String>,
+    dialect: QueryDialect,
 }
 
 impl DuckDbConverter {
@@ -40,6 +41,7 @@ impl DuckDbConverter {
             truncate: false,
             drop_table: false,
             query: None,
+            dialect: QueryDialect::default(),
         }
     }
 
@@ -63,6 +65,11 @@ impl DuckDbConverter {
         self
     }
 
+    pub fn with_dialect(mut self, dialect: QueryDialect) -> Self {
+        self.dialect = dialect;
+        self
+    }
+
     pub async fn convert(self) -> Result<()> {
         let temp_file = NamedTempFile::with_suffix(".parquet")?;
         let parquet_path = temp_file.path().to_path_buf();
@@ -70,6 +77,7 @@ impl DuckDbConverter {
         ParquetConverter::from_iterator(self.input.clone()?, parquet_path.clone())
             .with_sort_spec(self.sort_spec.clone())
             .with_query(self.query.clone())
+            .with_dialect(self.dialect)
             .convert()
             .await?;
 

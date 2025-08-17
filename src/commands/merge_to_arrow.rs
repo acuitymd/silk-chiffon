@@ -40,7 +40,8 @@ pub async fn run(args: MergeToArrowArgs) -> Result<()> {
         .with_compression(args.compression)
         .with_sorting(args.sort_by.unwrap_or_default())
         .with_output_ipc_format(args.output_ipc_format)
-        .with_query(args.query);
+        .with_query(args.query)
+        .with_dialect(args.dialect);
 
     converter.convert().await
 }
@@ -49,7 +50,7 @@ pub async fn run(args: MergeToArrowArgs) -> Result<()> {
 mod tests {
     use super::*;
     use crate::{
-        ArrowCompression,
+        ArrowCompression, QueryDialect,
         utils::{
             arrow_io::ArrowIPCFormat,
             test_helpers::{file_helpers, test_data, verify},
@@ -87,6 +88,7 @@ mod tests {
             ],
             output: OutputPath::new(&output_path).unwrap(),
             query: None,
+            dialect: QueryDialect::default(),
             sort_by: None,
             compression: ArrowCompression::None,
             record_batch_size: 122_880,
@@ -121,6 +123,7 @@ mod tests {
             inputs: vec![glob_pattern],
             output: OutputPath::new(&output_path).unwrap(),
             query: None,
+            dialect: QueryDialect::default(),
             sort_by: None,
             compression: ArrowCompression::None,
             record_batch_size: 122_880,
@@ -158,6 +161,7 @@ mod tests {
             ],
             output: OutputPath::new(&output_path).unwrap(),
             query: None,
+            dialect: QueryDialect::default(),
             sort_by: None,
             compression: ArrowCompression::None,
             record_batch_size: 122_880,

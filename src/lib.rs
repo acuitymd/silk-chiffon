@@ -10,10 +10,8 @@ use parquet::{
     basic::{Compression, GzipLevel, ZstdLevel},
     file::properties::{EnabledStatistics, WriterVersion},
 };
-use std::{
-    fmt::{Display, Formatter},
-    str::FromStr,
-};
+use std::{fmt, str::FromStr};
+use strum::Display;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -129,14 +127,18 @@ pub struct ParquetArgs {
     #[arg(short, long, verbatim_doc_comment)]
     pub query: Option<String>,
 
+    /// The query dialect to use.
+    #[arg(short, long, default_value_t, value_enum)]
+    pub dialect: QueryDialect,
+
     /// Sort the data by one or more columns before writing.
     ///
     /// Format: A comma-separated list like "col_a,col_b:desc,col_c".
-    #[arg(short, long, default_value_t = SortSpec::default())]
-    pub sort_by: SortSpec,
+    #[arg(short, long)]
+    pub sort_by: Option<SortSpec>,
 
     /// The compression algorithm to use.
-    #[arg(short, long, default_value_t = ParquetCompression::None)]
+    #[arg(short, long, default_value_t, value_enum)]
     pub compression: ParquetCompression,
 
     /// Embed metadata indicating that the file's data is sorted.
@@ -189,7 +191,7 @@ pub struct ParquetArgs {
     pub max_row_group_size: usize,
 
     /// Control column statistics level.
-    #[arg(long, default_value_t = ParquetStatistics::Page)]
+    #[arg(long, default_value_t, value_enum)]
     pub statistics: ParquetStatistics,
 
     /// Size of Arrow record batches written to the output file.
@@ -201,7 +203,7 @@ pub struct ParquetArgs {
     pub no_dictionary: bool,
 
     /// Set writer version.
-    #[arg(long, default_value_t = ParquetWriterVersion::V2)]
+    #[arg(long, default_value_t, value_enum)]
     pub writer_version: ParquetWriterVersion,
 }
 
@@ -229,11 +231,15 @@ pub struct DuckDbArgs {
     #[arg(short, long, verbatim_doc_comment)]
     pub query: Option<String>,
 
+    /// The query dialect to use.
+    #[arg(short, long, default_value_t, value_enum)]
+    pub dialect: QueryDialect,
+
     /// Sort the data by one or more columns before writing.
     ///
     /// Format: A comma-separated list like "col_a,col_b:desc,col_c".
-    #[arg(short, long, default_value_t = SortSpec::default())]
-    pub sort_by: SortSpec,
+    #[arg(short, long)]
+    pub sort_by: Option<SortSpec>,
 
     /// Truncate the database file before writing (removes entire file).
     #[arg(long, default_value_t = false)]
@@ -264,6 +270,10 @@ pub struct ArrowArgs {
     #[arg(short, long, verbatim_doc_comment)]
     pub query: Option<String>,
 
+    /// The query dialect to use.
+    #[arg(short, long, default_value_t, value_enum)]
+    pub dialect: QueryDialect,
+
     /// Sort the data by one or more columns before writing.
     ///
     /// Format: A comma-separated list like "col_a,col_b:desc,col_c".
@@ -271,7 +281,7 @@ pub struct ArrowArgs {
     pub sort_by: Option<SortSpec>,
 
     /// The IPC compression to use for the output.
-    #[arg(long, default_value_t = ArrowCompression::None)]
+    #[arg(long, default_value_t, value_enum)]
     pub compression: ArrowCompression,
 
     /// Size of Arrow record batches written to the output file.
@@ -279,35 +289,37 @@ pub struct ArrowArgs {
     pub record_batch_size: usize,
 
     /// Sets the output Arrow IPC format.
-    #[arg(short, long, default_value_t = ArrowIPCFormat::default())]
+    #[arg(short, long, default_value_t, value_enum)]
     pub output_ipc_format: ArrowIPCFormat,
 }
 
-#[derive(ValueEnum, Clone, Copy, Debug, Default)]
+#[derive(ValueEnum, Clone, Copy, Debug, Default, Display)]
+#[value(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
 pub enum ListOutputsFormat {
     #[default]
-    #[value(name = "none")]
     None,
-    #[value(name = "text")]
     Text,
-    #[value(name = "json")]
     Json,
 }
 
-impl FromStr for ListOutputsFormat {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "none" => Ok(ListOutputsFormat::None),
-            "text" => Ok(ListOutputsFormat::Text),
-            "json" => Ok(ListOutputsFormat::Json),
-            _ => Err(anyhow::anyhow!(
-                "Invalid list outputs format: {}. Valid options: none, text, json",
-                s
-            )),
-        }
-    }
+#[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Display)]
+#[value(rename_all = "lowercase")]
+pub enum QueryDialect {
+    #[default]
+    DuckDb,
+    Generic,
+    MySQL,
+    PostgreSQL,
+    Hive,
+    SQLite,
+    Snowflake,
+    Redshift,
+    MsSQL,
+    ClickHouse,
+    BigQuery,
+    ANSI,
+    Databricks,
 }
 
 #[derive(Args, Debug)]
@@ -350,6 +362,10 @@ pub struct SplitToArrowArgs {
     #[arg(short, long, verbatim_doc_comment)]
     pub query: Option<String>,
 
+    /// The query dialect to use.
+    #[arg(short, long, default_value_t, value_enum)]
+    pub dialect: QueryDialect,
+
     /// Target number of rows per record batch.
     #[arg(long, default_value_t = 122_880)]
     pub record_batch_size: usize,
@@ -369,15 +385,15 @@ pub struct SplitToArrowArgs {
     pub overwrite: bool,
 
     /// The IPC compression to use for the output.
-    #[arg(short, long, default_value_t = ArrowCompression::None)]
+    #[arg(short, long, default_value_t, value_enum)]
     pub compression: ArrowCompression,
 
     /// List the output files after creation.
-    #[arg(short, long, value_enum, default_value_t = ListOutputsFormat::None)]
+    #[arg(short, long, value_enum, default_value_t, value_enum)]
     pub list_outputs: ListOutputsFormat,
 
     /// Sets the output Arrow IPC format.
-    #[arg(short, long, default_value_t = ArrowIPCFormat::default())]
+    #[arg(short, long, default_value_t, value_enum)]
     pub output_ipc_format: ArrowIPCFormat,
 
     /// Names of columns to exclude from the output.
@@ -425,6 +441,10 @@ pub struct SplitToParquetArgs {
     #[arg(short, long, verbatim_doc_comment)]
     pub query: Option<String>,
 
+    /// The query dialect to use.
+    #[arg(short, long, default_value_t, value_enum)]
+    pub dialect: QueryDialect,
+
     /// Target number of rows per record batch.
     #[arg(long, default_value_t = 122_880)]
     pub record_batch_size: usize,
@@ -444,11 +464,11 @@ pub struct SplitToParquetArgs {
     pub overwrite: bool,
 
     /// The compression algorithm to use.
-    #[arg(short, long, default_value_t = ParquetCompression::None)]
+    #[arg(short, long, default_value_t, value_enum)]
     pub compression: ParquetCompression,
 
     /// Column statistics level.
-    #[arg(long, default_value_t = ParquetStatistics::Page)]
+    #[arg(long, default_value_t, value_enum)]
     pub statistics: ParquetStatistics,
 
     /// Maximum number of rows per row group.
@@ -456,7 +476,7 @@ pub struct SplitToParquetArgs {
     pub max_row_group_size: usize,
 
     /// Writer version.
-    #[arg(long, default_value_t = ParquetWriterVersion::V2)]
+    #[arg(long, default_value_t, value_enum)]
     pub writer_version: ParquetWriterVersion,
 
     /// Disable dictionary encoding.
@@ -492,7 +512,7 @@ pub struct SplitToParquetArgs {
     pub bloom_column: Vec<ColumnSpecificBloomFilterConfig>,
 
     /// List the output files after creation.
-    #[arg(short, long, value_enum, default_value_t = ListOutputsFormat::None)]
+    #[arg(short, long, value_enum, default_value_t, value_enum)]
     pub list_outputs: ListOutputsFormat,
 
     /// Names of columns to exclude from the output.
@@ -520,6 +540,10 @@ pub struct MergeToArrowArgs {
     #[arg(short, long, verbatim_doc_comment)]
     pub query: Option<String>,
 
+    /// The query dialect to use.
+    #[arg(short, long, default_value_t, value_enum)]
+    pub dialect: QueryDialect,
+
     /// Sort the data by one or more columns before writing.
     ///
     /// Format: A comma-separated list like "col_a,col_b:desc,col_c".
@@ -527,7 +551,7 @@ pub struct MergeToArrowArgs {
     pub sort_by: Option<SortSpec>,
 
     /// The IPC compression to use for the output.
-    #[arg(long, default_value_t = ArrowCompression::None)]
+    #[arg(long, default_value_t, value_enum)]
     pub compression: ArrowCompression,
 
     /// Size of Arrow record batches written to the output file.
@@ -535,7 +559,7 @@ pub struct MergeToArrowArgs {
     pub record_batch_size: usize,
 
     /// Sets the output Arrow IPC format.
-    #[arg(short = 'f', long, default_value_t = ArrowIPCFormat::default())]
+    #[arg(short = 'f', long, default_value_t, value_enum)]
     pub output_ipc_format: ArrowIPCFormat,
 }
 
@@ -559,14 +583,18 @@ pub struct MergeToParquetArgs {
     #[arg(short, long, verbatim_doc_comment)]
     pub query: Option<String>,
 
+    /// The query dialect to use.
+    #[arg(short, long, default_value_t, value_enum)]
+    pub dialect: QueryDialect,
+
     /// Sort the data by one or more columns before writing.
     ///
     /// Format: A comma-separated list like "col_a,col_b:desc,col_c".
-    #[arg(short, long, default_value_t = SortSpec::default())]
-    pub sort_by: SortSpec,
+    #[arg(short, long)]
+    pub sort_by: Option<SortSpec>,
 
     /// The compression algorithm to use.
-    #[arg(short, long, default_value_t = ParquetCompression::None)]
+    #[arg(short, long, default_value_t, value_enum)]
     pub compression: ParquetCompression,
 
     /// Embed metadata indicating that the file's data is sorted.
@@ -619,7 +647,7 @@ pub struct MergeToParquetArgs {
     pub max_row_group_size: usize,
 
     /// Control column statistics level.
-    #[arg(long, default_value_t = ParquetStatistics::Page)]
+    #[arg(long, default_value_t, value_enum)]
     pub statistics: ParquetStatistics,
 
     /// Size of Arrow record batches written to the output file.
@@ -631,7 +659,7 @@ pub struct MergeToParquetArgs {
     pub no_dictionary: bool,
 
     /// Set writer version.
-    #[arg(long, default_value_t = ParquetWriterVersion::V2)]
+    #[arg(long, default_value_t, value_enum)]
     pub writer_version: ParquetWriterVersion,
 }
 
@@ -659,11 +687,15 @@ pub struct MergeToDuckdbArgs {
     #[arg(short, long, verbatim_doc_comment)]
     pub query: Option<String>,
 
+    /// The query dialect to use.
+    #[arg(short, long, default_value_t, value_enum)]
+    pub dialect: QueryDialect,
+
     /// Sort the data by one or more columns before writing.
     ///
     /// Format: A comma-separated list like "col_a,col_b:desc,col_c".
-    #[arg(short, long, default_value_t = SortSpec::default())]
-    pub sort_by: SortSpec,
+    #[arg(short, long)]
+    pub sort_by: Option<SortSpec>,
 
     /// Truncate the database file before writing (removes entire file).
     #[arg(long, default_value_t = false)]
@@ -679,17 +711,13 @@ pub struct MergeToDuckdbArgs {
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug, Default)]
+#[value(rename_all = "lowercase")]
 pub enum ParquetCompression {
-    #[value(name = "zstd")]
     Zstd,
-    #[value(name = "snappy")]
     Snappy,
-    #[value(name = "gzip")]
     Gzip,
-    #[value(name = "lz4")]
     Lz4,
     #[default]
-    #[value(name = "none")]
     None,
 }
 
@@ -705,42 +733,12 @@ impl From<ParquetCompression> for Compression {
     }
 }
 
-impl FromStr for ParquetCompression {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "zstd" => Ok(ParquetCompression::Zstd),
-            "snappy" => Ok(ParquetCompression::Snappy),
-            "gzip" => Ok(ParquetCompression::Gzip),
-            "lz4" => Ok(ParquetCompression::Lz4),
-            "none" => Ok(ParquetCompression::None),
-            _ => Err(anyhow::anyhow!("Invalid compression: {}", s)),
-        }
-    }
-}
-
-impl Display for ParquetCompression {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
-            Self::Zstd => "zstd",
-            Self::Snappy => "snappy",
-            Self::Gzip => "gzip",
-            Self::Lz4 => "lz4",
-            Self::None => "none",
-        };
-        write!(f, "{s}")
-    }
-}
-
 #[derive(ValueEnum, Clone, Copy, Debug, Default)]
+#[value(rename_all = "lowercase")]
 pub enum ParquetStatistics {
-    #[value(name = "none")]
     None,
-    #[value(name = "chunk")]
     Chunk,
     #[default]
-    #[value(name = "page")]
     Page,
 }
 
@@ -754,23 +752,11 @@ impl From<ParquetStatistics> for EnabledStatistics {
     }
 }
 
-impl Display for ParquetStatistics {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
-            Self::None => "none",
-            Self::Chunk => "chunk",
-            Self::Page => "page",
-        };
-        write!(f, "{s}")
-    }
-}
-
 #[derive(ValueEnum, Clone, Copy, Debug, Default)]
+#[value(rename_all = "lowercase")]
 pub enum ParquetWriterVersion {
-    #[value(name = "v1")]
     V1,
     #[default]
-    #[value(name = "v2")]
     V2,
 }
 
@@ -783,24 +769,12 @@ impl From<ParquetWriterVersion> for WriterVersion {
     }
 }
 
-impl Display for ParquetWriterVersion {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
-            Self::V1 => "v1",
-            Self::V2 => "v2",
-        };
-        write!(f, "{s}")
-    }
-}
-
 #[derive(ValueEnum, Clone, Debug, Default)]
+#[value(rename_all = "lowercase")]
 pub enum ArrowCompression {
-    #[value(name = "zstd")]
     Zstd,
-    #[value(name = "lz4")]
     Lz4,
     #[default]
-    #[value(name = "none")]
     None,
 }
 
@@ -814,52 +788,19 @@ impl From<ArrowCompression> for Option<CompressionType> {
     }
 }
 
-impl FromStr for ArrowCompression {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "zstd" => Ok(ArrowCompression::Zstd),
-            "lz4" => Ok(ArrowCompression::Lz4),
-            "none" => Ok(ArrowCompression::None),
-            _ => Err(anyhow::anyhow!("Invalid compression: {}", s)),
-        }
-    }
-}
-
-impl Display for ArrowCompression {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
-            Self::Zstd => "zstd",
-            Self::Lz4 => "lz4",
-            Self::None => "none",
-        };
-        write!(f, "{s}")
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct SortColumn {
     pub name: String,
     pub direction: SortDirection,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(ValueEnum, Clone, Debug, PartialEq)]
+#[value(rename_all = "lowercase")]
 pub enum SortDirection {
+    #[value(name = "asc")]
     Ascending,
+    #[value(name = "desc")]
     Descending,
-}
-
-impl FromStr for SortDirection {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "asc" => Ok(SortDirection::Ascending),
-            "desc" => Ok(SortDirection::Descending),
-            _ => Err(anyhow::anyhow!("Invalid sort direction: {}", s)),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -919,7 +860,7 @@ impl FromStr for SortSpec {
     }
 }
 
-impl Display for SortSpec {
+impl fmt::Display for SortSpec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let parts: Vec<String> = self
             .columns
@@ -1135,4 +1076,30 @@ use pyo3::prelude::*;
 fn silk_chiffon(m: &Bound<'_, PyModule>) -> PyResult<()> {
     python::register_module(m)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_value_enum_from_str() {
+        assert_eq!(
+            QueryDialect::from_str("duckdb", true),
+            Ok(QueryDialect::DuckDb)
+        );
+        assert_eq!(
+            QueryDialect::from_str("generic", true),
+            Ok(QueryDialect::Generic)
+        );
+        assert_eq!(
+            QueryDialect::from_str("mysql", true),
+            Ok(QueryDialect::MySQL)
+        );
+        assert_eq!(QueryDialect::from_str("hive", true), Ok(QueryDialect::Hive));
+        assert_eq!(
+            QueryDialect::from_str("sqlite", true),
+            Ok(QueryDialect::SQLite)
+        );
+    }
 }

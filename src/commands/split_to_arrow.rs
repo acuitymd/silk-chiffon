@@ -23,6 +23,7 @@ pub async fn run_with_result(args: SplitToArrowArgs) -> Result<SplitConversionRe
     .with_create_dirs(args.create_dirs)
     .with_overwrite(args.overwrite)
     .with_query(args.query)
+    .with_dialect(args.dialect)
     .with_exclude_columns(args.exclude_columns);
 
     let conversion_result = converter.convert().await?;

@@ -10,10 +10,11 @@ pub async fn run(args: DuckDbArgs) -> Result<()> {
     let output_path = args.output.path().to_path_buf();
 
     let converter = DuckDbConverter::new(input_path, output_path, args.table_name)?
-        .with_sort_spec(args.sort_by.clone())
+        .with_sort_spec(args.sort_by.unwrap_or_default())
         .with_truncate(args.truncate)
         .with_drop_table(args.drop_table)
-        .with_query(args.query);
+        .with_query(args.query)
+        .with_dialect(args.dialect);
 
     converter.convert().await
 }
@@ -22,7 +23,7 @@ pub async fn run(args: DuckDbArgs) -> Result<()> {
 mod tests {
     use super::*;
     use crate::{
-        SortSpec,
+        QueryDialect,
         utils::test_helpers::{file_helpers, test_data},
     };
     use clio::{Input, OutputPath};
@@ -48,7 +49,8 @@ mod tests {
             output: OutputPath::new(&output_path).unwrap(),
             table_name: "test_table".to_string(),
             query: None,
-            sort_by: SortSpec::default(),
+            dialect: QueryDialect::default(),
+            sort_by: None,
             truncate: false,
             drop_table: false,
         };
@@ -81,7 +83,8 @@ mod tests {
             output: OutputPath::new(&output_path).unwrap(),
             table_name: "test_table".to_string(),
             query: None,
-            sort_by: "id:asc".parse().unwrap(),
+            dialect: QueryDialect::default(),
+            sort_by: Some("id:asc".parse().unwrap()),
             truncate: false,
             drop_table: false,
         };

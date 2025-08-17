@@ -4,6 +4,7 @@ use arrow::ipc::writer::FileWriter;
 use arrow::record_batch::RecordBatch;
 use clio::{Input, OutputPath};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use silk_chiffon::QueryDialect;
 use silk_chiffon::{
     ArrowArgs, ArrowCompression, ParquetArgs, ParquetCompression, ParquetStatistics,
     ParquetWriterVersion, SortColumn, SortDirection, SortSpec, utils::arrow_io::ArrowIPCFormat,
@@ -88,6 +89,7 @@ async fn test_arrow_with_filter_query() {
         input: Input::new(&input_path).unwrap(),
         output: OutputPath::new(&output_path).unwrap(),
         query: Some("SELECT * FROM data WHERE amount > 100".to_string()),
+        dialect: QueryDialect::default(),
         sort_by: None,
         compression: ArrowCompression::None,
         record_batch_size: 122_880,
@@ -124,6 +126,7 @@ async fn test_arrow_with_projection_query() {
         input: Input::new(&input_path).unwrap(),
         output: OutputPath::new(&output_path).unwrap(),
         query: Some("SELECT id, name FROM data".to_string()),
+        dialect: QueryDialect::default(),
         sort_by: None,
         compression: ArrowCompression::None,
         record_batch_size: 122_880,
@@ -156,6 +159,7 @@ async fn test_arrow_with_aggregation_query() {
         query: Some(
             "SELECT COUNT(*) as total_count, SUM(amount) as total_amount FROM data".to_string(),
         ),
+        dialect: QueryDialect::default(),
         sort_by: None,
         compression: ArrowCompression::None,
         record_batch_size: 122_880,
@@ -195,6 +199,7 @@ async fn test_arrow_with_query_and_sort() {
         input: Input::new(&input_path).unwrap(),
         output: OutputPath::new(&output_path).unwrap(),
         query: Some("SELECT * FROM data WHERE amount > 100".to_string()),
+        dialect: QueryDialect::default(),
         sort_by: Some(SortSpec {
             columns: vec![SortColumn {
                 name: "amount".to_string(),
@@ -243,7 +248,8 @@ async fn test_parquet_with_query() {
             "SELECT id, name, amount * 1.1 as adjusted_amount FROM data WHERE amount >= 100"
                 .to_string(),
         ),
-        sort_by: SortSpec::default(),
+        dialect: QueryDialect::default(),
+        sort_by: Some(SortSpec::default()),
         compression: ParquetCompression::None,
         write_sorted_metadata: false,
         bloom_all: None,
@@ -287,6 +293,7 @@ async fn test_invalid_query_returns_error() {
         input: Input::new(&input_path).unwrap(),
         output: OutputPath::new(&output_path).unwrap(),
         query: Some("SELECT nonexistent_column FROM data".to_string()),
+        dialect: QueryDialect::default(),
         sort_by: None,
         compression: ArrowCompression::None,
         record_batch_size: 122_880,
@@ -333,6 +340,7 @@ async fn test_type_casting_int64_to_int32() {
         query: Some(
             "SELECT CAST(id AS INT) as id, CAST(value AS INT) as value FROM data".to_string(),
         ),
+        dialect: QueryDialect::default(),
         sort_by: None,
         compression: ArrowCompression::None,
         record_batch_size: 122_880,

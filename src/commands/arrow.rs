@@ -14,17 +14,20 @@ pub async fn run(args: ArrowArgs) -> Result<()> {
         .with_sorting(args.sort_by.unwrap_or_default())
         .with_record_batch_size(args.record_batch_size)
         .with_output_ipc_format(args.output_ipc_format)
-        .with_query(args.query);
+        .with_query(args.query)
+        .with_dialect(args.dialect);
 
     converter.convert().await
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::{
-        ArrowArgs, ArrowCompression, SortDirection, SortSpec,
+        ArrowCompression, QueryDialect, SortDirection, SortSpec,
         commands::arrow::run,
         utils::{
+            arrow_io::ArrowIPCFormat,
             filesystem::ensure_parent_dir_exists,
             test_helpers::{file_helpers, test_data, verify},
         },
@@ -35,8 +38,6 @@ mod tests {
     use tempfile::tempdir;
 
     mod integration_tests {
-        use crate::utils::arrow_io::ArrowIPCFormat;
-
         use super::*;
 
         #[tokio::test]
@@ -64,6 +65,7 @@ mod tests {
                 compression: ArrowCompression::None,
                 record_batch_size: 122_880,
                 output_ipc_format: ArrowIPCFormat::File,
+                dialect: QueryDialect::default(),
             };
 
             // remove the directory to test that run() creates it
@@ -103,6 +105,7 @@ mod tests {
                 compression: ArrowCompression::Zstd,
                 record_batch_size: 122_880,
                 output_ipc_format: ArrowIPCFormat::File,
+                dialect: QueryDialect::default(),
             };
 
             run(args).await.unwrap();
