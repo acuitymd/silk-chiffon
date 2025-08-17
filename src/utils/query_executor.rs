@@ -119,9 +119,12 @@ pub fn build_query_with_sort(base_query: &str, sort_columns: &[(String, bool)]) 
 
 #[cfg(test)]
 mod tests {
+    use crate::utils::test_helpers::test_data::create_arrow_file_with_range_of_ids;
+
     use super::*;
     use arrow::array::{Int32Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
+    use tempfile::TempDir;
 
     fn create_test_batch() -> RecordBatch {
         let id_array = Int32Array::from(vec![1, 5, 10, 15, 20]);
@@ -244,5 +247,31 @@ mod tests {
 
         let result = result.schema();
         assert_eq!(result.field(0).data_type(), &DataType::Utf8);
+    }
+
+    #[tokio::test]
+    async fn test_alternative_query_dialects_with_failures() {
+        let temp_dir = TempDir::new().unwrap();
+        let input1_path = temp_dir.path().join("input1.arrow");
+        let input1_path_str = input1_path.to_str().unwrap();
+
+        create_arrow_file_with_range_of_ids(&input1_path, 1, 5);
+
+        let duckdb_query = "SELECT `id` FROM `data`";
+        // let mysql_query = "SELECT \"id\" FROM \"data\"";
+
+        // let mysql_executor = QueryExecutor::new(mysql_query.to_string(), QueryDialect::MySQL);
+        let duckdb_executor = QueryExecutor::new(duckdb_query.to_string(), QueryDialect::DuckDb);
+
+        // let mysql_result = mysql_executor
+        //     .execute_on_file(input1_path_str, "data")
+        //     .await;
+        let duckdb_result = duckdb_executor
+            .execute_on_file(input1_path_str, "data")
+            .await;
+
+        // assert!(mysql_result.is_err());
+        println!("{:?}", duckdb_result.is_ok());
+        assert!(duckdb_result.is_err());
     }
 }
