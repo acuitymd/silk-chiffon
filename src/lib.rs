@@ -1065,7 +1065,6 @@ impl BloomFilterConfig {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
