@@ -69,7 +69,7 @@ jobs:
       - name: Setup rust
         run: |
           rustup override set stable
-          rustup update
+          rustup target add ${{ matrix.target }}
           rustup show
           rustup --version
       - name: Build binary using zigbuild
