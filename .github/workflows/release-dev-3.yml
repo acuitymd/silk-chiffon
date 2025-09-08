@@ -1,0 +1,92 @@
+name: Release Dev 3
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+          - target: aarch64-apple-darwin
+            runner: ubuntu-latest
+            cross: true
+    runs-on: ${{ matrix.runner }}
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      #   - uses: mozilla-actions/sccache-action@v0.0.9
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "build-${{ matrix.runner }}"
+
+      - name: Setup cargo-zigbuild
+        uses: taiki-e/install-action@v2
+        if: matrix.cross
+        with:
+          tool: cargo-zigbuild
+
+      - name: Setup zig
+        uses: mlugg/setup-zig@v2
+        if: matrix.cross
+
+      - name: Build binary
+        run: |
+          if [[ "${{ matrix.cross }}" == "true" ]]; then
+            cargo zigbuild --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
+
+      - name: Generate version
+        id: version
+        run: |
+          SHORT_SHA=$(git rev-parse --short=8 ${{ github.sha }})
+          echo "version=$(date '+%Y%m%d')-${SHORT_SHA}" >> $GITHUB_OUTPUT
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: silk-chiffon-${{ matrix.target }}-${{ steps.version.outputs.version }}
+          path: target/${{ matrix.target }}/release/silk-chiffon*
+          compression-level: 0
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./binaries
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(date '+%Y%m%d')-$(git rev-parse --short=8 ${{ github.sha }})
+          gh release create v${VERSION} \
+            --title "🚀 Release v${VERSION}" \
+            --generate-notes \
+            ./binaries/**/*
