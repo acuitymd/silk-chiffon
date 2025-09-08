@@ -14,10 +14,6 @@ categories = [
   "columnar data",
 ]
 
-[lib]
-name = "silk_chiffon"
-crate-type = ["cdylib", "rlib"]
-
 [[bin]]
 name = "silk-chiffon"
 path = "src/main.rs"

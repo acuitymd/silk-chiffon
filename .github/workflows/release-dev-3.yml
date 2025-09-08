@@ -72,11 +72,15 @@ jobs:
           SHORT_SHA=$(git rev-parse --short=8 ${{ github.sha }})
           echo "version=$(date '+%Y%m%d')-${SHORT_SHA}" >> $GITHUB_OUTPUT
 
+      - name: Rename binary
+        run: |
+          cp target/${{ matrix.target }}/release/silk-chiffon target/${{ matrix.target }}/release/silk-chiffon-${{ matrix.target }}
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: silk-chiffon-${{ matrix.target }}-${{ steps.version.outputs.version }}
-          path: target/${{ matrix.target }}/release/silk-chiffon*
+          path: target/${{ matrix.target }}/release/silk-chiffon-${{ matrix.target }}
           compression-level: 0
 
   release:
@@ -91,7 +95,8 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: ./binaries
-      - run: ls -la ./binaries/**/*
+      - name: List binaries
+        run: ls -la ./binaries/**/*
 
       - name: Create GitHub release
         env:
