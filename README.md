@@ -2,11 +2,11 @@
 
 > _Converting Arrow files has never been silkier..._
 
-A blazingly fast, memory-efficient CLI tool and Python library for converting between the Apache Arrow IPC data format and a handful of other formats. Written in Rust for maximum performance, wrapped in Python for maximum convenience.
+A blazingly fast, memory-efficient CLI tool for converting between the Apache Arrow IPC data format and a handful of other formats. Written in Rust for maximum performance.
 
 ## ✨ What is Silk Chiffon?
 
-Silk Chiffon is versatile tool for Arrow-to-X data format conversions. Like its namesake fabric&mdash;light, flowing, and effortlessly elegant&mdash;this tool makes data transformations silky smooth.
+Silk Chiffon is versatile tool for Arrow-to-X data format conversions. Like its namesake fabric -- light, flowing, and effortlessly elegant -- this tool makes data transformations silky smooth.
 
 ### ️🎯 Core Features
 
@@ -15,7 +15,6 @@ Silk Chiffon is versatile tool for Arrow-to-X data format conversions. Like its 
 - **🪓 Data Splitting**: Split data into multiple files based on column values.
 - **🔗 Data Merging**: Merge data from multiple files into a single file.
 - **🧠 Smart Processing**: Sort, compress, and optimize your data on-the-fly.
-- **🐍 Python-Friendly**: Native Python bindings for seamless integration.
 - **🤏🏻 Memory Efficient**: Configurable batch processing for huge datasets.
 - **⚙️ Rich Configuration**: Fine-tune many aspects of your conversions.
 
@@ -25,15 +24,6 @@ Silk Chiffon is versatile tool for Arrow-to-X data format conversions. Like its 
 
 ```bash
 cargo install --path .
-```
-
-### Python Package
-
-> [!NOTE]
-> Soooooon....
-
-```bash
-pip install silk-chiffon
 ```
 
 ### Binary
@@ -65,47 +55,6 @@ Transform Arrow formats with sorting and compression:
 
 ```bash
 silk-chiffon arrow stream.arrows file.arrow --compression lz4 --sort-by "date:asc"
-```
-
-### Python API
-
-```python
-import silk_chiffon as sc
-
-# Convert Arrow to Parquet with bloom filters, with NDV automatically optimized
-sc.arrow_to_parquet(
-    "data.arrow",
-    "data.parquet",
-    compression="zstd",
-    bloom_columns=["user_id", "product_id"]
-)
-
-# Load Arrow data into DuckDB
-sc.arrow_to_duckdb(
-    "data.arrow",
-    "analytics.db",
-    table_name="events",
-    sort_by="timestamp"
-)
-
-# Split Arrow data by category into multiple Arrow files
-sc.split_to_arrow(
-    "data.arrow",
-    "output/{value}.arrow",
-    split_by="category",
-    sort_by=[("timestamp", "desc")],
-    compression="lz4"
-)
-
-# Split Arrow data into partitioned Parquet files
-sc.split_to_parquet(
-    "transactions.arrow",
-    "by_customer/{value}/data.parquet",
-    split_by="customer_id",
-    compression="zstd",
-    bloom_filter_columns=["transaction_id"],
-    create_dirs=True
-)
 ```
 
 ## 🗒️ Command Reference
@@ -404,28 +353,6 @@ silk-chiffon arrow large.arrow optimized.arrow \
 silk-chiffon arrow data.arrow stream.arrow --output-ipc-format stream
 ```
 
-### 🐍 Python Data Science
-
-Integrate with pandas and PyArrow workflows:
-
-```python
-import silk_chiffon as sc
-import pandas as pd
-
-# Your existing Arrow data from pandas/PyArrow
-df = pd.read_csv("data.csv")
-df.to_arrow("temp.arrow")
-
-# Convert to optimized Parquet
-sc.arrow_to_parquet(
-    "temp.arrow",
-    "optimized.parquet",
-    compression="zstd",
-    sort_by="date,value:desc",
-    statistics="page"
-)
-```
-
 ### 🗂️ Data Partitioning
 
 Split large datasets into manageable partitions:
@@ -474,7 +401,6 @@ Silk Chiffon is built on a foundation of high-performance Rust libraries:
 - **Apache Parquet**: Columnar disk format
 - **DataFusion**: Query engine for sorting operations
 - **DuckDB**: Embedded analytical database
-- **PyO3**: Python bindings
 
 The tool follows a composable architecture with dedicated converters for each format, each building upon the others, to ensure adequate performance and maximal maintainability.
 
