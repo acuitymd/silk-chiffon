@@ -1,15 +1,16 @@
 use crate::{
-    DuckDbArgs, converters::duckdb::DuckDbConverter, utils::filesystem::ensure_parent_dir_exists,
+    ArrowToDuckDbArgs, converters::arrow_to_duckdb::ArrowToDuckDbConverter,
+    utils::filesystem::ensure_parent_dir_exists,
 };
 use anyhow::Result;
 
-pub async fn run(args: DuckDbArgs) -> Result<()> {
+pub async fn run(args: ArrowToDuckDbArgs) -> Result<()> {
     ensure_parent_dir_exists(args.output.path()).await?;
 
     let input_path = args.input.path().to_string_lossy().to_string();
     let output_path = args.output.path().to_path_buf();
 
-    let converter = DuckDbConverter::new(input_path, output_path, args.table_name)?
+    let converter = ArrowToDuckDbConverter::new(input_path, output_path, args.table_name)?
         .with_sort_spec(args.sort_by.unwrap_or_default())
         .with_truncate(args.truncate)
         .with_drop_table(args.drop_table)
@@ -44,7 +45,7 @@ mod tests {
         );
         file_helpers::write_arrow_file(&input_path, &schema, vec![batch]).unwrap();
 
-        let args = DuckDbArgs {
+        let args = ArrowToDuckDbArgs {
             input: Input::new(&input_path).unwrap(),
             output: OutputPath::new(&output_path).unwrap(),
             table_name: "test_table".to_string(),
@@ -78,7 +79,7 @@ mod tests {
         );
         file_helpers::write_arrow_file(&input_path, &schema, vec![batch]).unwrap();
 
-        let args = DuckDbArgs {
+        let args = ArrowToDuckDbArgs {
             input: Input::new(&input_path).unwrap(),
             output: OutputPath::new(&output_path).unwrap(),
             table_name: "test_table".to_string(),

@@ -95,7 +95,7 @@ impl QueryExecutor {
 /// Adds a sort clause to an existing query by wrapping it as a `FROM` clause.
 ///
 /// The query passed to Silk Chiffon is separate from the sort option and so we need to represent
-/// both here. We also need to strictly enforce the sort order for splitting since the algorithm
+/// both here. We also need to strictly enforce the sort order for partitionting since the algorithm
 /// demands it.
 pub fn build_query_with_sort(base_query: &str, sort_columns: &[(String, bool)]) -> String {
     if sort_columns.is_empty() {

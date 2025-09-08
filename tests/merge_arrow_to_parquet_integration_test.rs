@@ -8,7 +8,7 @@ use std::fs::File;
 use tempfile::tempdir;
 
 #[test]
-fn test_merge_to_parquet_basic() {
+fn test_merge_arrow_to_parquet_basic() {
     let temp_dir = tempdir().unwrap();
     let input1_path = temp_dir.path().join("input1.arrow");
     let input2_path = temp_dir.path().join("input2.arrow");
@@ -20,7 +20,7 @@ fn test_merge_to_parquet_basic() {
     let output = Command::cargo_bin("silk-chiffon")
         .unwrap()
         .args([
-            "merge-to-parquet",
+            "merge-arrow-to-parquet",
             input1_path.to_str().unwrap(),
             input2_path.to_str().unwrap(),
             "-o",
@@ -43,7 +43,7 @@ fn test_merge_to_parquet_basic() {
 }
 
 #[test]
-fn test_merge_to_parquet_with_compression() {
+fn test_merge_arrow_to_parquet_with_compression() {
     let temp_dir = tempdir().unwrap();
     let input1_path = temp_dir.path().join("input1.arrow");
     let input2_path = temp_dir.path().join("input2.arrow");
@@ -55,7 +55,7 @@ fn test_merge_to_parquet_with_compression() {
     let output = Command::cargo_bin("silk-chiffon")
         .unwrap()
         .args([
-            "merge-to-parquet",
+            "merge-arrow-to-parquet",
             input1_path.to_str().unwrap(),
             input2_path.to_str().unwrap(),
             "-o",
@@ -86,7 +86,7 @@ fn test_merge_to_parquet_with_compression() {
 }
 
 #[test]
-fn test_merge_to_parquet_with_sorting() {
+fn test_merge_arrow_to_parquet_with_sorting() {
     let temp_dir = tempdir().unwrap();
     let input1_path = temp_dir.path().join("input1.arrow");
     let input2_path = temp_dir.path().join("input2.arrow");
@@ -98,7 +98,7 @@ fn test_merge_to_parquet_with_sorting() {
     let output = Command::cargo_bin("silk-chiffon")
         .unwrap()
         .args([
-            "merge-to-parquet",
+            "merge-arrow-to-parquet",
             input1_path.to_str().unwrap(),
             input2_path.to_str().unwrap(),
             "-o",
@@ -119,7 +119,7 @@ fn test_merge_to_parquet_with_sorting() {
 }
 
 #[test]
-fn test_merge_to_parquet_with_bloom_filters() {
+fn test_merge_arrow_to_parquet_with_bloom_filters() {
     let temp_dir = tempdir().unwrap();
     let input1_path = temp_dir.path().join("input1.arrow");
     let input2_path = temp_dir.path().join("input2.arrow");
@@ -131,7 +131,7 @@ fn test_merge_to_parquet_with_bloom_filters() {
     let output = Command::cargo_bin("silk-chiffon")
         .unwrap()
         .args([
-            "merge-to-parquet",
+            "merge-arrow-to-parquet",
             input1_path.to_str().unwrap(),
             input2_path.to_str().unwrap(),
             "-o",
@@ -158,7 +158,7 @@ fn test_merge_to_parquet_with_bloom_filters() {
 }
 
 #[test]
-fn test_merge_to_parquet_with_row_group_size() {
+fn test_merge_arrow_to_parquet_with_row_group_size() {
     let temp_dir = tempdir().unwrap();
     let input1_path = temp_dir.path().join("input1.arrow");
     let input2_path = temp_dir.path().join("input2.arrow");
@@ -170,7 +170,7 @@ fn test_merge_to_parquet_with_row_group_size() {
     let output = Command::cargo_bin("silk-chiffon")
         .unwrap()
         .args([
-            "merge-to-parquet",
+            "merge-arrow-to-parquet",
             input1_path.to_str().unwrap(),
             input2_path.to_str().unwrap(),
             "-o",
@@ -199,7 +199,7 @@ fn test_merge_to_parquet_with_row_group_size() {
 }
 
 #[test]
-fn test_merge_to_parquet_with_query() {
+fn test_merge_arrow_to_parquet_with_query() {
     let temp_dir = tempdir().unwrap();
     let input1_path = temp_dir.path().join("input1.arrow");
     let input2_path = temp_dir.path().join("input2.arrow");
@@ -211,7 +211,7 @@ fn test_merge_to_parquet_with_query() {
     let output = Command::cargo_bin("silk-chiffon")
         .unwrap()
         .args([
-            "merge-to-parquet",
+            "merge-arrow-to-parquet",
             input1_path.to_str().unwrap(),
             input2_path.to_str().unwrap(),
             "-o",
@@ -235,7 +235,7 @@ fn test_merge_to_parquet_with_query() {
 }
 
 #[test]
-fn test_merge_to_parquet_with_statistics() {
+fn test_merge_arrow_to_parquet_with_statistics() {
     let temp_dir = tempdir().unwrap();
     let input1_path = temp_dir.path().join("input1.arrow");
     let input2_path = temp_dir.path().join("input2.arrow");
@@ -247,7 +247,7 @@ fn test_merge_to_parquet_with_statistics() {
     let output = Command::cargo_bin("silk-chiffon")
         .unwrap()
         .args([
-            "merge-to-parquet",
+            "merge-arrow-to-parquet",
             input1_path.to_str().unwrap(),
             input2_path.to_str().unwrap(),
             "-o",
@@ -271,7 +271,7 @@ fn test_merge_to_parquet_with_statistics() {
 }
 
 #[test]
-fn test_merge_to_parquet_glob_pattern() {
+fn test_merge_arrow_to_parquet_glob_pattern() {
     let temp_dir = tempdir().unwrap();
     let output_path = temp_dir.path().join("merged_glob.parquet");
 
@@ -284,7 +284,7 @@ fn test_merge_to_parquet_glob_pattern() {
     let output = Command::cargo_bin("silk-chiffon")
         .unwrap()
         .args([
-            "merge-to-parquet",
+            "merge-arrow-to-parquet",
             &glob_pattern,
             "-o",
             output_path.to_str().unwrap(),
@@ -305,7 +305,7 @@ fn test_merge_to_parquet_glob_pattern() {
 }
 
 #[test]
-fn test_merge_to_parquet_writer_version() {
+fn test_merge_arrow_to_parquet_writer_version() {
     let temp_dir = tempdir().unwrap();
     let input_path = temp_dir.path().join("input.arrow");
     let output_path = temp_dir.path().join("merged_v1.parquet");
@@ -315,7 +315,7 @@ fn test_merge_to_parquet_writer_version() {
     let output = Command::cargo_bin("silk-chiffon")
         .unwrap()
         .args([
-            "merge-to-parquet",
+            "merge-arrow-to-parquet",
             input_path.to_str().unwrap(),
             "-o",
             output_path.to_str().unwrap(),

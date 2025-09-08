@@ -38,7 +38,7 @@ fn test_duckdb_conversion_basic() {
     let output = Command::cargo_bin("silk-chiffon")
         .unwrap()
         .args([
-            "duckdb",
+            "arrow-to-duckdb",
             input_path.to_str().unwrap(),
             output_path.to_str().unwrap(),
             "--table-name",
@@ -85,7 +85,7 @@ fn test_duckdb_table_already_exists() {
     let output = Command::cargo_bin("silk-chiffon")
         .unwrap()
         .args([
-            "duckdb",
+            "arrow-to-duckdb",
             input_path.to_str().unwrap(),
             output_path.to_str().unwrap(),
             "--table-name",
@@ -99,7 +99,7 @@ fn test_duckdb_table_already_exists() {
     let output = Command::cargo_bin("silk-chiffon")
         .unwrap()
         .args([
-            "duckdb",
+            "arrow-to-duckdb",
             input_path.to_str().unwrap(),
             output_path.to_str().unwrap(),
             "--table-name",
@@ -141,7 +141,7 @@ fn test_duckdb_with_drop_table() {
     Command::cargo_bin("silk-chiffon")
         .unwrap()
         .args([
-            "duckdb",
+            "arrow-to-duckdb",
             input_path.to_str().unwrap(),
             output_path.to_str().unwrap(),
             "--table-name",
@@ -167,7 +167,7 @@ fn test_duckdb_with_drop_table() {
     let output = Command::cargo_bin("silk-chiffon")
         .unwrap()
         .args([
-            "duckdb",
+            "arrow-to-duckdb",
             input_path.to_str().unwrap(),
             output_path.to_str().unwrap(),
             "--table-name",
@@ -214,7 +214,7 @@ fn test_duckdb_with_sorting() {
     let output = Command::cargo_bin("silk-chiffon")
         .unwrap()
         .args([
-            "duckdb",
+            "arrow-to-duckdb",
             input_path.to_str().unwrap(),
             output_path.to_str().unwrap(),
             "--table-name",
@@ -283,7 +283,7 @@ fn test_duckdb_add_multiple_tables() {
     let output = Command::cargo_bin("silk-chiffon")
         .unwrap()
         .args([
-            "duckdb",
+            "arrow-to-duckdb",
             users_path.to_str().unwrap(),
             output_path.to_str().unwrap(),
             "--table-name",
@@ -300,7 +300,7 @@ fn test_duckdb_add_multiple_tables() {
     let output = Command::cargo_bin("silk-chiffon")
         .unwrap()
         .args([
-            "duckdb",
+            "arrow-to-duckdb",
             products_path.to_str().unwrap(),
             output_path.to_str().unwrap(),
             "--table-name",
@@ -367,7 +367,7 @@ fn test_duckdb_preserves_insertion_order() {
     let output = Command::cargo_bin("silk-chiffon")
         .unwrap()
         .args([
-            "duckdb",
+            "arrow-to-duckdb",
             input_path.to_str().unwrap(),
             output_path.to_str().unwrap(),
             "--table-name",
@@ -430,7 +430,7 @@ fn test_duckdb_preserves_sorted_order() {
     let output = Command::cargo_bin("silk-chiffon")
         .unwrap()
         .args([
-            "duckdb",
+            "arrow-to-duckdb",
             input_path.to_str().unwrap(),
             output_path.to_str().unwrap(),
             "--table-name",
@@ -502,7 +502,7 @@ fn test_duckdb_preserves_order_with_limit_offset() {
     let output = Command::cargo_bin("silk-chiffon")
         .unwrap()
         .args([
-            "duckdb",
+            "arrow-to-duckdb",
             input_path.to_str().unwrap(),
             output_path.to_str().unwrap(),
             "--table-name",

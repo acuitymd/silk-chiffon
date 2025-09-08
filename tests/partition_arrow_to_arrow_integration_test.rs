@@ -3,7 +3,7 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::FileWriter;
 use arrow::record_batch::RecordBatch;
 use silk_chiffon::utils::arrow_io::ArrowIPCFormat;
-use silk_chiffon::{ArrowCompression, ListOutputsFormat, QueryDialect, SplitToArrowArgs};
+use silk_chiffon::{ArrowCompression, ListOutputsFormat, PartitionArrowToArrowArgs, QueryDialect};
 use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
@@ -49,7 +49,7 @@ fn write_test_arrow_file(path: &Path, schema: &Schema, batches: Vec<RecordBatch>
 }
 
 #[tokio::test]
-async fn test_split_to_arrow_basic() {
+async fn test_partition_arrow_to_arrow_basic() {
     let temp_dir = tempdir().unwrap();
     let input_path = temp_dir.path().join("input.arrow");
     let output_dir = temp_dir.path().join("output");
@@ -57,7 +57,7 @@ async fn test_split_to_arrow_basic() {
     let (schema, batches) = create_test_data();
     write_test_arrow_file(&input_path, &schema, batches);
 
-    let args = SplitToArrowArgs {
+    let args = PartitionArrowToArrowArgs {
         input: clio::Input::new(&input_path).unwrap(),
         by: "category".to_string(),
         output_template: format!("{}/{{value}}.arrow", output_dir.display()),
@@ -73,7 +73,7 @@ async fn test_split_to_arrow_basic() {
         exclude_columns: vec![],
     };
 
-    silk_chiffon::commands::split_to_arrow::run(args)
+    silk_chiffon::commands::partition_arrow_to_arrow::run(args)
         .await
         .unwrap();
 
@@ -110,7 +110,7 @@ async fn test_split_to_arrow_basic() {
 }
 
 #[tokio::test]
-async fn test_split_to_arrow_with_template_placeholders() {
+async fn test_partition_arrow_to_arrow_with_template_placeholders() {
     let temp_dir = tempdir().unwrap();
     let input_path = temp_dir.path().join("input.arrow");
     let output_dir = temp_dir.path().join("output");
@@ -118,7 +118,7 @@ async fn test_split_to_arrow_with_template_placeholders() {
     let (schema, batches) = create_test_data();
     write_test_arrow_file(&input_path, &schema, batches);
 
-    let args = SplitToArrowArgs {
+    let args = PartitionArrowToArrowArgs {
         input: clio::Input::new(&input_path).unwrap(),
         by: "category".to_string(),
         output_template: format!("{}/{{column}}_{{value}}_data.arrow", output_dir.display()),
@@ -134,7 +134,7 @@ async fn test_split_to_arrow_with_template_placeholders() {
         exclude_columns: vec![],
     };
 
-    silk_chiffon::commands::split_to_arrow::run(args)
+    silk_chiffon::commands::partition_arrow_to_arrow::run(args)
         .await
         .unwrap();
 
@@ -144,7 +144,7 @@ async fn test_split_to_arrow_with_template_placeholders() {
 }
 
 #[tokio::test]
-async fn test_split_to_arrow_with_sorting() {
+async fn test_partition_arrow_to_arrow_with_sorting() {
     let temp_dir = tempdir().unwrap();
     let input_path = temp_dir.path().join("input.arrow");
     let output_dir = temp_dir.path().join("output");
@@ -152,7 +152,7 @@ async fn test_split_to_arrow_with_sorting() {
     let (schema, batches) = create_test_data();
     write_test_arrow_file(&input_path, &schema, batches);
 
-    let args = SplitToArrowArgs {
+    let args = PartitionArrowToArrowArgs {
         input: clio::Input::new(&input_path).unwrap(),
         by: "category".to_string(),
         output_template: format!("{}/{{value}}.arrow", output_dir.display()),
@@ -168,7 +168,7 @@ async fn test_split_to_arrow_with_sorting() {
         exclude_columns: vec![],
     };
 
-    silk_chiffon::commands::split_to_arrow::run(args)
+    silk_chiffon::commands::partition_arrow_to_arrow::run(args)
         .await
         .unwrap();
 
@@ -191,7 +191,7 @@ async fn test_split_to_arrow_with_sorting() {
 }
 
 #[tokio::test]
-async fn test_split_to_arrow_with_int_column() {
+async fn test_partition_arrow_to_arrow_with_int_column() {
     let temp_dir = tempdir().unwrap();
     let input_path = temp_dir.path().join("input.arrow");
     let output_dir = temp_dir.path().join("output");
@@ -199,7 +199,7 @@ async fn test_split_to_arrow_with_int_column() {
     let (schema, batches) = create_test_data();
     write_test_arrow_file(&input_path, &schema, batches);
 
-    let args = SplitToArrowArgs {
+    let args = PartitionArrowToArrowArgs {
         input: clio::Input::new(&input_path).unwrap(),
         by: "id".to_string(),
         output_template: format!("{}/item_{{value}}.arrow", output_dir.display()),
@@ -215,7 +215,7 @@ async fn test_split_to_arrow_with_int_column() {
         exclude_columns: vec![],
     };
 
-    silk_chiffon::commands::split_to_arrow::run(args)
+    silk_chiffon::commands::partition_arrow_to_arrow::run(args)
         .await
         .unwrap();
 
@@ -225,14 +225,14 @@ async fn test_split_to_arrow_with_int_column() {
 }
 
 #[tokio::test]
-async fn test_split_to_arrow_error_nonexistent_column() {
+async fn test_partition_arrow_to_arrow_error_nonexistent_column() {
     let temp_dir = tempdir().unwrap();
     let input_path = temp_dir.path().join("input.arrow");
 
     let (schema, batches) = create_test_data();
     write_test_arrow_file(&input_path, &schema, batches);
 
-    let args = SplitToArrowArgs {
+    let args = PartitionArrowToArrowArgs {
         input: clio::Input::new(&input_path).unwrap(),
         by: "nonexistent".to_string(),
         output_template: "{value}.arrow".to_string(),
@@ -248,7 +248,7 @@ async fn test_split_to_arrow_error_nonexistent_column() {
         exclude_columns: vec![],
     };
 
-    let result = silk_chiffon::commands::split_to_arrow::run(args).await;
+    let result = silk_chiffon::commands::partition_arrow_to_arrow::run(args).await;
     assert!(result.is_err());
     assert!(
         result
@@ -259,7 +259,7 @@ async fn test_split_to_arrow_error_nonexistent_column() {
 }
 
 #[tokio::test]
-async fn test_split_to_arrow_safe_value_placeholder() {
+async fn test_partition_arrow_to_arrow_safe_value_placeholder() {
     let temp_dir = tempdir().unwrap();
     let input_path = temp_dir.path().join("input.arrow");
     let output_dir = temp_dir.path().join("output");
@@ -284,7 +284,7 @@ async fn test_split_to_arrow_safe_value_placeholder() {
 
     write_test_arrow_file(&input_path, &schema, vec![batch]);
 
-    let args = SplitToArrowArgs {
+    let args = PartitionArrowToArrowArgs {
         input: clio::Input::new(&input_path).unwrap(),
         by: "path".to_string(),
         output_template: format!("{}/{{safe_value}}.arrow", output_dir.display()),
@@ -300,7 +300,7 @@ async fn test_split_to_arrow_safe_value_placeholder() {
         exclude_columns: vec![],
     };
 
-    silk_chiffon::commands::split_to_arrow::run(args)
+    silk_chiffon::commands::partition_arrow_to_arrow::run(args)
         .await
         .unwrap();
 
@@ -310,7 +310,7 @@ async fn test_split_to_arrow_safe_value_placeholder() {
 }
 
 #[tokio::test]
-async fn test_split_to_arrow_stream_format() {
+async fn test_partition_arrow_to_arrow_stream_format() {
     let temp_dir = tempdir().unwrap();
     let input_path = temp_dir.path().join("input.arrow");
     let output_dir = temp_dir.path().join("output");
@@ -318,7 +318,7 @@ async fn test_split_to_arrow_stream_format() {
     let (schema, batches) = create_test_data();
     write_test_arrow_file(&input_path, &schema, batches);
 
-    let args = SplitToArrowArgs {
+    let args = PartitionArrowToArrowArgs {
         input: clio::Input::new(&input_path).unwrap(),
         by: "category".to_string(),
         output_template: format!("{}/{{value}}.arrows", output_dir.display()),
@@ -334,7 +334,7 @@ async fn test_split_to_arrow_stream_format() {
         exclude_columns: vec![],
     };
 
-    silk_chiffon::commands::split_to_arrow::run(args)
+    silk_chiffon::commands::partition_arrow_to_arrow::run(args)
         .await
         .unwrap();
 
@@ -371,7 +371,7 @@ async fn test_split_to_arrow_stream_format() {
 }
 
 #[tokio::test]
-async fn test_split_to_arrow_stream_format_with_compression() {
+async fn test_partition_arrow_to_arrow_stream_format_with_compression() {
     let temp_dir = tempdir().unwrap();
     let input_path = temp_dir.path().join("input.arrow");
     let output_dir = temp_dir.path().join("output");
@@ -379,7 +379,7 @@ async fn test_split_to_arrow_stream_format_with_compression() {
     let (schema, batches) = create_test_data();
     write_test_arrow_file(&input_path, &schema, batches);
 
-    let args = SplitToArrowArgs {
+    let args = PartitionArrowToArrowArgs {
         input: clio::Input::new(&input_path).unwrap(),
         by: "category".to_string(),
         output_template: format!("{}/{{value}}.arrows", output_dir.display()),
@@ -395,7 +395,7 @@ async fn test_split_to_arrow_stream_format_with_compression() {
         exclude_columns: vec![],
     };
 
-    silk_chiffon::commands::split_to_arrow::run(args)
+    silk_chiffon::commands::partition_arrow_to_arrow::run(args)
         .await
         .unwrap();
 

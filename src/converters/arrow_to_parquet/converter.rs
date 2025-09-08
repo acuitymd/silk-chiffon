@@ -9,13 +9,13 @@ use tempfile::NamedTempFile;
 use crate::{
     BloomFilterConfig, ParquetCompression, ParquetStatistics, ParquetWriterVersion, QueryDialect,
     SortSpec,
-    converters::arrow::ArrowConverter,
+    converters::arrow_to_arrow::ArrowToArrowConverter,
     utils::arrow_io::{ArrowFileSource, ArrowIPCFormat, ArrowIPCReader, RecordBatchIterator},
 };
 
 use super::{ndv_calculator::NdvCalculator, writer_builder::ParquetWritePropertiesBuilder};
 
-pub struct ParquetConverter {
+pub struct ArrowToParquetConverter {
     input: Box<dyn RecordBatchIterator>,
     output_path: PathBuf,
     sort_spec: SortSpec,
@@ -31,7 +31,7 @@ pub struct ParquetConverter {
     dialect: QueryDialect,
 }
 
-impl ParquetConverter {
+impl ArrowToParquetConverter {
     pub fn new(input_path: String, output_path: PathBuf) -> Result<Self> {
         let reader = ArrowIPCReader::from_path(input_path)?;
         let input = reader.into_batch_iterator()?;
@@ -142,7 +142,7 @@ impl ParquetConverter {
             let temp_path = temp_file.path().to_path_buf();
 
             let mut arrow_converter =
-                ArrowConverter::from_iterator(self.input.clone()?, &temp_path);
+                ArrowToArrowConverter::from_iterator(self.input.clone()?, &temp_path);
 
             if self.sort_spec.is_configured() {
                 arrow_converter = arrow_converter.with_sorting(self.sort_spec.clone());
@@ -230,7 +230,7 @@ mod tests {
     use parquet::file::reader::FileReader;
     use tempfile::tempdir;
 
-    use crate::converters::parquet::ParquetConverter;
+    use crate::converters::arrow_to_parquet::ArrowToParquetConverter;
 
     #[tokio::test]
     async fn test_converter_basic_file_to_parquet() {
@@ -245,7 +245,7 @@ mod tests {
         let batch = test_data::create_batch_with_ids_and_names(&schema, &test_ids, &test_names);
         file_helpers::write_arrow_file(&input_path, &schema, vec![batch]).unwrap();
 
-        let converter = ParquetConverter::new(
+        let converter = ArrowToParquetConverter::new(
             input_path.to_str().unwrap().to_string(),
             output_path.clone(),
         )
@@ -276,7 +276,7 @@ mod tests {
         let batch = test_data::create_batch_with_ids_and_names(&schema, &test_ids, &test_names);
         file_helpers::write_arrow_stream(&input_path, &schema, vec![batch]).unwrap();
 
-        let converter = ParquetConverter::new(
+        let converter = ArrowToParquetConverter::new(
             input_path.to_str().unwrap().to_string(),
             output_path.clone(),
         )
@@ -315,10 +315,12 @@ mod tests {
             let output = temp_dir
                 .path()
                 .join(format!("output_{compression:?}.parquet"));
-            let converter =
-                ParquetConverter::new(input_path.to_str().unwrap().to_string(), output.clone())
-                    .unwrap()
-                    .with_compression(compression);
+            let converter = ArrowToParquetConverter::new(
+                input_path.to_str().unwrap().to_string(),
+                output.clone(),
+            )
+            .unwrap()
+            .with_compression(compression);
             converter.convert().await.unwrap();
             assert!(output.exists());
         }
@@ -344,7 +346,7 @@ mod tests {
             }],
         };
 
-        let converter = ParquetConverter::new(
+        let converter = ArrowToParquetConverter::new(
             input_path.to_str().unwrap().to_string(),
             output_path.clone(),
         )
@@ -390,10 +392,12 @@ mod tests {
             ParquetStatistics::Page,
         ] {
             let output = temp_dir.path().join(format!("output_{stats:?}.parquet"));
-            let converter =
-                ParquetConverter::new(input_path.to_str().unwrap().to_string(), output.clone())
-                    .unwrap()
-                    .with_statistics(stats);
+            let converter = ArrowToParquetConverter::new(
+                input_path.to_str().unwrap().to_string(),
+                output.clone(),
+            )
+            .unwrap()
+            .with_statistics(stats);
             converter.convert().await.unwrap();
             assert!(output.exists());
         }
@@ -413,10 +417,12 @@ mod tests {
 
         for version in [ParquetWriterVersion::V1, ParquetWriterVersion::V2] {
             let output = temp_dir.path().join(format!("output_{version:?}.parquet"));
-            let converter =
-                ParquetConverter::new(input_path.to_str().unwrap().to_string(), output.clone())
-                    .unwrap()
-                    .with_writer_version(version);
+            let converter = ArrowToParquetConverter::new(
+                input_path.to_str().unwrap().to_string(),
+                output.clone(),
+            )
+            .unwrap()
+            .with_writer_version(version);
             converter.convert().await.unwrap();
             assert!(output.exists());
         }
@@ -435,7 +441,7 @@ mod tests {
         let batch = test_data::create_batch_with_ids_and_names(&schema, &test_ids, &test_names);
         file_helpers::write_arrow_file(&input_path, &schema, vec![batch]).unwrap();
 
-        let converter = ParquetConverter::new(
+        let converter = ArrowToParquetConverter::new(
             input_path.to_str().unwrap().to_string(),
             output_path.clone(),
         )
@@ -465,7 +471,7 @@ mod tests {
         }
         file_helpers::write_arrow_file(&input_path, &schema, batches).unwrap();
 
-        let converter = ParquetConverter::new(
+        let converter = ArrowToParquetConverter::new(
             input_path.to_str().unwrap().to_string(),
             output_path.clone(),
         )
@@ -488,7 +494,7 @@ mod tests {
         let schema = test_data::simple_schema();
         file_helpers::write_arrow_stream(&input_path, &schema, vec![]).unwrap();
 
-        let converter = ParquetConverter::new(
+        let converter = ArrowToParquetConverter::new(
             input_path.to_str().unwrap().to_string(),
             output_path.clone(),
         )
@@ -509,7 +515,8 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let output_path = temp_dir.path().join("output.parquet");
 
-        let converter = ParquetConverter::new("/nonexistent/file.arrow".to_string(), output_path);
+        let converter =
+            ArrowToParquetConverter::new("/nonexistent/file.arrow".to_string(), output_path);
 
         assert!(converter.is_err());
     }
@@ -523,7 +530,7 @@ mod tests {
         file_helpers::write_invalid_file(&input_path).unwrap();
 
         let converter =
-            ParquetConverter::new(input_path.to_str().unwrap().to_string(), output_path);
+            ArrowToParquetConverter::new(input_path.to_str().unwrap().to_string(), output_path);
 
         assert!(converter.is_err());
     }
@@ -543,7 +550,7 @@ mod tests {
 
         let bloom_config = BloomFilterConfig::All(AllColumnsBloomFilterConfig { fpp: 0.001 });
 
-        let converter = ParquetConverter::new(
+        let converter = ArrowToParquetConverter::new(
             input_path.to_str().unwrap().to_string(),
             output_path.clone(),
         )
@@ -578,7 +585,7 @@ mod tests {
             },
         ]);
 
-        let converter = ParquetConverter::new(
+        let converter = ArrowToParquetConverter::new(
             input_path.to_str().unwrap().to_string(),
             output_path.clone(),
         )
@@ -608,7 +615,7 @@ mod tests {
         }]);
 
         let converter =
-            ParquetConverter::new(input_path.to_str().unwrap().to_string(), output_path)
+            ArrowToParquetConverter::new(input_path.to_str().unwrap().to_string(), output_path)
                 .unwrap()
                 .with_bloom_filters(bloom_config);
         let result = converter.convert().await;
@@ -642,7 +649,7 @@ mod tests {
             }],
         };
 
-        let converter = ParquetConverter::new(
+        let converter = ArrowToParquetConverter::new(
             input_path.to_str().unwrap().to_string(),
             output_path.clone(),
         )
@@ -682,7 +689,7 @@ mod tests {
             ],
         };
 
-        let converter = ParquetConverter::new(
+        let converter = ArrowToParquetConverter::new(
             input_path.to_str().unwrap().to_string(),
             output_path.clone(),
         )
@@ -715,7 +722,7 @@ mod tests {
         };
 
         let converter =
-            ParquetConverter::new(input_path.to_str().unwrap().to_string(), output_path)
+            ArrowToParquetConverter::new(input_path.to_str().unwrap().to_string(), output_path)
                 .unwrap()
                 .with_sort_spec(sort_spec)
                 .with_write_sorted_metadata(true);
@@ -749,7 +756,7 @@ mod tests {
             config: ColumnBloomFilterConfig { fpp: 0.001 },
         }]);
 
-        let converter = ParquetConverter::new(
+        let converter = ArrowToParquetConverter::new(
             input_path.to_str().unwrap().to_string(),
             output_path.clone(),
         )

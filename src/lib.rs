@@ -31,7 +31,7 @@ pub enum Commands {
     /// Output formats:
     ///   - Parquet file format
     #[command(verbatim_doc_comment)]
-    Parquet(ParquetArgs),
+    ArrowToParquet(ArrowToParquetArgs),
     /// Convert Arrow format to DuckDB format.
     ///
     /// Input formats:
@@ -41,7 +41,7 @@ pub enum Commands {
     /// Output formats:
     ///   - DuckDB database file format
     #[command(verbatim_doc_comment)]
-    Duckdb(DuckDbArgs),
+    ArrowToDuckdb(ArrowToDuckDbArgs),
     /// Convert Arrow format to Arrow format.
     ///
     /// Input formats:
@@ -52,8 +52,8 @@ pub enum Commands {
     ///   - Arrow IPC stream format
     ///   - Arrow IPC file format
     #[command(verbatim_doc_comment)]
-    Arrow(ArrowArgs),
-    /// Split Arrow data into multiple Arrow files based on unique values in a column.
+    ArrowToArrow(ArrowToArrowArgs),
+    /// Partition Arrow data into multiple Arrow files based on unique values in a column.
     ///
     /// Input formats:
     ///   - Arrow IPC stream format
@@ -62,9 +62,9 @@ pub enum Commands {
     /// Output formats:
     ///   - Arrow IPC stream format
     ///   - Arrow IPC file format
-    #[command(name = "split-to-arrow", verbatim_doc_comment)]
-    SplitToArrow(SplitToArrowArgs),
-    /// Split Arrow data into multiple Parquet files based on unique values in a column.
+    #[command(verbatim_doc_comment)]
+    PartitionArrowToArrow(PartitionArrowToArrowArgs),
+    /// Partition Arrow data into multiple Parquet files based on unique values in a column.
     ///
     /// Input formats:
     ///   - Arrow IPC stream format
@@ -72,8 +72,8 @@ pub enum Commands {
     ///
     /// Output formats:
     ///   - Parquet file format
-    #[command(name = "split-to-parquet", verbatim_doc_comment)]
-    SplitToParquet(SplitToParquetArgs),
+    #[command(verbatim_doc_comment)]
+    PartitionArrowToParquet(PartitionArrowToParquetArgs),
     /// Merge multiple Arrow files into a single Arrow file.
     ///
     /// Input formats:
@@ -83,8 +83,8 @@ pub enum Commands {
     /// Output formats:
     ///   - Arrow IPC stream format
     ///   - Arrow IPC file format
-    #[command(name = "merge-to-arrow", verbatim_doc_comment)]
-    MergeToArrow(MergeToArrowArgs),
+    #[command(verbatim_doc_comment)]
+    MergeArrowToArrow(MergeArrowToArrowArgs),
     /// Merge multiple Arrow files into a single Parquet file.
     ///
     /// Input formats:
@@ -93,8 +93,8 @@ pub enum Commands {
     ///
     /// Output formats:
     ///   - Parquet file format
-    #[command(name = "merge-to-parquet", verbatim_doc_comment)]
-    MergeToParquet(MergeToParquetArgs),
+    #[command(verbatim_doc_comment)]
+    MergeArrowToParquet(MergeArrowToParquetArgs),
     /// Merge multiple Arrow files into a single DuckDB database.
     ///
     /// Input formats:
@@ -103,12 +103,12 @@ pub enum Commands {
     ///
     /// Output formats:
     ///   - DuckDB database file format
-    #[command(name = "merge-to-duckdb", verbatim_doc_comment)]
-    MergeToDuckdb(MergeToDuckdbArgs),
+    #[command(verbatim_doc_comment)]
+    MergeArrowToDuckdb(MergeArrowToDuckdbArgs),
 }
 
 #[derive(Args, Debug)]
-pub struct ParquetArgs {
+pub struct ArrowToParquetArgs {
     /// Input Arrow IPC file.
     #[arg(value_parser = clap::value_parser!(clio::Input).exists().is_file())]
     pub input: clio::Input,
@@ -208,7 +208,7 @@ pub struct ParquetArgs {
 }
 
 #[derive(Args, Debug)]
-pub struct DuckDbArgs {
+pub struct ArrowToDuckDbArgs {
     /// Input Arrow IPC file.
     #[arg(value_parser = clap::value_parser!(clio::Input).exists().is_file())]
     pub input: clio::Input,
@@ -251,7 +251,7 @@ pub struct DuckDbArgs {
 }
 
 #[derive(Args, Debug)]
-pub struct ArrowArgs {
+pub struct ArrowToArrowArgs {
     /// Input Arrow IPC file.
     #[arg(value_parser = clap::value_parser!(clio::Input).exists().is_file())]
     pub input: clio::Input,
@@ -323,12 +323,12 @@ pub enum QueryDialect {
 }
 
 #[derive(Args, Debug)]
-pub struct SplitToArrowArgs {
+pub struct PartitionArrowToArrowArgs {
     /// Input Arrow IPC file.
     #[arg(value_parser = clap::value_parser!(clio::Input).exists().is_file())]
     pub input: clio::Input,
 
-    /// Column to split by.
+    /// Column to partition by.
     #[arg(short, long)]
     pub by: String,
 
@@ -341,7 +341,7 @@ pub struct SplitToArrowArgs {
     ///   {hash}       - First 8 characters of SHA256 hash of the value
     ///
     /// Examples:
-    ///   "split_{value}.arrow"
+    ///   "partition_{value}.arrow"
     ///   "{column}/{value}/data.parquet"
     ///   "partition_{safe_value}_{hash}.arrow"
     #[arg(
@@ -402,12 +402,12 @@ pub struct SplitToArrowArgs {
 }
 
 #[derive(Args, Debug)]
-pub struct SplitToParquetArgs {
+pub struct PartitionArrowToParquetArgs {
     /// Input Arrow IPC file.
     #[arg(value_parser = clap::value_parser!(clio::Input).exists().is_file())]
     pub input: clio::Input,
 
-    /// Column to split by.
+    /// Column to partition by.
     #[arg(short, long)]
     pub by: String,
 
@@ -420,7 +420,7 @@ pub struct SplitToParquetArgs {
     ///   {hash}       - First 8 characters of SHA256 hash of the value
     ///
     /// Examples:
-    ///   "split_{value}.parquet"
+    ///   "partition_{value}.parquet"
     ///   "{column}/{value}/data.parquet"
     ///   "partition_{safe_value}_{hash}.parquet"
     #[arg(
@@ -521,7 +521,7 @@ pub struct SplitToParquetArgs {
 }
 
 #[derive(Args, Debug)]
-pub struct MergeToArrowArgs {
+pub struct MergeArrowToArrowArgs {
     /// Input Arrow IPC files (supports multiple files and glob patterns).
     #[arg(required = true, value_name = "INPUTS")]
     pub inputs: Vec<String>,
@@ -564,7 +564,7 @@ pub struct MergeToArrowArgs {
 }
 
 #[derive(Args, Debug)]
-pub struct MergeToParquetArgs {
+pub struct MergeArrowToParquetArgs {
     /// Input Arrow IPC files (supports multiple files and glob patterns).
     #[arg(required = true, value_name = "INPUTS")]
     pub inputs: Vec<String>,
@@ -664,7 +664,7 @@ pub struct MergeToParquetArgs {
 }
 
 #[derive(Args, Debug)]
-pub struct MergeToDuckdbArgs {
+pub struct MergeArrowToDuckdbArgs {
     /// Input Arrow IPC files (supports multiple files and glob patterns).
     #[arg(required = true, value_name = "INPUTS")]
     pub inputs: Vec<String>,

@@ -1,6 +1,6 @@
-use crate::converters::arrow::ArrowConverter;
-use crate::converters::split::output_template::OutputTemplate;
-use crate::converters::split::partition_writer::{
+use crate::converters::arrow_to_arrow::ArrowToArrowConverter;
+use crate::converters::partition_arrow::output_template::OutputTemplate;
+use crate::converters::partition_arrow::partition_writer::{
     ArrowWriterBuilder, ParquetWriterBuilder, PartitionWriter, WriterBuilder,
 };
 use crate::utils::arrow_io::ArrowIPCFormat;
@@ -68,9 +68,9 @@ impl PartitioningState {
     }
 }
 
-pub struct SplitConverter {
+pub struct PartitionArrowConverter {
     input_path: String,
-    split_column: String,
+    partition_column: String,
     output_template: OutputTemplate,
     output_format: OutputFormat,
     record_batch_size: usize,
@@ -201,11 +201,11 @@ pub struct SplitConversionResult {
     pub output_files: HashMap<String, PartitioningResult>,
 }
 
-impl SplitConverter {
-    pub fn new(input_path: String, split_column: String, output_template: String) -> Self {
+impl PartitionArrowConverter {
+    pub fn new(input_path: String, partition_column: String, output_template: String) -> Self {
         Self {
             input_path,
-            split_column,
+            partition_column,
             output_template: OutputTemplate::new(output_template),
             output_format: OutputFormat::Arrow {
                 compression: None,
@@ -342,10 +342,10 @@ impl SplitConverter {
 
     async fn prepare_sorted_input(&self) -> Result<NamedTempFile> {
         let sorted_path = NamedTempFile::new()?;
-        let mut arrow_converter = ArrowConverter::new(&self.input_path, sorted_path.path())?;
+        let mut arrow_converter = ArrowToArrowConverter::new(&self.input_path, sorted_path.path())?;
 
         let mut sort_columns = vec![SortColumn {
-            name: self.split_column.clone(),
+            name: self.partition_column.clone(),
             direction: SortDirection::Ascending,
         }];
 
@@ -382,7 +382,7 @@ impl SplitConverter {
             DataType::Float32 => Ok(ArrayValues::Float32(column.as_primitive::<Float32Type>())),
             DataType::Float64 => Ok(ArrayValues::Float64(column.as_primitive::<Float64Type>())),
             _ => Err(anyhow!(
-                "Unsupported column type for splitting: {:?}. Supported types: Utf8, Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64, Float32, Float64",
+                "Unsupported column type for partitionting: {:?}. Supported types: Utf8, Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64, Float32, Float64",
                 column.data_type()
             )),
         }
@@ -399,15 +399,20 @@ impl SplitConverter {
         }
 
         let column = batch
-            .column_by_name(&self.split_column)
-            .ok_or_else(|| anyhow!("Split column '{}' not found in schema", self.split_column))?;
+            .column_by_name(&self.partition_column)
+            .ok_or_else(|| {
+                anyhow!(
+                    "Split column '{}' not found in schema",
+                    self.partition_column
+                )
+            })?;
 
         let array = self.create_array_values(column)?;
 
         if partitioning_state.current_value.is_none() {
             partitioning_state.current_value = array.get_value(0);
             let initial_path = self.output_template.resolve(
-                &self.split_column,
+                &self.partition_column,
                 &self.format_value(&partitioning_state.current_value),
             );
 
@@ -439,7 +444,7 @@ impl SplitConverter {
 
                 let new_path = self
                     .output_template
-                    .resolve(&self.split_column, &self.format_value(&value));
+                    .resolve(&self.partition_column, &self.format_value(&value));
 
                 partitioning_state.result_map.insert(
                     self.format_value(&value),
@@ -570,7 +575,7 @@ mod tests {
     use std::sync::Arc;
     use tempfile::TempDir;
 
-    fn create_test_batch(num_rows: usize, split_values: Vec<i32>) -> RecordBatch {
+    fn create_test_batch(num_rows: usize, partition_values: Vec<i32>) -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Int64, false),
             Field::new("category", DataType::Int32, false),
@@ -579,7 +584,7 @@ mod tests {
         ]));
 
         let id_array = Int64Array::from((0..num_rows as i64).collect::<Vec<_>>());
-        let category_array = Int32Array::from(split_values);
+        let category_array = Int32Array::from(partition_values);
         let value_array =
             Float64Array::from((0..num_rows).map(|i| i as f64 * 1.5).collect::<Vec<_>>());
         let name_array = StringArray::from(
@@ -612,14 +617,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_basic_split() {
+    async fn test_basic_partition() {
         let temp_dir = TempDir::new().unwrap();
         let output_dir = temp_dir.path().join("output");
 
         let batch = create_test_batch(9, vec![1, 1, 1, 2, 2, 2, 3, 3, 3]);
         let input_path = create_test_file(&temp_dir, vec![batch]);
 
-        let converter = SplitConverter::new(
+        let converter = PartitionArrowConverter::new(
             input_path.to_str().unwrap().to_string(),
             "category".to_string(),
             format!("{}/{{value}}.arrow", output_dir.display()),
@@ -635,7 +640,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_split_with_nulls() {
+    async fn test_partition_with_nulls() {
         let temp_dir = TempDir::new().unwrap();
         let output_dir = temp_dir.path().join("output");
 
@@ -663,7 +668,7 @@ mod tests {
 
         let input_path = create_test_file(&temp_dir, vec![batch]);
 
-        let converter = SplitConverter::new(
+        let converter = PartitionArrowConverter::new(
             input_path.to_str().unwrap().to_string(),
             "category".to_string(),
             format!("{}/{{value}}.arrow", output_dir.display()),
@@ -679,14 +684,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_split_with_sorting() {
+    async fn test_partition_with_sorting() {
         let temp_dir = TempDir::new().unwrap();
         let output_dir = temp_dir.path().join("output");
 
         let batch = create_test_batch(9, vec![2, 1, 3, 1, 2, 3, 3, 2, 1]);
         let input_path = create_test_file(&temp_dir, vec![batch]);
 
-        let converter = SplitConverter::new(
+        let converter = PartitionArrowConverter::new(
             input_path.to_str().unwrap().to_string(),
             "category".to_string(),
             format!("{}/{{value}}.arrow", output_dir.display()),
@@ -727,7 +732,7 @@ mod tests {
         let batch = create_test_batch(3, vec![1, 1, 1]);
         let input_path = create_test_file(&temp_dir, vec![batch]);
 
-        let converter = SplitConverter::new(
+        let converter = PartitionArrowConverter::new(
             input_path.to_str().unwrap().to_string(),
             "category".to_string(),
             format!("{}/{{value}}.arrow", output_dir.display()),
@@ -750,7 +755,7 @@ mod tests {
         let batch = create_test_batch(3, vec![1, 1, 1]);
         let input_path = create_test_file(&temp_dir, vec![batch]);
 
-        let converter = SplitConverter::new(
+        let converter = PartitionArrowConverter::new(
             input_path.to_str().unwrap().to_string(),
             "category".to_string(),
             format!("{}/{{value}}.arrow", output_dir.display()),
@@ -762,7 +767,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_string_split_column() {
+    async fn test_string_partition_column() {
         let temp_dir = TempDir::new().unwrap();
         let output_dir = temp_dir.path().join("output");
 
@@ -786,7 +791,7 @@ mod tests {
 
         let input_path = create_test_file(&temp_dir, vec![batch]);
 
-        let converter = SplitConverter::new(
+        let converter = PartitionArrowConverter::new(
             input_path.to_str().unwrap().to_string(),
             "region".to_string(),
             format!("{}/{{value}}.arrow", output_dir.display()),
@@ -809,7 +814,7 @@ mod tests {
         let batch = create_test_batch(6, vec![1, 1, 2, 2, 3, 3]);
         let input_path = create_test_file(&temp_dir, vec![batch]);
 
-        let converter = SplitConverter::new(
+        let converter = PartitionArrowConverter::new(
             input_path.to_str().unwrap().to_string(),
             "category".to_string(),
             format!("{}/{{value}}.parquet", output_dir.display()),
@@ -838,11 +843,11 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let output_dir = temp_dir.path().join("output");
 
-        let split_values: Vec<i32> = (0..10000).map(|i| i / 100).collect();
-        let batch = create_test_batch(10000, split_values);
+        let partition_values: Vec<i32> = (0..10000).map(|i| i / 100).collect();
+        let batch = create_test_batch(10000, partition_values);
         let input_path = create_test_file(&temp_dir, vec![batch]);
 
-        let converter = SplitConverter::new(
+        let converter = PartitionArrowConverter::new(
             input_path.to_str().unwrap().to_string(),
             "category".to_string(),
             format!("{}/{{value}}.arrow", output_dir.display()),
@@ -865,7 +870,7 @@ mod tests {
         let batch3 = create_test_batch(3, vec![3, 3, 3]);
         let input_path = create_test_file(&temp_dir, vec![batch1, batch2, batch3]);
 
-        let converter = SplitConverter::new(
+        let converter = PartitionArrowConverter::new(
             input_path.to_str().unwrap().to_string(),
             "category".to_string(),
             format!("{}/{{value}}.arrow", output_dir.display()),
@@ -893,7 +898,7 @@ mod tests {
         let batch = create_test_batch(3, vec![1, 2, 3]);
         let input_path = create_test_file(&temp_dir, vec![batch]);
 
-        let converter = SplitConverter::new(
+        let converter = PartitionArrowConverter::new(
             input_path.to_str().unwrap().to_string(),
             "nonexistent".to_string(),
             format!("{}/{{value}}.arrow", output_dir.display()),
@@ -971,7 +976,7 @@ mod tests {
 
         let input_path = create_test_file(&temp_dir, vec![empty_batch, normal_batch]);
 
-        let converter = SplitConverter::new(
+        let converter = PartitionArrowConverter::new(
             input_path.to_str().unwrap().to_string(),
             "category".to_string(),
             format!("{}/{{value}}.arrow", output_dir.display()),
@@ -987,7 +992,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_split_with_query() {
+    async fn test_partition_with_query() {
         let temp_dir = TempDir::new().unwrap();
         let output_dir = temp_dir.path().join("output");
 
@@ -1012,8 +1017,8 @@ mod tests {
 
         let input_path = create_test_file(&temp_dir, vec![batch]);
 
-        // filter to only active records before splitting
-        let converter = SplitConverter::new(
+        // filter to only active records before partitionting
+        let converter = PartitionArrowConverter::new(
             input_path.to_str().unwrap().to_string(),
             "category".to_string(),
             format!("{}/{{value}}.arrow", output_dir.display()),
@@ -1053,7 +1058,7 @@ mod tests {
         let batch = create_test_batch(3, vec![1, 1, 1]);
         let input_path = create_test_file(&temp_dir, vec![batch.clone()]);
 
-        let converter = SplitConverter::new(
+        let converter = PartitionArrowConverter::new(
             input_path.to_str().unwrap().to_string(),
             "category".to_string(),
             format!("{}/{{value}}.arrow", output_dir.display()),

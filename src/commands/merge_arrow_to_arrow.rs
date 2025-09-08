@@ -1,6 +1,6 @@
 use crate::{
-    MergeToArrowArgs,
-    converters::arrow::ArrowConverter,
+    MergeArrowToArrowArgs,
+    converters::arrow_to_arrow::ArrowToArrowConverter,
     utils::{
         arrow_io::{ArrowIPCReader, MultiFileIterator},
         filesystem::ensure_parent_dir_exists,
@@ -9,7 +9,7 @@ use crate::{
 use anyhow::{Result, bail};
 use glob::glob;
 
-pub async fn run(args: MergeToArrowArgs) -> Result<()> {
+pub async fn run(args: MergeArrowToArrowArgs) -> Result<()> {
     ensure_parent_dir_exists(args.output.path()).await?;
 
     let mut expanded_paths = Vec::new();
@@ -36,7 +36,7 @@ pub async fn run(args: MergeToArrowArgs) -> Result<()> {
         )?)
     };
 
-    let converter = ArrowConverter::from_iterator(iterator, args.output.path())
+    let converter = ArrowToArrowConverter::from_iterator(iterator, args.output.path())
         .with_compression(args.compression)
         .with_sorting(args.sort_by.unwrap_or_default())
         .with_output_ipc_format(args.output_ipc_format)
@@ -81,7 +81,7 @@ mod tests {
         file_helpers::write_arrow_file(&input1_path, &schema, vec![batch1]).unwrap();
         file_helpers::write_arrow_file(&input2_path, &schema, vec![batch2]).unwrap();
 
-        let args = MergeToArrowArgs {
+        let args = MergeArrowToArrowArgs {
             inputs: vec![
                 input1_path.to_string_lossy().to_string(),
                 input2_path.to_string_lossy().to_string(),
@@ -119,7 +119,7 @@ mod tests {
         }
 
         let glob_pattern = format!("{}/*.arrow", temp_dir.path().display());
-        let args = MergeToArrowArgs {
+        let args = MergeArrowToArrowArgs {
             inputs: vec![glob_pattern],
             output: OutputPath::new(&output_path).unwrap(),
             query: None,
@@ -154,7 +154,7 @@ mod tests {
         file_helpers::write_arrow_file(&input1_path, &schema1, vec![batch1]).unwrap();
         file_helpers::write_arrow_file(&input2_path, &schema2, vec![batch2]).unwrap();
 
-        let args = MergeToArrowArgs {
+        let args = MergeArrowToArrowArgs {
             inputs: vec![
                 input1_path.to_string_lossy().to_string(),
                 input2_path.to_string_lossy().to_string(),
