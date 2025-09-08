@@ -47,9 +47,7 @@ jobs:
           rm -rf libduckdb libduckdb-${{ matrix.duckdb_target }}.zip
       - name: Install packages
         if: ${{ matrix.os == 'macos-latest' }}
-        run: |
-          brew install duckdb
-          brew install lld
+        run: brew install duckdb lld
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
