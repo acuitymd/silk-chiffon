@@ -103,6 +103,8 @@ jobs:
       - name: Package
         shell: bash
         run: |
+          ls target/
+          ls target/*/*
           cd target/${{ matrix.target }}/release
           tar czf ../../../${{ matrix.artifact_name }}.tar.gz silk-chiffon
           echo "ASSET_PATH=${{ matrix.artifact_name }}.tar.gz" >> $GITHUB_ENV
