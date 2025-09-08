@@ -103,7 +103,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          VERSION="v$(date '+%Y%m%d')-$(git rev-parse --short=8 ${{ github.sha }})"
+          # picking central time just because I can
+          VERSION="v$(date -z 'America/Chicago' '+%Y-%m-%d_%H:%M:%S')_$(git rev-parse --short=8 ${{ github.sha }})"
           gh release create ${VERSION} \
             --title "💝 Release ${VERSION}" \
             --generate-notes \
