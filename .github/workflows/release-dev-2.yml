@@ -72,13 +72,12 @@ jobs:
           rustup update
           rustup show
           rustup --version
-      - name: Build binary
-        run: |
-          if [ "${{ matrix.zigbuild }}" = "true" ]; then
-            cargo zigbuild --release --target ${{ matrix.target }}
-          else
-            cargo build --release --target ${{ matrix.target }}
-          fi
+      - name: Build binary using zigbuild
+        run: cargo zigbuild --release --target ${{ matrix.target }}
+        if: ${{ matrix.zigbuild }}
+      - name: Build binary using cargo
+        run: cargo build --release --target ${{ matrix.target }}
+        if: ${{ matrix.zigbuild == false }}
         shell: bash
       - name: Package binary
         run: |
@@ -91,7 +90,7 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.target }}
+          name: ${{ env.ASSET_NAME }}
           path: ${{ env.ASSET_PATH }}
           retention-days: 1
 
