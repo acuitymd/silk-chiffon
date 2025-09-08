@@ -1,64 +1,29 @@
-use arrow::array::{ArrayRef, Float64Array, Int32Array, Int64Array, StringArray};
+use arrow::array::{ArrayRef, Float64Array, Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use silk_chiffon::utils::arrow_io::ArrowIPCFormat;
-use silk_chiffon::{ArrowCompression, ListOutputsFormat, QueryDialect, SplitToArrowArgs};
+use silk_chiffon::{ArrowCompression, ListOutputsFormat, PartitionArrowToArrowArgs, QueryDialect};
 use std::fs::{self, File};
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
 
-#[derive(Clone)]
-enum Distribution {
-    Uniform,
-    Skewed { hot_keys: usize, hot_ratio: f64 },
-    ExtremelySkewed { hot_keys: usize, hot_ratio: f64 },
-    Random,
-}
-
-struct DistributionScenario {
+struct StringKeyScenario {
     name: &'static str,
     num_rows: usize,
     cardinality: usize,
-    distribution: Distribution,
+    key_length: usize,
 }
 
-fn generate_value(index: usize, cardinality: usize, distribution: &Distribution) -> usize {
-    match distribution {
-        Distribution::Uniform => index % cardinality,
-        Distribution::Skewed {
-            hot_keys,
-            hot_ratio,
-        } => {
-            if rand::random::<f64>() < *hot_ratio {
-                (rand::random::<u64>() as usize) % hot_keys
-            } else {
-                hot_keys + ((rand::random::<u64>() as usize) % (cardinality - hot_keys))
-            }
-        }
-        Distribution::ExtremelySkewed {
-            hot_keys,
-            hot_ratio,
-        } => {
-            if rand::random::<f64>() < *hot_ratio {
-                (rand::random::<u64>() as usize) % hot_keys
-            } else {
-                hot_keys + ((rand::random::<u64>() as usize) % (cardinality - hot_keys))
-            }
-        }
-        Distribution::Random => (rand::random::<u64>() as usize) % cardinality,
-    }
-}
-
-fn generate_test_data(scenario: &DistributionScenario) -> Vec<RecordBatch> {
+fn generate_test_data(scenario: &StringKeyScenario) -> Vec<RecordBatch> {
     let batch_size = 10_000;
     let num_batches = scenario.num_rows.div_ceil(batch_size);
 
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Int64, false),
-        Field::new("split_col", DataType::Int32, false),
+        Field::new("partition_col", DataType::Utf8, false),
         Field::new("value", DataType::Float64, false),
         Field::new("payload", DataType::Utf8, false),
     ]));
@@ -70,18 +35,19 @@ fn generate_test_data(scenario: &DistributionScenario) -> Vec<RecordBatch> {
     for batch_idx in 0..num_batches {
         let rows_in_batch = batch_size.min(scenario.num_rows - batch_idx * batch_size);
         let mut ids = Vec::with_capacity(rows_in_batch);
-        let mut split_values = Vec::with_capacity(rows_in_batch);
+        let mut partition_values = Vec::with_capacity(rows_in_batch);
         let mut values = Vec::with_capacity(rows_in_batch);
         let mut payloads = Vec::with_capacity(rows_in_batch);
 
         for row_idx in 0..rows_in_batch {
             ids.push(id_counter);
-            let split_value = generate_value(
-                batch_idx * batch_size + row_idx,
-                scenario.cardinality,
-                &scenario.distribution,
-            ) as i32;
-            split_values.push(split_value);
+            let key_idx = (batch_idx * batch_size + row_idx) % scenario.cardinality;
+            let partition_value = format!(
+                "key_{:0width$}",
+                key_idx,
+                width = scenario.key_length.saturating_sub(4)
+            );
+            partition_values.push(partition_value);
             values.push(rand::random::<f64>() * 1000.0);
             payloads.push(format!("{}{}", payload_base, id_counter % 1000));
             id_counter += 1;
@@ -91,7 +57,7 @@ fn generate_test_data(scenario: &DistributionScenario) -> Vec<RecordBatch> {
             schema.clone(),
             vec![
                 Arc::new(Int64Array::from(ids)) as ArrayRef,
-                Arc::new(Int32Array::from(split_values)) as ArrayRef,
+                Arc::new(StringArray::from(partition_values)) as ArrayRef,
                 Arc::new(Float64Array::from(values)) as ArrayRef,
                 Arc::new(StringArray::from(payloads)) as ArrayRef,
             ],
@@ -113,7 +79,7 @@ fn write_test_data(batches: &[RecordBatch], path: &std::path::Path) {
     writer.finish().unwrap();
 }
 
-fn setup_benchmark_data(scenario: &DistributionScenario) -> (TempDir, std::path::PathBuf) {
+fn setup_benchmark_data(scenario: &StringKeyScenario) -> (TempDir, std::path::PathBuf) {
     let temp_dir = TempDir::new().unwrap();
     let input_path = temp_dir.path().join("input.arrow");
 
@@ -124,9 +90,9 @@ fn setup_benchmark_data(scenario: &DistributionScenario) -> (TempDir, std::path:
 }
 
 async fn run_silk_chiffon(input_path: &std::path::Path, output_dir: &std::path::Path) {
-    let args = SplitToArrowArgs {
+    let args = PartitionArrowToArrowArgs {
         input: clio::Input::new(input_path).unwrap(),
-        by: "split_col".to_string(),
+        by: "partition_col".to_string(),
         output_template: format!("{}/{{value}}.arrow", output_dir.display()),
         record_batch_size: 122_880,
         sort_by: None,
@@ -140,46 +106,40 @@ async fn run_silk_chiffon(input_path: &std::path::Path, output_dir: &std::path::
         exclude_columns: vec![],
     };
 
-    silk_chiffon::commands::split_to_arrow::run(args)
+    silk_chiffon::commands::partition_arrow_to_arrow::run(args)
         .await
         .unwrap();
 }
 
-fn bench_distributions(c: &mut Criterion) {
+fn bench_string_keys(c: &mut Criterion) {
     let scenarios = vec![
-        DistributionScenario {
-            name: "uniform_distribution",
+        StringKeyScenario {
+            name: "short_keys_low_cardinality",
             num_rows: 1_000_000,
-            cardinality: 100,
-            distribution: Distribution::Uniform,
+            cardinality: 50,
+            key_length: 10,
         },
-        DistributionScenario {
-            name: "skewed_80_20",
-            num_rows: 1_000_000,
-            cardinality: 100,
-            distribution: Distribution::Skewed {
-                hot_keys: 5,
-                hot_ratio: 0.8,
-            },
-        },
-        DistributionScenario {
-            name: "extremely_skewed_95_5",
+        StringKeyScenario {
+            name: "short_keys_high_cardinality",
             num_rows: 1_000_000,
             cardinality: 1000,
-            distribution: Distribution::ExtremelySkewed {
-                hot_keys: 1,
-                hot_ratio: 0.95,
-            },
+            key_length: 10,
         },
-        DistributionScenario {
-            name: "random_distribution",
+        StringKeyScenario {
+            name: "long_keys_low_cardinality",
             num_rows: 1_000_000,
-            cardinality: 100,
-            distribution: Distribution::Random,
+            cardinality: 50,
+            key_length: 50,
+        },
+        StringKeyScenario {
+            name: "long_keys_high_cardinality",
+            num_rows: 1_000_000,
+            cardinality: 1000,
+            key_length: 50,
         },
     ];
 
-    let mut group = c.benchmark_group("split_distributions");
+    let mut group = c.benchmark_group("partition_string_keys");
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(60));
     group.warm_up_time(Duration::from_secs(5));
@@ -212,7 +172,7 @@ fn bench_distributions(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default();
-    targets = bench_distributions
+    targets = bench_string_keys
 }
 
 criterion_main!(benches);

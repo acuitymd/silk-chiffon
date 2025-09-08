@@ -12,7 +12,7 @@ use datafusion::error::DataFusionError;
 use datafusion::physical_plan::DisplayFormatType;
 use duckdb::Connection;
 use silk_chiffon::utils::arrow_io::ArrowIPCFormat;
-use silk_chiffon::{ArrowCompression, ListOutputsFormat, QueryDialect, SplitToArrowArgs};
+use silk_chiffon::{ArrowCompression, ListOutputsFormat, PartitionArrowToArrowArgs, QueryDialect};
 use std::fmt::Formatter;
 use std::fs::{self, File};
 use std::path::PathBuf;
@@ -36,10 +36,10 @@ fn generate_test_data(
     let batch_size = 10_000;
     let num_batches = num_rows.div_ceil(batch_size);
 
-    let split_field = Field::new("split_col", data_type.clone(), false);
+    let partition_field = Field::new("partition_col", data_type.clone(), false);
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Int64, false),
-        split_field,
+        partition_field,
         Field::new("value", DataType::Float64, false),
         Field::new("payload", DataType::Utf8, false),
     ]));
@@ -54,22 +54,22 @@ fn generate_test_data(
         let mut values = Vec::with_capacity(rows_in_batch);
         let mut payloads = Vec::with_capacity(rows_in_batch);
 
-        let split_array: ArrayRef = match data_type {
+        let partition_array: ArrayRef = match data_type {
             DataType::Int32 => {
-                let mut split_values = Vec::with_capacity(rows_in_batch);
+                let mut partition_values = Vec::with_capacity(rows_in_batch);
                 for row_idx in 0..rows_in_batch {
                     let value = ((batch_idx * batch_size + row_idx) % cardinality) as i32;
-                    split_values.push(value);
+                    partition_values.push(value);
                 }
-                Arc::new(Int32Array::from(split_values))
+                Arc::new(Int32Array::from(partition_values))
             }
             DataType::Utf8 => {
-                let mut split_values = Vec::with_capacity(rows_in_batch);
+                let mut partition_values = Vec::with_capacity(rows_in_batch);
                 for row_idx in 0..rows_in_batch {
                     let value = (batch_idx * batch_size + row_idx) % cardinality;
-                    split_values.push(format!("key_{value:06}"));
+                    partition_values.push(format!("key_{value:06}"));
                 }
-                Arc::new(StringArray::from(split_values))
+                Arc::new(StringArray::from(partition_values))
             }
             _ => panic!("Unsupported data type for benchmark: {data_type:?}"),
         };
@@ -85,7 +85,7 @@ fn generate_test_data(
             schema.clone(),
             vec![
                 Arc::new(Int64Array::from(ids)) as ArrayRef,
-                split_array,
+                partition_array,
                 Arc::new(Float64Array::from(values)) as ArrayRef,
                 Arc::new(StringArray::from(payloads)) as ArrayRef,
             ],
@@ -118,9 +118,9 @@ fn setup_benchmark_data(scenario: &BenchmarkScenario) -> (TempDir, std::path::Pa
 }
 
 async fn run_silk_arrow(input_path: &std::path::Path, output_dir: &std::path::Path) {
-    let args = SplitToArrowArgs {
+    let args = PartitionArrowToArrowArgs {
         input: clio::Input::new(input_path).unwrap(),
-        by: "split_col".to_string(),
+        by: "partition_col".to_string(),
         output_template: format!("{}/{{value}}.arrow", output_dir.display()),
         record_batch_size: 122_880,
         sort_by: None,
@@ -134,7 +134,7 @@ async fn run_silk_arrow(input_path: &std::path::Path, output_dir: &std::path::Pa
         exclude_columns: vec![],
     };
 
-    silk_chiffon::commands::split_to_arrow::run(args)
+    silk_chiffon::commands::partition_arrow_to_arrow::run(args)
         .await
         .unwrap();
 }
@@ -147,7 +147,7 @@ fn run_duckdb_arrow(input_path: &std::path::Path, output_dir: &std::path::Path) 
     conn.execute("LOAD nanoarrow", []).unwrap();
 
     let query = format!(
-        "COPY (SELECT * FROM read_arrow('{}')) TO '{}' (FORMAT ARROW, PARTITION_BY (split_col))",
+        "COPY (SELECT * FROM read_arrow('{}')) TO '{}' (FORMAT ARROW, PARTITION_BY (partition_col))",
         input_path.display(),
         output_dir.join("data.arrow").display()
     );
@@ -211,7 +211,7 @@ async fn run_datafusion_parquet(input_path: &std::path::Path, output_dir: &std::
     df.write_parquet(
         output_dir.to_str().unwrap(),
         datafusion::dataframe::DataFrameWriteOptions::new()
-            .with_partition_by(vec!["split_col".to_string()]),
+            .with_partition_by(vec!["partition_col".to_string()]),
         None,
     )
     .await
@@ -240,7 +240,7 @@ fn bench_small_datasets(c: &mut Criterion) {
         },
     ];
 
-    let mut group = c.benchmark_group("partition_split_small");
+    let mut group = c.benchmark_group("partition_partition_small");
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(30));
     group.warm_up_time(Duration::from_secs(5));
@@ -324,7 +324,7 @@ fn bench_large_datasets(c: &mut Criterion) {
         },
     ];
 
-    let mut group = c.benchmark_group("partition_split_large");
+    let mut group = c.benchmark_group("partition_partition_large");
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(60));
     group.warm_up_time(Duration::from_secs(5));

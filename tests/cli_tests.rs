@@ -18,10 +18,10 @@ fn test_help_command() {
             "Convert Arrow format to Arrow format",
         ))
         .stdout(predicate::str::contains(
-            "Split Arrow data into multiple Arrow files",
+            "Partition Arrow data into multiple Arrow files",
         ))
         .stdout(predicate::str::contains(
-            "Split Arrow data into multiple Parquet files",
+            "Partition Arrow data into multiple Parquet files",
         ));
 }
 
@@ -37,7 +37,7 @@ fn test_version_command() {
 #[test]
 fn test_parquet_help() {
     let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
-    cmd.args(["parquet", "--help"])
+    cmd.args(["arrow-to-parquet", "--help"])
         .assert()
         .success()
         .stdout(predicate::str::contains(
@@ -52,7 +52,7 @@ fn test_parquet_help() {
 #[test]
 fn test_duckdb_help() {
     let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
-    cmd.args(["duckdb", "--help"])
+    cmd.args(["arrow-to-duckdb", "--help"])
         .assert()
         .success()
         .stdout(predicate::str::contains(
@@ -66,7 +66,7 @@ fn test_duckdb_help() {
 #[test]
 fn test_arrow_help() {
     let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
-    cmd.args(["arrow", "--help"])
+    cmd.args(["arrow-to-arrow", "--help"])
         .assert()
         .success()
         .stdout(predicate::str::contains(
@@ -88,7 +88,7 @@ fn test_missing_subcommand() {
 #[test]
 fn test_parquet_missing_args() {
     let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
-    cmd.arg("parquet")
+    cmd.arg("arrow-to-parquet")
         .assert()
         .failure()
         .stderr(predicate::str::contains("required arguments"));
@@ -97,7 +97,7 @@ fn test_parquet_missing_args() {
 #[test]
 fn test_duckdb_missing_args() {
     let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
-    cmd.arg("duckdb")
+    cmd.arg("arrow-to-duckdb")
         .assert()
         .failure()
         .stderr(predicate::str::contains("required arguments"));
@@ -106,7 +106,7 @@ fn test_duckdb_missing_args() {
 #[test]
 fn test_arrow_missing_args() {
     let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
-    cmd.arg("arrow")
+    cmd.arg("arrow-to-arrow")
         .assert()
         .failure()
         .stderr(predicate::str::contains("required arguments"));
@@ -119,7 +119,7 @@ fn test_parquet_non_existent_input() {
 
     let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
     cmd.args([
-        "parquet",
+        "arrow-to-parquet",
         "/non/existent/file.arrow",
         output_path.to_str().unwrap(),
     ])
@@ -135,7 +135,7 @@ fn test_arrow_non_existent_input() {
 
     let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
     cmd.args([
-        "arrow",
+        "arrow-to-arrow",
         "/non/existent/file.arrow",
         output_path.to_str().unwrap(),
     ])
@@ -151,7 +151,7 @@ fn test_duckdb_non_existent_input() {
 
     let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
     cmd.args([
-        "duckdb",
+        "arrow-to-duckdb",
         "/non/existent/file.arrow",
         output_path.to_str().unwrap(),
     ])
@@ -161,52 +161,52 @@ fn test_duckdb_non_existent_input() {
 }
 
 #[test]
-fn test_split_to_arrow_help() {
+fn test_partition_arrow_to_arrow_help() {
     let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
-    cmd.args(["split-to-arrow", "--help"])
+    cmd.args(["partition-arrow-to-arrow", "--help"])
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Split Arrow data into multiple Arrow files",
+            "Partition Arrow data into multiple Arrow files",
         ))
-        .stdout(predicate::str::contains("Column to split by"));
+        .stdout(predicate::str::contains("Column to partition by"));
 }
 
 #[test]
-fn test_split_to_parquet_help() {
+fn test_partition_arrow_to_parquet_help() {
     let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
-    cmd.args(["split-to-parquet", "--help"])
+    cmd.args(["partition-arrow-to-parquet", "--help"])
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Split Arrow data into multiple Parquet files",
+            "Partition Arrow data into multiple Parquet files",
         ))
-        .stdout(predicate::str::contains("Column to split by"));
+        .stdout(predicate::str::contains("Column to partition by"));
 }
 
 #[test]
-fn test_split_to_arrow_missing_args() {
+fn test_partition_arrow_to_arrow_missing_args() {
     let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
-    cmd.arg("split-to-arrow")
+    cmd.arg("partition-arrow-to-arrow")
         .assert()
         .failure()
         .stderr(predicate::str::contains("required arguments"));
 }
 
 #[test]
-fn test_split_to_parquet_missing_args() {
+fn test_partition_arrow_to_parquet_missing_args() {
     let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
-    cmd.arg("split-to-parquet")
+    cmd.arg("partition-arrow-to-parquet")
         .assert()
         .failure()
         .stderr(predicate::str::contains("required arguments"));
 }
 
 #[test]
-fn test_split_to_arrow_non_existent_input() {
+fn test_partition_arrow_to_arrow_non_existent_input() {
     let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
     cmd.args([
-        "split-to-arrow",
+        "partition-arrow-to-arrow",
         "/non/existent/file.arrow",
         "--by",
         "category",
@@ -217,10 +217,10 @@ fn test_split_to_arrow_non_existent_input() {
 }
 
 #[test]
-fn test_split_to_parquet_non_existent_input() {
+fn test_partition_arrow_to_parquet_non_existent_input() {
     let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
     cmd.args([
-        "split-to-parquet",
+        "partition-arrow-to-parquet",
         "/non/existent/file.arrow",
         "--by",
         "category",

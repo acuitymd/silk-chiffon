@@ -4,7 +4,7 @@ use silk_chiffon::utils::test_helpers::test_data;
 use tempfile::tempdir;
 
 #[test]
-fn test_merge_to_duckdb_basic() {
+fn test_merge_arrow_to_duckdb_basic() {
     let temp_dir = tempdir().unwrap();
     let input1_path = temp_dir.path().join("input1.arrow");
     let input2_path = temp_dir.path().join("input2.arrow");
@@ -16,7 +16,7 @@ fn test_merge_to_duckdb_basic() {
     let output = Command::cargo_bin("silk-chiffon")
         .unwrap()
         .args([
-            "merge-to-duckdb",
+            "merge-arrow-to-duckdb",
             input1_path.to_str().unwrap(),
             input2_path.to_str().unwrap(),
             "-o",
@@ -48,7 +48,7 @@ fn test_merge_to_duckdb_basic() {
 }
 
 #[test]
-fn test_merge_to_duckdb_with_sorting() {
+fn test_merge_arrow_to_duckdb_with_sorting() {
     let temp_dir = tempdir().unwrap();
     let input1_path = temp_dir.path().join("input1.arrow");
     let input2_path = temp_dir.path().join("input2.arrow");
@@ -60,7 +60,7 @@ fn test_merge_to_duckdb_with_sorting() {
     let output = Command::cargo_bin("silk-chiffon")
         .unwrap()
         .args([
-            "merge-to-duckdb",
+            "merge-arrow-to-duckdb",
             input1_path.to_str().unwrap(),
             input2_path.to_str().unwrap(),
             "-o",
@@ -92,7 +92,7 @@ fn test_merge_to_duckdb_with_sorting() {
 }
 
 #[test]
-fn test_merge_to_duckdb_with_query() {
+fn test_merge_arrow_to_duckdb_with_query() {
     let temp_dir = tempdir().unwrap();
     let input1_path = temp_dir.path().join("input1.arrow");
     let input2_path = temp_dir.path().join("input2.arrow");
@@ -104,7 +104,7 @@ fn test_merge_to_duckdb_with_query() {
     let output = Command::cargo_bin("silk-chiffon")
         .unwrap()
         .args([
-            "merge-to-duckdb",
+            "merge-arrow-to-duckdb",
             input1_path.to_str().unwrap(),
             input2_path.to_str().unwrap(),
             "-o",
@@ -136,7 +136,7 @@ fn test_merge_to_duckdb_with_query() {
 }
 
 #[test]
-fn test_merge_to_duckdb_drop_table() {
+fn test_merge_arrow_to_duckdb_drop_table() {
     let temp_dir = tempdir().unwrap();
     let input_path = temp_dir.path().join("input.arrow");
     let output_path = temp_dir.path().join("test.db");
@@ -146,7 +146,7 @@ fn test_merge_to_duckdb_drop_table() {
     let output = Command::cargo_bin("silk-chiffon")
         .unwrap()
         .args([
-            "merge-to-duckdb",
+            "merge-arrow-to-duckdb",
             input_path.to_str().unwrap(),
             "-o",
             output_path.to_str().unwrap(),
@@ -160,7 +160,7 @@ fn test_merge_to_duckdb_drop_table() {
     let output = Command::cargo_bin("silk-chiffon")
         .unwrap()
         .args([
-            "merge-to-duckdb",
+            "merge-arrow-to-duckdb",
             input_path.to_str().unwrap(),
             "-o",
             output_path.to_str().unwrap(),
@@ -174,7 +174,7 @@ fn test_merge_to_duckdb_drop_table() {
     let output = Command::cargo_bin("silk-chiffon")
         .unwrap()
         .args([
-            "merge-to-duckdb",
+            "merge-arrow-to-duckdb",
             input_path.to_str().unwrap(),
             "-o",
             output_path.to_str().unwrap(),
@@ -197,7 +197,7 @@ fn test_merge_to_duckdb_drop_table() {
 }
 
 #[test]
-fn test_merge_to_duckdb_truncate() {
+fn test_merge_arrow_to_duckdb_truncate() {
     let temp_dir = tempdir().unwrap();
     let input_path = temp_dir.path().join("input.arrow");
     let output_path = temp_dir.path().join("test.db");
@@ -214,7 +214,7 @@ fn test_merge_to_duckdb_truncate() {
     let output = Command::cargo_bin("silk-chiffon")
         .unwrap()
         .args([
-            "merge-to-duckdb",
+            "merge-arrow-to-duckdb",
             input_path.to_str().unwrap(),
             "-o",
             output_path.to_str().unwrap(),
@@ -238,7 +238,7 @@ fn test_merge_to_duckdb_truncate() {
 }
 
 #[test]
-fn test_merge_to_duckdb_glob_pattern() {
+fn test_merge_arrow_to_duckdb_glob_pattern() {
     let temp_dir = tempdir().unwrap();
     let output_path = temp_dir.path().join("merged_glob.db");
 
@@ -251,7 +251,7 @@ fn test_merge_to_duckdb_glob_pattern() {
     let output = Command::cargo_bin("silk-chiffon")
         .unwrap()
         .args([
-            "merge-to-duckdb",
+            "merge-arrow-to-duckdb",
             &glob_pattern,
             "-o",
             output_path.to_str().unwrap(),
@@ -271,7 +271,7 @@ fn test_merge_to_duckdb_glob_pattern() {
 }
 
 #[test]
-fn test_merge_to_duckdb_with_record_batch_size() {
+fn test_merge_arrow_to_duckdb_with_record_batch_size() {
     let temp_dir = tempdir().unwrap();
     let input1_path = temp_dir.path().join("input1.arrow");
     let input2_path = temp_dir.path().join("input2.arrow");
@@ -283,7 +283,7 @@ fn test_merge_to_duckdb_with_record_batch_size() {
     let output = Command::cargo_bin("silk-chiffon")
         .unwrap()
         .args([
-            "merge-to-duckdb",
+            "merge-arrow-to-duckdb",
             input1_path.to_str().unwrap(),
             input2_path.to_str().unwrap(),
             "-o",
@@ -306,7 +306,7 @@ fn test_merge_to_duckdb_with_record_batch_size() {
 }
 
 #[test]
-fn test_merge_to_duckdb_error_no_table_name() {
+fn test_merge_arrow_to_duckdb_error_no_table_name() {
     let temp_dir = tempdir().unwrap();
     let input_path = temp_dir.path().join("input.arrow");
     let output_path = temp_dir.path().join("output.db");
@@ -316,7 +316,7 @@ fn test_merge_to_duckdb_error_no_table_name() {
     let output = Command::cargo_bin("silk-chiffon")
         .unwrap()
         .args([
-            "merge-to-duckdb",
+            "merge-arrow-to-duckdb",
             input_path.to_str().unwrap(),
             "-o",
             output_path.to_str().unwrap(),

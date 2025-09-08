@@ -5,7 +5,7 @@ use std::fs::File;
 use tempfile::tempdir;
 
 #[test]
-fn test_merge_to_arrow_basic() {
+fn test_merge_arrow_to_arrow_basic() {
     let temp_dir = tempdir().unwrap();
     let input1_path = temp_dir.path().join("input1.arrow");
     let input2_path = temp_dir.path().join("input2.arrow");
@@ -17,7 +17,7 @@ fn test_merge_to_arrow_basic() {
     let output = Command::cargo_bin("silk-chiffon")
         .unwrap()
         .args([
-            "merge-to-arrow",
+            "merge-arrow-to-arrow",
             input1_path.to_str().unwrap(),
             input2_path.to_str().unwrap(),
             "-o",
@@ -42,7 +42,7 @@ fn test_merge_to_arrow_basic() {
 }
 
 #[test]
-fn test_merge_to_arrow_with_sorting() {
+fn test_merge_arrow_to_arrow_with_sorting() {
     let temp_dir = tempdir().unwrap();
     let input1_path = temp_dir.path().join("input1.arrow");
     let input2_path = temp_dir.path().join("input2.arrow");
@@ -54,7 +54,7 @@ fn test_merge_to_arrow_with_sorting() {
     let output = Command::cargo_bin("silk-chiffon")
         .unwrap()
         .args([
-            "merge-to-arrow",
+            "merge-arrow-to-arrow",
             input1_path.to_str().unwrap(),
             input2_path.to_str().unwrap(),
             "-o",
@@ -85,7 +85,7 @@ fn test_merge_to_arrow_with_sorting() {
 }
 
 #[test]
-fn test_merge_to_arrow_with_glob_pattern() {
+fn test_merge_arrow_to_arrow_with_glob_pattern() {
     let temp_dir = tempdir().unwrap();
     let output_path = temp_dir.path().join("merged_glob.arrow");
 
@@ -98,7 +98,7 @@ fn test_merge_to_arrow_with_glob_pattern() {
     let output = Command::cargo_bin("silk-chiffon")
         .unwrap()
         .args([
-            "merge-to-arrow",
+            "merge-arrow-to-arrow",
             &glob_pattern,
             "-o",
             output_path.to_str().unwrap(),
@@ -121,7 +121,7 @@ fn test_merge_to_arrow_with_glob_pattern() {
 }
 
 #[test]
-fn test_merge_to_arrow_with_compression() {
+fn test_merge_arrow_to_arrow_with_compression() {
     let temp_dir = tempdir().unwrap();
     let input1_path = temp_dir.path().join("input1.arrow");
     let input2_path = temp_dir.path().join("input2.arrow");
@@ -133,7 +133,7 @@ fn test_merge_to_arrow_with_compression() {
     let output = Command::cargo_bin("silk-chiffon")
         .unwrap()
         .args([
-            "merge-to-arrow",
+            "merge-arrow-to-arrow",
             input1_path.to_str().unwrap(),
             input2_path.to_str().unwrap(),
             "-o",
@@ -169,7 +169,7 @@ fn test_merge_to_arrow_with_compression() {
 }
 
 #[test]
-fn test_merge_to_arrow_with_query() {
+fn test_merge_arrow_to_arrow_with_query() {
     let temp_dir = tempdir().unwrap();
     let input1_path = temp_dir.path().join("input1.arrow");
     let input2_path = temp_dir.path().join("input2.arrow");
@@ -181,7 +181,7 @@ fn test_merge_to_arrow_with_query() {
     let output = Command::cargo_bin("silk-chiffon")
         .unwrap()
         .args([
-            "merge-to-arrow",
+            "merge-arrow-to-arrow",
             input1_path.to_str().unwrap(),
             input2_path.to_str().unwrap(),
             "-o",
@@ -216,13 +216,13 @@ fn test_merge_to_arrow_with_query() {
 }
 
 #[test]
-fn test_merge_to_arrow_empty_input_error() {
+fn test_merge_arrow_to_arrow_empty_input_error() {
     let temp_dir = tempdir().unwrap();
     let output_path = temp_dir.path().join("merged.arrow");
 
     let output = Command::cargo_bin("silk-chiffon")
         .unwrap()
-        .args(["merge-to-arrow", "-o", output_path.to_str().unwrap()])
+        .args(["merge-arrow-to-arrow", "-o", output_path.to_str().unwrap()])
         .output()
         .expect("Failed to execute command");
 
@@ -230,14 +230,14 @@ fn test_merge_to_arrow_empty_input_error() {
 }
 
 #[test]
-fn test_merge_to_arrow_nonexistent_file_error() {
+fn test_merge_arrow_to_arrow_nonexistent_file_error() {
     let temp_dir = tempdir().unwrap();
     let output_path = temp_dir.path().join("merged.arrow");
 
     let output = Command::cargo_bin("silk-chiffon")
         .unwrap()
         .args([
-            "merge-to-arrow",
+            "merge-arrow-to-arrow",
             "/nonexistent/file.arrow",
             "-o",
             output_path.to_str().unwrap(),

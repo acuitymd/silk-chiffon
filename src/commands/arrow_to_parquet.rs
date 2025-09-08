@@ -1,10 +1,10 @@
 use crate::{
-    BloomFilterConfig, ParquetArgs, converters::parquet::ParquetConverter,
+    ArrowToParquetArgs, BloomFilterConfig, converters::arrow_to_parquet::ArrowToParquetConverter,
     utils::filesystem::ensure_parent_dir_exists,
 };
 use anyhow::Result;
 
-pub async fn run(args: ParquetArgs) -> Result<()> {
+pub async fn run(args: ArrowToParquetArgs) -> Result<()> {
     let input_path = args.input.path().to_string_lossy().to_string();
     let output_path = args.output.path().to_path_buf();
 
@@ -18,7 +18,7 @@ pub async fn run(args: ParquetArgs) -> Result<()> {
         BloomFilterConfig::None
     };
 
-    let converter = ParquetConverter::new(input_path, output_path)?
+    let converter = ArrowToParquetConverter::new(input_path, output_path)?
         .with_sort_spec(args.sort_by.unwrap_or_default())
         .with_record_batch_size(args.record_batch_size)
         .with_parquet_row_group_size(args.max_row_group_size)
@@ -53,7 +53,7 @@ mod tests {
             test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["A", "B", "C"]);
         file_helpers::write_arrow_file(&input_path, &schema, vec![batch]).unwrap();
 
-        let args = ParquetArgs {
+        let args = ArrowToParquetArgs {
             input: Input::new(&input_path).unwrap(),
             output: OutputPath::new(&output_path).unwrap(),
             query: None,
@@ -84,7 +84,7 @@ mod tests {
             test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["A", "B", "C"]);
         file_helpers::write_arrow_file(&input_path, &schema, vec![batch]).unwrap();
 
-        let args = ParquetArgs {
+        let args = ArrowToParquetArgs {
             input: Input::new(&input_path).unwrap(),
             output: OutputPath::new(&output_path).unwrap(),
             query: None,

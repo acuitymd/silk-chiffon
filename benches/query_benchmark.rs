@@ -4,7 +4,9 @@ use arrow::ipc::writer::FileWriter;
 use arrow::record_batch::RecordBatch;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use silk_chiffon::utils::arrow_io::ArrowIPCFormat;
-use silk_chiffon::{ArrowArgs, ArrowCompression, ParquetArgs, ParquetCompression, QueryDialect};
+use silk_chiffon::{
+    ArrowCompression, ArrowToArrowArgs, ArrowToParquetArgs, ParquetCompression, QueryDialect,
+};
 use std::fs::File;
 use std::sync::Arc;
 use std::time::Duration;
@@ -89,12 +91,12 @@ fn setup_query_benchmark(num_rows: usize) -> (TempDir, std::path::PathBuf) {
     (temp_dir, input_path)
 }
 
-async fn run_arrow_conversion(
+async fn run_arrow_to_arrow_conversion(
     input_path: &std::path::Path,
     output_path: &std::path::Path,
     query: Option<String>,
 ) {
-    let args = ArrowArgs {
+    let args = ArrowToArrowArgs {
         input: clio::Input::new(input_path).unwrap(),
         output: clio::OutputPath::new(output_path).unwrap(),
         query,
@@ -105,15 +107,17 @@ async fn run_arrow_conversion(
         output_ipc_format: ArrowIPCFormat::File,
     };
 
-    silk_chiffon::commands::arrow::run(args).await.unwrap();
+    silk_chiffon::commands::arrow_to_arrow::run(args)
+        .await
+        .unwrap();
 }
 
-async fn run_parquet_conversion(
+async fn run_arrow_to_parquet_conversion(
     input_path: &std::path::Path,
     output_path: &std::path::Path,
     query: Option<String>,
 ) {
-    let args = ParquetArgs {
+    let args = ArrowToParquetArgs {
         input: clio::Input::new(input_path).unwrap(),
         output: clio::OutputPath::new(output_path).unwrap(),
         query,
@@ -130,7 +134,9 @@ async fn run_parquet_conversion(
         record_batch_size: 122_880,
     };
 
-    silk_chiffon::commands::parquet::run(args).await.unwrap();
+    silk_chiffon::commands::arrow_to_parquet::run(args)
+        .await
+        .unwrap();
 }
 
 fn bench_query_vs_no_query(c: &mut Criterion) {
@@ -175,8 +181,12 @@ fn bench_query_vs_no_query(c: &mut Criterion) {
                     || setup_query_benchmark(scenario.num_rows),
                     |(temp_dir, input_path)| async move {
                         let output_path = temp_dir.path().join("output.arrow");
-                        run_arrow_conversion(&input_path, &output_path, scenario.query.clone())
-                            .await;
+                        run_arrow_to_arrow_conversion(
+                            &input_path,
+                            &output_path,
+                            scenario.query.clone(),
+                        )
+                        .await;
                     },
                     criterion::BatchSize::SmallInput,
                 );
@@ -191,8 +201,12 @@ fn bench_query_vs_no_query(c: &mut Criterion) {
                     || setup_query_benchmark(scenario.num_rows),
                     |(temp_dir, input_path)| async move {
                         let output_path = temp_dir.path().join("output.parquet");
-                        run_parquet_conversion(&input_path, &output_path, scenario.query.clone())
-                            .await;
+                        run_arrow_to_parquet_conversion(
+                            &input_path,
+                            &output_path,
+                            scenario.query.clone(),
+                        )
+                        .await;
                     },
                     criterion::BatchSize::SmallInput,
                 );
@@ -244,8 +258,12 @@ fn bench_query_types(c: &mut Criterion) {
                     || setup_query_benchmark(scenario.num_rows),
                     |(temp_dir, input_path)| async move {
                         let output_path = temp_dir.path().join("output.arrow");
-                        run_arrow_conversion(&input_path, &output_path, scenario.query.clone())
-                            .await;
+                        run_arrow_to_arrow_conversion(
+                            &input_path,
+                            &output_path,
+                            scenario.query.clone(),
+                        )
+                        .await;
                     },
                     criterion::BatchSize::SmallInput,
                 );
@@ -287,8 +305,12 @@ fn bench_query_with_sorting(c: &mut Criterion) {
                     || setup_query_benchmark(scenario.num_rows),
                     |(temp_dir, input_path)| async move {
                         let output_path = temp_dir.path().join("output.arrow");
-                        run_arrow_conversion(&input_path, &output_path, scenario.query.clone())
-                            .await;
+                        run_arrow_to_arrow_conversion(
+                            &input_path,
+                            &output_path,
+                            scenario.query.clone(),
+                        )
+                        .await;
                     },
                     criterion::BatchSize::SmallInput,
                 );
@@ -331,8 +353,12 @@ fn bench_query_overhead(c: &mut Criterion) {
                     || setup_query_benchmark(scenario.num_rows),
                     |(temp_dir, input_path)| async move {
                         let output_path = temp_dir.path().join("output.arrow");
-                        run_arrow_conversion(&input_path, &output_path, scenario.query.clone())
-                            .await;
+                        run_arrow_to_arrow_conversion(
+                            &input_path,
+                            &output_path,
+                            scenario.query.clone(),
+                        )
+                        .await;
                     },
                     criterion::BatchSize::SmallInput,
                 );
@@ -347,8 +373,12 @@ fn bench_query_overhead(c: &mut Criterion) {
                     || setup_query_benchmark(scenario.num_rows),
                     |(temp_dir, input_path)| async move {
                         let output_path = temp_dir.path().join("output.parquet");
-                        run_parquet_conversion(&input_path, &output_path, scenario.query.clone())
-                            .await;
+                        run_arrow_to_parquet_conversion(
+                            &input_path,
+                            &output_path,
+                            scenario.query.clone(),
+                        )
+                        .await;
                     },
                     criterion::BatchSize::SmallInput,
                 );

@@ -7,14 +7,18 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Parquet(args) => commands::parquet::run(args).await?,
-        Commands::Duckdb(args) => commands::duckdb::run(args).await?,
-        Commands::Arrow(args) => commands::arrow::run(args).await?,
-        Commands::SplitToArrow(args) => commands::split_to_arrow::run(args).await?,
-        Commands::SplitToParquet(args) => commands::split_to_parquet::run(args).await?,
-        Commands::MergeToArrow(args) => commands::merge_to_arrow::run(args).await?,
-        Commands::MergeToParquet(args) => commands::merge_to_parquet::run(args).await?,
-        Commands::MergeToDuckdb(args) => commands::merge_to_duckdb::run(args).await?,
+        Commands::ArrowToParquet(args) => commands::arrow_to_parquet::run(args).await?,
+        Commands::ArrowToDuckdb(args) => commands::arrow_to_duckdb::run(args).await?,
+        Commands::ArrowToArrow(args) => commands::arrow_to_arrow::run(args).await?,
+        Commands::PartitionArrowToArrow(args) => {
+            commands::partition_arrow_to_arrow::run(args).await?
+        }
+        Commands::PartitionArrowToParquet(args) => {
+            commands::partition_arrow_to_parquet::run(args).await?
+        }
+        Commands::MergeArrowToArrow(args) => commands::merge_arrow_to_arrow::run(args).await?,
+        Commands::MergeArrowToParquet(args) => commands::merge_arrow_to_parquet::run(args).await?,
+        Commands::MergeArrowToDuckdb(args) => commands::merge_arrow_to_duckdb::run(args).await?,
     };
     Ok(())
 }

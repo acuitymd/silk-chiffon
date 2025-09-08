@@ -390,7 +390,7 @@ impl ArrowIPCReader {
 #[cfg(test)]
 mod tests {
     use crate::{
-        converters::arrow::ArrowConverter,
+        converters::arrow_to_arrow::ArrowToArrowConverter,
         utils::{
             arrow_io::{ArrowFileSource, ArrowIPCFormat, ArrowIPCReader},
             test_helpers::{file_helpers, test_data, verify},
@@ -534,7 +534,8 @@ mod tests {
             file_helpers::write_arrow_file(&input_path, &schema, vec![batch]).unwrap();
 
             let mut converter =
-                ArrowConverter::new(input_path.to_str().unwrap(), Path::new("unused")).unwrap();
+                ArrowToArrowConverter::new(input_path.to_str().unwrap(), Path::new("unused"))
+                    .unwrap();
             let file_source = converter.as_file_format().await.unwrap();
 
             match file_source {
@@ -558,7 +559,8 @@ mod tests {
             file_helpers::write_arrow_stream(&input_path, &schema, vec![batch]).unwrap();
 
             let mut converter =
-                ArrowConverter::new(input_path.to_str().unwrap(), Path::new("unused")).unwrap();
+                ArrowToArrowConverter::new(input_path.to_str().unwrap(), Path::new("unused"))
+                    .unwrap();
             let file_source = converter.as_file_format().await.unwrap();
 
             match file_source {
@@ -592,7 +594,8 @@ mod tests {
             file_helpers::write_arrow_stream(&input_path, &schema, vec![batch]).unwrap();
 
             let mut converter =
-                ArrowConverter::new(input_path.to_str().unwrap(), Path::new("unused")).unwrap();
+                ArrowToArrowConverter::new(input_path.to_str().unwrap(), Path::new("unused"))
+                    .unwrap();
             let file_source = converter.as_file_format().await.unwrap();
 
             let temp_path = match &file_source {

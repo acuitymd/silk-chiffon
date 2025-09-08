@@ -7,7 +7,7 @@ use duckdb::Connection;
 use silk_chiffon::utils::arrow_io::ArrowIPCFormat;
 use silk_chiffon::{
     ArrowCompression, ListOutputsFormat, ParquetCompression, ParquetStatistics,
-    ParquetWriterVersion, QueryDialect, SplitToArrowArgs, SplitToParquetArgs,
+    ParquetWriterVersion, PartitionArrowToArrowArgs, PartitionArrowToParquetArgs, QueryDialect,
 };
 use std::fs::{self, File};
 use std::sync::Arc;
@@ -26,7 +26,7 @@ fn generate_test_data(num_rows: usize, cardinality: usize) -> Vec<RecordBatch> {
 
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Int64, false),
-        Field::new("split_col", DataType::Int32, false),
+        Field::new("partition_col", DataType::Int32, false),
         Field::new("value", DataType::Float64, false),
         Field::new("payload", DataType::Utf8, false),
     ]));
@@ -38,13 +38,13 @@ fn generate_test_data(num_rows: usize, cardinality: usize) -> Vec<RecordBatch> {
     for batch_idx in 0..num_batches {
         let rows_in_batch = batch_size.min(num_rows - batch_idx * batch_size);
         let mut ids = Vec::with_capacity(rows_in_batch);
-        let mut split_values = Vec::with_capacity(rows_in_batch);
+        let mut partition_values = Vec::with_capacity(rows_in_batch);
         let mut values = Vec::with_capacity(rows_in_batch);
         let mut payloads = Vec::with_capacity(rows_in_batch);
 
         for row_idx in 0..rows_in_batch {
             ids.push(id_counter);
-            split_values.push(((batch_idx * batch_size + row_idx) % cardinality) as i32);
+            partition_values.push(((batch_idx * batch_size + row_idx) % cardinality) as i32);
             values.push(rand::random::<f64>() * 1000.0);
             payloads.push(format!("{}{}", payload_base, id_counter % 1000));
             id_counter += 1;
@@ -54,7 +54,7 @@ fn generate_test_data(num_rows: usize, cardinality: usize) -> Vec<RecordBatch> {
             schema.clone(),
             vec![
                 Arc::new(Int64Array::from(ids)) as ArrayRef,
-                Arc::new(Int32Array::from(split_values)) as ArrayRef,
+                Arc::new(Int32Array::from(partition_values)) as ArrayRef,
                 Arc::new(Float64Array::from(values)) as ArrayRef,
                 Arc::new(StringArray::from(payloads)) as ArrayRef,
             ],
@@ -87,9 +87,9 @@ fn setup_benchmark_data(scenario: &FormatScenario) -> (TempDir, std::path::PathB
 }
 
 async fn run_silk_arrow(input_path: &std::path::Path, output_dir: &std::path::Path) {
-    let args = SplitToArrowArgs {
+    let args = PartitionArrowToArrowArgs {
         input: clio::Input::new(input_path).unwrap(),
-        by: "split_col".to_string(),
+        by: "partition_col".to_string(),
         output_template: format!("{}/{{value}}.arrow", output_dir.display()),
         record_batch_size: 122_880,
         sort_by: None,
@@ -103,15 +103,15 @@ async fn run_silk_arrow(input_path: &std::path::Path, output_dir: &std::path::Pa
         exclude_columns: vec![],
     };
 
-    silk_chiffon::commands::split_to_arrow::run(args)
+    silk_chiffon::commands::partition_arrow_to_arrow::run(args)
         .await
         .unwrap();
 }
 
 async fn run_silk_parquet(input_path: &std::path::Path, output_dir: &std::path::Path) {
-    let args = SplitToParquetArgs {
+    let args = PartitionArrowToParquetArgs {
         input: clio::Input::new(input_path).unwrap(),
-        by: "split_col".to_string(),
+        by: "partition_col".to_string(),
         output_template: format!("{}/{{value}}.parquet", output_dir.display()),
         record_batch_size: 122_880,
         sort_by: None,
@@ -131,7 +131,7 @@ async fn run_silk_parquet(input_path: &std::path::Path, output_dir: &std::path::
         exclude_columns: vec![],
     };
 
-    silk_chiffon::commands::split_to_parquet::run(args)
+    silk_chiffon::commands::partition_arrow_to_parquet::run(args)
         .await
         .unwrap();
 }
@@ -144,7 +144,7 @@ fn run_duckdb_parquet(input_path: &std::path::Path, output_dir: &std::path::Path
     conn.execute("LOAD nanoarrow", []).unwrap();
 
     let query = format!(
-        "COPY (SELECT * FROM read_arrow('{}')) TO '{}' (FORMAT PARQUET, PARTITION_BY (split_col))",
+        "COPY (SELECT * FROM read_arrow('{}')) TO '{}' (FORMAT PARQUET, PARTITION_BY (partition_col))",
         input_path.display(),
         output_dir.join("data.parquet").display()
     );

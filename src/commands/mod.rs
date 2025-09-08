@@ -1,8 +1,8 @@
-pub mod arrow;
-pub mod duckdb;
-pub mod merge_to_arrow;
-pub mod merge_to_duckdb;
-pub mod merge_to_parquet;
-pub mod parquet;
-pub mod split_to_arrow;
-pub mod split_to_parquet;
+pub mod arrow_to_arrow;
+pub mod arrow_to_duckdb;
+pub mod arrow_to_parquet;
+pub mod merge_arrow_to_arrow;
+pub mod merge_arrow_to_duckdb;
+pub mod merge_arrow_to_parquet;
+pub mod partition_arrow_to_arrow;
+pub mod partition_arrow_to_parquet;

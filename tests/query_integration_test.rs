@@ -6,7 +6,7 @@ use clio::{Input, OutputPath};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use silk_chiffon::QueryDialect;
 use silk_chiffon::{
-    ArrowArgs, ArrowCompression, ParquetArgs, ParquetCompression, ParquetStatistics,
+    ArrowCompression, ArrowToArrowArgs, ArrowToParquetArgs, ParquetCompression, ParquetStatistics,
     ParquetWriterVersion, SortColumn, SortDirection, SortSpec, utils::arrow_io::ArrowIPCFormat,
 };
 use std::fs::File;
@@ -85,7 +85,7 @@ async fn test_arrow_with_filter_query() {
 
     test_helpers::write_test_arrow_file(&input_path).unwrap();
 
-    let args = ArrowArgs {
+    let args = ArrowToArrowArgs {
         input: Input::new(&input_path).unwrap(),
         output: OutputPath::new(&output_path).unwrap(),
         query: Some("SELECT * FROM data WHERE amount > 100".to_string()),
@@ -96,7 +96,9 @@ async fn test_arrow_with_filter_query() {
         output_ipc_format: ArrowIPCFormat::File,
     };
 
-    silk_chiffon::commands::arrow::run(args).await.unwrap();
+    silk_chiffon::commands::arrow_to_arrow::run(args)
+        .await
+        .unwrap();
 
     let results = test_helpers::read_arrow_file(&output_path).unwrap();
     let total_rows: usize = results.iter().map(|b| b.num_rows()).sum();
@@ -122,7 +124,7 @@ async fn test_arrow_with_projection_query() {
 
     test_helpers::write_test_arrow_file(&input_path).unwrap();
 
-    let args = ArrowArgs {
+    let args = ArrowToArrowArgs {
         input: Input::new(&input_path).unwrap(),
         output: OutputPath::new(&output_path).unwrap(),
         query: Some("SELECT id, name FROM data".to_string()),
@@ -133,7 +135,9 @@ async fn test_arrow_with_projection_query() {
         output_ipc_format: ArrowIPCFormat::File,
     };
 
-    silk_chiffon::commands::arrow::run(args).await.unwrap();
+    silk_chiffon::commands::arrow_to_arrow::run(args)
+        .await
+        .unwrap();
 
     let results = test_helpers::read_arrow_file(&output_path).unwrap();
     assert!(!results.is_empty());
@@ -153,7 +157,7 @@ async fn test_arrow_with_aggregation_query() {
 
     test_helpers::write_test_arrow_file(&input_path).unwrap();
 
-    let args = ArrowArgs {
+    let args = ArrowToArrowArgs {
         input: Input::new(&input_path).unwrap(),
         output: OutputPath::new(&output_path).unwrap(),
         query: Some(
@@ -166,7 +170,9 @@ async fn test_arrow_with_aggregation_query() {
         output_ipc_format: ArrowIPCFormat::File,
     };
 
-    silk_chiffon::commands::arrow::run(args).await.unwrap();
+    silk_chiffon::commands::arrow_to_arrow::run(args)
+        .await
+        .unwrap();
 
     let results = test_helpers::read_arrow_file(&output_path).unwrap();
     assert_eq!(results.len(), 1);
@@ -195,7 +201,7 @@ async fn test_arrow_with_query_and_sort() {
 
     test_helpers::write_test_arrow_file(&input_path).unwrap();
 
-    let args = ArrowArgs {
+    let args = ArrowToArrowArgs {
         input: Input::new(&input_path).unwrap(),
         output: OutputPath::new(&output_path).unwrap(),
         query: Some("SELECT * FROM data WHERE amount > 100".to_string()),
@@ -211,7 +217,9 @@ async fn test_arrow_with_query_and_sort() {
         output_ipc_format: ArrowIPCFormat::File,
     };
 
-    silk_chiffon::commands::arrow::run(args).await.unwrap();
+    silk_chiffon::commands::arrow_to_arrow::run(args)
+        .await
+        .unwrap();
 
     let results = test_helpers::read_arrow_file(&output_path).unwrap();
 
@@ -241,7 +249,7 @@ async fn test_parquet_with_query() {
 
     test_helpers::write_test_arrow_file(&input_path).unwrap();
 
-    let args = ParquetArgs {
+    let args = ArrowToParquetArgs {
         input: Input::new(&input_path).unwrap(),
         output: OutputPath::new(&output_path).unwrap(),
         query: Some(
@@ -261,7 +269,9 @@ async fn test_parquet_with_query() {
         writer_version: ParquetWriterVersion::V2,
     };
 
-    silk_chiffon::commands::parquet::run(args).await.unwrap();
+    silk_chiffon::commands::arrow_to_parquet::run(args)
+        .await
+        .unwrap();
 
     assert!(output_path.exists());
 
@@ -289,7 +299,7 @@ async fn test_invalid_query_returns_error() {
 
     test_helpers::write_test_arrow_file(&input_path).unwrap();
 
-    let args = ArrowArgs {
+    let args = ArrowToArrowArgs {
         input: Input::new(&input_path).unwrap(),
         output: OutputPath::new(&output_path).unwrap(),
         query: Some("SELECT nonexistent_column FROM data".to_string()),
@@ -300,7 +310,7 @@ async fn test_invalid_query_returns_error() {
         output_ipc_format: ArrowIPCFormat::File,
     };
 
-    let result = silk_chiffon::commands::arrow::run(args).await;
+    let result = silk_chiffon::commands::arrow_to_arrow::run(args).await;
     assert!(result.is_err());
 
     let err_msg = result.unwrap_err().to_string();
@@ -334,7 +344,7 @@ async fn test_type_casting_int64_to_int32() {
     writer.write(&batch).unwrap();
     writer.finish().unwrap();
 
-    let args = ArrowArgs {
+    let args = ArrowToArrowArgs {
         input: Input::new(&input_path).unwrap(),
         output: OutputPath::new(&output_path).unwrap(),
         query: Some(
@@ -347,7 +357,9 @@ async fn test_type_casting_int64_to_int32() {
         output_ipc_format: ArrowIPCFormat::File,
     };
 
-    silk_chiffon::commands::arrow::run(args).await.unwrap();
+    silk_chiffon::commands::arrow_to_arrow::run(args)
+        .await
+        .unwrap();
 
     let results = test_helpers::read_arrow_file(&output_path).unwrap();
     assert!(!results.is_empty());

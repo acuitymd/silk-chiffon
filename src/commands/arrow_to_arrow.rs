@@ -1,15 +1,16 @@
 use crate::{
-    ArrowArgs, converters::arrow::ArrowConverter, utils::filesystem::ensure_parent_dir_exists,
+    ArrowToArrowArgs, converters::arrow_to_arrow::ArrowToArrowConverter,
+    utils::filesystem::ensure_parent_dir_exists,
 };
 use anyhow::Result;
 
-pub async fn run(args: ArrowArgs) -> Result<()> {
+pub async fn run(args: ArrowToArrowArgs) -> Result<()> {
     ensure_parent_dir_exists(args.output.path()).await?;
 
     let input_path = args.input.path().to_str().unwrap();
     let output_path = args.output.path();
 
-    let converter = ArrowConverter::new(input_path, output_path)?
+    let converter = ArrowToArrowConverter::new(input_path, output_path)?
         .with_compression(args.compression)
         .with_sorting(args.sort_by.unwrap_or_default())
         .with_record_batch_size(args.record_batch_size)
@@ -25,7 +26,7 @@ mod tests {
     use super::*;
     use crate::{
         ArrowCompression, QueryDialect, SortDirection, SortSpec,
-        commands::arrow::run,
+        commands::arrow_to_arrow::run,
         utils::{
             arrow_io::ArrowIPCFormat,
             filesystem::ensure_parent_dir_exists,
@@ -57,7 +58,7 @@ mod tests {
             // clio::OutputPath requires parent directory to exist first
             std::fs::create_dir_all(&output_dir).unwrap();
 
-            let args = ArrowArgs {
+            let args = ArrowToArrowArgs {
                 input: clio::Input::new(&input_path).unwrap(),
                 output: clio::OutputPath::new(&output_path).unwrap(),
                 query: None,
@@ -97,7 +98,7 @@ mod tests {
                 }],
             };
 
-            let args = ArrowArgs {
+            let args = ArrowToArrowArgs {
                 input: clio::Input::new(&input_path).unwrap(),
                 output: clio::OutputPath::new(&output_path).unwrap(),
                 query: None,

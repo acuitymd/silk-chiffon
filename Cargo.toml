@@ -58,23 +58,23 @@ rand = "~0.9"
 criterion = { version = "~0.7", features = ["html_reports", "async_tokio"] }
 
 [[bench]]
-name = "split_benchmark"
+name = "partition_benchmark"
 harness = false
 
 [[bench]]
-name = "split_formats_benchmark"
+name = "partition_formats_benchmark"
 harness = false
 
 [[bench]]
-name = "split_distributions_benchmark"
+name = "partition_distributions_benchmark"
 harness = false
 
 [[bench]]
-name = "split_string_keys_benchmark"
+name = "partition_string_keys_benchmark"
 harness = false
 
 [[bench]]
-name = "split_sorting_benchmark"
+name = "partition_sorting_benchmark"
 harness = false
 
 [[bench]]

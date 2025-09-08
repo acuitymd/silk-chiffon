@@ -2,7 +2,7 @@ use arrow::array::{ArrayRef, Int32Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::FileWriter;
 use arrow::record_batch::RecordBatch;
-use silk_chiffon::{QueryDialect, SplitToParquetArgs};
+use silk_chiffon::{PartitionArrowToParquetArgs, QueryDialect};
 use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
@@ -48,7 +48,7 @@ fn write_test_arrow_file(path: &Path, schema: &Schema, batches: Vec<RecordBatch>
 }
 
 #[tokio::test]
-async fn test_split_to_parquet_basic() {
+async fn test_partition_arrow_to_parquet_basic() {
     let temp_dir = tempdir().unwrap();
     let input_path = temp_dir.path().join("input.arrow");
     let output_dir = temp_dir.path().join("output");
@@ -56,7 +56,7 @@ async fn test_split_to_parquet_basic() {
     let (schema, batches) = create_test_data();
     write_test_arrow_file(&input_path, &schema, batches);
 
-    let args = SplitToParquetArgs {
+    let args = PartitionArrowToParquetArgs {
         input: clio::Input::new(&input_path).unwrap(),
         by: "category".to_string(),
         output_template: format!("{}/{{value}}.parquet", output_dir.display()),
@@ -78,7 +78,7 @@ async fn test_split_to_parquet_basic() {
         exclude_columns: vec![],
     };
 
-    silk_chiffon::commands::split_to_parquet::run(args)
+    silk_chiffon::commands::partition_arrow_to_parquet::run(args)
         .await
         .unwrap();
 
@@ -97,7 +97,7 @@ async fn test_split_to_parquet_basic() {
 }
 
 #[tokio::test]
-async fn test_split_to_parquet_with_bloom_filters() {
+async fn test_partition_arrow_to_parquet_with_bloom_filters() {
     let temp_dir = tempdir().unwrap();
     let input_path = temp_dir.path().join("input.arrow");
     let output_dir = temp_dir.path().join("output");
@@ -105,7 +105,7 @@ async fn test_split_to_parquet_with_bloom_filters() {
     let (schema, batches) = create_test_data();
     write_test_arrow_file(&input_path, &schema, batches);
 
-    let args = SplitToParquetArgs {
+    let args = PartitionArrowToParquetArgs {
         input: clio::Input::new(&input_path).unwrap(),
         by: "category".to_string(),
         output_template: format!("{}/{{value}}.parquet", output_dir.display()),
@@ -127,7 +127,7 @@ async fn test_split_to_parquet_with_bloom_filters() {
         exclude_columns: vec![],
     };
 
-    silk_chiffon::commands::split_to_parquet::run(args)
+    silk_chiffon::commands::partition_arrow_to_parquet::run(args)
         .await
         .unwrap();
 
@@ -137,7 +137,7 @@ async fn test_split_to_parquet_with_bloom_filters() {
 }
 
 #[tokio::test]
-async fn test_split_to_parquet_with_sorted_metadata() {
+async fn test_partition_arrow_to_parquet_with_sorted_metadata() {
     let temp_dir = tempdir().unwrap();
     let input_path = temp_dir.path().join("input.arrow");
     let output_dir = temp_dir.path().join("output");
@@ -145,7 +145,7 @@ async fn test_split_to_parquet_with_sorted_metadata() {
     let (schema, batches) = create_test_data();
     write_test_arrow_file(&input_path, &schema, batches);
 
-    let args = SplitToParquetArgs {
+    let args = PartitionArrowToParquetArgs {
         input: clio::Input::new(&input_path).unwrap(),
         by: "category".to_string(),
         output_template: format!("{}/{{value}}.parquet", output_dir.display()),
@@ -167,7 +167,7 @@ async fn test_split_to_parquet_with_sorted_metadata() {
         exclude_columns: vec![],
     };
 
-    silk_chiffon::commands::split_to_parquet::run(args)
+    silk_chiffon::commands::partition_arrow_to_parquet::run(args)
         .await
         .unwrap();
 

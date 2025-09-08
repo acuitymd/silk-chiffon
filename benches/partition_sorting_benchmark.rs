@@ -4,8 +4,8 @@ use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use silk_chiffon::{
-    ListOutputsFormat, ParquetCompression, ParquetStatistics, ParquetWriterVersion, QueryDialect,
-    SplitToParquetArgs,
+    ListOutputsFormat, ParquetCompression, ParquetStatistics, ParquetWriterVersion,
+    PartitionArrowToParquetArgs, QueryDialect,
 };
 use std::fs::{self, File};
 use std::sync::Arc;
@@ -25,7 +25,7 @@ fn generate_test_data(num_rows: usize, cardinality: usize) -> Vec<RecordBatch> {
 
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Int64, false),
-        Field::new("split_col", DataType::Int32, false),
+        Field::new("partition_col", DataType::Int32, false),
         Field::new("timestamp", DataType::Int64, false),
         Field::new("value", DataType::Float64, false),
         Field::new("category", DataType::Utf8, false),
@@ -38,14 +38,14 @@ fn generate_test_data(num_rows: usize, cardinality: usize) -> Vec<RecordBatch> {
     for batch_idx in 0..num_batches {
         let rows_in_batch = batch_size.min(num_rows - batch_idx * batch_size);
         let mut ids = Vec::with_capacity(rows_in_batch);
-        let mut split_values = Vec::with_capacity(rows_in_batch);
+        let mut partition_values = Vec::with_capacity(rows_in_batch);
         let mut timestamps = Vec::with_capacity(rows_in_batch);
         let mut values = Vec::with_capacity(rows_in_batch);
         let mut cats = Vec::with_capacity(rows_in_batch);
 
         for row_idx in 0..rows_in_batch {
             ids.push(id_counter);
-            split_values.push(((batch_idx * batch_size + row_idx) % cardinality) as i32);
+            partition_values.push(((batch_idx * batch_size + row_idx) % cardinality) as i32);
             timestamps.push(id_counter * 1000 + (rand::random::<i64>() % 100));
             values.push(rand::random::<f64>() * 1000.0);
             cats.push(categories[(id_counter as usize) % categories.len()].to_string());
@@ -56,7 +56,7 @@ fn generate_test_data(num_rows: usize, cardinality: usize) -> Vec<RecordBatch> {
             schema.clone(),
             vec![
                 Arc::new(Int64Array::from(ids)) as ArrayRef,
-                Arc::new(Int32Array::from(split_values)) as ArrayRef,
+                Arc::new(Int32Array::from(partition_values)) as ArrayRef,
                 Arc::new(Int64Array::from(timestamps)) as ArrayRef,
                 Arc::new(Float64Array::from(values)) as ArrayRef,
                 Arc::new(StringArray::from(cats)) as ArrayRef,
@@ -96,9 +96,9 @@ async fn run_silk_chiffon(
 ) {
     let sort_by = sort_columns.map(|s| s.parse().unwrap());
 
-    let args = SplitToParquetArgs {
+    let args = PartitionArrowToParquetArgs {
         input: clio::Input::new(input_path).unwrap(),
-        by: "split_col".to_string(),
+        by: "partition_col".to_string(),
         output_template: format!("{}/{{value}}.parquet", output_dir.display()),
         record_batch_size: 122_880,
         sort_by,
@@ -118,7 +118,7 @@ async fn run_silk_chiffon(
         exclude_columns: vec![],
     };
 
-    silk_chiffon::commands::split_to_parquet::run(args)
+    silk_chiffon::commands::partition_arrow_to_parquet::run(args)
         .await
         .unwrap();
 }
@@ -151,7 +151,7 @@ fn bench_sorting(c: &mut Criterion) {
         },
     ];
 
-    let mut group = c.benchmark_group("split_sorting");
+    let mut group = c.benchmark_group("partition_sorting");
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(90));
     group.warm_up_time(Duration::from_secs(10));

@@ -37,7 +37,7 @@ fn test_parquet_conversion_basic() {
     let output = Command::cargo_bin("silk-chiffon")
         .unwrap()
         .args([
-            "parquet",
+            "arrow-to-parquet",
             input_path.to_str().unwrap(),
             output_path.to_str().unwrap(),
         ])
@@ -86,7 +86,7 @@ fn test_parquet_conversion_with_sorting() {
     let output = Command::cargo_bin("silk-chiffon")
         .unwrap()
         .args([
-            "parquet",
+            "arrow-to-parquet",
             input_path.to_str().unwrap(),
             output_path.to_str().unwrap(),
             "--sort-by",
@@ -145,7 +145,7 @@ fn test_parquet_conversion_with_compression() {
     let output = Command::cargo_bin("silk-chiffon")
         .unwrap()
         .args([
-            "parquet",
+            "arrow-to-parquet",
             input_path.to_str().unwrap(),
             output_path.to_str().unwrap(),
             "--compression",
@@ -195,7 +195,7 @@ fn test_parquet_conversion_with_bloom_filter_all() {
     let output = Command::cargo_bin("silk-chiffon")
         .unwrap()
         .args([
-            "parquet",
+            "arrow-to-parquet",
             input_path.to_str().unwrap(),
             output_path.to_str().unwrap(),
             "--bloom-all",
@@ -211,7 +211,7 @@ fn test_parquet_conversion_with_bloom_filter_all() {
     let output = Command::cargo_bin("silk-chiffon")
         .unwrap()
         .args([
-            "parquet",
+            "arrow-to-parquet",
             input_path.to_str().unwrap(),
             output_path2.to_str().unwrap(),
             "--bloom-all",
@@ -254,7 +254,7 @@ fn test_parquet_conversion_with_bloom_filter_columns() {
     let output = Command::cargo_bin("silk-chiffon")
         .unwrap()
         .args([
-            "parquet",
+            "arrow-to-parquet",
             input_path.to_str().unwrap(),
             output_path.to_str().unwrap(),
             "--bloom-column",

@@ -32,7 +32,7 @@ use crate::{
 };
 use anyhow::Result;
 
-pub struct ArrowConverter {
+pub struct ArrowToArrowConverter {
     input: Box<dyn RecordBatchIterator>,
     output_path: PathBuf,
     write_options: IpcWriteOptions,
@@ -82,7 +82,7 @@ impl UniversalRecordBatchIterator for Pin<Box<dyn RecordBatchStream + Send>> {
     }
 }
 
-impl ArrowConverter {
+impl ArrowToArrowConverter {
     pub fn new(input_path: &str, output_path: &Path) -> Result<Self> {
         let reader = ArrowIPCReader::from_path(input_path)?;
         let input = reader.into_batch_iterator()?;
@@ -302,7 +302,7 @@ impl ArrowConverter {
 mod tests {
     use crate::{
         ArrowCompression, SortDirection, SortSpec,
-        converters::arrow::ArrowConverter,
+        converters::arrow_to_arrow::ArrowToArrowConverter,
         utils::test_helpers::{file_helpers, test_data, verify},
     };
     use arrow::array::{Array, Int32Array};
@@ -325,7 +325,7 @@ mod tests {
             file_helpers::write_arrow_file(&input_path, &schema, vec![batch]).unwrap();
 
             let converter =
-                ArrowConverter::new(input_path.to_str().unwrap(), &output_path).unwrap();
+                ArrowToArrowConverter::new(input_path.to_str().unwrap(), &output_path).unwrap();
             converter.convert().await.unwrap();
 
             let batches = verify::read_output_file(&output_path).unwrap();
@@ -346,7 +346,7 @@ mod tests {
             let batch = test_data::create_batch_with_ids_and_names(&schema, &test_ids, &test_names);
             file_helpers::write_arrow_file(&input_path, &schema, vec![batch]).unwrap();
 
-            let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path)
+            let converter = ArrowToArrowConverter::new(input_path.to_str().unwrap(), &output_path)
                 .unwrap()
                 .with_output_ipc_format(crate::utils::arrow_io::ArrowIPCFormat::Stream);
             converter.convert().await.unwrap();
@@ -369,7 +369,7 @@ mod tests {
             let batch = test_data::create_batch_with_ids_and_names(&schema, &test_ids, &test_names);
             file_helpers::write_arrow_stream(&input_path, &schema, vec![batch]).unwrap();
 
-            let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path)
+            let converter = ArrowToArrowConverter::new(input_path.to_str().unwrap(), &output_path)
                 .unwrap()
                 .with_output_ipc_format(crate::utils::arrow_io::ArrowIPCFormat::Stream);
             converter.convert().await.unwrap();
@@ -393,7 +393,7 @@ mod tests {
             file_helpers::write_arrow_stream(&input_path, &schema, vec![batch]).unwrap();
 
             let converter =
-                ArrowConverter::new(input_path.to_str().unwrap(), &output_path).unwrap();
+                ArrowToArrowConverter::new(input_path.to_str().unwrap(), &output_path).unwrap();
             converter.convert().await.unwrap();
 
             let batches = verify::read_output_file(&output_path).unwrap();
@@ -414,7 +414,7 @@ mod tests {
             let batch = test_data::create_batch_with_ids_and_names(&schema, &test_ids, &test_names);
             file_helpers::write_arrow_file(&input_path, &schema, vec![batch]).unwrap();
 
-            let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path)
+            let converter = ArrowToArrowConverter::new(input_path.to_str().unwrap(), &output_path)
                 .unwrap()
                 .with_compression(ArrowCompression::Zstd);
             converter.convert().await.unwrap();
@@ -437,7 +437,7 @@ mod tests {
             let batch = test_data::create_batch_with_ids_and_names(&schema, &test_ids, &test_names);
             file_helpers::write_arrow_file(&input_path, &schema, vec![batch]).unwrap();
 
-            let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path)
+            let converter = ArrowToArrowConverter::new(input_path.to_str().unwrap(), &output_path)
                 .unwrap()
                 .with_compression(ArrowCompression::Lz4);
             converter.convert().await.unwrap();
@@ -471,7 +471,7 @@ mod tests {
             );
             file_helpers::write_arrow_stream(&input_path, &schema, vec![batch1, batch2]).unwrap();
 
-            let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path)
+            let converter = ArrowToArrowConverter::new(input_path.to_str().unwrap(), &output_path)
                 .unwrap()
                 .with_record_batch_size(3);
             converter.convert().await.unwrap();
@@ -492,7 +492,7 @@ mod tests {
             file_helpers::write_arrow_stream(&input_path, &schema, vec![]).unwrap();
 
             let converter =
-                ArrowConverter::new(input_path.to_str().unwrap(), &output_path).unwrap();
+                ArrowToArrowConverter::new(input_path.to_str().unwrap(), &output_path).unwrap();
             converter.convert().await.unwrap();
 
             let batches = verify::read_output_file(&output_path).unwrap();
@@ -504,7 +504,7 @@ mod tests {
             let temp_dir = tempdir().unwrap();
             let output_path = temp_dir.path().join("output.arrow");
 
-            let result = ArrowConverter::new("/nonexistent/file.arrow", &output_path);
+            let result = ArrowToArrowConverter::new("/nonexistent/file.arrow", &output_path);
             assert!(result.is_err());
         }
 
@@ -516,7 +516,7 @@ mod tests {
 
             file_helpers::write_invalid_file(&input_path).unwrap();
 
-            let result = ArrowConverter::new(input_path.to_str().unwrap(), &output_path);
+            let result = ArrowToArrowConverter::new(input_path.to_str().unwrap(), &output_path);
             assert!(result.is_err());
         }
     }
@@ -544,7 +544,7 @@ mod tests {
                 }],
             };
 
-            let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path)
+            let converter = ArrowToArrowConverter::new(input_path.to_str().unwrap(), &output_path)
                 .unwrap()
                 .with_sorting(sort_spec);
             converter.convert().await.unwrap();
@@ -584,7 +584,7 @@ mod tests {
                 }],
             };
 
-            let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path)
+            let converter = ArrowToArrowConverter::new(input_path.to_str().unwrap(), &output_path)
                 .unwrap()
                 .with_sorting(sort_spec);
             converter.convert().await.unwrap();
@@ -630,7 +630,7 @@ mod tests {
                 ],
             };
 
-            let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path)
+            let converter = ArrowToArrowConverter::new(input_path.to_str().unwrap(), &output_path)
                 .unwrap()
                 .with_sorting(sort_spec);
             converter.convert().await.unwrap();
@@ -685,7 +685,7 @@ mod tests {
                 }],
             };
 
-            let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path)
+            let converter = ArrowToArrowConverter::new(input_path.to_str().unwrap(), &output_path)
                 .unwrap()
                 .with_sorting(sort_spec);
             converter.convert().await.unwrap();
@@ -728,7 +728,7 @@ mod tests {
                 }],
             };
 
-            let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path)
+            let converter = ArrowToArrowConverter::new(input_path.to_str().unwrap(), &output_path)
                 .unwrap()
                 .with_sorting(sort_spec);
             converter.convert().await.unwrap();
@@ -767,7 +767,7 @@ mod tests {
                 }],
             };
 
-            let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path)
+            let converter = ArrowToArrowConverter::new(input_path.to_str().unwrap(), &output_path)
                 .unwrap()
                 .with_sorting(sort_spec)
                 .with_compression(ArrowCompression::Zstd);
@@ -805,7 +805,7 @@ mod tests {
                 }],
             };
 
-            let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path)
+            let converter = ArrowToArrowConverter::new(input_path.to_str().unwrap(), &output_path)
                 .unwrap()
                 .with_sorting(sort_spec);
             let result = converter.convert().await;
@@ -833,7 +833,7 @@ mod tests {
                 }],
             };
 
-            let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path)
+            let converter = ArrowToArrowConverter::new(input_path.to_str().unwrap(), &output_path)
                 .unwrap()
                 .with_sorting(sort_spec)
                 .with_output_ipc_format(crate::utils::arrow_io::ArrowIPCFormat::Stream);
@@ -865,7 +865,7 @@ mod tests {
             );
             file_helpers::write_arrow_file(&input_path, &schema, vec![batch]).unwrap();
 
-            let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path)
+            let converter = ArrowToArrowConverter::new(input_path.to_str().unwrap(), &output_path)
                 .unwrap()
                 .with_query(Some("SELECT * FROM data WHERE id > 3".to_string()));
 
@@ -900,7 +900,7 @@ mod tests {
             );
             file_helpers::write_arrow_file(&input_path, &schema, vec![batch]).unwrap();
 
-            let converter = ArrowConverter::new(input_path.to_str().unwrap(), &output_path)
+            let converter = ArrowToArrowConverter::new(input_path.to_str().unwrap(), &output_path)
                 .unwrap()
                 .with_query(Some("SELECT id, name FROM data WHERE id <= 3".to_string()))
                 .with_sorting(crate::SortSpec {

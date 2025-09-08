@@ -1,9 +1,13 @@
-use crate::converters::split::{OutputFormat, SplitConversionResult, SplitConverter};
-use crate::{BloomFilterConfig, ListOutputsFormat, ParquetCompression, SplitToParquetArgs};
+use crate::converters::partition_arrow::{
+    OutputFormat, PartitionArrowConverter, SplitConversionResult,
+};
+use crate::{
+    BloomFilterConfig, ListOutputsFormat, ParquetCompression, PartitionArrowToParquetArgs,
+};
 use anyhow::Result;
 use std::path::PathBuf;
 
-pub async fn run_with_result(args: SplitToParquetArgs) -> Result<SplitConversionResult> {
+pub async fn run_with_result(args: PartitionArrowToParquetArgs) -> Result<SplitConversionResult> {
     let bloom_config = if args.bloom_all.is_some() {
         BloomFilterConfig::All(args.bloom_all.unwrap())
     } else if !args.bloom_column.is_empty() {
@@ -25,7 +29,7 @@ pub async fn run_with_result(args: SplitToParquetArgs) -> Result<SplitConversion
         write_sorted_metadata: args.write_sorted_metadata,
     };
 
-    let converter = SplitConverter::new(
+    let converter = PartitionArrowConverter::new(
         args.input.path().to_string_lossy().to_string(),
         args.by,
         args.output_template,
@@ -64,7 +68,7 @@ pub async fn run_with_result(args: SplitToParquetArgs) -> Result<SplitConversion
     Ok(conversion_result)
 }
 
-pub async fn run(args: SplitToParquetArgs) -> Result<()> {
+pub async fn run(args: PartitionArrowToParquetArgs) -> Result<()> {
     run_with_result(args).await?;
     Ok(())
 }

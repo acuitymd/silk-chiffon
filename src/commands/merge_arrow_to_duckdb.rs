@@ -1,6 +1,6 @@
 use crate::{
-    BloomFilterConfig, MergeToParquetArgs,
-    converters::parquet::ParquetConverter,
+    MergeArrowToDuckdbArgs,
+    converters::arrow_to_duckdb::ArrowToDuckDbConverter,
     utils::{
         arrow_io::{ArrowIPCReader, MultiFileIterator},
         filesystem::ensure_parent_dir_exists,
@@ -9,10 +9,11 @@ use crate::{
 use anyhow::{Result, bail};
 use glob::glob;
 
-pub async fn run(args: MergeToParquetArgs) -> Result<()> {
+pub async fn run(args: MergeArrowToDuckdbArgs) -> Result<()> {
     ensure_parent_dir_exists(args.output.path()).await?;
 
     let mut expanded_paths = Vec::new();
+
     for pattern in &args.inputs {
         for entry in glob(pattern)? {
             expanded_paths.push(entry?.to_string_lossy().to_string());
@@ -35,47 +36,37 @@ pub async fn run(args: MergeToParquetArgs) -> Result<()> {
         )?)
     };
 
-    let bloom_filters = if let Some(all_config) = args.bloom_all {
-        BloomFilterConfig::All(all_config)
-    } else if !args.bloom_column.is_empty() {
-        BloomFilterConfig::Columns(args.bloom_column)
-    } else {
-        BloomFilterConfig::None
-    };
+    let duckdb_converter = ArrowToDuckDbConverter::from_iterator(
+        iterator,
+        args.output.path().to_path_buf(),
+        args.table_name,
+    )
+    .with_sort_spec(args.sort_by.unwrap_or_default())
+    .with_query(args.query.clone())
+    .with_dialect(args.dialect)
+    .with_truncate(args.truncate)
+    .with_drop_table(args.drop_table);
 
-    let parquet_converter =
-        ParquetConverter::from_iterator(iterator, args.output.path().to_path_buf())
-            .with_sort_spec(args.sort_by.unwrap_or_default())
-            .with_query(args.query.clone())
-            .with_dialect(args.dialect)
-            .with_compression(args.compression)
-            .with_bloom_filters(bloom_filters)
-            .with_statistics(args.statistics)
-            .with_parquet_row_group_size(args.max_row_group_size)
-            .with_no_dictionary(args.no_dictionary)
-            .with_writer_version(args.writer_version)
-            .with_write_sorted_metadata(args.write_sorted_metadata)
-            .with_record_batch_size(args.record_batch_size);
-
-    parquet_converter.convert().await
+    duckdb_converter.convert().await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
-        ParquetCompression, ParquetStatistics, ParquetWriterVersion, QueryDialect,
-        utils::test_helpers::{file_helpers, test_data, verify},
+        QueryDialect,
+        utils::test_helpers::{file_helpers, test_data},
     };
     use clio::OutputPath;
+    use duckdb::Connection;
     use tempfile::tempdir;
 
     #[tokio::test]
-    async fn test_merge_to_parquet_two_files() {
+    async fn test_merge_arrow_to_duckdb_two_files() {
         let temp_dir = tempdir().unwrap();
         let input1_path = temp_dir.path().join("input1.arrow");
         let input2_path = temp_dir.path().join("input2.arrow");
-        let output_path = temp_dir.path().join("output.parquet");
+        let output_path = temp_dir.path().join("output.db");
 
         let schema = test_data::simple_schema();
         let batch1 = test_data::create_batch_with_ids_and_names(
@@ -92,82 +83,78 @@ mod tests {
         file_helpers::write_arrow_file(&input1_path, &schema, vec![batch1]).unwrap();
         file_helpers::write_arrow_file(&input2_path, &schema, vec![batch2]).unwrap();
 
-        let args = MergeToParquetArgs {
+        let args = MergeArrowToDuckdbArgs {
             inputs: vec![
                 input1_path.to_string_lossy().to_string(),
                 input2_path.to_string_lossy().to_string(),
             ],
             output: OutputPath::new(&output_path).unwrap(),
+            table_name: "merged_data".to_string(),
             query: None,
             dialect: QueryDialect::default(),
             sort_by: None,
-            compression: ParquetCompression::None,
-            write_sorted_metadata: false,
-            bloom_all: None,
-            bloom_column: vec![],
-            max_row_group_size: 1_048_576,
-            statistics: ParquetStatistics::Page,
+            truncate: false,
+            drop_table: false,
             record_batch_size: 122_880,
-            no_dictionary: false,
-            writer_version: ParquetWriterVersion::V2,
         };
 
         run(args).await.unwrap();
 
-        let batches = verify::read_parquet_file(&output_path).unwrap();
-        assert_eq!(batches.len(), 1);
-        assert_eq!(batches[0].num_rows(), 6);
+        let conn = Connection::open(&output_path).unwrap();
+        let count: i32 = conn
+            .query_row("SELECT COUNT(*) FROM merged_data", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 6);
     }
 
     #[tokio::test]
-    async fn test_merge_to_parquet_with_sorting() {
+    async fn test_merge_arrow_to_duckdb_with_query() {
         let temp_dir = tempdir().unwrap();
         let input1_path = temp_dir.path().join("input1.arrow");
         let input2_path = temp_dir.path().join("input2.arrow");
-        let output_path = temp_dir.path().join("output.parquet");
+        let output_path = temp_dir.path().join("output.db");
 
         let schema = test_data::simple_schema();
         let batch1 = test_data::create_batch_with_ids_and_names(
             &schema,
-            &[5, 3, 1],
-            &["Eve", "Charlie", "Alice"],
+            &[1, 2, 3],
+            &["Alice", "Bob", "Charlie"],
         );
         let batch2 = test_data::create_batch_with_ids_and_names(
             &schema,
-            &[6, 4, 2],
-            &["Frank", "David", "Bob"],
+            &[4, 5, 6],
+            &["David", "Eve", "Frank"],
         );
 
         file_helpers::write_arrow_file(&input1_path, &schema, vec![batch1]).unwrap();
         file_helpers::write_arrow_file(&input2_path, &schema, vec![batch2]).unwrap();
 
-        let args = MergeToParquetArgs {
+        let args = MergeArrowToDuckdbArgs {
             inputs: vec![
                 input1_path.to_string_lossy().to_string(),
                 input2_path.to_string_lossy().to_string(),
             ],
             output: OutputPath::new(&output_path).unwrap(),
-            query: None,
+            table_name: "filtered_data".to_string(),
+            query: Some("SELECT * FROM data WHERE id > 3".to_string()),
             dialect: QueryDialect::default(),
-            sort_by: Some("id".parse().unwrap()),
-            compression: ParquetCompression::None,
-            write_sorted_metadata: true,
-            bloom_all: None,
-            bloom_column: vec![],
-            max_row_group_size: 1_048_576,
-            statistics: ParquetStatistics::Page,
+            sort_by: None,
+            truncate: false,
+            drop_table: false,
             record_batch_size: 122_880,
-            no_dictionary: false,
-            writer_version: ParquetWriterVersion::V2,
         };
 
         run(args).await.unwrap();
 
-        let batches = verify::read_parquet_file(&output_path).unwrap();
-        assert_eq!(batches.len(), 1);
-        assert_eq!(batches[0].num_rows(), 6);
+        let conn = Connection::open(&output_path).unwrap();
+        let count: i32 = conn
+            .query_row("SELECT COUNT(*) FROM filtered_data", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 3); // only ids 4, 5, 6
 
-        let ids = verify::extract_column_as_i32_vec(&batches[0], "id");
-        assert_eq!(ids, vec![1, 2, 3, 4, 5, 6]);
+        let min_id: i32 = conn
+            .query_row("SELECT MIN(id) FROM filtered_data", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(min_id, 4);
     }
 }

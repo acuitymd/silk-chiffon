@@ -1,6 +1,6 @@
 use crate::{
     QueryDialect, SortSpec,
-    converters::parquet::ParquetConverter,
+    converters::arrow_to_parquet::ArrowToParquetConverter,
     utils::arrow_io::{ArrowIPCReader, RecordBatchIterator},
 };
 use anyhow::{Context, Result, anyhow};
@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
 use tokio::fs::remove_file;
 
-pub struct DuckDbConverter {
+pub struct ArrowToDuckDbConverter {
     input: Box<dyn RecordBatchIterator>,
     output_path: PathBuf,
     table_name: String,
@@ -21,7 +21,7 @@ pub struct DuckDbConverter {
     dialect: QueryDialect,
 }
 
-impl DuckDbConverter {
+impl ArrowToDuckDbConverter {
     pub fn new(input_path: String, output_path: PathBuf, table_name: String) -> Result<Self> {
         let reader = ArrowIPCReader::from_path(input_path)?;
         let input = reader.into_batch_iterator()?;
@@ -74,7 +74,7 @@ impl DuckDbConverter {
         let temp_file = NamedTempFile::with_suffix(".parquet")?;
         let parquet_path = temp_file.path().to_path_buf();
 
-        ParquetConverter::from_iterator(self.input.clone()?, parquet_path.clone())
+        ArrowToParquetConverter::from_iterator(self.input.clone()?, parquet_path.clone())
             .with_sort_spec(self.sort_spec.clone())
             .with_query(self.query.clone())
             .with_dialect(self.dialect)
@@ -152,7 +152,7 @@ mod tests {
         );
         file_helpers::write_arrow_file(&input_path, &schema, vec![batch]).unwrap();
 
-        let converter = DuckDbConverter::new(
+        let converter = ArrowToDuckDbConverter::new(
             input_path.to_string_lossy().to_string(),
             output_path.clone(),
             "test_table".to_string(),
@@ -182,7 +182,7 @@ mod tests {
         );
         file_helpers::write_arrow_file(&input_path, &schema, vec![batch]).unwrap();
 
-        let converter = DuckDbConverter::new(
+        let converter = ArrowToDuckDbConverter::new(
             input_path.to_string_lossy().to_string(),
             output_path.clone(),
             "test_table".to_string(),
@@ -217,7 +217,7 @@ mod tests {
         let batch = test_data::create_batch_with_ids_and_names(&schema, &[1], &["Alice"]);
         file_helpers::write_arrow_file(&input_path, &schema, vec![batch]).unwrap();
 
-        let converter = DuckDbConverter::new(
+        let converter = ArrowToDuckDbConverter::new(
             input_path.to_string_lossy().to_string(),
             output_path.clone(),
             "test_table".to_string(),
@@ -225,7 +225,7 @@ mod tests {
         .unwrap();
         converter.convert().await.unwrap();
 
-        let converter = DuckDbConverter::new(
+        let converter = ArrowToDuckDbConverter::new(
             input_path.to_string_lossy().to_string(),
             output_path.clone(),
             "test_table".to_string(),
@@ -246,7 +246,7 @@ mod tests {
         let batch = test_data::create_batch_with_ids_and_names(&schema, &[1], &["Alice"]);
         file_helpers::write_arrow_file(&input_path, &schema, vec![batch.clone()]).unwrap();
 
-        let converter = DuckDbConverter::new(
+        let converter = ArrowToDuckDbConverter::new(
             input_path.to_string_lossy().to_string(),
             output_path.clone(),
             "test_table".to_string(),
@@ -258,7 +258,7 @@ mod tests {
             test_data::create_batch_with_ids_and_names(&schema, &[2, 3], &["Bob", "Charlie"]);
         file_helpers::write_arrow_file(&input_path, &schema, vec![batch2]).unwrap();
 
-        let converter = DuckDbConverter::new(
+        let converter = ArrowToDuckDbConverter::new(
             input_path.to_string_lossy().to_string(),
             output_path.clone(),
             "test_table".to_string(),
@@ -284,7 +284,7 @@ mod tests {
         let batch = test_data::create_batch_with_ids_and_names(&schema, &[1], &["Alice"]);
         file_helpers::write_arrow_file(&input_path, &schema, vec![batch]).unwrap();
 
-        let converter = DuckDbConverter::new(
+        let converter = ArrowToDuckDbConverter::new(
             input_path.to_string_lossy().to_string(),
             output_path.clone(),
             "old_table".to_string(),
@@ -292,7 +292,7 @@ mod tests {
         .unwrap();
         converter.convert().await.unwrap();
 
-        let converter = DuckDbConverter::new(
+        let converter = ArrowToDuckDbConverter::new(
             input_path.to_string_lossy().to_string(),
             output_path.clone(),
             "new_table".to_string(),
