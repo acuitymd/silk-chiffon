@@ -1,14 +1,9 @@
-mod python
-mod rust
-
-# list all tasks
 @default:
     echo
     echo 'Usage:'
     echo
     echo '    Run `just` to list all tasks.'
     echo '    Run `just <task>` to run a task.'
-    echo '    Run `just <python|rust> <task>` to run a task for a specific language.'
     echo
     echo 'Tasks:'
     echo
@@ -17,30 +12,26 @@ mod rust
 
 alias ls := default
 
-# build python + rust
-build: python::build rust::build
-
-# test python + rust
-test: python::test rust::test
-
-# benchmark rust
 benchmark:
     cargo bench
 
-# alias of fmt-fix
-fmt: fmt-fix
+build:
+    cargo build --release
 
-# fmt check python + rust
-fmt-check: python::fmt-check rust::fmt-check
+test:
+    RUST_BACKTRACE=1 cargo test --verbose
 
-# fmt fix python + rust
-fmt-fix: python::fmt-fix rust::fmt-fix
+type-check:
+    cargo check --all-features
 
-# alias of lint-fix
-lint: lint-fix
+fmt-check:
+    cargo fmt --check
 
-# lint check python + rust
-lint-check: python::lint-check rust::lint-check
+fmt-fix:
+    cargo fmt
 
-# lint fix python + rust
-lint-fix: python::lint-fix rust::lint-fix
+lint-check:
+    cargo clippy --all-targets --all-features -- -D warnings
+
+lint-fix:
+    cargo clippy --all-targets --all-features --fix -- -D warnings
