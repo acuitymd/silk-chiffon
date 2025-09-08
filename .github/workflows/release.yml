@@ -1,4 +1,4 @@
-name: Release Dev 3
+name: Release
 on:
   workflow_dispatch:
 

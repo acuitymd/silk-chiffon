@@ -14,51 +14,41 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  CARGO_TERM_COLOR: always
+  RUSTC_WRAPPER: sccache
+  SCCACHE_GHA_ENABLED: "true"
+  CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
   DUCKDB_VERSION: 1.3.2
   RUST_BACKTRACE: 1
 
 jobs:
-  rust-ci:
-    name: Rust (${{ matrix.rust }}) CI for ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest]
-        rust: [stable]
+  ci:
+    runs-on: ubuntu-latest
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      #   - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: ./.github/workflows/actions/sccache-action
+
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: ${{ matrix.rust }}
+          targets: x86_64-unknown-linux-gnu
           components: rustfmt, clippy
 
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          # Cache key based on Cargo files
-          key: ${{ matrix.os }}-${{ matrix.rust }}-${{ hashFiles('**/Cargo.lock') }}
-          # Cache additional paths if needed
-          cache-directories: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-
-      - name: Setup DuckDB (Ubuntu only)
+      - name: Install packages
         run: |
+          set -e
           sudo apt-get update
-          sudo apt-get install -y curl unzip
-          curl -L -O https://github.com/duckdb/duckdb/releases/download/v${{ env.DUCKDB_VERSION }}/libduckdb-linux-amd64.zip
+          sudo apt-get install -y curl unzip lld
+          curl -L -O https://github.com/duckdb/duckdb/releases/download/v${{env.DUCKDB_VERSION}}/libduckdb-linux-amd64.zip
           unzip libduckdb-linux-amd64.zip -d libduckdb
           sudo mv libduckdb/duckdb.* /usr/local/include/
           sudo mv libduckdb/libduckdb.so /usr/local/lib/
           sudo ldconfig /usr/local/lib
           rm -rf libduckdb libduckdb-linux-amd64.zip
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "ci-ubuntu-latest"
 
       - name: Check formatting
         run: cargo fmt --check
