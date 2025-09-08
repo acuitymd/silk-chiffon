@@ -57,7 +57,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       #   - uses: mozilla-actions/sccache-action@v0.0.9
-      - uses: ./actions/sccache-action
+      - uses: ./.github/workflows/actions/sccache-action
 
       - uses: Swatinem/rust-cache@v2
         with:
