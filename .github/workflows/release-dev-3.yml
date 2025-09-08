@@ -103,8 +103,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          VERSION=$(date '+%Y%m%d')-$(git rev-parse --short=8 ${{ github.sha }})
-          gh release create v${VERSION} \
-            --title "🚀 Release v${VERSION}" \
+          VERSION="v$(date '+%Y%m%d')-$(git rev-parse --short=8 ${{ github.sha }})"
+          gh release create ${VERSION} \
+            --title "💝 Release ${VERSION}" \
             --generate-notes \
             ./binaries/**/*

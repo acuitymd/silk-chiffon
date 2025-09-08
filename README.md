@@ -35,6 +35,13 @@ cargo install --path .
 cargo binstall silk-chiffon
 ```
 
+### Releases
+
+You can download prebuild binaries from [each of our releases](https://github.com/acuitymd/silk-chiffon/releases).
+
+> [!IMPORTANT]
+> Macos will correctly detect that the downloaded binary is unsigned and will graciously offer to yeet the entire binary. To remove this roadblock you can unquarantine the binary using: `xattr -d com.apple.quarantine /path/to/silk-chiffon`.
+
 ## 🚀 Quick Start
 
 ### Command Line
