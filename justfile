@@ -24,14 +24,20 @@ test:
 type-check:
     cargo check --all-features
 
+alias type := type-check
+
 fmt-check:
     cargo fmt --check
 
 fmt-fix:
     cargo fmt
 
+alias fmt := fmt-fix
+
 lint-check:
-    cargo clippy --all-targets --all-features -- -D warnings
+    cargo clippy --all-targets --all-features --allow-dirty -- -D warnings
 
 lint-fix:
-    cargo clippy --all-targets --all-features --fix -- -D warnings
+    cargo clippy --all-targets --all-features --fix --allow-dirty -- -D warnings
+
+alias lint := lint-fix
