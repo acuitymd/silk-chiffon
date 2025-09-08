@@ -85,7 +85,7 @@ jobs:
           BINARY_NAME="$(cargo read-manifest | jq -r '.targets[] | select(.kind[] == "bin") | .name')"
           PACKAGED_BINARY_NAME="${BINARY_NAME}-${{ matrix.target }}"
           mkdir -p dist
-          cp "target/${{ matrix.target }}/release/${BINARY_NAME}" "dist/${PACKAGED_BINARY_NAME}/"
+          cp "target/${{ matrix.target }}/release/${BINARY_NAME}" "dist/${PACKAGED_BINARY_NAME}"
           echo "ASSET_PATH=dist/${PACKAGED_BINARY_NAME}" >> $GITHUB_ENV
           echo "ASSET_NAME=${PACKAGED_BINARY_NAME}" >> $GITHUB_ENV
       - name: Upload build artifact
