@@ -77,11 +77,3 @@ harness = false
 lto = true
 codegen-units = 1
 panic = "abort"
-
-[profile.ci]
-inherits = "test"
-opt-level = 0
-debug = false
-
-[profile.ci.package."*"]
-opt-level = 2

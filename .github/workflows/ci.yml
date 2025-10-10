@@ -111,4 +111,4 @@ jobs:
           tool: nextest
 
       - name: Run tests
-        run: cargo nextest run --profile ci --all-features --locked
+        run: cargo nextest run --release --all-features --locked
