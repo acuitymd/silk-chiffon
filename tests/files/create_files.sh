@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 
+command_exists() {
+  command -v "$1" &>/dev/null
+  return $?
+}
+
 function log() {
   RED='\033[0;31m'
   GREEN='\033[0;32m'
@@ -35,6 +40,15 @@ log_and_run() {
   "$@"
 }
 
+function die() {
+  error "$*"
+  exit 1
+}
+
+command_exists "duckdb" || die "duckdb is not installed"
+command_exists "datafusion-cli" || die "datafusion-cli is not installed"
+command_exists "silk-chiffon" || die "silk-chiffon is not installed"
+
 DIR="$(cd "$(dirname "$0")" && pwd)"
 
 info "Changing directory to $DIR"
@@ -63,23 +77,14 @@ done
 
 info "Creating duckdb format"
 
-if ! duckdb -f duckdb_cli_create_files.sql &>/dev/null; then
-  error "Failed to create DuckDB files"
-  exit 1
-fi
+duckdb -f duckdb_cli_create_files.sql &>/dev/null || die "Failed to create DuckDB files"
 
 info "Creating arrow file format and parquet format"
 
-if ! datafusion-cli --file datafusion_cli_create_files.sql &>/dev/null; then
-  error "Failed to create DataFusion files"
-  exit 1
-fi
+datafusion-cli --file datafusion_cli_create_files.sql &>/dev/null || die "Failed to create DataFusion files"
 
 info "Creating arrow stream format"
 
-if ! silk-chiffon arrow-to-arrow people.file.arrow people.stream.arrow --output-ipc-format stream &>/dev/null; then
-  error "Failed to create Arrow stream file"
-  exit 1
-fi
+silk-chiffon arrow-to-arrow people.file.arrow people.stream.arrow --output-ipc-format stream &>/dev/null || die "Failed to create Arrow stream file"
 
 info "Files created successfully"
