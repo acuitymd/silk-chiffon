@@ -28,6 +28,17 @@ impl DuckDBDataSource {
     pub fn new(path: String, table_name: String) -> Self {
         Self { path, table_name }
     }
+
+    fn get_schema(&self) -> Result<SchemaRef> {
+        let conn = Connection::open(&self.path)?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT * FROM {}",
+            quote_identifier(&self.table_name)
+        ))?;
+        let result = stmt.query_arrow([])?;
+        let schema = result.get_schema();
+        Ok(schema)
+    }
 }
 
 struct DuckDBChannelStream {
@@ -68,16 +79,8 @@ impl DataSource for DuckDBDataSource {
         let path = self.path.clone();
         let table_name = self.table_name.clone();
 
-        let conn = Connection::open(&self.path)?;
-        let mut stmt = conn.prepare(&format!(
-            "SELECT * FROM {} LIMIT 0",
-            quote_identifier(&self.table_name)
-        ))?;
-        let result = stmt.query_arrow([])?;
-        let schema = result.get_schema();
+        let schema = self.get_schema()?;
         let returned_schema = schema.clone();
-        drop(stmt);
-        drop(conn);
 
         let (tx, rx) = mpsc::channel::<Result<RecordBatch, DataFusionError>>(32);
 
