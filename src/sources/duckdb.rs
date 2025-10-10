@@ -67,7 +67,7 @@ impl DataSource for DuckDBDataSource {
         let path = self.path.clone();
         let table_name = self.table_name.clone();
 
-        let conn = Connection::open(&self.path).unwrap();
+        let conn = Connection::open(&self.path)?;
         let mut stmt = conn.prepare(&format!(
             "SELECT * FROM {} LIMIT 0",
             quote_identifier(&self.table_name)
@@ -82,7 +82,7 @@ impl DataSource for DuckDBDataSource {
 
         thread::spawn(move || {
             let result = (|| -> Result<()> {
-                let conn = Connection::open(&path).unwrap();
+                let conn = Connection::open(&path)?;
                 let mut stmt =
                     conn.prepare(&format!("SELECT * FROM {}", quote_identifier(&table_name)))?;
 
@@ -98,8 +98,8 @@ impl DataSource for DuckDBDataSource {
             })();
 
             if let Err(e) = result {
-                tx.blocking_send(Err(DataFusionError::Execution(e.to_string())))
-                    .unwrap();
+                // ignore the error if the channel is already closed
+                let _ = tx.blocking_send(Err(DataFusionError::Execution(e.to_string())));
             }
         });
 
