@@ -14,31 +14,36 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # RUSTC_WRAPPER: sccache
-  # SCCACHE_GHA_ENABLED: "true"
   CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
   DUCKDB_VERSION: 1.4.1
   RUST_BACKTRACE: 1
 
 jobs:
-  ci:
+  format:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      #   - uses: mozilla-actions/sccache-action@v0.0.9
-      # - uses: ./.github/workflows/actions/sccache-action
-
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo fmt --check
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-unknown-linux-gnu
-          components: rustfmt, clippy
+          components: clippy
 
-      - name: Install packages
+      - name: Setup DuckDB cache
+        id: cache-duckdb
+        uses: actions/cache@v4
+        with:
+          path: /usr/local/lib/libduckdb.so
+          key: duckdb-${{ env.DUCKDB_VERSION }}-linux-amd64
+
+      - name: Install DuckDB
+        if: steps.cache-duckdb.outputs.cache-hit != 'true'
         run: |
           set -e
-          sudo apt-get update
-          sudo apt-get install -y curl unzip lld
           curl -L -O https://github.com/duckdb/duckdb/releases/download/v${{env.DUCKDB_VERSION}}/libduckdb-linux-amd64.zip
           unzip libduckdb-linux-amd64.zip -d libduckdb
           sudo mv libduckdb/duckdb.* /usr/local/include/
@@ -46,43 +51,64 @@ jobs:
           sudo ldconfig /usr/local/lib
           rm -rf libduckdb libduckdb-linux-amd64.zip
 
-      - name: Check disk usage
-        run: |
-          df -h
-          du -csh ./*
+      - name: Configure DuckDB
+        if: steps.cache-duckdb.outputs.cache-hit == 'true'
+        run: sudo ldconfig /usr/local/lib
 
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: "ci-ubuntu-latest"
 
-      - name: Check disk usage
+      - run: cargo clippy --all-targets --all-features --locked -- -D warnings
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y lld
+
+      - name: Configure fast linker
         run: |
-          df -h
-          du -csh ./*
+          mkdir -p ~/.cargo
+          cat >> ~/.cargo/config.toml << EOF
+          [target.x86_64-unknown-linux-gnu]
+          linker = "clang"
+          rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+          EOF
 
-      - name: Check formatting
-        run: cargo fmt --check
+      - name: Setup DuckDB cache
+        id: cache-duckdb
+        uses: actions/cache@v4
+        with:
+          path: /usr/local/lib/libduckdb.so
+          key: duckdb-${{ env.DUCKDB_VERSION }}-linux-amd64
 
-      - name: Check disk usage
+      - name: Install DuckDB
+        if: steps.cache-duckdb.outputs.cache-hit != 'true'
         run: |
-          df -h
-          du -csh ./*
+          set -e
+          curl -L -O https://github.com/duckdb/duckdb/releases/download/v${{env.DUCKDB_VERSION}}/libduckdb-linux-amd64.zip
+          unzip libduckdb-linux-amd64.zip -d libduckdb
+          sudo mv libduckdb/duckdb.* /usr/local/include/
+          sudo mv libduckdb/libduckdb.so /usr/local/lib/
+          sudo ldconfig /usr/local/lib
+          rm -rf libduckdb libduckdb-linux-amd64.zip
 
-      - name: Check linting
-        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Configure DuckDB
+        if: steps.cache-duckdb.outputs.cache-hit == 'true'
+        run: sudo ldconfig /usr/local/lib
 
-      - name: Check disk usage
-        run: |
-          df -h
-          du -csh ./*
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "ci-ubuntu-latest"
 
-      - name: Check types
-        run: cargo check --all-features
-
-      - name: Check disk usage
-        run: |
-          df -h
-          du -csh ./*
+      - name: Install nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
 
       - name: Run tests
-        run: cargo test --verbose
+        run: cargo nextest run --profile ci --all-features --locked
