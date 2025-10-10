@@ -3240,6 +3240,7 @@ dependencies = [
  "strum",
  "tempfile",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
