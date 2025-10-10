@@ -59,5 +59,10 @@ jobs:
       - name: Check types
         run: cargo check --all-features
 
+      - name: Check disk usage
+        run: |
+          df -h
+          du -csh ./*
+
       - name: Run tests
         run: cargo test --verbose
