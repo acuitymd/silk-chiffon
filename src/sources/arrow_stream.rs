@@ -8,10 +8,11 @@ use datafusion::{
 use futures::Stream;
 use std::{
     fs::File,
-    io::BufReader,
     pin::Pin,
     task::{Context, Poll},
+    thread,
 };
+use tokio::sync::mpsc;
 
 use crate::sources::data_source::DataSource;
 
@@ -26,33 +27,31 @@ impl ArrowStreamDataSource {
     }
 }
 
-struct ArrowStreamSendableBatchReader {
-    reader: StreamReader<BufReader<File>>,
+struct ArrowStreamChannelStream {
+    schema: SchemaRef,
+    receiver: mpsc::Receiver<Result<RecordBatch, DataFusionError>>,
 }
 
-impl ArrowStreamSendableBatchReader {
-    pub fn new(path: String) -> Result<Self> {
-        let file = File::open(&path)?;
-        let reader = StreamReader::try_new_buffered(file, None)?;
-        Ok(Self { reader })
+impl ArrowStreamChannelStream {
+    fn new(
+        schema: SchemaRef,
+        receiver: mpsc::Receiver<Result<RecordBatch, DataFusionError>>,
+    ) -> Self {
+        Self { schema, receiver }
     }
 }
 
-impl Stream for ArrowStreamSendableBatchReader {
+impl Stream for ArrowStreamChannelStream {
     type Item = Result<RecordBatch, DataFusionError>;
 
-    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match self.reader.next() {
-            Some(Ok(batch)) => Poll::Ready(Some(Ok(batch))),
-            Some(Err(e)) => Poll::Ready(Some(Err(DataFusionError::Execution(e.to_string())))),
-            None => Poll::Ready(None),
-        }
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.receiver.poll_recv(cx)
     }
 }
 
-impl RecordBatchStream for ArrowStreamSendableBatchReader {
+impl RecordBatchStream for ArrowStreamChannelStream {
     fn schema(&self) -> SchemaRef {
-        self.reader.schema()
+        self.schema.clone()
     }
 }
 
@@ -63,9 +62,38 @@ impl DataSource for ArrowStreamDataSource {
     }
 
     async fn as_stream(&self) -> Result<SendableRecordBatchStream> {
-        Ok(Box::pin(ArrowStreamSendableBatchReader::new(
-            self.path.clone(),
-        )?))
+        let path = self.path.clone();
+
+        let file = File::open(&self.path)?;
+        let reader = StreamReader::try_new_buffered(file, None)?;
+        let schema = reader.schema();
+        let returned_schema = schema.clone();
+        drop(reader);
+
+        let (tx, rx) = mpsc::channel::<Result<RecordBatch, DataFusionError>>(32);
+
+        thread::spawn(move || {
+            let result = (|| -> Result<()> {
+                let file = File::open(&path)?;
+                let reader = StreamReader::try_new_buffered(file, None)?;
+
+                for batch_result in reader {
+                    let batch = batch_result?;
+                    if tx.blocking_send(Ok(batch)).is_err() {
+                        break; // rx was dropped
+                    }
+                }
+
+                Ok(())
+            })();
+
+            if let Err(e) = result {
+                // ignore the error if the channel is already closed
+                let _ = tx.blocking_send(Err(DataFusionError::Execution(e.to_string())));
+            }
+        });
+
+        Ok(Box::pin(ArrowStreamChannelStream::new(returned_schema, rx)))
     }
 }
 
