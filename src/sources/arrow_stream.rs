@@ -27,7 +27,7 @@ impl ArrowStreamDataSource {
         Self { path }
     }
 
-    fn get_schema(&self) -> Result<SchemaRef> {
+    fn schema(&self) -> Result<SchemaRef> {
         let file = File::open(&self.path)?;
         let reader = StreamReader::try_new_buffered(file, None)?;
         let schema = reader.schema();
@@ -72,7 +72,7 @@ impl DataSource for ArrowStreamDataSource {
     async fn as_stream(&self) -> Result<SendableRecordBatchStream> {
         let path = self.path.clone();
 
-        let schema = self.get_schema()?;
+        let schema = self.schema()?;
         let returned_schema = schema.clone();
 
         let (tx, rx) = mpsc::channel::<Result<RecordBatch, DataFusionError>>(32);

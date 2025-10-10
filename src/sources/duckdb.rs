@@ -29,7 +29,7 @@ impl DuckDBDataSource {
         Self { path, table_name }
     }
 
-    fn get_schema(&self) -> Result<SchemaRef> {
+    fn schema(&self) -> Result<SchemaRef> {
         let conn = Connection::open(&self.path)?;
         let mut stmt = conn.prepare(&format!(
             "SELECT * FROM {}",
@@ -79,7 +79,7 @@ impl DataSource for DuckDBDataSource {
         let path = self.path.clone();
         let table_name = self.table_name.clone();
 
-        let schema = self.get_schema()?;
+        let schema = self.schema()?;
         let returned_schema = schema.clone();
 
         let (tx, rx) = mpsc::channel::<Result<RecordBatch, DataFusionError>>(32);
