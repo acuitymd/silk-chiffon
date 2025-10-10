@@ -46,15 +46,35 @@ jobs:
           sudo ldconfig /usr/local/lib
           rm -rf libduckdb libduckdb-linux-amd64.zip
 
+      - name: Check disk usage
+        run: |
+          df -h
+          du -csh ./*
+
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: "ci-ubuntu-latest"
 
+      - name: Check disk usage
+        run: |
+          df -h
+          du -csh ./*
+
       - name: Check formatting
         run: cargo fmt --check
 
+      - name: Check disk usage
+        run: |
+          df -h
+          du -csh ./*
+
       - name: Check linting
         run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Check disk usage
+        run: |
+          df -h
+          du -csh ./*
 
       - name: Check types
         run: cargo check --all-features
