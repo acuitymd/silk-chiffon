@@ -40,30 +40,30 @@ mod tests {
 
     use super::*;
 
-    const TEST_ARROW_PATH: &str = "tests/files/people.arrow";
+    const TEST_ARROW_FILE_PATH: &str = "tests/files/people.file.arrow";
 
     #[test]
     fn test_new() {
-        let source = ArrowFileDataSource::new(TEST_ARROW_PATH.to_string());
-        assert_eq!(source.path, TEST_ARROW_PATH);
+        let source = ArrowFileDataSource::new(TEST_ARROW_FILE_PATH.to_string());
+        assert_eq!(source.path, TEST_ARROW_FILE_PATH);
     }
 
     #[test]
     fn test_name() {
-        let source = ArrowFileDataSource::new(TEST_ARROW_PATH.to_string());
+        let source = ArrowFileDataSource::new(TEST_ARROW_FILE_PATH.to_string());
         assert_eq!(source.name(), "arrow_file");
     }
 
     #[tokio::test]
     async fn test_as_table_provider() {
-        let source = ArrowFileDataSource::new(TEST_ARROW_PATH.to_string());
+        let source = ArrowFileDataSource::new(TEST_ARROW_FILE_PATH.to_string());
         let table_provider = source.as_table_provider().await.unwrap();
         assert!(table_provider.schema().fields().len() > 0);
     }
 
     #[tokio::test]
     async fn test_as_table_provider_can_be_queried() {
-        let source = ArrowFileDataSource::new(TEST_ARROW_PATH.to_string());
+        let source = ArrowFileDataSource::new(TEST_ARROW_FILE_PATH.to_string());
         let table_provider = source.as_table_provider().await.unwrap();
 
         let ctx = SessionContext::new();
@@ -79,7 +79,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_as_stream() {
-        let source = ArrowFileDataSource::new(TEST_ARROW_PATH.to_string());
+        let source = ArrowFileDataSource::new(TEST_ARROW_FILE_PATH.to_string());
         let mut stream = source.as_stream().await.unwrap();
 
         assert!(stream.schema().fields().len() > 0);

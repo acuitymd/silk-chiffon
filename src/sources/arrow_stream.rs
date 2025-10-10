@@ -22,7 +22,7 @@ pub struct ArrowStreamDataSource {
 }
 
 impl ArrowStreamDataSource {
-    pub fn create(path: String) -> Self {
+    pub fn new(path: String) -> Self {
         Self { path }
     }
 }
@@ -60,7 +60,7 @@ impl RecordBatchStream for ArrowStreamSendableBatchReader {
 #[async_trait]
 impl DataSource for ArrowStreamDataSource {
     fn name(&self) -> &str {
-        "arrow_file"
+        "arrow_stream"
     }
 
     async fn as_table_provider(&self) -> Result<Arc<dyn TableProvider>> {
@@ -73,5 +73,43 @@ impl DataSource for ArrowStreamDataSource {
         Ok(Box::pin(ArrowStreamSendableBatchReader::new(
             self.path.clone(),
         )?))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+
+    const TEST_ARROW_STREAM_PATH: &str = "tests/files/people.stream.arrow";
+
+    #[test]
+    fn test_new() {
+        let source = ArrowStreamDataSource::new(TEST_ARROW_STREAM_PATH.to_string());
+        assert_eq!(source.path, TEST_ARROW_STREAM_PATH);
+    }
+
+    #[test]
+    fn test_name() {
+        let source = ArrowStreamDataSource::new(TEST_ARROW_STREAM_PATH.to_string());
+        assert_eq!(source.name(), "arrow_stream");
+    }
+
+    #[tokio::test]
+    async fn test_as_table_provider() {
+        let source = ArrowStreamDataSource::new(TEST_ARROW_STREAM_PATH.to_string());
+        let table_provider = source.as_table_provider().await;
+        assert!(matches!(table_provider, Err(_)));
+    }
+
+    #[tokio::test]
+    async fn test_as_stream() {
+        let source = ArrowStreamDataSource::new(TEST_ARROW_STREAM_PATH.to_string());
+        let mut stream = source.as_stream().await.unwrap();
+
+        assert!(stream.schema().fields().len() > 0);
+        let batch = stream.next().await.unwrap().unwrap();
+        assert!(stream.next().await.is_none());
+        assert!(batch.num_rows() > 0);
     }
 }
