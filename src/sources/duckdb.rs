@@ -113,3 +113,54 @@ impl DataSource for DuckDBDataSource {
         Ok(Box::pin(DuckDBChannelStream::new(returned_schema, rx)))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+
+    const TEST_DUCKDB_PATH: &str = "tests/files/people.duckdb";
+    const TEST_DUCKDB_TABLE_NAME: &str = "people";
+
+    #[test]
+    fn test_new() {
+        let source = DuckDBDataSource::new(
+            TEST_DUCKDB_PATH.to_string(),
+            TEST_DUCKDB_TABLE_NAME.to_string(),
+        );
+        assert_eq!(source.path, TEST_DUCKDB_PATH);
+    }
+
+    #[test]
+    fn test_name() {
+        let source = DuckDBDataSource::new(
+            TEST_DUCKDB_PATH.to_string(),
+            TEST_DUCKDB_TABLE_NAME.to_string(),
+        );
+        assert_eq!(source.name(), "duckdb");
+    }
+
+    #[tokio::test]
+    async fn test_as_table_provider() {
+        let source = DuckDBDataSource::new(
+            TEST_DUCKDB_PATH.to_string(),
+            TEST_DUCKDB_TABLE_NAME.to_string(),
+        );
+        let table_provider = source.as_table_provider().await;
+        assert!(matches!(table_provider, Err(_)));
+    }
+
+    #[tokio::test]
+    async fn test_as_stream() {
+        let source = DuckDBDataSource::new(
+            TEST_DUCKDB_PATH.to_string(),
+            TEST_DUCKDB_TABLE_NAME.to_string(),
+        );
+        let mut stream = source.as_stream().await.unwrap();
+
+        assert!(stream.schema().fields().len() > 0);
+        let batch = stream.next().await.unwrap().unwrap();
+        assert!(stream.next().await.is_none());
+        assert!(batch.num_rows() > 0);
+    }
+}
