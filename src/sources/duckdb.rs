@@ -1,9 +1,8 @@
 use ::duckdb::Connection;
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use arrow::{array::RecordBatch, datatypes::SchemaRef};
 use async_trait::async_trait;
 use datafusion::{
-    catalog::TableProvider,
     error::DataFusionError,
     execution::{RecordBatchStream, SendableRecordBatchStream},
 };
@@ -11,7 +10,6 @@ use futures::Stream;
 use pg_escape::quote_identifier;
 use std::{
     pin::Pin,
-    sync::Arc,
     task::{Context, Poll},
     thread,
 };
@@ -19,6 +17,7 @@ use tokio::sync::mpsc;
 
 use crate::sources::data_source::DataSource;
 
+#[derive(Debug)]
 pub struct DuckDBDataSource {
     path: String,
     table_name: String,
@@ -62,12 +61,6 @@ impl RecordBatchStream for DuckDBChannelStream {
 impl DataSource for DuckDBDataSource {
     fn name(&self) -> &str {
         "duckdb"
-    }
-
-    async fn as_table_provider(&self) -> Result<Arc<dyn TableProvider>> {
-        Err(anyhow!(
-            "DuckDBDataSource.as_table_provider is not implemented"
-        ))
     }
 
     async fn as_stream(&self) -> Result<SendableRecordBatchStream> {

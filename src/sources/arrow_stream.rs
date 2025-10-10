@@ -1,8 +1,7 @@
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use arrow::{array::RecordBatch, datatypes::SchemaRef, ipc::reader::StreamReader};
 use async_trait::async_trait;
 use datafusion::{
-    catalog::TableProvider,
     error::DataFusionError,
     execution::{RecordBatchStream, SendableRecordBatchStream},
 };
@@ -11,12 +10,12 @@ use std::{
     fs::File,
     io::BufReader,
     pin::Pin,
-    sync::Arc,
     task::{Context, Poll},
 };
 
 use crate::sources::data_source::DataSource;
 
+#[derive(Debug)]
 pub struct ArrowStreamDataSource {
     path: String,
 }
@@ -61,12 +60,6 @@ impl RecordBatchStream for ArrowStreamSendableBatchReader {
 impl DataSource for ArrowStreamDataSource {
     fn name(&self) -> &str {
         "arrow_stream"
-    }
-
-    async fn as_table_provider(&self) -> Result<Arc<dyn TableProvider>> {
-        Err(anyhow!(
-            "ArrowStreamDataSource.as_table_provider is not implemented"
-        ))
     }
 
     async fn as_stream(&self) -> Result<SendableRecordBatchStream> {

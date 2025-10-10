@@ -10,7 +10,13 @@ use datafusion::{
 pub trait DataSource {
     fn name(&self) -> &str;
 
-    async fn as_table_provider(&self) -> Result<Arc<dyn TableProvider>>;
+    async fn as_table_provider(&self) -> Result<Arc<dyn TableProvider>> {
+        Err(anyhow!("as_table_provider is not implemented"))
+    }
+
+    fn supports_table_provider(&self) -> bool {
+        false
+    }
 
     async fn as_stream(&self) -> Result<SendableRecordBatchStream> {
         let ctx = SessionContext::new();

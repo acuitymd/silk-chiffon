@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 use crate::sources::data_source::DataSource;
 
+#[derive(Debug)]
 pub struct ArrowFileDataSource {
     path: String,
 }
@@ -31,6 +32,10 @@ impl DataSource for ArrowFileDataSource {
             .await?;
         let table = ctx.table(&table_name).await?;
         Ok(table.into_view())
+    }
+
+    fn supports_table_provider(&self) -> bool {
+        true
     }
 }
 
