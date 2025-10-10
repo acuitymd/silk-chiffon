@@ -35,6 +35,15 @@ log_and_run() {
   "$@"
 }
 
+DIR="$(cd "$(dirname "$0")" && pwd)"
+
+info "Changing directory to $DIR"
+
+if ! cd "$DIR"; then
+  error "Failed to cd to $DIR"
+  exit 1
+fi
+
 info "Removing existing files"
 
 files=(
