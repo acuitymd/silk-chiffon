@@ -27,7 +27,7 @@ impl DataSource for ArrowFileDataSource {
 
     async fn as_table_provider(&self) -> Result<Arc<dyn TableProvider>> {
         let ctx = SessionContext::new();
-        let table_name = format!("arrow_file_{}", Uuid::new_v4().as_simple().to_string());
+        let table_name = format!("arrow_file_{}", Uuid::new_v4().as_simple());
         ctx.register_arrow(&table_name, &self.path, ArrowReadOptions::default())
             .await?;
         let table = ctx.table(&table_name).await?;
@@ -63,7 +63,7 @@ mod tests {
     async fn test_as_table_provider() {
         let source = ArrowFileDataSource::new(TEST_ARROW_FILE_PATH.to_string());
         let table_provider = source.as_table_provider().await.unwrap();
-        assert!(table_provider.schema().fields().len() > 0);
+        assert!(!table_provider.schema().fields().is_empty());
     }
 
     #[tokio::test]
@@ -77,7 +77,7 @@ mod tests {
         let df = ctx.sql("SELECT * FROM test_table LIMIT 1").await.unwrap();
         let batches = df.collect().await.unwrap();
 
-        assert!(batches.len() > 0);
+        assert!(!batches.is_empty());
         let batch = batches[0].clone();
         assert!(batch.num_rows() > 0);
     }
@@ -87,7 +87,7 @@ mod tests {
         let source = ArrowFileDataSource::new(TEST_ARROW_FILE_PATH.to_string());
         let mut stream = source.as_stream().await.unwrap();
 
-        assert!(stream.schema().fields().len() > 0);
+        assert!(!stream.schema().fields().is_empty());
         let batch = stream.next().await.unwrap().unwrap();
         assert!(stream.next().await.is_none());
         assert!(batch.num_rows() > 0);

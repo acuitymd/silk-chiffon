@@ -86,9 +86,9 @@ impl DataSource for DuckDBDataSource {
                 let mut stmt =
                     conn.prepare(&format!("SELECT * FROM {}", quote_identifier(&table_name)))?;
 
-                let mut stream = stmt.stream_arrow([], schema)?;
+                let stream = stmt.stream_arrow([], schema)?;
 
-                while let Some(batch) = stream.next() {
+                for batch in stream {
                     if tx.blocking_send(Ok(batch)).is_err() {
                         break; // rx was dropped
                     }
@@ -140,7 +140,7 @@ mod tests {
             TEST_DUCKDB_TABLE_NAME.to_string(),
         );
         let table_provider = source.as_table_provider().await;
-        assert!(matches!(table_provider, Err(_)));
+        assert!(table_provider.is_err());
     }
 
     #[tokio::test]
@@ -151,7 +151,7 @@ mod tests {
         );
         let mut stream = source.as_stream().await.unwrap();
 
-        assert!(stream.schema().fields().len() > 0);
+        assert!(!stream.schema().fields().is_empty());
         let batch = stream.next().await.unwrap().unwrap();
         assert!(stream.next().await.is_none());
         assert!(batch.num_rows() > 0);

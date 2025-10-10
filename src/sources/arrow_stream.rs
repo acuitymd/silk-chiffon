@@ -92,7 +92,7 @@ mod tests {
     async fn test_as_table_provider() {
         let source = ArrowStreamDataSource::new(TEST_ARROW_STREAM_PATH.to_string());
         let table_provider = source.as_table_provider().await;
-        assert!(matches!(table_provider, Err(_)));
+        assert!(table_provider.is_err());
     }
 
     #[tokio::test]
@@ -100,7 +100,7 @@ mod tests {
         let source = ArrowStreamDataSource::new(TEST_ARROW_STREAM_PATH.to_string());
         let mut stream = source.as_stream().await.unwrap();
 
-        assert!(stream.schema().fields().len() > 0);
+        assert!(!stream.schema().fields().is_empty());
         let batch = stream.next().await.unwrap().unwrap();
         assert!(stream.next().await.is_none());
         assert!(batch.num_rows() > 0);
