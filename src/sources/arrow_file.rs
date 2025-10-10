@@ -1,9 +1,10 @@
+use std::sync::Arc;
+
 use anyhow::Result;
 use async_trait::async_trait;
 use datafusion::{
     catalog::TableProvider, execution::options::ArrowReadOptions, prelude::SessionContext,
 };
-use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::sources::data_source::DataSource;

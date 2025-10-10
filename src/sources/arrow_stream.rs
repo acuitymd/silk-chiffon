@@ -1,3 +1,10 @@
+use std::{
+    fs::File,
+    pin::Pin,
+    task::{Context, Poll},
+    thread,
+};
+
 use anyhow::Result;
 use arrow::{array::RecordBatch, datatypes::SchemaRef, ipc::reader::StreamReader};
 use async_trait::async_trait;
@@ -6,12 +13,6 @@ use datafusion::{
     execution::{RecordBatchStream, SendableRecordBatchStream},
 };
 use futures::Stream;
-use std::{
-    fs::File,
-    pin::Pin,
-    task::{Context, Poll},
-    thread,
-};
 use tokio::sync::mpsc;
 
 use crate::sources::data_source::DataSource;

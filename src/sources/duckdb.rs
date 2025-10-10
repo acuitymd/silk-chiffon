@@ -1,3 +1,9 @@
+use std::{
+    pin::Pin,
+    task::{Context, Poll},
+    thread,
+};
+
 use ::duckdb::Connection;
 use anyhow::Result;
 use arrow::{array::RecordBatch, datatypes::SchemaRef};
@@ -8,11 +14,6 @@ use datafusion::{
 };
 use futures::Stream;
 use pg_escape::quote_identifier;
-use std::{
-    pin::Pin,
-    task::{Context, Poll},
-    thread,
-};
 use tokio::sync::mpsc;
 
 use crate::sources::data_source::DataSource;
