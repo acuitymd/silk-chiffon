@@ -27,7 +27,7 @@ function warn() {
 }
 
 function error() {
-  log "ERROR" "🔴" "$1\n" && exit 1
+  log "ERROR" "🔴" "$1\n"
 }
 
 log_and_run() {
