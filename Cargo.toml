@@ -38,6 +38,7 @@ serde_json = "^1.0.145"
 serde = { version = "^1.0.228", features = ["derive"] }
 async-trait = "^0.1.89"
 strum = "^0.27.2"
+uuid = { version = "^1.18.1", features = ["v4"] }
 
 [features]
 default = []

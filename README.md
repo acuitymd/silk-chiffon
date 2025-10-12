@@ -12,8 +12,8 @@ Silk Chiffon is versatile tool for Arrow-to-X data format conversions. Like its 
 
 - **⚡ Lightning Fast**: Built with Rust for native performance.
 - **🤹🏻‍♀ Multi-Format Support**: Convert from Arrow IPC to Arrow IPC, Parquet, and DuckDB.
-- **🪓 Data Partitioning**: Partition data into multiple files based on column values.
-- **🔗 Data Merging**: Merge data from multiple files into a single file.
+- **🪓 Partitioning**: Partition data into multiple files based on column values.
+- **🔗 Merging**: Merge data from multiple files into a single file.
 - **🧠 Smart Processing**: Sort, compress, and optimize your data on-the-fly.
 - **🤏🏻 Memory Efficient**: Configurable batch processing for huge datasets.
 - **⚙️ Rich Configuration**: Fine-tune many aspects of your conversions.

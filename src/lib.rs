@@ -1,5 +1,6 @@
 pub mod commands;
 pub mod converters;
+pub mod sources;
 pub mod utils;
 
 use crate::utils::arrow_io::ArrowIPCFormat;
