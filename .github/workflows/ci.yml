@@ -64,6 +64,7 @@ jobs:
           shared-key: "ci-ubuntu-latest"
 
       - run: cargo clippy --all-targets --all-features --locked -- -D warnings
+
   test:
     runs-on: ubuntu-latest
     steps:
@@ -73,15 +74,6 @@ jobs:
 
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y lld
-
-      - name: Configure fast linker
-        run: |
-          mkdir -p ~/.cargo
-          cat >> ~/.cargo/config.toml << EOF
-          [target.x86_64-unknown-linux-gnu]
-          linker = "clang"
-          rustflags = ["-C", "link-arg=-fuse-ld=lld"]
-          EOF
 
       - name: Setup DuckDB cache
         id: cache-duckdb
