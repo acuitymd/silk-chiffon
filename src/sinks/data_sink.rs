@@ -8,7 +8,7 @@ use datafusion::execution::SendableRecordBatchStream;
 #[async_trait]
 pub trait DataSink {
     async fn write_stream(&mut self, stream: SendableRecordBatchStream) -> Result<SinkResult>;
-    async fn write_batch(&mut self, batch: &RecordBatch) -> Result<()>;
+    async fn write_batch(&mut self, batch: RecordBatch) -> Result<()>;
     async fn finish(&mut self) -> Result<SinkResult>;
 }
 
