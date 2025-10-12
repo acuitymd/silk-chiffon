@@ -5,11 +5,7 @@ use std::{
     sync::Arc,
 };
 
-use arrow::{
-    array::{RecordBatch, RecordBatchWriter},
-    compute::BatchCoalescer,
-    error::ArrowError,
-};
+use arrow::{array::RecordBatch, compute::BatchCoalescer};
 use arrow::{
     datatypes::SchemaRef,
     ipc::{
@@ -26,7 +22,10 @@ use datafusion::{
 use crate::{
     ArrowCompression, QueryDialect, SortDirection, SortSpec,
     utils::{
-        arrow_io::{ArrowFileSource, ArrowIPCFormat, ArrowIPCReader, RecordBatchIterator},
+        arrow_io::{
+            ArrowFileSource, ArrowIPCFormat, ArrowIPCReader, RecordBatchIterator,
+            RecordBatchWriterWithFinish,
+        },
         query_executor::{QueryExecutor, build_query_with_sort},
     },
 };
@@ -42,22 +41,6 @@ pub struct ArrowToArrowConverter {
     output_ipc_format: ArrowIPCFormat,
     query: Option<String>,
     dialect: QueryDialect,
-}
-
-trait RecordBatchWriterWithFinish: RecordBatchWriter + Send {
-    fn finish(&mut self) -> Result<(), ArrowError>;
-}
-
-impl RecordBatchWriterWithFinish for FileWriter<File> {
-    fn finish(&mut self) -> Result<(), ArrowError> {
-        self.finish()
-    }
-}
-
-impl RecordBatchWriterWithFinish for StreamWriter<File> {
-    fn finish(&mut self) -> Result<(), ArrowError> {
-        self.finish()
-    }
 }
 
 #[async_trait]

@@ -1,5 +1,6 @@
 pub mod commands;
 pub mod converters;
+pub mod sinks;
 pub mod sources;
 pub mod utils;
 
