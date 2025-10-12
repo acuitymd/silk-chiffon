@@ -113,5 +113,11 @@ jobs:
       - name: Clear target directory
         run: rm -rf target
 
+      - name: Check disk space
+        run: df -h
+
+      - name: Get pwd
+        run: pwd
+
       - name: Run tests
         run: cargo nextest run --release --all-features --locked
