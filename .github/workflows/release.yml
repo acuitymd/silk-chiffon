@@ -57,12 +57,12 @@ jobs:
         if: steps.cache-duckdb.outputs.cache-hit != 'true' && matrix.os == 'linux'
         run: |
           set -e
-          curl -L -O https://github.com/duckdb/duckdb/releases/download/v${{env.DUCKDB_VERSION}}/libduckdb-linux-amd64.zip
-          unzip libduckdb-linux-amd64.zip -d libduckdb
+          curl -L -O https://github.com/duckdb/duckdb/releases/download/v${{env.DUCKDB_VERSION}}/libduckdb-${{ matrix.duckdb_asset }}.zip
+          unzip libduckdb-${{ matrix.duckdb_asset }}.zip -d libduckdb
           sudo mv libduckdb/duckdb.* /usr/local/include/
           sudo mv libduckdb/libduckdb* /usr/local/lib/
           sudo ldconfig /usr/local/lib
-          rm -rf libduckdb libduckdb-linux-amd64.zip
+          rm -rf libduckdb libduckdb-${{ matrix.duckdb_asset }}.zip
 
       - name: Configure DuckDB
         if: steps.cache-duckdb.outputs.cache-hit == 'true' && matrix.os == 'linux'
