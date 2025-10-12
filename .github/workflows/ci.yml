@@ -37,8 +37,12 @@ jobs:
         id: cache-duckdb
         uses: actions/cache@v4
         with:
-          path: /usr/local/lib/libduckdb.so
-          key: duckdb-${{ env.DUCKDB_VERSION }}-linux-amd64
+          path: |
+            /usr/local/lib/libduckdb.so
+            /usr/local/lib/libduckdb_static.a
+            /usr/local/include/duckdb.h
+            /usr/local/include/duckdb.hpp
+          key: duckdb-${{ env.DUCKDB_VERSION }}-linux-amd64-2025-10-11
 
       - name: Install DuckDB
         if: steps.cache-duckdb.outputs.cache-hit != 'true'
@@ -47,7 +51,7 @@ jobs:
           curl -L -O https://github.com/duckdb/duckdb/releases/download/v${{env.DUCKDB_VERSION}}/libduckdb-linux-amd64.zip
           unzip libduckdb-linux-amd64.zip -d libduckdb
           sudo mv libduckdb/duckdb.* /usr/local/include/
-          sudo mv libduckdb/libduckdb.so /usr/local/lib/
+          sudo mv libduckdb/libduckdb* /usr/local/lib/
           sudo ldconfig /usr/local/lib
           rm -rf libduckdb libduckdb-linux-amd64.zip
 
@@ -83,8 +87,12 @@ jobs:
         id: cache-duckdb
         uses: actions/cache@v4
         with:
-          path: /usr/local/lib/libduckdb.so
-          key: duckdb-${{ env.DUCKDB_VERSION }}-linux-amd64
+          path: |
+            /usr/local/lib/libduckdb.so
+            /usr/local/lib/libduckdb_static.a
+            /usr/local/include/duckdb.h
+            /usr/local/include/duckdb.hpp
+          key: duckdb-${{ env.DUCKDB_VERSION }}-linux-amd64-2025-10-11
 
       - name: Install DuckDB
         if: steps.cache-duckdb.outputs.cache-hit != 'true'
@@ -93,7 +101,7 @@ jobs:
           curl -L -O https://github.com/duckdb/duckdb/releases/download/v${{env.DUCKDB_VERSION}}/libduckdb-linux-amd64.zip
           unzip libduckdb-linux-amd64.zip -d libduckdb
           sudo mv libduckdb/duckdb.* /usr/local/include/
-          sudo mv libduckdb/libduckdb.so /usr/local/lib/
+          sudo mv libduckdb/libduckdb* /usr/local/lib/
           sudo ldconfig /usr/local/lib
           rm -rf libduckdb libduckdb-linux-amd64.zip
 
