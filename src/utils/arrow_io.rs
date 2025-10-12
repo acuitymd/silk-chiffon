@@ -388,30 +388,47 @@ impl ArrowIPCReader {
     }
 }
 
-pub trait RecordBatchWriterWithFinish: RecordBatchWriter + Send {
+pub trait ArrowRecordBatchWriter: RecordBatchWriter + Send {
     fn finish(&mut self) -> Result<(), ArrowError>;
+    fn write_metadata(&mut self, key: &str, value: &str);
 }
 
-impl RecordBatchWriterWithFinish for FileWriter<File> {
+impl ArrowRecordBatchWriter for FileWriter<File> {
     fn finish(&mut self) -> Result<(), ArrowError> {
         self.finish()
     }
+
+    fn write_metadata(&mut self, key: &str, value: &str) {
+        self.write_metadata(key, value);
+    }
 }
-impl RecordBatchWriterWithFinish for FileWriter<BufWriter<File>> {
+impl ArrowRecordBatchWriter for FileWriter<BufWriter<File>> {
     fn finish(&mut self) -> Result<(), ArrowError> {
         self.finish()
     }
-}
 
-impl RecordBatchWriterWithFinish for StreamWriter<File> {
-    fn finish(&mut self) -> Result<(), ArrowError> {
-        self.finish()
+    fn write_metadata(&mut self, key: &str, value: &str) {
+        self.write_metadata(key, value);
     }
 }
 
-impl RecordBatchWriterWithFinish for StreamWriter<BufWriter<File>> {
+impl ArrowRecordBatchWriter for StreamWriter<File> {
     fn finish(&mut self) -> Result<(), ArrowError> {
         self.finish()
+    }
+
+    fn write_metadata(&mut self, _key: &str, _value: &str) {
+        // NOOP for stream writer, they don't support metadata
+    }
+}
+
+impl ArrowRecordBatchWriter for StreamWriter<BufWriter<File>> {
+    fn finish(&mut self) -> Result<(), ArrowError> {
+        self.finish()
+    }
+
+    fn write_metadata(&mut self, _key: &str, _value: &str) {
+        // NOOP for stream writer, they don't support metadata
     }
 }
 

@@ -1,5 +1,5 @@
 use futures::stream::StreamExt;
-use std::{fs::File, io::BufWriter, path::PathBuf};
+use std::{collections::HashMap, fs::File, io::BufWriter, path::PathBuf};
 
 use anyhow::Result;
 use arrow::{
@@ -16,13 +16,20 @@ use datafusion::execution::SendableRecordBatchStream;
 
 use crate::{
     sinks::data_sink::{DataSink, SinkResult},
-    utils::arrow_io::{ArrowIPCFormat, RecordBatchWriterWithFinish},
+    utils::arrow_io::{ArrowIPCFormat, ArrowRecordBatchWriter},
 };
 
 pub struct ArrowSinkOptions {
     format: ArrowIPCFormat,
     record_batch_size: usize,
     compression: Option<CompressionType>,
+    metadata: HashMap<String, String>,
+}
+
+impl Default for ArrowSinkOptions {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ArrowSinkOptions {
@@ -31,6 +38,7 @@ impl ArrowSinkOptions {
             format: ArrowIPCFormat::default(),
             record_batch_size: 122_880,
             compression: None,
+            metadata: HashMap::new(),
         }
     }
 
@@ -48,12 +56,22 @@ impl ArrowSinkOptions {
         self.compression = compression;
         self
     }
+
+    pub fn with_metadata_value(mut self, key: String, value: String) -> Self {
+        self.metadata.insert(key, value);
+        self
+    }
+
+    pub fn with_metadata(mut self, metadata: HashMap<String, String>) -> Self {
+        self.metadata = metadata;
+        self
+    }
 }
 
 pub struct ArrowSink {
     path: PathBuf,
     rows_written: u64,
-    writer: Box<dyn RecordBatchWriterWithFinish>,
+    writer: Box<dyn ArrowRecordBatchWriter>,
     coalescer: BatchCoalescer,
 }
 
@@ -67,18 +85,22 @@ impl ArrowSink {
             None => IpcWriteOptions::default(),
         };
 
-        let writer: Box<dyn RecordBatchWriterWithFinish> = match options.format {
+        let mut writer: Box<dyn ArrowRecordBatchWriter> = match options.format {
             ArrowIPCFormat::File => Box::new(FileWriter::try_new_with_options(
                 file,
-                &schema,
+                schema,
                 write_options,
             )?),
             ArrowIPCFormat::Stream => Box::new(StreamWriter::try_new_with_options(
                 file,
-                &schema,
+                schema,
                 write_options,
             )?),
         };
+
+        for (key, value) in options.metadata {
+            writer.write_metadata(&key, &value);
+        }
 
         let coalescer = BatchCoalescer::new(schema.clone(), options.record_batch_size);
 
