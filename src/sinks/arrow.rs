@@ -6,15 +6,13 @@ use arrow::{
     array::RecordBatch,
     compute::BatchCoalescer,
     datatypes::SchemaRef,
-    ipc::{
-        CompressionType,
-        writer::{FileWriter, IpcWriteOptions, StreamWriter},
-    },
+    ipc::writer::{FileWriter, IpcWriteOptions, StreamWriter},
 };
 use async_trait::async_trait;
 use datafusion::execution::SendableRecordBatchStream;
 
 use crate::{
+    ArrowCompression,
     sinks::data_sink::{DataSink, SinkResult},
     utils::arrow_io::{ArrowIPCFormat, ArrowRecordBatchWriter},
 };
@@ -22,7 +20,7 @@ use crate::{
 pub struct ArrowSinkOptions {
     format: ArrowIPCFormat,
     record_batch_size: usize,
-    compression: Option<CompressionType>,
+    compression: ArrowCompression,
     metadata: HashMap<String, String>,
 }
 
@@ -37,7 +35,7 @@ impl ArrowSinkOptions {
         Self {
             format: ArrowIPCFormat::default(),
             record_batch_size: 122_880,
-            compression: None,
+            compression: ArrowCompression::None,
             metadata: HashMap::new(),
         }
     }
@@ -52,7 +50,7 @@ impl ArrowSinkOptions {
         self
     }
 
-    pub fn with_compression(mut self, compression: Option<CompressionType>) -> Self {
+    pub fn with_compression(mut self, compression: ArrowCompression) -> Self {
         self.compression = compression;
         self
     }
@@ -79,10 +77,10 @@ impl ArrowSink {
     pub fn create(path: PathBuf, schema: &SchemaRef, options: ArrowSinkOptions) -> Result<Self> {
         let file = BufWriter::new(File::create(&path)?);
         let write_options = match options.compression {
-            Some(compression) => {
-                IpcWriteOptions::default().try_with_compression(Some(compression))?
+            ArrowCompression::Zstd | ArrowCompression::Lz4 => {
+                IpcWriteOptions::default().try_with_compression(options.compression.into())?
             }
-            None => IpcWriteOptions::default(),
+            ArrowCompression::None => IpcWriteOptions::default(),
         };
 
         let mut writer: Box<dyn ArrowRecordBatchWriter> = match options.format {
@@ -272,7 +270,7 @@ mod tests {
 
         #[tokio::test]
         async fn test_sink_with_compression() {
-            for compression in [CompressionType::ZSTD, CompressionType::LZ4_FRAME] {
+            for compression in [ArrowCompression::Zstd, ArrowCompression::Lz4] {
                 let temp_dir = tempdir().unwrap();
                 let output_path = temp_dir.path().join("output.arrow");
 
@@ -306,7 +304,7 @@ mod tests {
                 let mut compressed_sink = ArrowSink::create(
                     output_path.clone(),
                     &schema,
-                    ArrowSinkOptions::new().with_compression(Some(compression)),
+                    ArrowSinkOptions::new().with_compression(compression),
                 )
                 .unwrap();
 
@@ -416,7 +414,7 @@ mod tests {
         fn test_default_options() {
             let options = ArrowSinkOptions::default();
             assert_eq!(options.record_batch_size, 122_880);
-            assert!(options.compression.is_none());
+            assert!(matches!(options.compression, ArrowCompression::None));
             assert!(options.metadata.is_empty());
         }
 
@@ -428,12 +426,12 @@ mod tests {
             let options = ArrowSinkOptions::new()
                 .with_format(ArrowIPCFormat::Stream)
                 .with_record_batch_size(1000)
-                .with_compression(Some(CompressionType::ZSTD))
+                .with_compression(ArrowCompression::Zstd)
                 .with_metadata(metadata.clone());
 
             assert_eq!(options.format, ArrowIPCFormat::Stream);
             assert_eq!(options.record_batch_size, 1000);
-            assert!(options.compression.is_some());
+            assert!(matches!(options.compression, ArrowCompression::Zstd));
             assert_eq!(options.metadata, metadata);
         }
 
