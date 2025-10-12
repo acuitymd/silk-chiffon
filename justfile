@@ -19,7 +19,7 @@ build:
     cargo build --release
 
 test:
-    RUST_BACKTRACE=1 cargo test --verbose
+    RUST_BACKTRACE=1 cargo nextest run --all-features --locked
 
 type-check:
     cargo check --all-features
