@@ -110,5 +110,8 @@ jobs:
         with:
           tool: nextest
 
+      - name: Clear target directory
+        run: rm -rf target
+
       - name: Run tests
         run: cargo nextest run --release --all-features --locked
