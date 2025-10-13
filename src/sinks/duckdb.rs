@@ -38,27 +38,31 @@ impl DuckDBSink {
     }
 
     fn create_table(&mut self) -> Result<()> {
-        let mut columns = Vec::new();
-
-        for field in self.schema.fields() {
-            let col = field.name();
-            let logical_type = to_duckdb_logical_type(field.data_type())
-                .map_err(|e| anyhow!("Failed to convert logical type: {:?}", e))?;
-            let col_type = Self::logical_type_to_sql(logical_type)?;
-            let nullable = if field.is_nullable() { "" } else { " NOT NULL" };
-            columns.push(format!(
-                "{} {}{}",
-                quote_identifier(&col),
-                col_type,
-                nullable
-            ));
-        }
+        let columns = self
+            .schema
+            .fields()
+            .iter()
+            .map(|field| {
+                let col = field.name();
+                let logical_type = to_duckdb_logical_type(field.data_type())
+                    .map_err(|e| anyhow!("Failed to convert logical type: {:?}", e))?;
+                let col_type = Self::logical_type_to_sql(logical_type)?;
+                let nullable = if field.is_nullable() { "" } else { " NOT NULL" };
+                Ok(format!(
+                    "{} {}{}",
+                    quote_identifier(&col),
+                    col_type,
+                    nullable
+                ))
+            })
+            .collect::<Result<Vec<String>>>()?;
 
         let sql = format!(
             "CREATE TABLE {} ({})",
             quote_identifier(&self.table_name),
             columns.join(", ")
         );
+
         self.conn
             .as_mut()
             .ok_or_else(|| anyhow!("Connection not found"))?
