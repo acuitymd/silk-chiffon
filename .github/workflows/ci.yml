@@ -134,4 +134,4 @@ jobs:
         run: df -h
 
       - name: Run tests
-        run: cargo nextest --all-features --locked
+        run: cargo nextest run --all-features --locked

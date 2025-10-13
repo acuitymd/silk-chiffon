@@ -275,7 +275,7 @@ mod tests {
                 let output_path = temp_dir.path().join("output.arrow");
 
                 let schema = test_data::simple_schema();
-                // need to give it enough data with enough repitition that we benefit from compression
+                // need to give it enough data with enough repetition that we benefit from compression
                 let batch = test_data::create_batch_with_ids_and_names(
                     &schema,
                     &[
