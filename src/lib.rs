@@ -771,6 +771,15 @@ impl From<ParquetWriterVersion> for WriterVersion {
     }
 }
 
+impl From<ParquetWriterVersion> for i32 {
+    fn from(writer_version: ParquetWriterVersion) -> Self {
+        match writer_version {
+            ParquetWriterVersion::V1 => 1,
+            ParquetWriterVersion::V2 => 2,
+        }
+    }
+}
+
 #[derive(ValueEnum, Clone, Debug, Default)]
 #[value(rename_all = "lowercase")]
 pub enum ArrowCompression {

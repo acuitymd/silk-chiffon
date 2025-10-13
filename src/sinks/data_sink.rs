@@ -4,10 +4,18 @@ use anyhow::Result;
 use arrow::array::RecordBatch;
 use async_trait::async_trait;
 use datafusion::execution::SendableRecordBatchStream;
+use futures::StreamExt;
 
 #[async_trait]
 pub trait DataSink {
-    async fn write_stream(&mut self, stream: SendableRecordBatchStream) -> Result<SinkResult>;
+    async fn write_stream(&mut self, mut stream: SendableRecordBatchStream) -> Result<SinkResult> {
+        while let Some(batch) = stream.next().await {
+            let batch = batch?;
+            self.write_batch(batch).await?;
+        }
+
+        self.finish().await
+    }
     async fn write_batch(&mut self, batch: RecordBatch) -> Result<()>;
     async fn finish(&mut self) -> Result<SinkResult>;
 }
