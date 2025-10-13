@@ -1,5 +1,6 @@
 pub mod commands;
 pub mod converters;
+pub mod sinks;
 pub mod sources;
 pub mod utils;
 
@@ -766,6 +767,15 @@ impl From<ParquetWriterVersion> for WriterVersion {
         match writer_version {
             ParquetWriterVersion::V1 => WriterVersion::PARQUET_1_0,
             ParquetWriterVersion::V2 => WriterVersion::PARQUET_2_0,
+        }
+    }
+}
+
+impl From<ParquetWriterVersion> for i32 {
+    fn from(writer_version: ParquetWriterVersion) -> Self {
+        match writer_version {
+            ParquetWriterVersion::V1 => 1,
+            ParquetWriterVersion::V2 => 2,
         }
     }
 }

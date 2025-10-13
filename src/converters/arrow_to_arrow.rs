@@ -5,11 +5,7 @@ use std::{
     sync::Arc,
 };
 
-use arrow::{
-    array::{RecordBatch, RecordBatchWriter},
-    compute::BatchCoalescer,
-    error::ArrowError,
-};
+use arrow::{array::RecordBatch, compute::BatchCoalescer};
 use arrow::{
     datatypes::SchemaRef,
     ipc::{
@@ -26,7 +22,10 @@ use datafusion::{
 use crate::{
     ArrowCompression, QueryDialect, SortDirection, SortSpec,
     utils::{
-        arrow_io::{ArrowFileSource, ArrowIPCFormat, ArrowIPCReader, RecordBatchIterator},
+        arrow_io::{
+            ArrowFileSource, ArrowIPCFormat, ArrowIPCReader, ArrowRecordBatchWriter,
+            RecordBatchIterator,
+        },
         query_executor::{QueryExecutor, build_query_with_sort},
     },
 };
@@ -42,22 +41,6 @@ pub struct ArrowToArrowConverter {
     output_ipc_format: ArrowIPCFormat,
     query: Option<String>,
     dialect: QueryDialect,
-}
-
-trait RecordBatchWriterWithFinish: RecordBatchWriter + Send {
-    fn finish(&mut self) -> Result<(), ArrowError>;
-}
-
-impl RecordBatchWriterWithFinish for FileWriter<File> {
-    fn finish(&mut self) -> Result<(), ArrowError> {
-        self.finish()
-    }
-}
-
-impl RecordBatchWriterWithFinish for StreamWriter<File> {
-    fn finish(&mut self) -> Result<(), ArrowError> {
-        self.finish()
-    }
 }
 
 #[async_trait]
@@ -157,8 +140,8 @@ impl ArrowToArrowConverter {
         &self,
         output_file: File,
         schema: SchemaRef,
-    ) -> Result<Box<dyn RecordBatchWriterWithFinish>> {
-        let writer: Box<dyn RecordBatchWriterWithFinish> = match self.output_ipc_format {
+    ) -> Result<Box<dyn ArrowRecordBatchWriter>> {
+        let writer: Box<dyn ArrowRecordBatchWriter> = match self.output_ipc_format {
             ArrowIPCFormat::File => Box::new(FileWriter::try_new_with_options(
                 output_file,
                 &schema,
@@ -177,7 +160,7 @@ impl ArrowToArrowConverter {
     async fn write_to_output<T: UniversalRecordBatchIterator>(
         input: &mut T,
         schema: &SchemaRef,
-        writer: &mut dyn RecordBatchWriterWithFinish,
+        writer: &mut dyn ArrowRecordBatchWriter,
         record_batch_size: usize,
     ) -> Result<()> {
         let mut coalescer = BatchCoalescer::new(schema.clone(), record_batch_size);

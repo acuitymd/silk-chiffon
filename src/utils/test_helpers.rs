@@ -151,7 +151,7 @@ pub mod verify {
         datatypes::Schema,
         ipc::reader::{FileReader, StreamReader},
     };
-    use std::{fs::File, path::Path};
+    use std::{collections::HashMap, fs::File, path::Path};
 
     use crate::utils::test_helpers::test_data;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -177,6 +177,13 @@ pub mod verify {
         let file = File::open(path)?;
         let reader = StreamReader::try_new(file, None)?;
         reader.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn read_file_metadata(path: &Path) -> Result<HashMap<String, String>> {
+        let file = File::open(path)?;
+        let reader = FileReader::try_new_buffered(file, None)?;
+        let metadata = reader.custom_metadata().clone();
+        Ok(metadata)
     }
 
     pub fn assert_schema_matches(actual: &Schema, expected: &Schema) {

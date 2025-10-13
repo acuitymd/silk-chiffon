@@ -2,18 +2,19 @@ use anyhow::{Context, Result, anyhow};
 use clap::ValueEnum;
 use std::{
     fmt::{Display, Formatter},
-    io::BufReader,
+    io::{BufReader, BufWriter},
     path::{Path, PathBuf},
     str::FromStr,
 };
 
 use arrow::{
-    array::RecordBatch,
+    array::{RecordBatch, RecordBatchWriter},
     compute::BatchCoalescer,
     datatypes::SchemaRef,
+    error::ArrowError,
     ipc::{
         reader::{FileReader, StreamReader},
-        writer::{FileWriter, IpcWriteOptions},
+        writer::{FileWriter, IpcWriteOptions, StreamWriter},
     },
 };
 use std::fs::File;
@@ -384,6 +385,50 @@ impl ArrowIPCReader {
             ArrowIPCReaderInner::File { path } => Ok(Box::new(FileReaderIterator::new(path)?)),
             ArrowIPCReaderInner::Stream { path } => Ok(Box::new(StreamReaderIterator::new(path)?)),
         }
+    }
+}
+
+pub trait ArrowRecordBatchWriter: RecordBatchWriter + Send {
+    fn finish(&mut self) -> Result<(), ArrowError>;
+    fn write_metadata(&mut self, key: &str, value: &str);
+}
+
+impl ArrowRecordBatchWriter for FileWriter<File> {
+    fn finish(&mut self) -> Result<(), ArrowError> {
+        self.finish()
+    }
+
+    fn write_metadata(&mut self, key: &str, value: &str) {
+        self.write_metadata(key, value);
+    }
+}
+impl ArrowRecordBatchWriter for FileWriter<BufWriter<File>> {
+    fn finish(&mut self) -> Result<(), ArrowError> {
+        self.finish()
+    }
+
+    fn write_metadata(&mut self, key: &str, value: &str) {
+        self.write_metadata(key, value);
+    }
+}
+
+impl ArrowRecordBatchWriter for StreamWriter<File> {
+    fn finish(&mut self) -> Result<(), ArrowError> {
+        self.finish()
+    }
+
+    fn write_metadata(&mut self, _key: &str, _value: &str) {
+        // NOOP for stream writer, they don't support metadata
+    }
+}
+
+impl ArrowRecordBatchWriter for StreamWriter<BufWriter<File>> {
+    fn finish(&mut self) -> Result<(), ArrowError> {
+        self.finish()
+    }
+
+    fn write_metadata(&mut self, _key: &str, _value: &str) {
+        // NOOP for stream writer, they don't support metadata
     }
 }
 

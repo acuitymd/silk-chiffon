@@ -82,6 +82,10 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y lld
 
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
       - name: Setup DuckDB cache
         id: cache-duckdb
         uses: actions/cache@v4
@@ -130,4 +134,4 @@ jobs:
         run: df -h
 
       - name: Run tests
-        run: cargo test --all-features --locked
+        run: cargo nextest run --all-features --locked
