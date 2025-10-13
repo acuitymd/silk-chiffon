@@ -20,6 +20,7 @@ pub trait DataSink {
     async fn finish(&mut self) -> Result<SinkResult>;
 }
 
+#[derive(Debug)]
 pub struct SinkResult {
     pub files_written: Vec<PathBuf>,
     pub rows_written: u64,
