@@ -1636,6 +1636,7 @@ dependencies = [
  "fallible-streaming-iterator",
  "hashlink",
  "libduckdb-sys",
+ "num",
  "num-integer",
  "rust_decimal",
  "strum 0.27.2",
@@ -2282,7 +2283,6 @@ version = "1.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4b93c3ff279601516f01531cadf2ccba50394fbb5f7bf685c6e6b9b07c8dca6f"
 dependencies = [
- "cc",
  "flate2",
  "pkg-config",
  "serde",

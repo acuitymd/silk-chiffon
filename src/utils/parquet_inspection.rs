@@ -115,7 +115,6 @@ pub fn read_entire_parquet_file(path: &Path) -> Result<ParquetContents> {
         let row_group_reader = reader.get_row_group(row_group_idx)?;
         let rows: Vec<Row> = row_group_reader
             .get_row_iter(None)?
-            .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
 
         result.row_groups.push(RowGroup {
