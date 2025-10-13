@@ -8,6 +8,7 @@ use duckdb::{
     core::{LogicalTypeHandle, LogicalTypeId},
     vtab::to_duckdb_logical_type,
 };
+use pg_escape::quote_identifier;
 
 use crate::sinks::data_sink::{DataSink, SinkResult};
 
@@ -45,10 +46,19 @@ impl DuckDBSink {
                 .map_err(|e| anyhow!("Failed to convert logical type: {:?}", e))?;
             let col_type = Self::logical_type_to_sql(logical_type)?;
             let nullable = if field.is_nullable() { "" } else { " NOT NULL" };
-            columns.push(format!("{} {}{}", col, col_type, nullable));
+            columns.push(format!(
+                "{} {}{}",
+                quote_identifier(&col),
+                col_type,
+                nullable
+            ));
         }
 
-        let sql = format!("CREATE TABLE {} ({})", self.table_name, columns.join(", "));
+        let sql = format!(
+            "CREATE TABLE {} ({})",
+            quote_identifier(&self.table_name),
+            columns.join(", ")
+        );
         self.conn
             .as_mut()
             .ok_or_else(|| anyhow!("Connection not found"))?
