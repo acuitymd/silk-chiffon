@@ -17,9 +17,9 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "^1.0.100"
 arrow = { version = "^56.2.0", features = ["default", "ipc_compression"] }
-clap = { version = "^4.5.48", features = ["default", "derive"] }
+clap = { version = "^4.5.49", features = ["default", "derive"] }
 clio = { version = "^0.3.5", features = ["clap-parse"] }
-datafusion = "^50.1.0"
+datafusion = "^50.2.0"
 duckdb = { version = "^1.4.1", features = ["appender-arrow"] }
 futures = "^0.3.31"
 glob = "^0.3.3"
@@ -32,7 +32,7 @@ parquet = { version = "^56.2.0", features = [
 ] }
 sha2 = "^0.10.9"
 tempfile = "^3.23.0"
-tokio = { version = "^1.47.1", features = ["full"] }
+tokio = { version = "^1.48.0", features = ["full"] }
 sanitize-filename = "^0.6.0"
 serde_json = "^1.0.145"
 serde = { version = "^1.0.228", features = ["derive"] }
