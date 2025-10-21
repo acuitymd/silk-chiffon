@@ -18,8 +18,8 @@ benchmark:
 build:
     cargo build --release
 
-test:
-    RUST_BACKTRACE=1 cargo nextest run --all-features --locked
+test *args:
+    RUST_BACKTRACE=1 cargo nextest run --all-features --locked {{args}}
 
 type-check:
     cargo check --all-features
