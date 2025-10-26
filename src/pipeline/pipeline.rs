@@ -31,7 +31,7 @@ impl Pipeline {
     }
 
     pub async fn execute_with_context(&mut self, ctx: &mut SessionContext) -> Result<()> {
-        let table_provider = self.input_strategy.as_table_provider().await?;
+        let table_provider = self.input_strategy.as_table_provider(ctx).await?;
 
         let mut df = ctx.read_table(table_provider)?;
 

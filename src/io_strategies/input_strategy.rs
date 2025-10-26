@@ -15,7 +15,10 @@ pub enum InputStrategy {
 }
 
 impl InputStrategy {
-    pub async fn as_table_provider(&self) -> Result<Arc<dyn TableProvider>> {
+    pub async fn as_table_provider(
+        &self,
+        ctx: &mut SessionContext,
+    ) -> Result<Arc<dyn TableProvider>> {
         match self {
             InputStrategy::Single(source) => source.as_table_provider().await,
             InputStrategy::Multiple(sources) => {
@@ -32,8 +35,6 @@ impl InputStrategy {
                     .await
                     .into_iter()
                     .collect::<Result<Vec<Arc<dyn TableProvider>>>>()?;
-
-                let ctx = SessionContext::new();
 
                 let mut df: DataFrame = ctx.read_empty()?;
 

@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use datafusion::{
     error::DataFusionError,
     execution::{RecordBatchStream, SendableRecordBatchStream},
+    prelude::SessionContext,
 };
 use futures::Stream;
 use tokio::sync::mpsc;
@@ -99,6 +100,13 @@ impl DataSource for ArrowStreamDataSource {
         });
 
         Ok(Box::pin(ArrowStreamChannelStream::new(returned_schema, rx)))
+    }
+
+    async fn as_stream_with_session_context(
+        &self,
+        _ctx: &mut SessionContext,
+    ) -> Result<SendableRecordBatchStream> {
+        self.as_stream().await
     }
 }
 

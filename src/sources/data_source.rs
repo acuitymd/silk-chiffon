@@ -20,10 +20,10 @@ pub trait DataSource: Send + Sync {
 
     async fn as_stream(&self) -> Result<SendableRecordBatchStream> {
         let mut ctx = SessionContext::new();
-        self.as_stream_with_context(&mut ctx).await
+        self.as_stream_with_session_context(&mut ctx).await
     }
 
-    async fn as_stream_with_context(
+    async fn as_stream_with_session_context(
         &self,
         ctx: &mut SessionContext,
     ) -> Result<SendableRecordBatchStream> {
