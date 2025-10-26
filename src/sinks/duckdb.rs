@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Mutex};
 
 use anyhow::{Result, anyhow, bail};
 use arrow::{array::RecordBatch, datatypes::SchemaRef};
@@ -12,7 +12,7 @@ use pg_escape::quote_identifier;
 
 use crate::sinks::data_sink::{DataSink, SinkResult};
 
-pub struct DuckDBSink {
+pub struct DuckDBSinkInner {
     path: PathBuf,
     table_name: String,
     schema: SchemaRef,
@@ -20,16 +20,22 @@ pub struct DuckDBSink {
     conn: Option<Connection>,
 }
 
+pub struct DuckDBSink {
+    inner: Mutex<DuckDBSinkInner>,
+}
+
 impl DuckDBSink {
     pub fn create(path: PathBuf, table_name: String, schema: SchemaRef) -> Result<Self> {
         let conn = Connection::open(&path)?;
 
         let mut sink = Self {
-            path,
-            table_name,
-            schema,
-            rows_written: 0,
-            conn: Some(conn),
+            inner: Mutex::new(DuckDBSinkInner {
+                path,
+                table_name,
+                schema,
+                rows_written: 0,
+                conn: Some(conn),
+            }),
         };
 
         sink.create_table()?;
@@ -38,7 +44,8 @@ impl DuckDBSink {
     }
 
     fn create_table(&mut self) -> Result<()> {
-        let columns = self
+        let mut inner = self.inner.lock().unwrap();
+        let columns = inner
             .schema
             .fields()
             .iter()
@@ -59,11 +66,12 @@ impl DuckDBSink {
 
         let sql = format!(
             "CREATE TABLE {} ({})",
-            quote_identifier(&self.table_name),
+            quote_identifier(&inner.table_name),
             columns.join(", ")
         );
 
-        self.conn
+        inner
+            .conn
             .as_mut()
             .ok_or_else(|| anyhow!("Connection not found"))?
             .execute(&sql, [])?;
@@ -118,26 +126,31 @@ impl DuckDBSink {
 #[async_trait]
 impl DataSink for DuckDBSink {
     async fn write_batch(&mut self, batch: RecordBatch) -> Result<()> {
+        let mut inner = self.inner.lock().unwrap();
         let batch_rows = batch.num_rows();
-        let conn = self
+        let table_name = inner.table_name.clone();
+        let conn = inner
             .conn
             .as_mut()
             .ok_or_else(|| anyhow!("Connection not found"))?;
-        conn.appender(&self.table_name)?
-            .append_record_batch(batch)?;
-        self.rows_written += batch_rows as u64;
+        conn.appender(&table_name)?.append_record_batch(batch)?;
+        inner.rows_written += batch_rows as u64;
         Ok(())
     }
 
     async fn finish(&mut self) -> Result<SinkResult> {
-        self.conn
+        let mut inner = self.inner.lock().unwrap();
+        let path = inner.path.clone();
+        let rows_written = inner.rows_written;
+        inner
+            .conn
             .take()
             .ok_or_else(|| anyhow!("Connection already closed"))?
             .close()
             .map_err(|e| anyhow!("Failed to close connection: {:?}", e.1))?;
         Ok(SinkResult {
-            files_written: vec![self.path.clone()],
-            rows_written: self.rows_written,
+            files_written: vec![path],
+            rows_written,
         })
     }
 }

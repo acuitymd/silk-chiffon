@@ -7,7 +7,7 @@ use datafusion::execution::SendableRecordBatchStream;
 use futures::StreamExt;
 
 #[async_trait]
-pub trait DataSink {
+pub trait DataSink: Send + Sync {
     async fn write_stream(&mut self, mut stream: SendableRecordBatchStream) -> Result<SinkResult> {
         while let Some(batch) = stream.next().await {
             let batch = batch?;

@@ -7,7 +7,7 @@ use datafusion::{
 };
 
 #[async_trait]
-pub trait DataSource {
+pub trait DataSource: Send + Sync {
     fn name(&self) -> &str;
 
     async fn as_table_provider(&self) -> Result<Arc<dyn TableProvider>> {

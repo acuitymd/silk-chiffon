@@ -5,7 +5,7 @@ use parquet::{
     format::SortingColumn,
     schema::types::ColumnPath,
 };
-use std::{collections::HashMap, fs::File, io::BufWriter, path::PathBuf};
+use std::{collections::HashMap, fs::File, io::BufWriter, path::PathBuf, sync::Mutex};
 
 use anyhow::{Result, anyhow};
 use arrow::{array::RecordBatch, datatypes::SchemaRef};
@@ -109,10 +109,14 @@ impl ParquetSinkOptions {
     }
 }
 
-pub struct ParquetSink {
+pub struct ParquetSinkInner {
     path: PathBuf,
     rows_written: u64,
     writer: ArrowWriter<BufWriter<File>>,
+}
+
+pub struct ParquetSink {
+    inner: Mutex<ParquetSinkInner>,
 }
 
 impl ParquetSink {
@@ -133,11 +137,17 @@ impl ParquetSink {
 
         let writer = ArrowWriter::try_new(file, schema.clone(), Some(writer_builder.build()))?;
 
-        Ok(Self {
+        let inner = ParquetSinkInner {
             path,
             rows_written: 0,
             writer,
-        })
+        };
+
+        let sink = Self {
+            inner: Mutex::new(inner),
+        };
+
+        Ok(sink)
     }
 
     fn apply_bloom_filters(
@@ -219,18 +229,20 @@ impl DataSink for ParquetSink {
     }
 
     async fn write_batch(&mut self, batch: RecordBatch) -> Result<()> {
-        self.writer.write(&batch)?;
-        self.rows_written += batch.num_rows() as u64;
+        let mut inner = self.inner.lock().unwrap();
+        inner.writer.write(&batch)?;
+        inner.rows_written += batch.num_rows() as u64;
 
         Ok(())
     }
 
     async fn finish(&mut self) -> Result<SinkResult> {
-        self.writer.finish()?;
+        let mut inner = self.inner.lock().unwrap();
+        inner.writer.finish()?;
 
         Ok(SinkResult {
-            files_written: vec![self.path.clone()],
-            rows_written: self.rows_written,
+            files_written: vec![inner.path.clone()],
+            rows_written: inner.rows_written,
         })
     }
 }
