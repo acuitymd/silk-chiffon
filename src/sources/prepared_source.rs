@@ -21,7 +21,7 @@ pub enum PreparedSource {
 }
 
 impl PreparedSource {
-    pub async fn from_data_source(data_source: Box<dyn DataSource + Sync>) -> Result<Self> {
+    pub async fn from_data_source(data_source: Box<dyn DataSource>) -> Result<Self> {
         if data_source.supports_table_provider() {
             Ok(Self::Direct(data_source.as_table_provider().await?))
         } else {
@@ -56,7 +56,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_from_data_source_with_table_provider_support() {
-        let data_source: Box<dyn DataSource + Sync> =
+        let data_source: Box<dyn DataSource> =
             Box::new(ArrowFileDataSource::new(TEST_ARROW_FILE_PATH.to_string()));
 
         let prepared_source = PreparedSource::from_data_source(data_source).await.unwrap();
@@ -66,7 +66,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_from_data_source_without_table_provider_support() {
-        let data_source: Box<dyn DataSource + Sync> = Box::new(ArrowStreamDataSource::new(
+        let data_source: Box<dyn DataSource> = Box::new(ArrowStreamDataSource::new(
             TEST_ARROW_STREAM_PATH.to_string(),
         ));
 
@@ -84,7 +84,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_direct_source_can_query_data() {
-        let data_source: Box<dyn DataSource + Sync> =
+        let data_source: Box<dyn DataSource> =
             Box::new(ArrowFileDataSource::new(TEST_ARROW_FILE_PATH.to_string()));
 
         let prepared_source = PreparedSource::from_data_source(data_source).await.unwrap();
@@ -106,7 +106,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_materialized_source_can_query_data() {
-        let data_source: Box<dyn DataSource + Sync> = Box::new(ArrowStreamDataSource::new(
+        let data_source: Box<dyn DataSource> = Box::new(ArrowStreamDataSource::new(
             TEST_ARROW_STREAM_PATH.to_string(),
         ));
 
@@ -129,7 +129,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_materialized_source_preserves_data() {
-        let data_source: Box<dyn DataSource + Sync> = Box::new(ArrowStreamDataSource::new(
+        let data_source: Box<dyn DataSource> = Box::new(ArrowStreamDataSource::new(
             TEST_ARROW_STREAM_PATH.to_string(),
         ));
 
