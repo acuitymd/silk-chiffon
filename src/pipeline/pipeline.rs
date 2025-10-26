@@ -13,7 +13,7 @@ pub struct Pipeline {
 }
 
 impl Pipeline {
-    fn new(
+    pub fn new(
         input_strategy: InputStrategy,
         operations: Vec<Box<dyn DataOperation>>,
         output_strategy: OutputStrategy,
@@ -25,8 +25,12 @@ impl Pipeline {
         }
     }
 
-    async fn execute(&mut self) -> Result<()> {
-        let ctx = SessionContext::new();
+    pub async fn execute(&mut self) -> Result<()> {
+        let mut ctx = SessionContext::new();
+        self.execute_with_context(&mut ctx).await
+    }
+
+    pub async fn execute_with_context(&mut self, ctx: &mut SessionContext) -> Result<()> {
         let table_provider = self.input_strategy.as_table_provider().await?;
 
         let mut df = ctx.read_table(table_provider)?;
