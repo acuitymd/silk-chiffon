@@ -15,7 +15,6 @@ pub struct PipelineConfig {
     pub temp_dir: Option<PathBuf>,
 }
 
-
 pub struct Pipeline {
     input_strategy: InputStrategy,
     operations: Vec<Box<dyn DataOperation>>,
