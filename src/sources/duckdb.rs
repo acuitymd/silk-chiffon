@@ -151,7 +151,8 @@ mod tests {
             TEST_DUCKDB_PATH.to_string(),
             TEST_DUCKDB_TABLE_NAME.to_string(),
         );
-        let table_provider = source.as_table_provider().await;
+        let mut ctx = SessionContext::new();
+        let table_provider = source.as_table_provider(&mut ctx).await;
         assert!(table_provider.is_err());
     }
 

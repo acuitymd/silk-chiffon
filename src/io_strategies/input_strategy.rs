@@ -5,7 +5,6 @@ use datafusion::{
     catalog::TableProvider,
     prelude::{DataFrame, SessionContext},
 };
-use futures::future::join_all;
 
 use crate::sources::data_source::DataSource;
 
@@ -20,21 +19,17 @@ impl InputStrategy {
         ctx: &mut SessionContext,
     ) -> Result<Arc<dyn TableProvider>> {
         match self {
-            InputStrategy::Single(source) => source.as_table_provider().await,
+            InputStrategy::Single(source) => source.as_table_provider(ctx).await,
             InputStrategy::Multiple(sources) => {
-                if sources.len() == 0 {
+                if sources.is_empty() {
                     return Err(anyhow!("No sources provided"));
                 }
 
-                let futures = sources
-                    .iter()
-                    .map(async |source| source.as_table_provider().await)
-                    .collect::<Vec<_>>();
+                let mut providers: Vec<Arc<dyn TableProvider>> = Vec::new();
 
-                let providers = join_all(futures)
-                    .await
-                    .into_iter()
-                    .collect::<Result<Vec<Arc<dyn TableProvider>>>>()?;
+                for source in sources {
+                    providers.push(source.as_table_provider(ctx).await?);
+                }
 
                 let mut df: DataFrame = ctx.read_empty()?;
 
