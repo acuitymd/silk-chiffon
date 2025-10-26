@@ -10,7 +10,7 @@ use datafusion::{
 pub trait DataSource: Send + Sync {
     fn name(&self) -> &str;
 
-    async fn as_table_provider(&self, ctx: &mut SessionContext) -> Result<Arc<dyn TableProvider>> {
+    async fn as_table_provider(&self, _ctx: &mut SessionContext) -> Result<Arc<dyn TableProvider>> {
         Err(anyhow!("as_table_provider is not implemented"))
     }
 
