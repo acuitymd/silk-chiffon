@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use anyhow::Result;
 use arrow::datatypes::SchemaRef;
 use datafusion::prelude::DataFrame;
