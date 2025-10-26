@@ -27,8 +27,7 @@ impl DataSource for ParquetDataSource {
         "parquet"
     }
 
-    async fn as_table_provider(&self) -> Result<Arc<dyn TableProvider>> {
-        let ctx = SessionContext::new();
+    async fn as_table_provider(&self, ctx: &mut SessionContext) -> Result<Arc<dyn TableProvider>> {
         let table_name = format!("parquet_{}", Uuid::new_v4().as_simple());
         ctx.register_parquet(&table_name, &self.path, ParquetReadOptions::default())
             .await?;
@@ -64,16 +63,17 @@ mod tests {
     #[tokio::test]
     async fn test_as_table_provider() {
         let source = ParquetDataSource::new(TEST_PARQUET_PATH.to_string());
-        let table_provider = source.as_table_provider().await.unwrap();
+        let mut ctx = SessionContext::new();
+        let table_provider = source.as_table_provider(&mut ctx).await.unwrap();
         assert!(!table_provider.schema().fields().is_empty());
     }
 
     #[tokio::test]
     async fn test_as_table_provider_can_be_queried() {
         let source = ParquetDataSource::new(TEST_PARQUET_PATH.to_string());
-        let table_provider = source.as_table_provider().await.unwrap();
+        let mut ctx = SessionContext::new();
+        let table_provider = source.as_table_provider(&mut ctx).await.unwrap();
 
-        let ctx = SessionContext::new();
         ctx.register_table("test_table", table_provider).unwrap();
 
         let df = ctx.sql("SELECT * FROM test_table LIMIT 1").await.unwrap();

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use datafusion::catalog::TableProvider;
+use datafusion::{catalog::TableProvider, prelude::SessionContext};
 use tempfile::NamedTempFile;
 
 use crate::{
@@ -21,9 +21,12 @@ pub enum PreparedSource {
 }
 
 impl PreparedSource {
-    pub async fn from_data_source(data_source: Box<dyn DataSource>) -> Result<Self> {
+    pub async fn from_data_source(
+        data_source: Box<dyn DataSource>,
+        ctx: &mut SessionContext,
+    ) -> Result<Self> {
         if data_source.supports_table_provider() {
-            Ok(Self::Direct(data_source.as_table_provider().await?))
+            Ok(Self::Direct(data_source.as_table_provider(ctx).await?))
         } else {
             let temp_file = NamedTempFile::with_suffix(".arrow")?;
             let temp_path = temp_file.path().to_path_buf();
@@ -37,7 +40,7 @@ impl PreparedSource {
             let arrow_data_source =
                 ArrowFileDataSource::new(temp_path.to_str().unwrap().to_string());
             Ok(Self::Materialized {
-                table_provider: arrow_data_source.as_table_provider().await?,
+                table_provider: arrow_data_source.as_table_provider(ctx).await?,
                 _temp_file: temp_file,
             })
         }
@@ -49,7 +52,6 @@ mod tests {
     use super::*;
     use crate::sources::{arrow_file::ArrowFileDataSource, arrow_stream::ArrowStreamDataSource};
     use arrow::array::Int64Array;
-    use datafusion::prelude::SessionContext;
 
     const TEST_ARROW_FILE_PATH: &str = "tests/files/people.file.arrow";
     const TEST_ARROW_STREAM_PATH: &str = "tests/files/people.stream.arrow";
@@ -59,7 +61,11 @@ mod tests {
         let data_source: Box<dyn DataSource> =
             Box::new(ArrowFileDataSource::new(TEST_ARROW_FILE_PATH.to_string()));
 
-        let prepared_source = PreparedSource::from_data_source(data_source).await.unwrap();
+        let mut ctx = SessionContext::new();
+
+        let prepared_source = PreparedSource::from_data_source(data_source, &mut ctx)
+            .await
+            .unwrap();
 
         assert!(matches!(prepared_source, PreparedSource::Direct(_)));
     }
@@ -72,7 +78,11 @@ mod tests {
 
         assert!(!data_source.supports_table_provider());
 
-        let prepared_source = PreparedSource::from_data_source(data_source).await.unwrap();
+        let mut ctx = SessionContext::new();
+
+        let prepared_source = PreparedSource::from_data_source(data_source, &mut ctx)
+            .await
+            .unwrap();
 
         let table_provider = match prepared_source {
             PreparedSource::Direct(_) => panic!("Expected Materialized variant"),
@@ -87,7 +97,11 @@ mod tests {
         let data_source: Box<dyn DataSource> =
             Box::new(ArrowFileDataSource::new(TEST_ARROW_FILE_PATH.to_string()));
 
-        let prepared_source = PreparedSource::from_data_source(data_source).await.unwrap();
+        let mut ctx = SessionContext::new();
+
+        let prepared_source = PreparedSource::from_data_source(data_source, &mut ctx)
+            .await
+            .unwrap();
 
         let table_provider = match prepared_source {
             PreparedSource::Direct(tp) => tp,
@@ -110,7 +124,11 @@ mod tests {
             TEST_ARROW_STREAM_PATH.to_string(),
         ));
 
-        let prepared_source = PreparedSource::from_data_source(data_source).await.unwrap();
+        let mut ctx = SessionContext::new();
+
+        let prepared_source = PreparedSource::from_data_source(data_source, &mut ctx)
+            .await
+            .unwrap();
 
         let table_provider = match prepared_source {
             PreparedSource::Direct(_) => panic!("Expected Materialized variant"),
@@ -133,7 +151,11 @@ mod tests {
             TEST_ARROW_STREAM_PATH.to_string(),
         ));
 
-        let prepared_source = PreparedSource::from_data_source(data_source).await.unwrap();
+        let mut ctx = SessionContext::new();
+
+        let prepared_source = PreparedSource::from_data_source(data_source, &mut ctx)
+            .await
+            .unwrap();
 
         let table_provider = match prepared_source {
             PreparedSource::Direct(_) => panic!("Expected Materialized variant"),

@@ -26,8 +26,7 @@ impl DataSource for ArrowFileDataSource {
         "arrow_file"
     }
 
-    async fn as_table_provider(&self) -> Result<Arc<dyn TableProvider>> {
-        let ctx = SessionContext::new();
+    async fn as_table_provider(&self, ctx: &mut SessionContext) -> Result<Arc<dyn TableProvider>> {
         let table_name = format!("arrow_file_{}", Uuid::new_v4().as_simple());
         ctx.register_arrow(&table_name, &self.path, ArrowReadOptions::default())
             .await?;
@@ -42,6 +41,7 @@ impl DataSource for ArrowFileDataSource {
 
 #[cfg(test)]
 mod tests {
+    use datafusion::prelude::SessionContext;
     use futures::StreamExt;
 
     use super::*;
@@ -63,14 +63,16 @@ mod tests {
     #[tokio::test]
     async fn test_as_table_provider() {
         let source = ArrowFileDataSource::new(TEST_ARROW_FILE_PATH.to_string());
-        let table_provider = source.as_table_provider().await.unwrap();
+        let mut ctx = SessionContext::new();
+        let table_provider = source.as_table_provider(&mut ctx).await.unwrap();
         assert!(!table_provider.schema().fields().is_empty());
     }
 
     #[tokio::test]
     async fn test_as_table_provider_can_be_queried() {
         let source = ArrowFileDataSource::new(TEST_ARROW_FILE_PATH.to_string());
-        let table_provider = source.as_table_provider().await.unwrap();
+        let mut ctx = SessionContext::new();
+        let table_provider = source.as_table_provider(&mut ctx).await.unwrap();
 
         let ctx = SessionContext::new();
         ctx.register_table("test_table", table_provider).unwrap();
