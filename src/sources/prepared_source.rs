@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use async_trait::async_trait;
 use datafusion::{catalog::TableProvider, prelude::SessionContext};
 use tempfile::NamedTempFile;
 
@@ -13,8 +14,12 @@ use crate::{
 };
 
 pub enum PreparedSource {
-    Direct(Arc<dyn TableProvider>),
+    Direct {
+        name: String,
+        table_provider: Arc<dyn TableProvider>,
+    },
     Materialized {
+        name: String,
         table_provider: Arc<dyn TableProvider>,
         _temp_file: NamedTempFile,
     },
@@ -26,7 +31,10 @@ impl PreparedSource {
         ctx: &mut SessionContext,
     ) -> Result<Self> {
         if data_source.supports_table_provider() {
-            Ok(Self::Direct(data_source.as_table_provider(ctx).await?))
+            Ok(Self::Direct {
+                name: format!("prepared_direct_{}", data_source.name().to_string()),
+                table_provider: data_source.as_table_provider(ctx).await?,
+            })
         } else {
             let temp_file = NamedTempFile::with_suffix(".arrow")?;
             let temp_path = temp_file.path().to_path_buf();
@@ -40,10 +48,36 @@ impl PreparedSource {
             let arrow_data_source =
                 ArrowFileDataSource::new(temp_path.to_str().unwrap().to_string());
             Ok(Self::Materialized {
+                name: format!("prepared_materialized_{}", data_source.name().to_string()),
                 table_provider: arrow_data_source.as_table_provider(ctx).await?,
                 _temp_file: temp_file,
             })
         }
+    }
+
+    pub fn table_provider(&self) -> Arc<dyn TableProvider> {
+        match self {
+            PreparedSource::Direct { table_provider, .. } => table_provider.clone(),
+            PreparedSource::Materialized { table_provider, .. } => table_provider.clone(),
+        }
+    }
+}
+
+#[async_trait]
+impl DataSource for PreparedSource {
+    fn name(&self) -> &str {
+        match self {
+            PreparedSource::Direct { name, .. } => name.as_str(),
+            PreparedSource::Materialized { name, .. } => name.as_str(),
+        }
+    }
+
+    async fn as_table_provider(&self, _ctx: &mut SessionContext) -> Result<Arc<dyn TableProvider>> {
+        Ok(self.table_provider())
+    }
+
+    fn supports_table_provider(&self) -> bool {
+        true
     }
 }
 
@@ -67,7 +101,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(matches!(prepared_source, PreparedSource::Direct(_)));
+        assert!(matches!(prepared_source, PreparedSource::Direct { .. }));
     }
 
     #[tokio::test]
@@ -85,7 +119,7 @@ mod tests {
             .unwrap();
 
         let table_provider = match prepared_source {
-            PreparedSource::Direct(_) => panic!("Expected Materialized variant"),
+            PreparedSource::Direct { .. } => panic!("Expected Materialized variant"),
             PreparedSource::Materialized { table_provider, .. } => table_provider,
         };
 
@@ -104,7 +138,7 @@ mod tests {
             .unwrap();
 
         let table_provider = match prepared_source {
-            PreparedSource::Direct(tp) => tp,
+            PreparedSource::Direct { table_provider, .. } => table_provider,
             PreparedSource::Materialized { .. } => panic!("Expected Direct variant"),
         };
 
@@ -131,7 +165,7 @@ mod tests {
             .unwrap();
 
         let table_provider = match prepared_source {
-            PreparedSource::Direct(_) => panic!("Expected Materialized variant"),
+            PreparedSource::Direct { .. } => panic!("Expected Materialized variant"),
             PreparedSource::Materialized { table_provider, .. } => table_provider,
         };
 
@@ -158,7 +192,7 @@ mod tests {
             .unwrap();
 
         let table_provider = match prepared_source {
-            PreparedSource::Direct(_) => panic!("Expected Materialized variant"),
+            PreparedSource::Direct { .. } => panic!("Expected Materialized variant"),
             PreparedSource::Materialized { table_provider, .. } => table_provider,
         };
 
