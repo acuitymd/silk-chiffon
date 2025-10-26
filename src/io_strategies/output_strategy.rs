@@ -1,5 +1,8 @@
+use std::sync::Arc;
+
 use anyhow::Result;
 use arrow::datatypes::SchemaRef;
+use datafusion::prelude::DataFrame;
 
 use crate::{converters::partition_arrow::OutputTemplate, sinks::data_sink::DataSink};
 
@@ -11,4 +14,21 @@ pub enum OutputStrategy {
         sink_factory: Box<dyn Fn(&str, &SchemaRef) -> Result<Box<dyn DataSink>> + Send + Sync>,
         exclude_partition_column: bool,
     },
+}
+
+impl OutputStrategy {
+    pub async fn write(&mut self, df: DataFrame) -> Result<()> {
+        match self {
+            OutputStrategy::Single(sink) => {
+                sink.write_stream(df.execute_stream().await?).await?;
+                Ok(())
+            }
+            OutputStrategy::Partitioned { sink_factory, .. } => {
+                let schema = df.schema().inner();
+                let mut sink = sink_factory("output", schema)?;
+                sink.write_stream(df.execute_stream().await?).await?;
+                Ok(())
+            }
+        }
+    }
 }
