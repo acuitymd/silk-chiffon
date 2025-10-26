@@ -10,15 +10,11 @@ use crate::{
     operations::data_operation::DataOperation,
 };
 
+#[derive(Default)]
 pub struct PipelineConfig {
     pub temp_dir: Option<PathBuf>,
 }
 
-impl Default for PipelineConfig {
-    fn default() -> Self {
-        Self { temp_dir: None }
-    }
-}
 
 pub struct Pipeline {
     input_strategy: InputStrategy,

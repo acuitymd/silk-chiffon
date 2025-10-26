@@ -6,6 +6,12 @@ use crate::operations::data_operation::DataOperation;
 
 pub struct IdentityOperation;
 
+impl Default for IdentityOperation {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl IdentityOperation {
     pub fn new() -> Self {
         Self {}

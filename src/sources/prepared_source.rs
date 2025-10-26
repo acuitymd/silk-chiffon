@@ -32,7 +32,7 @@ impl PreparedSource {
     ) -> Result<Self> {
         if data_source.supports_table_provider() {
             Ok(Self::Direct {
-                name: format!("prepared_direct_{}", data_source.name().to_string()),
+                name: format!("prepared_direct_{}", data_source.name()),
                 table_provider: data_source.as_table_provider(ctx).await?,
             })
         } else {
@@ -48,7 +48,7 @@ impl PreparedSource {
             let arrow_data_source =
                 ArrowFileDataSource::new(temp_path.to_str().unwrap().to_string());
             Ok(Self::Materialized {
-                name: format!("prepared_materialized_{}", data_source.name().to_string()),
+                name: format!("prepared_materialized_{}", data_source.name()),
                 table_provider: arrow_data_source.as_table_provider(ctx).await?,
                 _temp_file: temp_file,
             })
