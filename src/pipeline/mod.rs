@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use clap::ValueEnum;
 use datafusion::prelude::{SessionConfig, SessionContext};
 
 use crate::{
@@ -61,15 +60,14 @@ impl Pipeline {
     }
 
     pub fn build_session_context(&self, dialect: QueryDialect) -> SessionContext {
+        let mut cfg = SessionConfig::new();
+
         // DuckDB doesn't like joining Datatype::Utf8View to Datatype::Utf8, so we disable
         // the automatic mapping of all string types to Datatype::Utf8View.
         // https://datafusion.apache.org/library-user-guide/upgrading.html#new-map-string-types-to-utf8view-configuration-option
-        let cfg = SessionConfig::new()
-            .set_bool("datafusion.sql_parser.map_string_types_to_utf8view", false)
-            .set_str(
-                "datafusion.sql_parser.dialect",
-                dialect.to_possible_value().unwrap().get_name(),
-            );
+        cfg.options_mut().sql_parser.map_string_types_to_utf8view = false;
+
+        cfg.options_mut().sql_parser.dialect = dialect.to_string();
 
         SessionContext::new_with_config(cfg)
     }
