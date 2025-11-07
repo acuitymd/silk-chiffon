@@ -7,10 +7,10 @@ use datafusion::{
 };
 
 #[async_trait]
-pub trait DataSource {
+pub trait DataSource: Send + Sync {
     fn name(&self) -> &str;
 
-    async fn as_table_provider(&self) -> Result<Arc<dyn TableProvider>> {
+    async fn as_table_provider(&self, _ctx: &mut SessionContext) -> Result<Arc<dyn TableProvider>> {
         Err(anyhow!("as_table_provider is not implemented"))
     }
 
@@ -19,8 +19,15 @@ pub trait DataSource {
     }
 
     async fn as_stream(&self) -> Result<SendableRecordBatchStream> {
-        let ctx = SessionContext::new();
-        let table = self.as_table_provider().await?;
+        let mut ctx = SessionContext::new();
+        self.as_stream_with_session_context(&mut ctx).await
+    }
+
+    async fn as_stream_with_session_context(
+        &self,
+        ctx: &mut SessionContext,
+    ) -> Result<SendableRecordBatchStream> {
+        let table = self.as_table_provider(ctx).await?;
         let df = ctx.read_table(table)?;
         df.execute_stream().await.map_err(|e| anyhow!(e))
     }

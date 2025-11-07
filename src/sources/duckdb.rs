@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use datafusion::{
     error::DataFusionError,
     execution::{RecordBatchStream, SendableRecordBatchStream},
+    prelude::SessionContext,
 };
 use futures::Stream;
 use pg_escape::quote_identifier;
@@ -109,6 +110,13 @@ impl DataSource for DuckDBDataSource {
 
         Ok(Box::pin(DuckDBChannelStream::new(returned_schema, rx)))
     }
+
+    async fn as_stream_with_session_context(
+        &self,
+        _ctx: &mut SessionContext,
+    ) -> Result<SendableRecordBatchStream> {
+        self.as_stream().await
+    }
 }
 
 #[cfg(test)]
@@ -143,7 +151,8 @@ mod tests {
             TEST_DUCKDB_PATH.to_string(),
             TEST_DUCKDB_TABLE_NAME.to_string(),
         );
-        let table_provider = source.as_table_provider().await;
+        let mut ctx = SessionContext::new();
+        let table_provider = source.as_table_provider(&mut ctx).await;
         assert!(table_provider.is_err());
     }
 

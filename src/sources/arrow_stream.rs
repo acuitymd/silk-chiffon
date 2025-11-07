@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use datafusion::{
     error::DataFusionError,
     execution::{RecordBatchStream, SendableRecordBatchStream},
+    prelude::SessionContext,
 };
 use futures::Stream;
 use tokio::sync::mpsc;
@@ -100,6 +101,13 @@ impl DataSource for ArrowStreamDataSource {
 
         Ok(Box::pin(ArrowStreamChannelStream::new(returned_schema, rx)))
     }
+
+    async fn as_stream_with_session_context(
+        &self,
+        _ctx: &mut SessionContext,
+    ) -> Result<SendableRecordBatchStream> {
+        self.as_stream().await
+    }
 }
 
 #[cfg(test)]
@@ -124,7 +132,8 @@ mod tests {
     #[tokio::test]
     async fn test_as_table_provider() {
         let source = ArrowStreamDataSource::new(TEST_ARROW_STREAM_PATH.to_string());
-        let table_provider = source.as_table_provider().await;
+        let mut ctx = SessionContext::new();
+        let table_provider = source.as_table_provider(&mut ctx).await;
         assert!(table_provider.is_err());
     }
 

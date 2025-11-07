@@ -1,5 +1,8 @@
 pub mod commands;
 pub mod converters;
+pub mod io_strategies;
+pub mod operations;
+pub mod pipeline;
 pub mod sinks;
 pub mod sources;
 pub mod utils;

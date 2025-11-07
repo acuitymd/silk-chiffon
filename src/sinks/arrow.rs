@@ -1,5 +1,5 @@
 use futures::stream::StreamExt;
-use std::{collections::HashMap, fs::File, io::BufWriter, path::PathBuf};
+use std::{collections::HashMap, fs::File, io::BufWriter, path::PathBuf, sync::Mutex};
 
 use anyhow::Result;
 use arrow::{
@@ -66,11 +66,15 @@ impl ArrowSinkOptions {
     }
 }
 
-pub struct ArrowSink {
+pub struct ArrowSinkInner {
     path: PathBuf,
     rows_written: u64,
     writer: Box<dyn ArrowRecordBatchWriter>,
     coalescer: BatchCoalescer,
+}
+
+pub struct ArrowSink {
+    inner: Mutex<ArrowSinkInner>,
 }
 
 impl ArrowSink {
@@ -102,11 +106,15 @@ impl ArrowSink {
 
         let coalescer = BatchCoalescer::new(schema.clone(), options.record_batch_size);
 
-        Ok(Self {
+        let inner = ArrowSinkInner {
             path,
             rows_written: 0,
             writer,
             coalescer,
+        };
+
+        Ok(Self {
+            inner: Mutex::new(inner),
         })
     }
 }
@@ -123,29 +131,31 @@ impl DataSink for ArrowSink {
     }
 
     async fn write_batch(&mut self, batch: RecordBatch) -> Result<()> {
-        self.coalescer.push_batch(batch)?;
+        let mut inner = self.inner.lock().unwrap();
+        inner.coalescer.push_batch(batch)?;
 
-        while let Some(completed_batch) = self.coalescer.next_completed_batch() {
-            self.writer.write(&completed_batch)?;
-            self.rows_written += completed_batch.num_rows() as u64;
+        while let Some(completed_batch) = inner.coalescer.next_completed_batch() {
+            inner.writer.write(&completed_batch)?;
+            inner.rows_written += completed_batch.num_rows() as u64;
         }
 
         Ok(())
     }
 
     async fn finish(&mut self) -> Result<SinkResult> {
-        self.coalescer.finish_buffered_batch()?;
+        let mut inner = self.inner.lock().unwrap();
+        inner.coalescer.finish_buffered_batch()?;
 
-        if let Some(final_batch) = self.coalescer.next_completed_batch() {
-            self.writer.write(&final_batch)?;
-            self.rows_written += final_batch.num_rows() as u64;
+        if let Some(final_batch) = inner.coalescer.next_completed_batch() {
+            inner.writer.write(&final_batch)?;
+            inner.rows_written += final_batch.num_rows() as u64;
         }
 
-        self.writer.finish()?;
+        inner.writer.finish()?;
 
         Ok(SinkResult {
-            files_written: vec![self.path.clone()],
-            rows_written: self.rows_written,
+            files_written: vec![inner.path.clone()],
+            rows_written: inner.rows_written,
         })
     }
 }
