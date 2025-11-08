@@ -66,7 +66,14 @@ impl InputStrategy {
                 .await?
                 .table_provider())
             }
-            InputStrategy::Multiple(sources) => build_multiple_table_providers(ctx, sources).await,
+            InputStrategy::Multiple(sources) => {
+                build_multiple_table_providers_with_working_directory(
+                    ctx,
+                    sources,
+                    working_directory,
+                )
+                .await
+            }
         }
     }
 
@@ -108,7 +115,43 @@ async fn build_multiple_table_providers(
     let mut providers: Vec<Arc<dyn TableProvider>> = Vec::new();
 
     for source in sources {
-        providers.push(source.as_table_provider(ctx).await?);
+        providers.push(
+            PreparedSource::from_data_source(source, ctx)
+                .await?
+                .table_provider(),
+        );
+    }
+
+    let mut df: DataFrame = ctx.read_empty()?;
+
+    for provider in providers {
+        df = df.union(ctx.read_table(provider.clone())?)?;
+    }
+
+    Ok(df.into_view())
+}
+
+async fn build_multiple_table_providers_with_working_directory(
+    ctx: &mut SessionContext,
+    sources: &Vec<Box<dyn DataSource>>,
+    working_directory: String,
+) -> Result<Arc<dyn TableProvider>> {
+    if sources.is_empty() {
+        return Err(anyhow!("No sources provided"));
+    }
+
+    let mut providers: Vec<Arc<dyn TableProvider>> = Vec::new();
+
+    for source in sources {
+        providers.push(
+            PreparedSource::from_data_source_with_working_directory(
+                source,
+                ctx,
+                working_directory.clone(),
+            )
+            .await?
+            .table_provider(),
+        );
     }
 
     let mut df: DataFrame = ctx.read_empty()?;
