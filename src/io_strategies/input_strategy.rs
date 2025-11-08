@@ -45,13 +45,13 @@ impl InputStrategy {
         working_directory: Option<String>,
     ) -> Result<Arc<dyn TableProvider>> {
         match self {
-            InputStrategy::Single(source) => {
-                Ok(
-                    PreparedSource::from_data_source(source, ctx, working_directory.clone())
-                        .await?
-                        .table_provider(),
-                )
-            }
+            InputStrategy::Single(source) => Ok(PreparedSource::from_data_source(
+                source.as_ref(),
+                ctx,
+                working_directory.clone(),
+            )
+            .await?
+            .table_provider()),
             InputStrategy::Multiple(sources) => {
                 build_multiple_table_providers(ctx, sources, working_directory.clone()).await
             }
@@ -102,7 +102,7 @@ async fn build_multiple_table_providers(
 
     for source in sources {
         providers.push(
-            PreparedSource::from_data_source(source, ctx, working_directory.clone())
+            PreparedSource::from_data_source(source.as_ref(), ctx, working_directory.clone())
                 .await?
                 .table_provider(),
         );

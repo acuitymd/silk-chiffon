@@ -27,7 +27,7 @@ pub enum PreparedSource {
 
 impl PreparedSource {
     pub async fn from_data_source(
-        data_source: &Box<dyn DataSource>,
+        data_source: &dyn DataSource,
         ctx: &mut SessionContext,
         working_directory: Option<String>,
     ) -> Result<Self> {
@@ -103,9 +103,10 @@ mod tests {
 
         let mut ctx = SessionContext::new();
 
-        let prepared_source = PreparedSource::from_data_source(&data_source, &mut ctx, None)
-            .await
-            .unwrap();
+        let prepared_source =
+            PreparedSource::from_data_source(data_source.as_ref(), &mut ctx, None)
+                .await
+                .unwrap();
 
         assert!(matches!(prepared_source, PreparedSource::Direct { .. }));
     }
@@ -120,9 +121,10 @@ mod tests {
 
         let mut ctx = SessionContext::new();
 
-        let prepared_source = PreparedSource::from_data_source(&data_source, &mut ctx, None)
-            .await
-            .unwrap();
+        let prepared_source =
+            PreparedSource::from_data_source(data_source.as_ref(), &mut ctx, None)
+                .await
+                .unwrap();
 
         let table_provider = match prepared_source {
             PreparedSource::Direct { .. } => panic!("Expected Materialized variant"),
@@ -139,9 +141,10 @@ mod tests {
 
         let mut ctx = SessionContext::new();
 
-        let prepared_source = PreparedSource::from_data_source(&data_source, &mut ctx, None)
-            .await
-            .unwrap();
+        let prepared_source =
+            PreparedSource::from_data_source(data_source.as_ref(), &mut ctx, None)
+                .await
+                .unwrap();
 
         let table_provider = match prepared_source {
             PreparedSource::Direct { table_provider, .. } => table_provider,
@@ -166,9 +169,10 @@ mod tests {
 
         let mut ctx = SessionContext::new();
 
-        let prepared_source = PreparedSource::from_data_source(&data_source, &mut ctx, None)
-            .await
-            .unwrap();
+        let prepared_source =
+            PreparedSource::from_data_source(data_source.as_ref(), &mut ctx, None)
+                .await
+                .unwrap();
 
         let table_provider = match prepared_source {
             PreparedSource::Direct { .. } => panic!("Expected Materialized variant"),
@@ -193,9 +197,10 @@ mod tests {
 
         let mut ctx = SessionContext::new();
 
-        let prepared_source = PreparedSource::from_data_source(&data_source, &mut ctx, None)
-            .await
-            .unwrap();
+        let prepared_source =
+            PreparedSource::from_data_source(data_source.as_ref(), &mut ctx, None)
+                .await
+                .unwrap();
 
         let table_provider = match prepared_source {
             PreparedSource::Direct { .. } => panic!("Expected Materialized variant"),

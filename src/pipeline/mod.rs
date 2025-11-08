@@ -18,22 +18,12 @@ pub struct PipelineConfig {
     pub working_directory: Option<String>,
 }
 
+#[derive(Default)]
 pub struct Pipeline {
     input_strategy: Option<InputStrategy>,
     operations: Vec<Box<dyn DataOperation>>,
     output_strategy: Option<OutputStrategy>,
     config: PipelineConfig,
-}
-
-impl Default for Pipeline {
-    fn default() -> Self {
-        Self {
-            input_strategy: None,
-            operations: Vec::new(),
-            output_strategy: None,
-            config: PipelineConfig::default(),
-        }
-    }
 }
 
 impl Pipeline {
