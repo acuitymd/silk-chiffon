@@ -16,6 +16,7 @@ use crate::{
 #[derive(Default)]
 pub struct PipelineConfig {
     pub working_directory: Option<String>,
+    pub query_dialect: QueryDialect,
 }
 
 #[derive(Default)]
@@ -74,8 +75,13 @@ impl Pipeline {
         self
     }
 
+    pub fn with_query_dialect(mut self, dialect: QueryDialect) -> Self {
+        self.config.query_dialect = dialect;
+        self
+    }
+
     pub async fn execute(&mut self) -> Result<()> {
-        let mut ctx = SessionContext::new();
+        let mut ctx = self.build_session_context();
         self.execute_with_session_context(&mut ctx).await
     }
 
@@ -111,7 +117,7 @@ impl Pipeline {
         Ok(())
     }
 
-    pub fn build_session_context(&self, dialect: QueryDialect) -> SessionContext {
+    pub fn build_session_context(&self) -> SessionContext {
         let mut cfg = SessionConfig::new();
 
         // DuckDB doesn't like joining Datatype::Utf8View to Datatype::Utf8, so we disable
@@ -119,7 +125,7 @@ impl Pipeline {
         // https://datafusion.apache.org/library-user-guide/upgrading.html#new-map-string-types-to-utf8view-configuration-option
         cfg.options_mut().sql_parser.map_string_types_to_utf8view = false;
 
-        cfg.options_mut().sql_parser.dialect = dialect.to_string();
+        cfg.options_mut().sql_parser.dialect = self.config.query_dialect.to_string();
 
         SessionContext::new_with_config(cfg)
     }
