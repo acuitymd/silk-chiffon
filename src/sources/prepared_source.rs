@@ -43,13 +43,14 @@ impl PreparedSource {
                 NamedTempFile::with_suffix(".arrow")?
             };
             let temp_path = temp_file.path().to_path_buf();
-            let schema = data_source.as_stream().await?.schema();
+            let stream = data_source.as_stream().await?;
+            let schema = stream.schema();
             let mut sink: Box<dyn DataSink> = Box::new(ArrowSink::create(
                 temp_path.clone(),
                 &schema,
                 ArrowSinkOptions::default(),
             )?);
-            sink.write_stream(data_source.as_stream().await?).await?;
+            sink.write_stream(stream).await?;
             let arrow_data_source =
                 ArrowFileDataSource::new(temp_path.to_str().unwrap().to_string());
             Ok(Self::Materialized {
