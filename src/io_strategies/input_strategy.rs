@@ -71,7 +71,11 @@ impl InputStrategy {
 
                 let mut streams = vec![first_stream];
                 for source in &sources[1..] {
-                    streams.push(source.as_stream_with_session_context(ctx).await?);
+                    let stream = source.as_stream_with_session_context(ctx).await?;
+                    if stream.schema() != schema {
+                        return Err(anyhow!("Schemas do not match"));
+                    }
+                    streams.push(stream);
                 }
 
                 let merged = MergedRecordBatchStream {
