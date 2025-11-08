@@ -47,6 +47,12 @@ impl Pipeline {
         self
     }
 
+    pub fn with_operation(mut self, operation: Box<dyn DataOperation>) -> Self {
+        self.operations.push(operation);
+
+        self
+    }
+
     pub fn with_output_strategy_with_single_sink(mut self, sink: Box<dyn DataSink>) -> Self {
         self.output_strategy = Some(OutputStrategy::Single(sink));
 
