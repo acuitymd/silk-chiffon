@@ -27,8 +27,9 @@ pub enum PreparedSource {
 
 impl PreparedSource {
     pub async fn from_data_source(
-        data_source: Box<dyn DataSource>,
+        data_source: &dyn DataSource,
         ctx: &mut SessionContext,
+        working_directory: Option<String>,
     ) -> Result<Self> {
         if data_source.supports_table_provider() {
             Ok(Self::Direct {
@@ -36,15 +37,20 @@ impl PreparedSource {
                 table_provider: data_source.as_table_provider(ctx).await?,
             })
         } else {
-            let temp_file = NamedTempFile::with_suffix(".arrow")?;
+            let temp_file = if let Some(working_directory) = working_directory {
+                NamedTempFile::with_suffix_in(".arrow", working_directory)?
+            } else {
+                NamedTempFile::with_suffix(".arrow")?
+            };
             let temp_path = temp_file.path().to_path_buf();
-            let schema = data_source.as_stream().await?.schema();
+            let stream = data_source.as_stream().await?;
+            let schema = stream.schema();
             let mut sink: Box<dyn DataSink> = Box::new(ArrowSink::create(
                 temp_path.clone(),
                 &schema,
                 ArrowSinkOptions::default(),
             )?);
-            sink.write_stream(data_source.as_stream().await?).await?;
+            sink.write_stream(stream).await?;
             let arrow_data_source =
                 ArrowFileDataSource::new(temp_path.to_str().unwrap().to_string());
             Ok(Self::Materialized {
@@ -97,9 +103,10 @@ mod tests {
 
         let mut ctx = SessionContext::new();
 
-        let prepared_source = PreparedSource::from_data_source(data_source, &mut ctx)
-            .await
-            .unwrap();
+        let prepared_source =
+            PreparedSource::from_data_source(data_source.as_ref(), &mut ctx, None)
+                .await
+                .unwrap();
 
         assert!(matches!(prepared_source, PreparedSource::Direct { .. }));
     }
@@ -114,9 +121,10 @@ mod tests {
 
         let mut ctx = SessionContext::new();
 
-        let prepared_source = PreparedSource::from_data_source(data_source, &mut ctx)
-            .await
-            .unwrap();
+        let prepared_source =
+            PreparedSource::from_data_source(data_source.as_ref(), &mut ctx, None)
+                .await
+                .unwrap();
 
         let table_provider = match prepared_source {
             PreparedSource::Direct { .. } => panic!("Expected Materialized variant"),
@@ -133,9 +141,10 @@ mod tests {
 
         let mut ctx = SessionContext::new();
 
-        let prepared_source = PreparedSource::from_data_source(data_source, &mut ctx)
-            .await
-            .unwrap();
+        let prepared_source =
+            PreparedSource::from_data_source(data_source.as_ref(), &mut ctx, None)
+                .await
+                .unwrap();
 
         let table_provider = match prepared_source {
             PreparedSource::Direct { table_provider, .. } => table_provider,
@@ -160,9 +169,10 @@ mod tests {
 
         let mut ctx = SessionContext::new();
 
-        let prepared_source = PreparedSource::from_data_source(data_source, &mut ctx)
-            .await
-            .unwrap();
+        let prepared_source =
+            PreparedSource::from_data_source(data_source.as_ref(), &mut ctx, None)
+                .await
+                .unwrap();
 
         let table_provider = match prepared_source {
             PreparedSource::Direct { .. } => panic!("Expected Materialized variant"),
@@ -187,9 +197,10 @@ mod tests {
 
         let mut ctx = SessionContext::new();
 
-        let prepared_source = PreparedSource::from_data_source(data_source, &mut ctx)
-            .await
-            .unwrap();
+        let prepared_source =
+            PreparedSource::from_data_source(data_source.as_ref(), &mut ctx, None)
+                .await
+                .unwrap();
 
         let table_provider = match prepared_source {
             PreparedSource::Direct { .. } => panic!("Expected Materialized variant"),

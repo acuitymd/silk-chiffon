@@ -1,6 +1,6 @@
 use anyhow::Result;
 use arrow::datatypes::SchemaRef;
-use datafusion::prelude::DataFrame;
+use datafusion::{execution::SendableRecordBatchStream, prelude::DataFrame};
 
 use crate::{converters::partition_arrow::OutputTemplate, sinks::data_sink::DataSink};
 
@@ -29,6 +29,20 @@ impl OutputStrategy {
                 let mut sink =
                     sink_factory(TableName::from("output"), df.schema().inner().clone())?;
                 sink.write_stream(df.execute_stream().await?).await?;
+                Ok(())
+            }
+        }
+    }
+
+    pub async fn write_stream(&mut self, stream: SendableRecordBatchStream) -> Result<()> {
+        match self {
+            OutputStrategy::Single(sink) => {
+                sink.write_stream(stream).await?;
+                Ok(())
+            }
+            OutputStrategy::Partitioned { sink_factory, .. } => {
+                let mut sink = sink_factory(TableName::from("output"), stream.schema().clone())?;
+                sink.write_stream(stream).await?;
                 Ok(())
             }
         }
