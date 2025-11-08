@@ -106,13 +106,9 @@ impl Pipeline {
             return Ok(());
         }
 
-        let table_provider = if let Some(working_directory) = &self.config.working_directory {
-            input_strategy
-                .as_table_provider_with_working_directory(ctx, working_directory.clone())
-                .await?
-        } else {
-            input_strategy.as_table_provider(ctx).await?
-        };
+        let table_provider = input_strategy
+            .as_table_provider(ctx, self.config.working_directory.clone())
+            .await?;
 
         let mut df = ctx.read_table(table_provider)?;
 

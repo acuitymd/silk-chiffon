@@ -42,37 +42,18 @@ impl InputStrategy {
     pub async fn as_table_provider(
         &self,
         ctx: &mut SessionContext,
-    ) -> Result<Arc<dyn TableProvider>> {
-        match self {
-            InputStrategy::Single(source) => Ok(PreparedSource::from_data_source(source, ctx)
-                .await?
-                .table_provider()),
-            InputStrategy::Multiple(sources) => build_multiple_table_providers(ctx, sources).await,
-        }
-    }
-
-    pub async fn as_table_provider_with_working_directory(
-        &self,
-        ctx: &mut SessionContext,
-        working_directory: String,
+        working_directory: Option<String>,
     ) -> Result<Arc<dyn TableProvider>> {
         match self {
             InputStrategy::Single(source) => {
-                Ok(PreparedSource::from_data_source_with_working_directory(
-                    source,
-                    ctx,
-                    working_directory,
+                Ok(
+                    PreparedSource::from_data_source(source, ctx, working_directory.clone())
+                        .await?
+                        .table_provider(),
                 )
-                .await?
-                .table_provider())
             }
             InputStrategy::Multiple(sources) => {
-                build_multiple_table_providers_with_working_directory(
-                    ctx,
-                    sources,
-                    working_directory,
-                )
-                .await
+                build_multiple_table_providers(ctx, sources, working_directory.clone()).await
             }
         }
     }
@@ -107,6 +88,7 @@ impl InputStrategy {
 async fn build_multiple_table_providers(
     ctx: &mut SessionContext,
     sources: &Vec<Box<dyn DataSource>>,
+    working_directory: Option<String>,
 ) -> Result<Arc<dyn TableProvider>> {
     if sources.is_empty() {
         return Err(anyhow!("No sources provided"));
@@ -116,41 +98,9 @@ async fn build_multiple_table_providers(
 
     for source in sources {
         providers.push(
-            PreparedSource::from_data_source(source, ctx)
+            PreparedSource::from_data_source(source, ctx, working_directory.clone())
                 .await?
                 .table_provider(),
-        );
-    }
-
-    let mut df: DataFrame = ctx.read_empty()?;
-
-    for provider in providers {
-        df = df.union(ctx.read_table(provider.clone())?)?;
-    }
-
-    Ok(df.into_view())
-}
-
-async fn build_multiple_table_providers_with_working_directory(
-    ctx: &mut SessionContext,
-    sources: &Vec<Box<dyn DataSource>>,
-    working_directory: String,
-) -> Result<Arc<dyn TableProvider>> {
-    if sources.is_empty() {
-        return Err(anyhow!("No sources provided"));
-    }
-
-    let mut providers: Vec<Arc<dyn TableProvider>> = Vec::new();
-
-    for source in sources {
-        providers.push(
-            PreparedSource::from_data_source_with_working_directory(
-                source,
-                ctx,
-                working_directory.clone(),
-            )
-            .await?
-            .table_provider(),
         );
     }
 
