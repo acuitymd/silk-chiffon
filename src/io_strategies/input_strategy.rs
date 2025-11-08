@@ -14,12 +14,12 @@ use futures::stream::{SelectAll, Stream, select_all};
 
 use crate::sources::{data_source::DataSource, prepared_source::PreparedSource};
 
-struct MergedRecordBatchStream {
+struct MergedSendableRecordBatchStreams {
     schema: SchemaRef,
     inner: SelectAll<SendableRecordBatchStream>,
 }
 
-impl Stream for MergedRecordBatchStream {
+impl Stream for MergedSendableRecordBatchStreams {
     type Item = Result<RecordBatch, DataFusionError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -27,7 +27,7 @@ impl Stream for MergedRecordBatchStream {
     }
 }
 
-impl RecordBatchStream for MergedRecordBatchStream {
+impl RecordBatchStream for MergedSendableRecordBatchStreams {
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
@@ -78,7 +78,7 @@ impl InputStrategy {
                     streams.push(stream);
                 }
 
-                let merged = MergedRecordBatchStream {
+                let merged = MergedSendableRecordBatchStreams {
                     schema,
                     inner: select_all(streams),
                 };
