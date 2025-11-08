@@ -27,7 +27,7 @@ pub enum PreparedSource {
 
 impl PreparedSource {
     pub async fn from_data_source(
-        data_source: Box<dyn DataSource>,
+        data_source: &Box<dyn DataSource>,
         ctx: &mut SessionContext,
     ) -> Result<Self> {
         if data_source.supports_table_provider() {
@@ -37,6 +37,36 @@ impl PreparedSource {
             })
         } else {
             let temp_file = NamedTempFile::with_suffix(".arrow")?;
+            let temp_path = temp_file.path().to_path_buf();
+            let schema = data_source.as_stream().await?.schema();
+            let mut sink: Box<dyn DataSink> = Box::new(ArrowSink::create(
+                temp_path.clone(),
+                &schema,
+                ArrowSinkOptions::default(),
+            )?);
+            sink.write_stream(data_source.as_stream().await?).await?;
+            let arrow_data_source =
+                ArrowFileDataSource::new(temp_path.to_str().unwrap().to_string());
+            Ok(Self::Materialized {
+                name: format!("prepared_materialized_{}", data_source.name()),
+                table_provider: arrow_data_source.as_table_provider(ctx).await?,
+                _temp_file: temp_file,
+            })
+        }
+    }
+
+    pub async fn from_data_source_with_working_directory(
+        data_source: &Box<dyn DataSource>,
+        ctx: &mut SessionContext,
+        working_directory: String,
+    ) -> Result<Self> {
+        if data_source.supports_table_provider() {
+            Ok(Self::Direct {
+                name: format!("prepared_direct_{}", data_source.name()),
+                table_provider: data_source.as_table_provider(ctx).await?,
+            })
+        } else {
+            let temp_file = NamedTempFile::with_suffix_in(".arrow", working_directory)?;
             let temp_path = temp_file.path().to_path_buf();
             let schema = data_source.as_stream().await?.schema();
             let mut sink: Box<dyn DataSink> = Box::new(ArrowSink::create(
@@ -97,7 +127,7 @@ mod tests {
 
         let mut ctx = SessionContext::new();
 
-        let prepared_source = PreparedSource::from_data_source(data_source, &mut ctx)
+        let prepared_source = PreparedSource::from_data_source(&data_source, &mut ctx)
             .await
             .unwrap();
 
@@ -114,7 +144,7 @@ mod tests {
 
         let mut ctx = SessionContext::new();
 
-        let prepared_source = PreparedSource::from_data_source(data_source, &mut ctx)
+        let prepared_source = PreparedSource::from_data_source(&data_source, &mut ctx)
             .await
             .unwrap();
 
@@ -133,7 +163,7 @@ mod tests {
 
         let mut ctx = SessionContext::new();
 
-        let prepared_source = PreparedSource::from_data_source(data_source, &mut ctx)
+        let prepared_source = PreparedSource::from_data_source(&data_source, &mut ctx)
             .await
             .unwrap();
 
@@ -160,7 +190,7 @@ mod tests {
 
         let mut ctx = SessionContext::new();
 
-        let prepared_source = PreparedSource::from_data_source(data_source, &mut ctx)
+        let prepared_source = PreparedSource::from_data_source(&data_source, &mut ctx)
             .await
             .unwrap();
 
@@ -187,7 +217,7 @@ mod tests {
 
         let mut ctx = SessionContext::new();
 
-        let prepared_source = PreparedSource::from_data_source(data_source, &mut ctx)
+        let prepared_source = PreparedSource::from_data_source(&data_source, &mut ctx)
             .await
             .unwrap();
 
