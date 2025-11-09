@@ -583,7 +583,7 @@ mod tests {
             Field::new("name", DataType::Utf8, false),
         ]));
 
-        let id_array = Int64Array::from((0..num_rows as i64).collect::<Vec<_>>());
+        let id_array = Int64Array::from((0..i64::try_from(num_rows).unwrap()).collect::<Vec<_>>());
         let category_array = Int32Array::from(partition_values);
         let value_array =
             Float64Array::from((0..num_rows).map(|i| i as f64 * 1.5).collect::<Vec<_>>());
