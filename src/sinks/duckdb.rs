@@ -724,7 +724,7 @@ mod tests {
 
             let conn = Connection::open(&db_path).unwrap();
             // all timestamp variants should be readable as i64
-            let (ts_s, ts_ms, ts_us, ts_ns): (i64, i64, i64, i64) = conn
+            let (seconds, milliseconds, microseconds, nanoseconds): (i64, i64, i64, i64) = conn
                 .query_row(
                     "SELECT ts_s, ts_ms, ts_us, ts_ns FROM timestamp_variants LIMIT 1",
                     [],
@@ -732,10 +732,10 @@ mod tests {
                 )
                 .unwrap();
 
-            assert_eq!(ts_s, 1609459200);
-            assert_eq!(ts_ms, 1609459200000);
-            assert_eq!(ts_us, 1609459200000000);
-            assert_eq!(ts_ns, 1609459200000000000);
+            assert_eq!(seconds, 1609459200);
+            assert_eq!(milliseconds, 1609459200000);
+            assert_eq!(microseconds, 1609459200000000);
+            assert_eq!(nanoseconds, 1609459200000000000);
         }
 
         #[tokio::test]

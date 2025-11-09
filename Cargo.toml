@@ -83,3 +83,4 @@ panic = "abort"
 [lints.clippy]
 needless_pass_by_value = "warn"
 option_as_ref_cloned = "warn"
+similar_names = "warn"
