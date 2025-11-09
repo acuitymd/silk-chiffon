@@ -83,6 +83,7 @@ panic = "abort"
 [lints.clippy]
 case_sensitive_file_extension_comparisons = "warn"
 cast_lossless = "warn"
+cast_possible_truncation = "warn"
 needless_pass_by_value = "warn"
 option_as_ref_cloned = "warn"
 similar_names = "warn"

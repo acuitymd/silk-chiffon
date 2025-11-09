@@ -58,7 +58,8 @@ fn generate_test_data(
             DataType::Int32 => {
                 let mut partition_values = Vec::with_capacity(rows_in_batch);
                 for row_idx in 0..rows_in_batch {
-                    let value = ((batch_idx * batch_size + row_idx) % cardinality) as i32;
+                    let value =
+                        i32::try_from((batch_idx * batch_size + row_idx) % cardinality).unwrap();
                     partition_values.push(value);
                 }
                 Arc::new(Int32Array::from(partition_values))

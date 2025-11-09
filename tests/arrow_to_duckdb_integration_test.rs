@@ -389,7 +389,11 @@ fn test_duckdb_preserves_insertion_order() {
         .unwrap();
 
     for (i, (pos, val)) in results.iter().enumerate() {
-        assert_eq!(*pos, i as i32, "Position {pos} found at index {i}");
+        assert_eq!(
+            *pos,
+            i32::try_from(i).unwrap(),
+            "Position {pos} found at index {i}"
+        );
         assert_eq!(
             val,
             &format!("value_{i:03}"),
@@ -541,6 +545,10 @@ fn test_duckdb_preserves_order_with_limit_offset() {
         .unwrap();
 
     for (i, seq) in all_rows.iter().enumerate() {
-        assert_eq!(*seq, i as i32, "Sequence {seq} found at position {i}");
+        assert_eq!(
+            *seq,
+            i32::try_from(i).unwrap(),
+            "Sequence {seq} found at position {i}"
+        );
     }
 }

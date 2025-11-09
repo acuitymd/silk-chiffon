@@ -47,10 +47,11 @@ fn generate_query_test_data(num_rows: usize) -> Vec<RecordBatch> {
 
         for _ in 0..rows_in_batch {
             ids.push(id_counter);
-            categories_vec.push(categories[id_counter as usize % categories.len()]);
+            categories_vec
+                .push(categories[usize::try_from(id_counter).unwrap() % categories.len()]);
             values.push(rand::random::<f64>() * 1000.0);
-            quantities.push((id_counter % 100) as i32);
-            statuses_vec.push(statuses[id_counter as usize % statuses.len()]);
+            quantities.push(i32::try_from(id_counter % 100).unwrap());
+            statuses_vec.push(statuses[usize::try_from(id_counter).unwrap() % statuses.len()]);
             id_counter += 1;
         }
 

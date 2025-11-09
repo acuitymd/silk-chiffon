@@ -207,7 +207,8 @@ impl ParquetSink {
             let descending = sort_col.direction == SortDirection::Descending;
 
             sorting_columns.push(SortingColumn {
-                column_idx: column_idx as i32,
+                column_idx: i32::try_from(column_idx)
+                    .map_err(|_| anyhow!("Column index out of range"))?,
                 descending,
                 nulls_first: descending,
             });

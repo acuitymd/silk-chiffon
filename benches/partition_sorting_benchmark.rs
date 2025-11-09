@@ -45,10 +45,13 @@ fn generate_test_data(num_rows: usize, cardinality: usize) -> Vec<RecordBatch> {
 
         for row_idx in 0..rows_in_batch {
             ids.push(id_counter);
-            partition_values.push(((batch_idx * batch_size + row_idx) % cardinality) as i32);
+            partition_values
+                .push(i32::try_from((batch_idx * batch_size + row_idx) % cardinality).unwrap());
             timestamps.push(id_counter * 1000 + (rand::random::<i64>() % 100));
             values.push(rand::random::<f64>() * 1000.0);
-            cats.push(categories[(id_counter as usize) % categories.len()].to_string());
+            cats.push(
+                categories[usize::try_from(id_counter).unwrap() % categories.len()].to_string(),
+            );
             id_counter += 1;
         }
 
