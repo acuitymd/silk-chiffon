@@ -82,7 +82,7 @@ pub mod test_data {
 
         let ids: Vec<i32> = (start_id..start_id + count).collect();
         let names: Vec<String> = ids.iter().map(|id| format!("Person_{id}")).collect();
-        let values: Vec<f64> = ids.iter().map(|id| *id as f64 * 1.5).collect();
+        let values: Vec<f64> = ids.iter().map(|id| f64::from(*id) * 1.5).collect();
 
         let batch = RecordBatch::try_new(
             schema.clone(),
