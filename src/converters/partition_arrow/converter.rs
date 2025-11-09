@@ -311,7 +311,7 @@ impl PartitionArrowConverter {
                 ipc_format,
             } => {
                 ArrowWriterBuilder::new()
-                    .with_compression(compression.clone())
+                    .with_compression(*compression)
                     .with_ipc_format(ipc_format.clone())
                     .build_writer(path, schema)
                     .await

@@ -53,7 +53,7 @@ impl DuckDBSink {
                 let col = field.name();
                 let logical_type = to_duckdb_logical_type(field.data_type())
                     .map_err(|e| anyhow!("Failed to convert logical type: {:?}", e))?;
-                let col_type = Self::logical_type_to_sql(logical_type)?;
+                let col_type = Self::logical_type_to_sql(&logical_type)?;
                 let nullable = if field.is_nullable() { "" } else { " NOT NULL" };
                 Ok(format!(
                     "{} {}{}",
@@ -79,7 +79,7 @@ impl DuckDBSink {
         Ok(())
     }
 
-    fn logical_type_to_sql(logical_type: LogicalTypeHandle) -> Result<String> {
+    fn logical_type_to_sql(logical_type: &LogicalTypeHandle) -> Result<String> {
         let sql = match logical_type.id() {
             LogicalTypeId::Boolean => "BOOLEAN".to_string(),
             LogicalTypeId::Tinyint => "TINYINT".to_string(),
