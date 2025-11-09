@@ -163,7 +163,7 @@ impl ArrowToArrowConverter {
         writer: &mut dyn ArrowRecordBatchWriter,
         record_batch_size: usize,
     ) -> Result<()> {
-        let mut coalescer = BatchCoalescer::new(schema.clone(), record_batch_size);
+        let mut coalescer = BatchCoalescer::new(Arc::clone(schema), record_batch_size);
 
         while let Some(batch) = input.next().await? {
             coalescer.push_batch(batch)?;

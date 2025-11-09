@@ -5,7 +5,13 @@ use parquet::{
     format::SortingColumn,
     schema::types::ColumnPath,
 };
-use std::{collections::HashMap, fs::File, io::BufWriter, path::PathBuf, sync::Mutex};
+use std::{
+    collections::HashMap,
+    fs::File,
+    io::BufWriter,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use anyhow::{Result, anyhow};
 use arrow::{array::RecordBatch, datatypes::SchemaRef};
@@ -135,7 +141,7 @@ impl ParquetSink {
 
         writer_builder = Self::apply_sort_metadata(&options.sort_spec, writer_builder, schema)?;
 
-        let writer = ArrowWriter::try_new(file, schema.clone(), Some(writer_builder.build()))?;
+        let writer = ArrowWriter::try_new(file, Arc::clone(schema), Some(writer_builder.build()))?;
 
         let inner = ParquetSinkInner {
             path,

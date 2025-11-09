@@ -294,9 +294,12 @@ mod tests {
             let schema = test_data::simple_schema();
             let batch = test_data::create_batch_with_ids_and_names(&schema, &[1], &["a"]);
 
-            let mut sink =
-                DuckDBSink::create(db_path.clone(), "my-test.table".to_string(), schema.clone())
-                    .unwrap();
+            let mut sink = DuckDBSink::create(
+                db_path.clone(),
+                "my-test.table".to_string(),
+                Arc::clone(&schema),
+            )
+            .unwrap();
 
             sink.write_batch(batch).await.unwrap();
             sink.finish().await.unwrap();
@@ -321,7 +324,7 @@ mod tests {
             ]));
 
             let batch = RecordBatch::try_new(
-                schema.clone(),
+                Arc::clone(&schema),
                 vec![
                     Arc::new(Int32Array::from(vec![1, 2])),
                     Arc::new(StringArray::from(vec!["x", "y"])),
@@ -426,7 +429,7 @@ mod tests {
             ]));
 
             let batch = RecordBatch::try_new(
-                schema.clone(),
+                Arc::clone(&schema),
                 vec![
                     Arc::new(Int8Array::from(vec![1_i8, 2, 3])),
                     Arc::new(Int16Array::from(vec![1_i16, 2, 3])),
@@ -487,7 +490,7 @@ mod tests {
             ]));
 
             let batch = RecordBatch::try_new(
-                schema.clone(),
+                Arc::clone(&schema),
                 vec![
                     Arc::new(Float32Array::from(vec![1.5_f32, 2.5, 3.5])),
                     Arc::new(Float64Array::from(vec![1.5, 2.5, 3.5])),
@@ -523,7 +526,7 @@ mod tests {
             ]));
 
             let batch = RecordBatch::try_new(
-                schema.clone(),
+                Arc::clone(&schema),
                 vec![
                     Arc::new(Int32Array::from(vec![1, 2, 3])),
                     Arc::new(BooleanArray::from(vec![true, false, true])),
@@ -558,7 +561,7 @@ mod tests {
             ]));
 
             let batch = RecordBatch::try_new(
-                schema.clone(),
+                Arc::clone(&schema),
                 vec![
                     Arc::new(StringArray::from(vec!["hello", "world"])),
                     Arc::new(BinaryArray::from(vec![
@@ -602,7 +605,7 @@ mod tests {
             ]));
 
             let batch = RecordBatch::try_new(
-                schema.clone(),
+                Arc::clone(&schema),
                 vec![
                     Arc::new(Date32Array::from(vec![18628, 18629])),
                     Arc::new(TimestampMicrosecondArray::from(vec![
@@ -646,7 +649,7 @@ mod tests {
             ]));
 
             let batch = RecordBatch::try_new(
-                schema.clone(),
+                Arc::clone(&schema),
                 vec![
                     Arc::new(Int32Array::from(vec![1, 2])),
                     Arc::new(
@@ -700,7 +703,7 @@ mod tests {
             ]));
 
             let batch = RecordBatch::try_new(
-                schema.clone(),
+                Arc::clone(&schema),
                 vec![
                     Arc::new(arrow::array::TimestampSecondArray::from(vec![
                         1609459200_i64,
@@ -753,7 +756,7 @@ mod tests {
             ]));
 
             let batch = RecordBatch::try_new(
-                schema.clone(),
+                Arc::clone(&schema),
                 vec![
                     Arc::new(Int32Array::from(vec![1])),
                     Arc::new(arrow::array::IntervalMonthDayNanoArray::from(vec![
@@ -885,7 +888,7 @@ mod tests {
             uuid_array.append_value(uuid_bytes).unwrap();
 
             let batch = RecordBatch::try_new(
-                schema.clone(),
+                Arc::clone(&schema),
                 vec![
                     Arc::new(Int32Array::from(vec![1, 2])),
                     Arc::new(uuid_array.finish()),
@@ -937,7 +940,7 @@ mod tests {
             ]));
 
             let batch = RecordBatch::try_new(
-                schema.clone(),
+                Arc::clone(&schema),
                 vec![
                     Arc::new(Int32Array::from(vec![1, 2])),
                     Arc::new(

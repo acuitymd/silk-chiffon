@@ -34,7 +34,7 @@ pub mod test_data {
         names: &[&str],
     ) -> RecordBatch {
         RecordBatch::try_new(
-            schema.clone(),
+            Arc::clone(schema),
             vec![
                 Arc::new(Int32Array::from(ids.to_vec())),
                 Arc::new(StringArray::from(names.to_vec())),
@@ -49,7 +49,7 @@ pub mod test_data {
         names: &[&str],
     ) -> RecordBatch {
         RecordBatch::try_new(
-            schema.clone(),
+            Arc::clone(schema),
             vec![
                 Arc::new(Int32Array::from(ids.to_vec())),
                 Arc::new(StringArray::from(names.to_vec())),
@@ -64,7 +64,7 @@ pub mod test_data {
         values: &[i32],
     ) -> RecordBatch {
         RecordBatch::try_new(
-            schema.clone(),
+            Arc::clone(schema),
             vec![
                 Arc::new(Int32Array::from(groups.to_vec())),
                 Arc::new(Int32Array::from(values.to_vec())),
@@ -85,7 +85,7 @@ pub mod test_data {
         let values: Vec<f64> = ids.iter().map(|id| f64::from(*id) * 1.5).collect();
 
         let batch = RecordBatch::try_new(
-            schema.clone(),
+            Arc::clone(&schema),
             vec![
                 Arc::new(Int32Array::from(ids)),
                 Arc::new(StringArray::from(names)),

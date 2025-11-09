@@ -17,7 +17,7 @@ fn create_test_data() -> (Arc<Schema>, Vec<RecordBatch>) {
     ]));
 
     let batch1 = RecordBatch::try_new(
-        schema.clone(),
+        Arc::clone(&schema),
         vec![
             Arc::new(Int32Array::from(vec![1, 2, 3, 4, 5])) as ArrayRef,
             Arc::new(StringArray::from(vec!["A", "B", "A", "B", "C"])) as ArrayRef,
@@ -27,7 +27,7 @@ fn create_test_data() -> (Arc<Schema>, Vec<RecordBatch>) {
     .unwrap();
 
     let batch2 = RecordBatch::try_new(
-        schema.clone(),
+        Arc::clone(&schema),
         vec![
             Arc::new(Int32Array::from(vec![6, 7, 8, 9, 10])) as ArrayRef,
             Arc::new(StringArray::from(vec!["A", "C", "B", "C", "A"])) as ArrayRef,
@@ -270,7 +270,7 @@ async fn test_partition_arrow_to_arrow_safe_value_placeholder() {
     ]));
 
     let batch = RecordBatch::try_new(
-        schema.clone(),
+        Arc::clone(&schema),
         vec![
             Arc::new(Int32Array::from(vec![1, 2, 3])) as ArrayRef,
             Arc::new(StringArray::from(vec![

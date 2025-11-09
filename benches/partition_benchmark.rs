@@ -83,7 +83,7 @@ fn generate_test_data(
         }
 
         let batch = RecordBatch::try_new(
-            schema.clone(),
+            Arc::clone(&schema),
             vec![
                 Arc::new(Int64Array::from(ids)) as ArrayRef,
                 partition_array,

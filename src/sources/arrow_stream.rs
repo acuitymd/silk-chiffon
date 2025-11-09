@@ -1,6 +1,7 @@
 use std::{
     fs::File,
     pin::Pin,
+    sync::Arc,
     task::{Context, Poll},
     thread,
 };
@@ -60,7 +61,7 @@ impl Stream for ArrowStreamChannelStream {
 
 impl RecordBatchStream for ArrowStreamChannelStream {
     fn schema(&self) -> SchemaRef {
-        self.schema.clone()
+        Arc::clone(&self.schema)
     }
 }
 
@@ -74,7 +75,7 @@ impl DataSource for ArrowStreamDataSource {
         let path = self.path.clone();
 
         let schema = self.schema()?;
-        let returned_schema = schema.clone();
+        let returned_schema = Arc::clone(&schema);
 
         let (tx, rx) = mpsc::channel::<Result<RecordBatch, DataFusionError>>(32);
 

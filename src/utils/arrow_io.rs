@@ -309,7 +309,7 @@ impl MultiFileIterator {
             paths,
             current_idx: 0,
             current_reader: None,
-            schema: schema.clone(),
+            schema: Arc::clone(&schema),
             coalescer: BatchCoalescer::new(schema, batch_size),
             batch_size,
         })
@@ -333,7 +333,7 @@ impl MultiFileIterator {
             }
         }
 
-        Ok(first.clone())
+        Ok(Arc::clone(first))
     }
 
     fn advance_to_next_file(&mut self) -> Result<bool> {
@@ -349,8 +349,8 @@ impl MultiFileIterator {
 }
 
 impl RecordBatchIterator for MultiFileIterator {
-    fn schema(&self) -> Arc<arrow::datatypes::Schema> {
-        self.schema.clone()
+    fn schema(&self) -> SchemaRef {
+        Arc::clone(&self.schema)
     }
 
     fn clone(&self) -> Result<Box<dyn RecordBatchIterator>> {

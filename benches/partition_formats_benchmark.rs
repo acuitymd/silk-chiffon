@@ -52,7 +52,7 @@ fn generate_test_data(num_rows: usize, cardinality: usize) -> Vec<RecordBatch> {
         }
 
         let batch = RecordBatch::try_new(
-            schema.clone(),
+            Arc::clone(&schema),
             vec![
                 Arc::new(Int64Array::from(ids)) as ArrayRef,
                 Arc::new(Int32Array::from(partition_values)) as ArrayRef,

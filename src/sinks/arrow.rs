@@ -1,5 +1,11 @@
 use futures::stream::StreamExt;
-use std::{collections::HashMap, fs::File, io::BufWriter, path::PathBuf, sync::Mutex};
+use std::{
+    collections::HashMap,
+    fs::File,
+    io::BufWriter,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use anyhow::Result;
 use arrow::{
@@ -104,7 +110,7 @@ impl ArrowSink {
             writer.write_metadata(&key, &value);
         }
 
-        let coalescer = BatchCoalescer::new(schema.clone(), options.record_batch_size);
+        let coalescer = BatchCoalescer::new(Arc::clone(schema), options.record_batch_size);
 
         let inner = ArrowSinkInner {
             path,

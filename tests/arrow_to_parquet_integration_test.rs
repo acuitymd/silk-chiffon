@@ -21,7 +21,7 @@ fn test_parquet_conversion_basic() {
     ]));
 
     let batch = RecordBatch::try_new(
-        schema.clone(),
+        Arc::clone(&schema),
         vec![
             Arc::new(Int32Array::from(vec![1, 2, 3])),
             Arc::new(StringArray::from(vec!["Alice", "Bob", "Charlie"])),
@@ -70,7 +70,7 @@ fn test_parquet_conversion_with_sorting() {
     ]));
 
     let batch = RecordBatch::try_new(
-        schema.clone(),
+        Arc::clone(&schema),
         vec![
             Arc::new(Int32Array::from(vec![3, 1, 2])),
             Arc::new(StringArray::from(vec!["Charlie", "Alice", "Bob"])),
@@ -129,7 +129,7 @@ fn test_parquet_conversion_with_compression() {
     ]));
 
     let batch = RecordBatch::try_new(
-        schema.clone(),
+        Arc::clone(&schema),
         vec![
             Arc::new(Int32Array::from(vec![1, 2, 3])),
             Arc::new(StringArray::from(vec!["Alice", "Bob", "Charlie"])),
@@ -176,7 +176,7 @@ fn test_parquet_conversion_with_bloom_filter_all() {
     ]));
 
     let batch = RecordBatch::try_new(
-        schema.clone(),
+        Arc::clone(&schema),
         vec![
             Arc::new(Int32Array::from(vec![1, 2, 3, 1, 2])),
             Arc::new(StringArray::from(vec![
@@ -237,7 +237,7 @@ fn test_parquet_conversion_with_bloom_filter_columns() {
     ]));
 
     let batch = RecordBatch::try_new(
-        schema.clone(),
+        Arc::clone(&schema),
         vec![
             Arc::new(Int32Array::from(vec![1, 2, 3])),
             Arc::new(StringArray::from(vec!["Alice", "Bob", "Charlie"])),

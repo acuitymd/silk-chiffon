@@ -455,14 +455,14 @@ impl PartitionArrowConverter {
                 );
                 partitioning_state.writer = Some(self.create_writer(&new_path, &schema).await?);
                 partitioning_state.coalescer =
-                    BatchCoalescer::new(schema.clone(), self.record_batch_size);
+                    BatchCoalescer::new(Arc::clone(&schema), self.record_batch_size);
             }
 
             partitioning_state.current_value = value;
 
             let slice = self.slice_batch(
                 &batch,
-                schema.clone(),
+                Arc::clone(&schema),
                 from_row_index,
                 to_row_index - from_row_index,
             )?;
@@ -505,7 +505,7 @@ impl PartitionArrowConverter {
 
         for column in schema.fields() {
             if !self.exclude_columns.contains(column.name()) {
-                builder.push(column.clone());
+                builder.push(Arc::clone(column));
             }
         }
 
@@ -548,11 +548,12 @@ impl PartitionArrowConverter {
         let file_reader = FileReader::try_new_buffered(File::open(sorted_path.path())?, None)?;
         let schema = self.exclude_columns(&file_reader.schema())?;
 
-        let mut partitioning_state = PartitioningState::new(schema.clone(), self.record_batch_size);
+        let mut partitioning_state =
+            PartitioningState::new(Arc::clone(&schema), self.record_batch_size);
 
         for batch in file_reader {
             let batch = batch?;
-            self.process_batch(schema.clone(), batch, &mut partitioning_state)
+            self.process_batch(Arc::clone(&schema), batch, &mut partitioning_state)
                 .await?;
         }
 
@@ -956,7 +957,7 @@ mod tests {
         ]));
 
         let empty_batch = RecordBatch::try_new(
-            schema.clone(),
+            Arc::clone(&schema),
             vec![
                 Arc::new(Int64Array::from(vec![] as Vec<i64>)),
                 Arc::new(Int32Array::from(vec![] as Vec<i32>)),
