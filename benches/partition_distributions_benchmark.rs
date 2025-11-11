@@ -33,9 +33,10 @@ fn generate_value(index: usize, cardinality: usize, distribution: &Distribution)
             hot_ratio,
         } => {
             if rand::random::<f64>() < *hot_ratio {
-                (rand::random::<u64>() as usize) % hot_keys
+                usize::try_from(rand::random::<u64>()).unwrap() % hot_keys
             } else {
-                hot_keys + ((rand::random::<u64>() as usize) % (cardinality - hot_keys))
+                hot_keys
+                    + (usize::try_from(rand::random::<u64>()).unwrap() % (cardinality - hot_keys))
             }
         }
         Distribution::ExtremelySkewed {
@@ -43,12 +44,13 @@ fn generate_value(index: usize, cardinality: usize, distribution: &Distribution)
             hot_ratio,
         } => {
             if rand::random::<f64>() < *hot_ratio {
-                (rand::random::<u64>() as usize) % hot_keys
+                usize::try_from(rand::random::<u64>()).unwrap() % hot_keys
             } else {
-                hot_keys + ((rand::random::<u64>() as usize) % (cardinality - hot_keys))
+                hot_keys
+                    + (usize::try_from(rand::random::<u64>()).unwrap() % (cardinality - hot_keys))
             }
         }
-        Distribution::Random => (rand::random::<u64>() as usize) % cardinality,
+        Distribution::Random => usize::try_from(rand::random::<u64>()).unwrap() % cardinality,
     }
 }
 
@@ -76,11 +78,12 @@ fn generate_test_data(scenario: &DistributionScenario) -> Vec<RecordBatch> {
 
         for row_idx in 0..rows_in_batch {
             ids.push(id_counter);
-            let partition_value = generate_value(
+            let partition_value = i32::try_from(generate_value(
                 batch_idx * batch_size + row_idx,
                 scenario.cardinality,
                 &scenario.distribution,
-            ) as i32;
+            ))
+            .unwrap();
             partition_values.push(partition_value);
             values.push(rand::random::<f64>() * 1000.0);
             payloads.push(format!("{}{}", payload_base, id_counter % 1000));
@@ -88,7 +91,7 @@ fn generate_test_data(scenario: &DistributionScenario) -> Vec<RecordBatch> {
         }
 
         let batch = RecordBatch::try_new(
-            schema.clone(),
+            Arc::clone(&schema),
             vec![
                 Arc::new(Int64Array::from(ids)) as ArrayRef,
                 Arc::new(Int32Array::from(partition_values)) as ArrayRef,

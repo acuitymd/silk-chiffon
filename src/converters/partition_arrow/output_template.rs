@@ -87,7 +87,10 @@ mod tests {
                 .unwrap()
                 .starts_with("category/Books & Media_")
         );
-        assert!(path.to_str().unwrap().ends_with(".arrow"));
+        assert!(
+            path.extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("arrow"))
+        );
     }
 
     #[test]

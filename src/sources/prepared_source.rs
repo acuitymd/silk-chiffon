@@ -63,8 +63,8 @@ impl PreparedSource {
 
     pub fn table_provider(&self) -> Arc<dyn TableProvider> {
         match self {
-            PreparedSource::Direct { table_provider, .. } => table_provider.clone(),
-            PreparedSource::Materialized { table_provider, .. } => table_provider.clone(),
+            PreparedSource::Direct { table_provider, .. } => Arc::clone(table_provider),
+            PreparedSource::Materialized { table_provider, .. } => Arc::clone(table_provider),
         }
     }
 }

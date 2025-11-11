@@ -82,13 +82,13 @@ impl QueryExecutor {
     /// A bit of a hack to get the schema of the result of a query. Should be extremely fast
     /// because there's no data it's executed on.
     pub async fn get_result_schema(&self, input_schema: SchemaRef) -> Result<SchemaRef> {
-        let empty_table = EmptyTable::new(input_schema.clone());
+        let empty_table = EmptyTable::new(Arc::clone(&input_schema));
 
         self.ctx.register_table("data", Arc::new(empty_table))?;
 
         let df = self.sql_to_dataframe(&self.query).await?;
 
-        Ok(df.schema().inner().clone())
+        Ok(Arc::clone(df.schema().inner()))
     }
 }
 

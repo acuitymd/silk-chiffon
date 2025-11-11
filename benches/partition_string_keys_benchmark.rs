@@ -54,7 +54,7 @@ fn generate_test_data(scenario: &StringKeyScenario) -> Vec<RecordBatch> {
         }
 
         let batch = RecordBatch::try_new(
-            schema.clone(),
+            Arc::clone(&schema),
             vec![
                 Arc::new(Int64Array::from(ids)) as ArrayRef,
                 Arc::new(StringArray::from(partition_values)) as ArrayRef,

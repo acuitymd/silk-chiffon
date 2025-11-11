@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::Result;
 use arrow::datatypes::SchemaRef;
 use datafusion::{execution::SendableRecordBatchStream, prelude::DataFrame};
@@ -27,7 +29,7 @@ impl OutputStrategy {
             }
             OutputStrategy::Partitioned { sink_factory, .. } => {
                 let mut sink =
-                    sink_factory(TableName::from("output"), df.schema().inner().clone())?;
+                    sink_factory(TableName::from("output"), Arc::clone(df.schema().inner()))?;
                 sink.write_stream(df.execute_stream().await?).await?;
                 Ok(())
             }
@@ -41,7 +43,8 @@ impl OutputStrategy {
                 Ok(())
             }
             OutputStrategy::Partitioned { sink_factory, .. } => {
-                let mut sink = sink_factory(TableName::from("output"), stream.schema().clone())?;
+                let mut sink =
+                    sink_factory(TableName::from("output"), Arc::clone(&stream.schema()))?;
                 sink.write_stream(stream).await?;
                 Ok(())
             }

@@ -91,7 +91,7 @@ impl ArrowToArrowConverter {
 
     pub fn with_compression(mut self, compression: ArrowCompression) -> Self {
         let compression_type =
-            <ArrowCompression as Into<Option<CompressionType>>>::into(compression.clone());
+            <ArrowCompression as Into<Option<CompressionType>>>::into(compression);
         self.write_options = self
             .write_options
             .try_with_compression(compression_type)
@@ -139,17 +139,17 @@ impl ArrowToArrowConverter {
     fn new_writer(
         &self,
         output_file: File,
-        schema: SchemaRef,
+        schema: &SchemaRef,
     ) -> Result<Box<dyn ArrowRecordBatchWriter>> {
         let writer: Box<dyn ArrowRecordBatchWriter> = match self.output_ipc_format {
             ArrowIPCFormat::File => Box::new(FileWriter::try_new_with_options(
                 output_file,
-                &schema,
+                schema,
                 self.write_options.clone(),
             )?),
             ArrowIPCFormat::Stream => Box::new(StreamWriter::try_new_with_options(
                 output_file,
-                &schema,
+                schema,
                 self.write_options.clone(),
             )?),
         };
@@ -163,7 +163,7 @@ impl ArrowToArrowConverter {
         writer: &mut dyn ArrowRecordBatchWriter,
         record_batch_size: usize,
     ) -> Result<()> {
-        let mut coalescer = BatchCoalescer::new(schema.clone(), record_batch_size);
+        let mut coalescer = BatchCoalescer::new(Arc::clone(schema), record_batch_size);
 
         while let Some(batch) = input.next().await? {
             coalescer.push_batch(batch)?;
@@ -247,7 +247,7 @@ impl ArrowToArrowConverter {
         let schema = stream.schema();
         let output_file = File::create(&self.output_path)?;
 
-        let mut writer = self.new_writer(output_file, schema.clone())?;
+        let mut writer = self.new_writer(output_file, &schema)?;
 
         Self::write_to_output(
             &mut stream,
@@ -263,7 +263,7 @@ impl ArrowToArrowConverter {
     async fn convert_direct(&mut self) -> Result<()> {
         let output_file = File::create(&self.output_path)?;
         let schema = self.input.schema();
-        let mut writer = self.new_writer(output_file, schema.clone())?;
+        let mut writer = self.new_writer(output_file, &schema)?;
 
         Self::write_to_output(
             &mut self.input,

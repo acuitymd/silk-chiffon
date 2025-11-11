@@ -31,7 +31,7 @@ mod test_helpers {
         ]));
 
         let batch1 = RecordBatch::try_new(
-            schema.clone(),
+            Arc::clone(&schema),
             vec![
                 Arc::new(Int32Array::from(vec![1, 2, 3, 4, 5])),
                 Arc::new(StringArray::from(vec![
@@ -43,7 +43,7 @@ mod test_helpers {
         .unwrap();
 
         let batch2 = RecordBatch::try_new(
-            schema.clone(),
+            Arc::clone(&schema),
             vec![
                 Arc::new(Int32Array::from(vec![6, 7, 8, 9, 10])),
                 Arc::new(StringArray::from(vec![
@@ -331,7 +331,7 @@ async fn test_type_casting_int64_to_int32() {
     ]));
 
     let batch = RecordBatch::try_new(
-        schema.clone(),
+        Arc::clone(&schema),
         vec![
             Arc::new(Int64Array::from(vec![1i64, 2, 3, 4, 5])),
             Arc::new(Int64Array::from(vec![100i64, 200, 300, 400, 500])),

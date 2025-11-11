@@ -5,7 +5,13 @@ use parquet::{
     format::SortingColumn,
     schema::types::ColumnPath,
 };
-use std::{collections::HashMap, fs::File, io::BufWriter, path::PathBuf, sync::Mutex};
+use std::{
+    collections::HashMap,
+    fs::File,
+    io::BufWriter,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use anyhow::{Result, anyhow};
 use arrow::{array::RecordBatch, datatypes::SchemaRef};
@@ -120,7 +126,7 @@ pub struct ParquetSink {
 }
 
 impl ParquetSink {
-    pub fn create(path: PathBuf, schema: &SchemaRef, options: ParquetSinkOptions) -> Result<Self> {
+    pub fn create(path: PathBuf, schema: &SchemaRef, options: &ParquetSinkOptions) -> Result<Self> {
         let file = BufWriter::new(File::create(&path)?);
 
         let mut writer_builder = WriterProperties::builder()
@@ -135,7 +141,7 @@ impl ParquetSink {
 
         writer_builder = Self::apply_sort_metadata(&options.sort_spec, writer_builder, schema)?;
 
-        let writer = ArrowWriter::try_new(file, schema.clone(), Some(writer_builder.build()))?;
+        let writer = ArrowWriter::try_new(file, Arc::clone(schema), Some(writer_builder.build()))?;
 
         let inner = ParquetSinkInner {
             path,
@@ -207,7 +213,8 @@ impl ParquetSink {
             let descending = sort_col.direction == SortDirection::Descending;
 
             sorting_columns.push(SortingColumn {
-                column_idx: column_idx as i32,
+                column_idx: i32::try_from(column_idx)
+                    .map_err(|_| anyhow!("Column index out of range"))?,
                 descending,
                 nulls_first: descending,
             });
@@ -274,7 +281,7 @@ mod tests {
                 test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["a", "b", "c"]);
 
             let mut sink =
-                ParquetSink::create(output_path.clone(), &schema, ParquetSinkOptions::new())
+                ParquetSink::create(output_path.clone(), &schema, &ParquetSinkOptions::new())
                     .unwrap();
 
             sink.write_batch(batch).await.unwrap();
@@ -301,7 +308,7 @@ mod tests {
             let batch2 = test_data::create_batch_with_ids_and_names(&schema, &[3, 4], &["c", "d"]);
 
             let mut sink =
-                ParquetSink::create(output_path.clone(), &schema, ParquetSinkOptions::new())
+                ParquetSink::create(output_path.clone(), &schema, &ParquetSinkOptions::new())
                     .unwrap();
 
             sink.write_batch(batch1).await.unwrap();
@@ -331,7 +338,7 @@ mod tests {
             let mut sink = ParquetSink::create(
                 output_path.clone(),
                 &schema,
-                ParquetSinkOptions::new().with_max_row_group_size(3),
+                &ParquetSinkOptions::new().with_max_row_group_size(3),
             )
             .unwrap();
 
@@ -390,7 +397,7 @@ mod tests {
                 let mut compressed_sink = ParquetSink::create(
                     output_path.clone(),
                     &schema,
-                    ParquetSinkOptions::new().with_compression(compression),
+                    &ParquetSinkOptions::new().with_compression(compression),
                 )
                 .unwrap();
 
@@ -411,7 +418,7 @@ mod tests {
             let schema = test_data::simple_schema();
 
             let mut sink =
-                ParquetSink::create(output_path.clone(), &schema, ParquetSinkOptions::new())
+                ParquetSink::create(output_path.clone(), &schema, &ParquetSinkOptions::new())
                     .unwrap();
 
             let result = sink.finish().await.unwrap();
@@ -442,7 +449,7 @@ mod tests {
             let stream = source.as_stream().await.unwrap();
 
             let mut sink =
-                ParquetSink::create(output_path.clone(), &schema, ParquetSinkOptions::new())
+                ParquetSink::create(output_path.clone(), &schema, &ParquetSinkOptions::new())
                     .unwrap();
 
             let result = sink.write_stream(stream).await.unwrap();
@@ -472,7 +479,7 @@ mod tests {
             let mut sink = ParquetSink::create(
                 output_path.clone(),
                 &schema,
-                ParquetSinkOptions::new().with_sort_spec(sort_spec),
+                &ParquetSinkOptions::new().with_sort_spec(sort_spec),
             )
             .unwrap();
 
@@ -497,7 +504,7 @@ mod tests {
             let mut sink = ParquetSink::create(
                 output_path.clone(),
                 &schema,
-                ParquetSinkOptions::new().with_sort_spec(sort_spec),
+                &ParquetSinkOptions::new().with_sort_spec(sort_spec),
             )
             .unwrap();
 
@@ -521,7 +528,7 @@ mod tests {
 
             let options = ParquetSinkOptions::new().with_bloom_filters(bloom_filters);
 
-            let mut sink = ParquetSink::create(output_path.clone(), &schema, options).unwrap();
+            let mut sink = ParquetSink::create(output_path.clone(), &schema, &options).unwrap();
 
             sink.write_batch(batch).await.unwrap();
             sink.finish().await.unwrap();
@@ -551,7 +558,7 @@ mod tests {
                 .with_bloom_filters(bloom_filters)
                 .with_ndv_map(ndv_map);
 
-            let mut sink = ParquetSink::create(output_path.clone(), &schema, options).unwrap();
+            let mut sink = ParquetSink::create(output_path.clone(), &schema, &options).unwrap();
 
             sink.write_batch(batch).await.unwrap();
             sink.finish().await.unwrap();
@@ -583,7 +590,7 @@ mod tests {
                 .with_bloom_filters(bloom_filters)
                 .with_ndv_map(ndv_map);
 
-            let mut sink = ParquetSink::create(output_path.clone(), &schema, options).unwrap();
+            let mut sink = ParquetSink::create(output_path.clone(), &schema, &options).unwrap();
 
             sink.write_batch(batch).await.unwrap();
             sink.finish().await.unwrap();
@@ -609,7 +616,7 @@ mod tests {
             let mut sink = ParquetSink::create(
                 output_path.clone(),
                 &schema,
-                ParquetSinkOptions::new().with_no_dictionary(true),
+                &ParquetSinkOptions::new().with_no_dictionary(true),
             )
             .unwrap();
 
@@ -635,7 +642,7 @@ mod tests {
             let mut sink = ParquetSink::create(
                 output_path.clone(),
                 &schema,
-                ParquetSinkOptions::new().with_no_dictionary(false),
+                &ParquetSinkOptions::new().with_no_dictionary(false),
             )
             .unwrap();
 
@@ -666,7 +673,7 @@ mod tests {
                 let mut sink = ParquetSink::create(
                     output_path.clone(),
                     &schema,
-                    ParquetSinkOptions::new().with_statistics(statistics),
+                    &ParquetSinkOptions::new().with_statistics(statistics),
                 )
                 .unwrap();
 
@@ -714,7 +721,7 @@ mod tests {
                 let mut sink = ParquetSink::create(
                     output_path.clone(),
                     &schema,
-                    ParquetSinkOptions::new().with_writer_version(version),
+                    &ParquetSinkOptions::new().with_writer_version(version),
                 )
                 .unwrap();
 
@@ -743,7 +750,7 @@ mod tests {
             let result = ParquetSink::create(
                 output_path.clone(),
                 &schema,
-                ParquetSinkOptions::new().with_sort_spec(sort_spec),
+                &ParquetSinkOptions::new().with_sort_spec(sort_spec),
             );
 
             assert!(result.is_err());
@@ -765,7 +772,7 @@ mod tests {
 
             let options = ParquetSinkOptions::new().with_bloom_filters(bloom_filters);
 
-            let result = ParquetSink::create(output_path.clone(), &schema, options);
+            let result = ParquetSink::create(output_path.clone(), &schema, &options);
 
             assert!(result.is_err());
             let err = result.err().unwrap();
@@ -797,7 +804,7 @@ mod tests {
             let mut sink = ParquetSink::create(
                 output_path.clone(),
                 &schema,
-                ParquetSinkOptions::new().with_sort_spec(sort_spec),
+                &ParquetSinkOptions::new().with_sort_spec(sort_spec),
             )
             .unwrap();
 

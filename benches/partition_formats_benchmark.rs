@@ -44,14 +44,15 @@ fn generate_test_data(num_rows: usize, cardinality: usize) -> Vec<RecordBatch> {
 
         for row_idx in 0..rows_in_batch {
             ids.push(id_counter);
-            partition_values.push(((batch_idx * batch_size + row_idx) % cardinality) as i32);
+            partition_values
+                .push(i32::try_from((batch_idx * batch_size + row_idx) % cardinality).unwrap());
             values.push(rand::random::<f64>() * 1000.0);
             payloads.push(format!("{}{}", payload_base, id_counter % 1000));
             id_counter += 1;
         }
 
         let batch = RecordBatch::try_new(
-            schema.clone(),
+            Arc::clone(&schema),
             vec![
                 Arc::new(Int64Array::from(ids)) as ArrayRef,
                 Arc::new(Int32Array::from(partition_values)) as ArrayRef,

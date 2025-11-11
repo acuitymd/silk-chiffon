@@ -22,7 +22,7 @@ fn test_duckdb_conversion_basic() {
     ]));
 
     let batch = RecordBatch::try_new(
-        schema.clone(),
+        Arc::clone(&schema),
         vec![
             Arc::new(Int32Array::from(vec![1, 2, 3])),
             Arc::new(StringArray::from(vec!["Alice", "Bob", "Charlie"])),
@@ -69,7 +69,7 @@ fn test_duckdb_table_already_exists() {
     ]));
 
     let batch = RecordBatch::try_new(
-        schema.clone(),
+        Arc::clone(&schema),
         vec![
             Arc::new(Int32Array::from(vec![1])),
             Arc::new(StringArray::from(vec!["Alice"])),
@@ -125,7 +125,7 @@ fn test_duckdb_with_drop_table() {
     ]));
 
     let batch1 = RecordBatch::try_new(
-        schema.clone(),
+        Arc::clone(&schema),
         vec![
             Arc::new(Int32Array::from(vec![1])),
             Arc::new(Int32Array::from(vec![100])),
@@ -151,7 +151,7 @@ fn test_duckdb_with_drop_table() {
         .unwrap();
 
     let batch2 = RecordBatch::try_new(
-        schema.clone(),
+        Arc::clone(&schema),
         vec![
             Arc::new(Int32Array::from(vec![2])),
             Arc::new(Int32Array::from(vec![200])),
@@ -198,7 +198,7 @@ fn test_duckdb_with_sorting() {
     ]));
 
     let batch = RecordBatch::try_new(
-        schema.clone(),
+        Arc::clone(&schema),
         vec![
             Arc::new(Int32Array::from(vec![3, 1, 2])),
             Arc::new(StringArray::from(vec!["Charlie", "Alice", "Bob"])),
@@ -247,7 +247,7 @@ fn test_duckdb_add_multiple_tables() {
         Field::new("name", DataType::Utf8, false),
     ]));
     let users_batch = RecordBatch::try_new(
-        users_schema.clone(),
+        Arc::clone(&users_schema),
         vec![
             Arc::new(Int32Array::from(vec![1, 2, 3])),
             Arc::new(StringArray::from(vec!["Alice", "Bob", "Charlie"])),
@@ -266,7 +266,7 @@ fn test_duckdb_add_multiple_tables() {
         Field::new("name", DataType::Utf8, false),
     ]));
     let products_batch = RecordBatch::try_new(
-        products_schema.clone(),
+        Arc::clone(&products_schema),
         vec![
             Arc::new(Int32Array::from(vec![100, 101, 102])),
             Arc::new(StringArray::from(vec!["Widget", "Gadget", "Tool"])),
@@ -351,7 +351,7 @@ fn test_duckdb_preserves_insertion_order() {
     let values: Vec<String> = positions.iter().map(|i| format!("value_{i:03}")).collect();
 
     let batch = RecordBatch::try_new(
-        schema.clone(),
+        Arc::clone(&schema),
         vec![
             Arc::new(Int32Array::from(positions.clone())),
             Arc::new(StringArray::from(values.clone())),
@@ -389,7 +389,11 @@ fn test_duckdb_preserves_insertion_order() {
         .unwrap();
 
     for (i, (pos, val)) in results.iter().enumerate() {
-        assert_eq!(*pos, i as i32, "Position {pos} found at index {i}");
+        assert_eq!(
+            *pos,
+            i32::try_from(i).unwrap(),
+            "Position {pos} found at index {i}"
+        );
         assert_eq!(
             val,
             &format!("value_{i:03}"),
@@ -411,7 +415,7 @@ fn test_duckdb_preserves_sorted_order() {
     ]));
 
     let batch = RecordBatch::try_new(
-        schema.clone(),
+        Arc::clone(&schema),
         vec![
             Arc::new(Int32Array::from(vec![5, 3, 8, 1, 9, 2, 7, 4, 6])),
             Arc::new(StringArray::from(vec![
@@ -486,7 +490,7 @@ fn test_duckdb_preserves_order_with_limit_offset() {
     let data: Vec<String> = seq_nums.iter().map(|i| format!("row_{i:03}")).collect();
 
     let batch = RecordBatch::try_new(
-        schema.clone(),
+        Arc::clone(&schema),
         vec![
             Arc::new(Int32Array::from(seq_nums)),
             Arc::new(StringArray::from(data)),
@@ -541,6 +545,10 @@ fn test_duckdb_preserves_order_with_limit_offset() {
         .unwrap();
 
     for (i, seq) in all_rows.iter().enumerate() {
-        assert_eq!(*seq, i as i32, "Sequence {seq} found at position {i}");
+        assert_eq!(
+            *seq,
+            i32::try_from(i).unwrap(),
+            "Sequence {seq} found at position {i}"
+        );
     }
 }

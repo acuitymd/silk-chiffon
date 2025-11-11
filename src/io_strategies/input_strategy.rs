@@ -29,7 +29,7 @@ impl Stream for MergedSendableRecordBatchStreams {
 
 impl RecordBatchStream for MergedSendableRecordBatchStreams {
     fn schema(&self) -> SchemaRef {
-        self.schema.clone()
+        Arc::clone(&self.schema)
     }
 }
 
@@ -74,7 +74,7 @@ impl InputStrategy {
                 let mut df: DataFrame = ctx.read_empty()?;
 
                 for provider in providers {
-                    df = df.union(ctx.read_table(provider.clone())?)?;
+                    df = df.union(ctx.read_table(Arc::clone(&provider))?)?;
                 }
 
                 Ok(df.into_view())

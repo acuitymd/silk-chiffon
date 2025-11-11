@@ -783,7 +783,7 @@ impl From<ParquetWriterVersion> for i32 {
     }
 }
 
-#[derive(ValueEnum, Clone, Debug, Default)]
+#[derive(ValueEnum, Clone, Debug, Default, Copy)]
 #[value(rename_all = "lowercase")]
 pub enum ArrowCompression {
     Zstd,

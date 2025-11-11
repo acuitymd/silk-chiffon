@@ -12,9 +12,9 @@ use parquet::arrow::arrow_writer::ArrowWriter;
 use parquet::file::properties::{WriterProperties, WriterPropertiesBuilder};
 use parquet::format::SortingColumn;
 use parquet::schema::types::ColumnPath;
-use std::fs::File;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
+use std::{fs::File, sync::Arc};
 
 const IO_BUFFER_SIZE: usize = 1024 * 1024;
 
@@ -285,7 +285,8 @@ impl ParquetWriterBuilder {
                 let descending = sort_col.direction == SortDirection::Descending;
 
                 sorting_columns.push(SortingColumn {
-                    column_idx: column_idx as i32,
+                    column_idx: i32::try_from(column_idx)
+                        .map_err(|_| anyhow!("Column index out of range"))?,
                     descending,
                     nulls_first: descending,
                 });
@@ -309,7 +310,7 @@ impl WriterBuilder for ParquetWriterBuilder {
         let buf_writer = BufWriter::with_capacity(IO_BUFFER_SIZE, file);
 
         let writer_properties = self.build_writer_properties(schema).await?;
-        let writer = ArrowWriter::try_new(buf_writer, schema.clone(), Some(writer_properties))?;
+        let writer = ArrowWriter::try_new(buf_writer, Arc::clone(schema), Some(writer_properties))?;
 
         Ok(Box::new(ParquetWriter {
             writer,
@@ -323,7 +324,6 @@ mod tests {
     use super::*;
     use arrow::array::{Int32Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
-    use std::sync::Arc;
     use tempfile::TempDir;
 
     fn create_test_schema() -> SchemaRef {
@@ -365,7 +365,7 @@ mod tests {
     async fn test_arrow_writer_with_compression() {
         let temp_dir = TempDir::new().unwrap();
         let schema = create_test_schema();
-        let batch = create_test_batch(schema.clone());
+        let batch = create_test_batch(Arc::clone(&schema));
 
         for compression in [ArrowCompression::Lz4, ArrowCompression::Zstd] {
             let path = temp_dir.path().join(format!("test_{compression:?}.arrow"));
@@ -417,7 +417,7 @@ mod tests {
         let mut writer = builder.build_writer(&path, &schema).await.unwrap();
 
         for _ in 0..50 {
-            let batch = create_test_batch(schema.clone());
+            let batch = create_test_batch(Arc::clone(&schema));
             writer.write_batch(&batch).unwrap();
         }
         writer.finish().unwrap();
