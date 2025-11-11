@@ -89,7 +89,7 @@ mod tests {
         );
         assert!(
             path.extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case(".arrow"))
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("arrow"))
         );
     }
 
