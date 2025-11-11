@@ -310,8 +310,7 @@ impl WriterBuilder for ParquetWriterBuilder {
         let buf_writer = BufWriter::with_capacity(IO_BUFFER_SIZE, file);
 
         let writer_properties = self.build_writer_properties(schema).await?;
-        let writer =
-            ArrowWriter::try_new(buf_writer, Arc::clone(schema), Some(writer_properties))?;
+        let writer = ArrowWriter::try_new(buf_writer, Arc::clone(schema), Some(writer_properties))?;
 
         Ok(Box::new(ParquetWriter {
             writer,
