@@ -42,7 +42,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y lld
 
       - name: Install packages
-        if: ${{ matrix.os == 'macos' }}
+        if: matrix.os == 'macos'
         run: brew install lld
 
       - uses: Swatinem/rust-cache@v2
@@ -50,15 +50,16 @@ jobs:
           shared-key: "release-${{ matrix.runner }}"
 
       - name: Install cargo-zigbuild
+        if: matrix.os == 'linux'
         # the python package also installs ziglang
         run: pip3 install cargo-zigbuild
 
       - name: Build binary
-        if: ${{ matrix.os == 'macos' }}
+        if: matrix.os == 'macos'
         run: cargo build --locked --release --target ${{ matrix.target }}
 
       - name: Build binary
-        if: ${{ matrix.os == 'linux' }}
+        if: matrix.os == 'linux'
         # links against older version of libc, makes it more compatible with older distros
         run: cargo zigbuild --locked --release --target ${{ matrix.target }}
 
