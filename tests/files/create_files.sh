@@ -45,7 +45,6 @@ function die() {
   exit 1
 }
 
-command_exists "duckdb" || die "duckdb is not installed"
 command_exists "datafusion-cli" || die "datafusion-cli is not installed"
 command_exists "silk-chiffon" || die "silk-chiffon is not installed"
 
@@ -64,7 +63,6 @@ files=(
   "people.file.arrow"
   "people.stream.arrow"
   "people.parquet"
-  "people.duckdb"
 )
 
 for file in "${files[@]}"; do
@@ -74,10 +72,6 @@ for file in "${files[@]}"; do
     warn "File $file does not exist, skipping"
   fi
 done
-
-info "Creating duckdb format"
-
-duckdb -f duckdb_cli_create_files.sql &>/dev/null || die "Failed to create DuckDB files"
 
 info "Creating arrow file format and parquet format"
 

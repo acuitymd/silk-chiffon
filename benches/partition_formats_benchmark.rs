@@ -3,7 +3,6 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use duckdb::Connection;
 use silk_chiffon::utils::arrow_io::ArrowIPCFormat;
 use silk_chiffon::{
     ArrowCompression, ListOutputsFormat, ParquetCompression, ParquetStatistics,
@@ -137,22 +136,6 @@ async fn run_silk_parquet(input_path: &std::path::Path, output_dir: &std::path::
         .unwrap();
 }
 
-fn run_duckdb_parquet(input_path: &std::path::Path, output_dir: &std::path::Path) {
-    let conn = Connection::open_in_memory().unwrap();
-
-    conn.execute("INSTALL nanoarrow FROM community", [])
-        .unwrap();
-    conn.execute("LOAD nanoarrow", []).unwrap();
-
-    let query = format!(
-        "COPY (SELECT * FROM read_arrow('{}')) TO '{}' (FORMAT PARQUET, PARTITION_BY (partition_col))",
-        input_path.display(),
-        output_dir.join("data.parquet").display()
-    );
-
-    conn.execute(&query, []).unwrap();
-}
-
 fn bench_format_comparison(c: &mut Criterion) {
     let scenarios = vec![
         FormatScenario {
@@ -203,22 +186,6 @@ fn bench_format_comparison(c: &mut Criterion) {
                         let output_dir = temp_dir.path().join("silk_parquet_output");
                         fs::create_dir_all(&output_dir).unwrap();
                         run_silk_parquet(&input_path, &output_dir).await;
-                    },
-                    criterion::BatchSize::SmallInput,
-                );
-            },
-        );
-
-        group.bench_with_input(
-            BenchmarkId::new("duckdb_parquet", scenario.name),
-            &scenario,
-            |b, scenario| {
-                b.iter_batched(
-                    || setup_benchmark_data(scenario),
-                    |(temp_dir, input_path)| {
-                        let output_dir = temp_dir.path().join("duckdb_parquet_output");
-                        fs::create_dir_all(&output_dir).unwrap();
-                        run_duckdb_parquet(&input_path, &output_dir);
                     },
                     criterion::BatchSize::SmallInput,
                 );

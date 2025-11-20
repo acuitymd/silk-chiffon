@@ -11,7 +11,7 @@ Silk Chiffon is versatile tool for Arrow-to-X data format conversions. Like its 
 ### ️🎯 Core Features
 
 - **⚡ Lightning Fast**: Built with Rust for native performance.
-- **🤹🏻‍♀ Multi-Format Support**: Convert from Arrow IPC to Arrow IPC, Parquet, and DuckDB.
+- **🤹🏻‍♀ Multi-Format Support**: Convert from Arrow IPC to Arrow IPC and Parquet.
 - **🪓 Partitioning**: Partition data into multiple files based on column values.
 - **🔗 Merging**: Merge data from multiple files into a single file.
 - **🧠 Smart Processing**: Sort, compress, and optimize your data on-the-fly.
@@ -52,12 +52,6 @@ Convert Arrow to Parquet with compression and sorting:
 silk-chiffon arrow-to-parquet input.arrow output.parquet --compression zstd --sort-by "amount:asc"
 ```
 
-Convert to DuckDB with sorting:
-
-```bash
-silk-chiffon arrow-to-duckdb input.arrow output.db --table-name sales --sort-by "date,amount:desc"
-```
-
 Transform Arrow formats with sorting and compression:
 
 ```bash
@@ -68,14 +62,12 @@ silk-chiffon arrow-to-arrow stream.arrows file.arrow --compression lz4 --sort-by
 
 ### Available Commands
 
-- **[`parquet`](#-arrow--parquet)** - Convert Arrow to Parquet format
-- **[`duckdb`](#-arrow--duckdb)** - Convert Arrow to DuckDB database
-- **[`arrow`](#-arrow--arrow)** - Convert between Arrow formats (file ↔ stream)
+- **[`arrow-to-parquet`](#-arrow--parquet)** - Convert Arrow to Parquet format
+- **[`arrow-to-arrow`](#-arrow--arrow)** - Convert between Arrow formats (file ↔ stream)
 - **[`partition-arrow-to-arrow`](#-partition-arrow--multiple-arrow-files)** - Partition Arrow data into multiple Arrow files
 - **[`partition-arrow-to-parquet`](#-partition-arrow--multiple-parquet-files)** - Partition Arrow data into multiple Parquet files
 - **[`merge-arrow-to-arrow`](#-merge-arrow--arrow)** - Merge multiple Arrow files into single Arrow file
 - **[`merge-arrow-to-parquet`](#-merge-arrow--parquet)** - Merge multiple Arrow files into single Parquet file
-- **[`merge-arrow-to-duckdb`](#-merge-arrow--duckdb)** - Merge multiple Arrow files into DuckDB table
 
 ### 🪶 Arrow → Parquet
 
@@ -109,24 +101,6 @@ silk-chiffon arrow-to-parquet data.arrow data.parquet \
   --bloom-column "user_id:fpp=0.001" \
   --bloom-column "session_id"
 ```
-
-### 🦆 Arrow → DuckDB
-
-Load your Arrow data directly into the DuckDB format:
-
-```bash
-silk-chiffon arrow-to-duckdb [OPTIONS] --table-name <TABLE_NAME> <INPUT> <OUTPUT>
-```
-
-> [!NOTE]
-> By default this will add new tables to existing DuckDB files, assuming the table doesn't already exist. Use `--truncate` if you want a fresh file.
-
-**Key Options:**
-
-- `--table-name`: Required table name for your data
-- `--sort-by`: Pre-sort data before insertion
-- `--drop-table`: Replace existing table of the same name
-- `--truncate`: Start fresh with an empty database
 
 ### 🏹 Arrow → Arrow
 
@@ -290,36 +264,6 @@ silk-chiffon merge-arrow-to-parquet daily_*.arrow yearly.parquet \
   --write-sorted-metadata
 ```
 
-### 🔗 Merge Arrow → DuckDB
-
-Merge multiple Arrow files into a single DuckDB table:
-
-```bash
-silk-chiffon merge-arrow-to-duckdb [OPTIONS] --table-name <TABLE_NAME> <INPUTS...> <OUTPUT>
-```
-
-**Key Options:**
-
-- `--table-name`: Required table name for merged data
-- `--sort-by`: Pre-sort data before insertion
-- `--drop-table`: Replace existing table of the same name
-- `--truncate`: Start fresh with an empty database
-
-**Example:**
-
-```bash
-# Merge regional data into unified table
-silk-chiffon merge-arrow-to-duckdb regions/*.arrow analytics.db \
-  --table-name sales_data \
-  --sort-by "date,region"
-
-# Merge with table replacement
-silk-chiffon merge-arrow-to-duckdb monthly_*.arrow yearly.db \
-  --table-name transactions \
-  --drop-table \
-  --sort-by "timestamp"
-```
-
 ## 🎯 Use Cases
 
 ### 📊 Data Pipeline Integration
@@ -332,17 +276,6 @@ silk-chiffon arrow-to-parquet stream.arrow warehouse/data.parquet \
   --compression zstd \
   --bloom-column "customer_id" \
   --sort-by "timestamp"
-```
-
-### 🔍 Analytics Workflows
-
-Load Arrow data into DuckDB for analysis:
-
-```bash
-# Create an analytics-ready database
-silk-chiffon arrow-to-duckdb events.arrow analytics.db \
-  --table-name events \
-  --sort-by "event_time,user_id"
 ```
 
 ### 🗄️ Format Optimization
@@ -407,7 +340,6 @@ Silk Chiffon is built on a foundation of high-performance Rust libraries:
 - **Apache Arrow**: Columnar memory format
 - **Apache Parquet**: Columnar disk format
 - **DataFusion**: Query engine for sorting operations
-- **DuckDB**: Embedded analytical database
 
 The tool follows a composable architecture with dedicated converters for each format, each building upon the others, to ensure adequate performance and maximal maintainability.
 

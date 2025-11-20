@@ -4,11 +4,10 @@ use anyhow::Result;
 use parquet::{
     basic::{Compression, Encoding},
     file::{
-        metadata::FileMetaData,
+        metadata::{FileMetaData, SortingColumn},
         reader::{FileReader as ParquetFileReader, SerializedFileReader},
         statistics::Statistics as ParquetStatistics,
     },
-    format::SortingColumn,
     record::Row,
 };
 
@@ -102,7 +101,7 @@ pub fn read_entire_parquet_file(path: &Path) -> Result<ParquetContents> {
             columns.push(Column {
                 name: col_meta.column_path().to_string(),
                 compression,
-                encodings: col_meta.encodings().clone(),
+                encodings: col_meta.encodings().collect::<Vec<_>>(),
                 num_values: col_meta.num_values(),
                 compressed_size: col_meta.compressed_size(),
                 uncompressed_size: col_meta.uncompressed_size(),

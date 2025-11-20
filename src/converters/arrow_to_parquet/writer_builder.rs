@@ -2,10 +2,10 @@ use anyhow::{Result, anyhow};
 use arrow::datatypes::SchemaRef;
 use parquet::{
     basic::Compression,
-    file::properties::{
-        EnabledStatistics, WriterProperties, WriterPropertiesBuilder, WriterVersion,
+    file::{
+        metadata::SortingColumn,
+        properties::{EnabledStatistics, WriterProperties, WriterPropertiesBuilder, WriterVersion},
     },
-    format::SortingColumn,
     schema::types::ColumnPath,
 };
 use std::{collections::HashMap, path::Path};
