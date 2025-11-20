@@ -10,7 +10,6 @@ env:
   RUSTC_WRAPPER: sccache
   SCCACHE_GHA_ENABLED: true
   CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
-  DUCKDB_VERSION: 1.4.1
 
 jobs:
   build:
@@ -20,15 +19,12 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-latest
             os: linux
-            duckdb_asset: linux-amd64
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm
             os: linux
-            duckdb_asset: linux-arm64
           - target: aarch64-apple-darwin
             runner: macos-latest
             os: macos
-            duckdb_asset: osx-universal
 
     runs-on: ${{ matrix.runner }}
 
@@ -47,7 +43,7 @@ jobs:
 
       - name: Install packages
         if: ${{ matrix.os == 'macos' }}
-        run: brew install duckdb lld
+        run: brew install lld
 
       - uses: Swatinem/rust-cache@v2
         with:

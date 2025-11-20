@@ -17,7 +17,6 @@ env:
   RUSTC_WRAPPER: sccache
   SCCACHE_GHA_ENABLED: true
   CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
-  DUCKDB_VERSION: 1.4.1
   RUST_BACKTRACE: 1
 
 jobs:
@@ -37,32 +36,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-
-      - name: Setup DuckDB cache
-        id: cache-duckdb
-        uses: actions/cache@v4
-        with:
-          path: |
-            /usr/local/lib/libduckdb.so
-            /usr/local/lib/libduckdb_static.a
-            /usr/local/include/duckdb.h
-            /usr/local/include/duckdb.hpp
-          key: duckdb-${{ env.DUCKDB_VERSION }}-linux-amd64-2025-10-11
-
-      - name: Install DuckDB
-        if: steps.cache-duckdb.outputs.cache-hit != 'true'
-        run: |
-          set -e
-          curl -L -O https://github.com/duckdb/duckdb/releases/download/v${{env.DUCKDB_VERSION}}/libduckdb-linux-amd64.zip
-          unzip libduckdb-linux-amd64.zip -d libduckdb
-          sudo mv libduckdb/duckdb.* /usr/local/include/
-          sudo mv libduckdb/libduckdb* /usr/local/lib/
-          sudo ldconfig /usr/local/lib
-          rm -rf libduckdb libduckdb-linux-amd64.zip
-
-      - name: Configure DuckDB
-        if: steps.cache-duckdb.outputs.cache-hit == 'true'
-        run: sudo ldconfig /usr/local/lib
 
       - uses: Swatinem/rust-cache@v2
         with:
