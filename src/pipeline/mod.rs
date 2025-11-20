@@ -131,7 +131,7 @@ impl Pipeline {
         // https://datafusion.apache.org/library-user-guide/upgrading.html#new-map-string-types-to-utf8view-configuration-option
         cfg.options_mut().sql_parser.map_string_types_to_utf8view = false;
 
-        cfg.options_mut().sql_parser.dialect = self.config.query_dialect.to_string();
+        cfg.options_mut().sql_parser.dialect = self.config.query_dialect.into();
 
         SessionContext::new_with_config(cfg)
     }

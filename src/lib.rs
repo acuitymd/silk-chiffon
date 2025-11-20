@@ -11,12 +11,13 @@ use crate::utils::arrow_io::ArrowIPCFormat;
 use anyhow::{Result, anyhow};
 use arrow::ipc::CompressionType;
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use datafusion::config::Dialect;
 use parquet::{
     basic::{Compression, GzipLevel, ZstdLevel},
     file::properties::{EnabledStatistics, WriterVersion},
 };
 use std::{fmt, str::FromStr};
-use strum::Display;
+use strum_macros::Display;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -37,16 +38,6 @@ pub enum Commands {
     ///   - Parquet file format
     #[command(verbatim_doc_comment)]
     ArrowToParquet(ArrowToParquetArgs),
-    /// Convert Arrow format to DuckDB format.
-    ///
-    /// Input formats:
-    ///   - Arrow IPC stream format
-    ///   - Arrow IPC file format
-    ///
-    /// Output formats:
-    ///   - DuckDB database file format
-    #[command(verbatim_doc_comment)]
-    ArrowToDuckdb(ArrowToDuckDbArgs),
     /// Convert Arrow format to Arrow format.
     ///
     /// Input formats:
@@ -100,16 +91,6 @@ pub enum Commands {
     ///   - Parquet file format
     #[command(verbatim_doc_comment)]
     MergeArrowToParquet(MergeArrowToParquetArgs),
-    /// Merge multiple Arrow files into a single DuckDB database.
-    ///
-    /// Input formats:
-    ///   - Multiple Arrow IPC files (file or stream format)
-    ///   - Supports glob patterns
-    ///
-    /// Output formats:
-    ///   - DuckDB database file format
-    #[command(verbatim_doc_comment)]
-    MergeArrowToDuckdb(MergeArrowToDuckdbArgs),
 }
 
 #[derive(Args, Debug)]
@@ -213,49 +194,6 @@ pub struct ArrowToParquetArgs {
 }
 
 #[derive(Args, Debug)]
-pub struct ArrowToDuckDbArgs {
-    /// Input Arrow IPC file.
-    #[arg(value_parser = clap::value_parser!(clio::Input).exists().is_file())]
-    pub input: clio::Input,
-
-    /// Output DuckDB database file path.
-    #[arg(value_parser)]
-    pub output: clio::OutputPath,
-
-    /// Name of the table to create.
-    #[arg(short, long)]
-    pub table_name: String,
-
-    /// SQL query to apply to the data. The input data is available as table 'data'.
-    ///
-    /// Examples:
-    ///   --query "SELECT * FROM data WHERE status = 'active'"
-    ///   --query "SELECT id, name, amount FROM data"
-    ///   --query "SELECT region, SUM(amount) FROM data GROUP BY region"
-    ///   --query "SELECT *, amount * 1.1 as adjusted FROM data"
-    #[arg(short, long, verbatim_doc_comment)]
-    pub query: Option<String>,
-
-    /// The query dialect to use.
-    #[arg(short, long, default_value_t, value_enum)]
-    pub dialect: QueryDialect,
-
-    /// Sort the data by one or more columns before writing.
-    ///
-    /// Format: A comma-separated list like "col_a,col_b:desc,col_c".
-    #[arg(short, long)]
-    pub sort_by: Option<SortSpec>,
-
-    /// Truncate the database file before writing (removes entire file).
-    #[arg(long, default_value_t = false)]
-    pub truncate: bool,
-
-    /// Drop the table if it already exists before creating.
-    #[arg(long, default_value_t = false, conflicts_with = "truncate")]
-    pub drop_table: bool,
-}
-
-#[derive(Args, Debug)]
 pub struct ArrowToArrowArgs {
     /// Input Arrow IPC file.
     #[arg(value_parser = clap::value_parser!(clio::Input).exists().is_file())]
@@ -325,6 +263,26 @@ pub enum QueryDialect {
     BigQuery,
     ANSI,
     Databricks,
+}
+
+impl From<QueryDialect> for Dialect {
+    fn from(dialect: QueryDialect) -> Self {
+        match dialect {
+            QueryDialect::DuckDb => Dialect::DuckDB,
+            QueryDialect::Generic => Dialect::Generic,
+            QueryDialect::MySQL => Dialect::MySQL,
+            QueryDialect::PostgreSQL => Dialect::PostgreSQL,
+            QueryDialect::Hive => Dialect::Hive,
+            QueryDialect::SQLite => Dialect::SQLite,
+            QueryDialect::Snowflake => Dialect::Snowflake,
+            QueryDialect::Redshift => Dialect::Redshift,
+            QueryDialect::MsSQL => Dialect::MsSQL,
+            QueryDialect::ClickHouse => Dialect::ClickHouse,
+            QueryDialect::BigQuery => Dialect::BigQuery,
+            QueryDialect::Databricks => Dialect::Databricks,
+            QueryDialect::ANSI => Dialect::Ansi,
+        }
+    }
 }
 
 #[derive(Args, Debug)]
@@ -666,53 +624,6 @@ pub struct MergeArrowToParquetArgs {
     /// Set writer version.
     #[arg(long, default_value_t, value_enum)]
     pub writer_version: ParquetWriterVersion,
-}
-
-#[derive(Args, Debug)]
-pub struct MergeArrowToDuckdbArgs {
-    /// Input Arrow IPC files (supports multiple files and glob patterns).
-    #[arg(required = true, value_name = "INPUTS")]
-    pub inputs: Vec<String>,
-
-    /// Output DuckDB database file path.
-    #[arg(short, long, value_parser)]
-    pub output: clio::OutputPath,
-
-    /// Name of the table to create.
-    #[arg(short, long)]
-    pub table_name: String,
-
-    /// SQL query to apply to the data. The input data is available as table 'data'.
-    ///
-    /// Examples:
-    ///   --query "SELECT * FROM data WHERE status = 'active'"
-    ///   --query "SELECT id, name, amount FROM data"
-    ///   --query "SELECT region, SUM(amount) FROM data GROUP BY region"
-    ///   --query "SELECT *, amount * 1.1 as adjusted FROM data"
-    #[arg(short, long, verbatim_doc_comment)]
-    pub query: Option<String>,
-
-    /// The query dialect to use.
-    #[arg(short, long, default_value_t, value_enum)]
-    pub dialect: QueryDialect,
-
-    /// Sort the data by one or more columns before writing.
-    ///
-    /// Format: A comma-separated list like "col_a,col_b:desc,col_c".
-    #[arg(short, long)]
-    pub sort_by: Option<SortSpec>,
-
-    /// Truncate the database file before writing (removes entire file).
-    #[arg(long, default_value_t = false)]
-    pub truncate: bool,
-
-    /// Drop the table if it already exists before creating.
-    #[arg(long, default_value_t = false, conflicts_with = "truncate")]
-    pub drop_table: bool,
-
-    /// Size of Arrow record batches written to the output file.
-    #[arg(long, default_value_t = 122_880)]
-    pub record_batch_size: usize,
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug, Default)]

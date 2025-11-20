@@ -1,18 +1,15 @@
-use assert_cmd::Command;
+use assert_cmd::cargo;
 use predicates::prelude::*;
 use tempfile::TempDir;
 
 #[test]
 fn test_help_command() {
-    let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
+    let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
     cmd.arg("--help")
         .assert()
         .success()
         .stdout(predicate::str::contains(
             "Convert Arrow format to Parquet format",
-        ))
-        .stdout(predicate::str::contains(
-            "Convert Arrow format to DuckDB format",
         ))
         .stdout(predicate::str::contains(
             "Convert Arrow format to Arrow format",
@@ -27,7 +24,7 @@ fn test_help_command() {
 
 #[test]
 fn test_version_command() {
-    let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
+    let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
     cmd.arg("--version")
         .assert()
         .success()
@@ -36,7 +33,7 @@ fn test_version_command() {
 
 #[test]
 fn test_parquet_help() {
-    let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
+    let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
     cmd.args(["arrow-to-parquet", "--help"])
         .assert()
         .success()
@@ -50,22 +47,8 @@ fn test_parquet_help() {
 }
 
 #[test]
-fn test_duckdb_help() {
-    let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
-    cmd.args(["arrow-to-duckdb", "--help"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains(
-            "Convert Arrow format to DuckDB format.",
-        ))
-        .stdout(predicate::str::contains(
-            "Sort the data by one or more columns",
-        ));
-}
-
-#[test]
 fn test_arrow_help() {
-    let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
+    let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
     cmd.args(["arrow-to-arrow", "--help"])
         .assert()
         .success()
@@ -79,7 +62,7 @@ fn test_arrow_help() {
 
 #[test]
 fn test_missing_subcommand() {
-    let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
+    let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
     cmd.assert()
         .failure()
         .stderr(predicate::str::contains("Usage:"));
@@ -87,7 +70,7 @@ fn test_missing_subcommand() {
 
 #[test]
 fn test_parquet_missing_args() {
-    let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
+    let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
     cmd.arg("arrow-to-parquet")
         .assert()
         .failure()
@@ -95,17 +78,8 @@ fn test_parquet_missing_args() {
 }
 
 #[test]
-fn test_duckdb_missing_args() {
-    let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
-    cmd.arg("arrow-to-duckdb")
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("required arguments"));
-}
-
-#[test]
 fn test_arrow_missing_args() {
-    let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
+    let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
     cmd.arg("arrow-to-arrow")
         .assert()
         .failure()
@@ -117,7 +91,7 @@ fn test_parquet_non_existent_input() {
     let temp_dir = TempDir::new().unwrap();
     let output_path = temp_dir.path().join("output.parquet");
 
-    let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
+    let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
     cmd.args([
         "arrow-to-parquet",
         "/non/existent/file.arrow",
@@ -133,7 +107,7 @@ fn test_arrow_non_existent_input() {
     let temp_dir = TempDir::new().unwrap();
     let output_path = temp_dir.path().join("output.arrow");
 
-    let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
+    let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
     cmd.args([
         "arrow-to-arrow",
         "/non/existent/file.arrow",
@@ -145,24 +119,8 @@ fn test_arrow_non_existent_input() {
 }
 
 #[test]
-fn test_duckdb_non_existent_input() {
-    let temp_dir = TempDir::new().unwrap();
-    let output_path = temp_dir.path().join("output.db");
-
-    let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
-    cmd.args([
-        "arrow-to-duckdb",
-        "/non/existent/file.arrow",
-        output_path.to_str().unwrap(),
-    ])
-    .assert()
-    .failure()
-    .stderr(predicate::str::contains("No such file or directory"));
-}
-
-#[test]
 fn test_partition_arrow_to_arrow_help() {
-    let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
+    let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
     cmd.args(["partition-arrow-to-arrow", "--help"])
         .assert()
         .success()
@@ -174,7 +132,7 @@ fn test_partition_arrow_to_arrow_help() {
 
 #[test]
 fn test_partition_arrow_to_parquet_help() {
-    let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
+    let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
     cmd.args(["partition-arrow-to-parquet", "--help"])
         .assert()
         .success()
@@ -186,7 +144,7 @@ fn test_partition_arrow_to_parquet_help() {
 
 #[test]
 fn test_partition_arrow_to_arrow_missing_args() {
-    let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
+    let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
     cmd.arg("partition-arrow-to-arrow")
         .assert()
         .failure()
@@ -195,7 +153,7 @@ fn test_partition_arrow_to_arrow_missing_args() {
 
 #[test]
 fn test_partition_arrow_to_parquet_missing_args() {
-    let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
+    let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
     cmd.arg("partition-arrow-to-parquet")
         .assert()
         .failure()
@@ -204,7 +162,7 @@ fn test_partition_arrow_to_parquet_missing_args() {
 
 #[test]
 fn test_partition_arrow_to_arrow_non_existent_input() {
-    let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
+    let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
     cmd.args([
         "partition-arrow-to-arrow",
         "/non/existent/file.arrow",
@@ -218,7 +176,7 @@ fn test_partition_arrow_to_arrow_non_existent_input() {
 
 #[test]
 fn test_partition_arrow_to_parquet_non_existent_input() {
-    let mut cmd = Command::cargo_bin("silk-chiffon").unwrap();
+    let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
     cmd.args([
         "partition-arrow-to-parquet",
         "/non/existent/file.arrow",

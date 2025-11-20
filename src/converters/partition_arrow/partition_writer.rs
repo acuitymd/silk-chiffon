@@ -9,8 +9,10 @@ use arrow::datatypes::SchemaRef;
 use arrow::ipc::writer::{FileWriter, IpcWriteOptions, StreamWriter};
 use async_trait::async_trait;
 use parquet::arrow::arrow_writer::ArrowWriter;
-use parquet::file::properties::{WriterProperties, WriterPropertiesBuilder};
-use parquet::format::SortingColumn;
+use parquet::file::{
+    metadata::SortingColumn,
+    properties::{WriterProperties, WriterPropertiesBuilder},
+};
 use parquet::schema::types::ColumnPath;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};

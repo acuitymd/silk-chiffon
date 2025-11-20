@@ -1,8 +1,10 @@
 use futures::stream::StreamExt;
 use parquet::{
     arrow::ArrowWriter,
-    file::properties::{WriterProperties, WriterPropertiesBuilder},
-    format::SortingColumn,
+    file::{
+        metadata::SortingColumn,
+        properties::{WriterProperties, WriterPropertiesBuilder},
+    },
     schema::types::ColumnPath,
 };
 use std::{

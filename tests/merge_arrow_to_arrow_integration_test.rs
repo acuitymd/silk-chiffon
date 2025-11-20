@@ -1,5 +1,5 @@
 use arrow::{array::Int32Array, ipc::reader::FileReader};
-use assert_cmd::Command;
+use assert_cmd::cargo;
 use silk_chiffon::utils::test_helpers::test_data;
 use std::fs::File;
 use tempfile::tempdir;
@@ -14,8 +14,7 @@ fn test_merge_arrow_to_arrow_basic() {
     test_data::create_arrow_file_with_range_of_ids(&input1_path, 1, 3);
     test_data::create_arrow_file_with_range_of_ids(&input2_path, 4, 3);
 
-    let output = Command::cargo_bin("silk-chiffon")
-        .unwrap()
+    let output = cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
             "merge-arrow-to-arrow",
             input1_path.to_str().unwrap(),
@@ -51,8 +50,7 @@ fn test_merge_arrow_to_arrow_with_sorting() {
     test_data::create_arrow_file_with_range_of_ids(&input1_path, 5, 3);
     test_data::create_arrow_file_with_range_of_ids(&input2_path, 1, 3);
 
-    let output = Command::cargo_bin("silk-chiffon")
-        .unwrap()
+    let output = cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
             "merge-arrow-to-arrow",
             input1_path.to_str().unwrap(),
@@ -95,8 +93,7 @@ fn test_merge_arrow_to_arrow_with_glob_pattern() {
     }
 
     let glob_pattern = format!("{}/data_*.arrow", temp_dir.path().display());
-    let output = Command::cargo_bin("silk-chiffon")
-        .unwrap()
+    let output = cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
             "merge-arrow-to-arrow",
             &glob_pattern,
@@ -130,8 +127,7 @@ fn test_merge_arrow_to_arrow_with_compression() {
     test_data::create_arrow_file_with_range_of_ids(&input1_path, 1, 100);
     test_data::create_arrow_file_with_range_of_ids(&input2_path, 101, 100);
 
-    let output = Command::cargo_bin("silk-chiffon")
-        .unwrap()
+    let output = cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
             "merge-arrow-to-arrow",
             input1_path.to_str().unwrap(),
@@ -178,8 +174,7 @@ fn test_merge_arrow_to_arrow_with_query() {
     test_data::create_arrow_file_with_range_of_ids(&input1_path, 1, 10);
     test_data::create_arrow_file_with_range_of_ids(&input2_path, 11, 10);
 
-    let output = Command::cargo_bin("silk-chiffon")
-        .unwrap()
+    let output = cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
             "merge-arrow-to-arrow",
             input1_path.to_str().unwrap(),
@@ -220,8 +215,7 @@ fn test_merge_arrow_to_arrow_empty_input_error() {
     let temp_dir = tempdir().unwrap();
     let output_path = temp_dir.path().join("merged.arrow");
 
-    let output = Command::cargo_bin("silk-chiffon")
-        .unwrap()
+    let output = cargo::cargo_bin_cmd!("silk-chiffon")
         .args(["merge-arrow-to-arrow", "-o", output_path.to_str().unwrap()])
         .output()
         .expect("Failed to execute command");
@@ -234,8 +228,7 @@ fn test_merge_arrow_to_arrow_nonexistent_file_error() {
     let temp_dir = tempdir().unwrap();
     let output_path = temp_dir.path().join("merged.arrow");
 
-    let output = Command::cargo_bin("silk-chiffon")
-        .unwrap()
+    let output = cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
             "merge-arrow-to-arrow",
             "/nonexistent/file.arrow",

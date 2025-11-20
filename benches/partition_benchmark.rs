@@ -10,7 +10,6 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use datafusion::catalog::stream::{StreamConfig, StreamProvider, StreamTable};
 use datafusion::error::DataFusionError;
 use datafusion::physical_plan::DisplayFormatType;
-use duckdb::Connection;
 use silk_chiffon::utils::arrow_io::ArrowIPCFormat;
 use silk_chiffon::{ArrowCompression, ListOutputsFormat, PartitionArrowToArrowArgs, QueryDialect};
 use std::fmt::Formatter;
@@ -140,22 +139,6 @@ async fn run_silk_arrow(input_path: &std::path::Path, output_dir: &std::path::Pa
         .unwrap();
 }
 
-fn run_duckdb_arrow(input_path: &std::path::Path, output_dir: &std::path::Path) {
-    let conn = Connection::open_in_memory().unwrap();
-
-    conn.execute("INSTALL nanoarrow FROM community", [])
-        .unwrap();
-    conn.execute("LOAD nanoarrow", []).unwrap();
-
-    let query = format!(
-        "COPY (SELECT * FROM read_arrow('{}')) TO '{}' (FORMAT ARROW, PARTITION_BY (partition_col))",
-        input_path.display(),
-        output_dir.join("data.arrow").display()
-    );
-
-    conn.execute(&query, []).unwrap();
-}
-
 #[derive(Debug)]
 struct ArrowIPCStreamProvider {
     schema: Arc<Schema>,
@@ -261,22 +244,6 @@ fn bench_small_datasets(c: &mut Criterion) {
                         let output_dir = temp_dir.path().join("silk_output");
                         fs::create_dir_all(&output_dir).unwrap();
                         run_silk_arrow(&input_path, &output_dir).await;
-                    },
-                    criterion::BatchSize::SmallInput,
-                );
-            },
-        );
-
-        group.bench_with_input(
-            BenchmarkId::new("duckdb_arrow", scenario.name),
-            &scenario,
-            |b, scenario| {
-                b.iter_batched(
-                    || setup_benchmark_data(scenario),
-                    |(temp_dir, input_path)| {
-                        let output_dir = temp_dir.path().join("duckdb_output");
-                        fs::create_dir_all(&output_dir).unwrap();
-                        run_duckdb_arrow(&input_path, &output_dir);
                     },
                     criterion::BatchSize::SmallInput,
                 );

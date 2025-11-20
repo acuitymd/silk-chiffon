@@ -1,4 +1,4 @@
-use assert_cmd::Command;
+use assert_cmd::cargo;
 use parquet::{
     basic::Compression,
     file::reader::{FileReader, SerializedFileReader},
@@ -17,8 +17,7 @@ fn test_merge_arrow_to_parquet_basic() {
     test_data::create_arrow_file_with_range_of_ids(&input1_path, 1, 3);
     test_data::create_arrow_file_with_range_of_ids(&input2_path, 4, 3);
 
-    let output = Command::cargo_bin("silk-chiffon")
-        .unwrap()
+    let output = cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
             "merge-arrow-to-parquet",
             input1_path.to_str().unwrap(),
@@ -52,8 +51,7 @@ fn test_merge_arrow_to_parquet_with_compression() {
     test_data::create_arrow_file_with_range_of_ids(&input1_path, 1, 100);
     test_data::create_arrow_file_with_range_of_ids(&input2_path, 101, 100);
 
-    let output = Command::cargo_bin("silk-chiffon")
-        .unwrap()
+    let output = cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
             "merge-arrow-to-parquet",
             input1_path.to_str().unwrap(),
@@ -95,8 +93,7 @@ fn test_merge_arrow_to_parquet_with_sorting() {
     test_data::create_arrow_file_with_range_of_ids(&input1_path, 10, 5);
     test_data::create_arrow_file_with_range_of_ids(&input2_path, 1, 5);
 
-    let output = Command::cargo_bin("silk-chiffon")
-        .unwrap()
+    let output = cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
             "merge-arrow-to-parquet",
             input1_path.to_str().unwrap(),
@@ -128,8 +125,7 @@ fn test_merge_arrow_to_parquet_with_bloom_filters() {
     test_data::create_arrow_file_with_range_of_ids(&input1_path, 1, 50);
     test_data::create_arrow_file_with_range_of_ids(&input2_path, 51, 50);
 
-    let output = Command::cargo_bin("silk-chiffon")
-        .unwrap()
+    let output = cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
             "merge-arrow-to-parquet",
             input1_path.to_str().unwrap(),
@@ -167,8 +163,7 @@ fn test_merge_arrow_to_parquet_with_row_group_size() {
     test_data::create_arrow_file_with_range_of_ids(&input1_path, 1, 1000);
     test_data::create_arrow_file_with_range_of_ids(&input2_path, 1001, 1000);
 
-    let output = Command::cargo_bin("silk-chiffon")
-        .unwrap()
+    let output = cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
             "merge-arrow-to-parquet",
             input1_path.to_str().unwrap(),
@@ -208,8 +203,7 @@ fn test_merge_arrow_to_parquet_with_query() {
     test_data::create_arrow_file_with_range_of_ids(&input1_path, 1, 20);
     test_data::create_arrow_file_with_range_of_ids(&input2_path, 21, 20);
 
-    let output = Command::cargo_bin("silk-chiffon")
-        .unwrap()
+    let output = cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
             "merge-arrow-to-parquet",
             input1_path.to_str().unwrap(),
@@ -244,8 +238,7 @@ fn test_merge_arrow_to_parquet_with_statistics() {
     test_data::create_arrow_file_with_range_of_ids(&input1_path, 1, 100);
     test_data::create_arrow_file_with_range_of_ids(&input2_path, 101, 100);
 
-    let output = Command::cargo_bin("silk-chiffon")
-        .unwrap()
+    let output = cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
             "merge-arrow-to-parquet",
             input1_path.to_str().unwrap(),
@@ -281,8 +274,7 @@ fn test_merge_arrow_to_parquet_glob_pattern() {
     }
 
     let glob_pattern = format!("{}/part_*.arrow", temp_dir.path().display());
-    let output = Command::cargo_bin("silk-chiffon")
-        .unwrap()
+    let output = cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
             "merge-arrow-to-parquet",
             &glob_pattern,
@@ -312,8 +304,7 @@ fn test_merge_arrow_to_parquet_writer_version() {
 
     test_data::create_arrow_file_with_range_of_ids(&input_path, 1, 10);
 
-    let output = Command::cargo_bin("silk-chiffon")
-        .unwrap()
+    let output = cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
             "merge-arrow-to-parquet",
             input_path.to_str().unwrap(),
