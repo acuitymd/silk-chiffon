@@ -49,8 +49,18 @@ jobs:
         with:
           shared-key: "release-${{ matrix.runner }}"
 
+      - name: Install cargo-zigbuild
+        # the python package also installs ziglang
+        run: pip3 install cargo-zigbuild
+
       - name: Build binary
+        if: ${{ matrix.os == 'macos' }}
         run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Build binary
+        if: ${{ matrix.os == 'linux' }}
+        # links against older version of libc, makes it more compatible with older distros
+        run: cargo zigbuild --release --target ${{ matrix.target }}
 
       - name: Test binary
         run: ./target/${{ matrix.target }}/release/silk-chiffon --version
