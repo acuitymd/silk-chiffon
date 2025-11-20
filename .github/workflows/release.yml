@@ -10,7 +10,6 @@ env:
   RUSTC_WRAPPER: sccache
   SCCACHE_GHA_ENABLED: true
   CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
-  DUCKDB_VERSION: 1.4.1
 
 jobs:
   build:
@@ -20,15 +19,12 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-latest
             os: linux
-            duckdb_asset: linux-amd64
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm
             os: linux
-            duckdb_asset: linux-arm64
           - target: aarch64-apple-darwin
             runner: macos-latest
             os: macos
-            duckdb_asset: osx-universal
 
     runs-on: ${{ matrix.runner }}
 
@@ -45,43 +41,30 @@ jobs:
         if: matrix.os == 'linux'
         run: sudo apt-get update && sudo apt-get install -y lld
 
-      - name: Setup DuckDB cache
-        id: cache-duckdb
-        if: matrix.os == 'linux'
-        uses: actions/cache@v4
-        with:
-          path: |
-            /usr/local/lib/libduckdb.so
-            /usr/local/lib/libduckdb_static.a
-            /usr/local/include/duckdb.h
-            /usr/local/include/duckdb.hpp
-          key: duckdb-${{ env.DUCKDB_VERSION }}-linux-amd64-2025-10-11
-
-      - name: Install DuckDB
-        if: steps.cache-duckdb.outputs.cache-hit != 'true' && matrix.os == 'linux'
-        run: |
-          set -e
-          curl -L -O https://github.com/duckdb/duckdb/releases/download/v${{env.DUCKDB_VERSION}}/libduckdb-${{ matrix.duckdb_asset }}.zip
-          unzip libduckdb-${{ matrix.duckdb_asset }}.zip -d libduckdb
-          sudo mv libduckdb/duckdb.* /usr/local/include/
-          sudo mv libduckdb/libduckdb* /usr/local/lib/
-          sudo ldconfig /usr/local/lib
-          rm -rf libduckdb libduckdb-${{ matrix.duckdb_asset }}.zip
-
-      - name: Configure DuckDB
-        if: steps.cache-duckdb.outputs.cache-hit == 'true' && matrix.os == 'linux'
-        run: sudo ldconfig /usr/local/lib
-
       - name: Install packages
-        if: ${{ matrix.os == 'macos' }}
-        run: brew install duckdb lld
+        if: matrix.os == 'macos'
+        run: brew install lld
 
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: "release-${{ matrix.runner }}"
 
+      - name: Install cargo-zigbuild
+        if: matrix.os == 'linux'
+        # the python package also installs ziglang
+        run: pip3 install cargo-zigbuild
+
       - name: Build binary
-        run: cargo build --release --target ${{ matrix.target }}
+        if: matrix.os == 'macos'
+        run: cargo build --locked --release --target ${{ matrix.target }}
+
+      - name: Build binary
+        if: matrix.os == 'linux'
+        # links against older version of libc, makes it more compatible with older distros
+        run: cargo zigbuild --locked --release --target ${{ matrix.target }}
+
+      - name: Test binary
+        run: ./target/${{ matrix.target }}/release/silk-chiffon --version
 
       - name: Generate version
         id: version
