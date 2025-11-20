@@ -1,5 +1,10 @@
 name: Release
 on:
+  push:
+    branches:
+      - main
+    tags:
+      - "*"
   workflow_dispatch:
 
 concurrency:
