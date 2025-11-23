@@ -14,6 +14,20 @@ use futures::stream::Stream;
 /// A HashMap of column names to single-row arrays representing a partition value for a column
 pub type PartitionValues = HashMap<String, ArrayRef>;
 
+/// Compare two PartitionValues by their array contents, not pointers.
+/// Returns true if both have the same keys and all arrays are equal.
+pub fn partition_values_equal(a: &PartitionValues, b: &PartitionValues) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+
+    a.iter().all(|(key, a_array)| {
+        b.get(key)
+            .map(|b_array| a_array.as_ref() == b_array.as_ref())
+            .unwrap_or(false)
+    })
+}
+
 /// Stream that partitions record batches by column values, yielding
 /// (partition_values, sliced_batch) tuples where partition_values contains
 /// single-row arrays for each partition column.
@@ -356,5 +370,87 @@ mod tests {
         } else {
             panic!("Expected at least one result");
         }
+    }
+
+    #[test]
+    fn test_partition_values_equal_same_values() {
+        // test that partition_values_equal returns true for same values with different pointers
+        let mut values1 = HashMap::new();
+        values1.insert(
+            "region".to_string(),
+            Arc::new(StringArray::from(vec!["us-west"])) as ArrayRef,
+        );
+        values1.insert(
+            "category".to_string(),
+            Arc::new(Int32Array::from(vec![42])) as ArrayRef,
+        );
+
+        let mut values2 = HashMap::new();
+        values2.insert(
+            "region".to_string(),
+            Arc::new(StringArray::from(vec!["us-west"])) as ArrayRef,
+        );
+        values2.insert(
+            "category".to_string(),
+            Arc::new(Int32Array::from(vec![42])) as ArrayRef,
+        );
+
+        // different pointers, same values
+        assert!(partition_values_equal(&values1, &values2));
+    }
+
+    #[test]
+    fn test_partition_values_equal_different_values() {
+        let mut values1 = HashMap::new();
+        values1.insert(
+            "region".to_string(),
+            Arc::new(StringArray::from(vec!["us-west"])) as ArrayRef,
+        );
+
+        let mut values2 = HashMap::new();
+        values2.insert(
+            "region".to_string(),
+            Arc::new(StringArray::from(vec!["us-east"])) as ArrayRef,
+        );
+
+        assert!(!partition_values_equal(&values1, &values2));
+    }
+
+    #[test]
+    fn test_partition_values_equal_different_keys() {
+        let mut values1 = HashMap::new();
+        values1.insert(
+            "region".to_string(),
+            Arc::new(StringArray::from(vec!["us-west"])) as ArrayRef,
+        );
+
+        let mut values2 = HashMap::new();
+        values2.insert(
+            "zone".to_string(),
+            Arc::new(StringArray::from(vec!["us-west"])) as ArrayRef,
+        );
+
+        assert!(!partition_values_equal(&values1, &values2));
+    }
+
+    #[test]
+    fn test_partition_values_equal_different_lengths() {
+        let mut values1 = HashMap::new();
+        values1.insert(
+            "region".to_string(),
+            Arc::new(StringArray::from(vec!["us-west"])) as ArrayRef,
+        );
+
+        let mut values2 = HashMap::new();
+        values2.insert(
+            "region".to_string(),
+            Arc::new(StringArray::from(vec!["us-west"])) as ArrayRef,
+        );
+        values2.insert(
+            "zone".to_string(),
+            Arc::new(StringArray::from(vec!["a"])) as ArrayRef,
+        );
+
+        assert!(!partition_values_equal(&values1, &values2));
     }
 }

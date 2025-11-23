@@ -7,7 +7,7 @@ use futures::StreamExt;
 
 use crate::{
     io_strategies::{
-        partitioner::{PartitionValues, Partitioner},
+        partitioner::{PartitionValues, Partitioner, partition_values_equal},
         path_template::PathTemplate,
     },
     sinks::data_sink::DataSink,
@@ -72,9 +72,13 @@ impl OutputStrategy {
                     if *exclude_partition_columns {
                         batch = batch.project(&non_partition_columns_indices)?;
                     }
-                    if current_sink.is_some()
-                        && most_recent_partition_values.as_ref().unwrap() != &partition_values
-                    {
+
+                    let partition_changed = most_recent_partition_values
+                        .as_ref()
+                        .map(|prev| !partition_values_equal(prev, &partition_values))
+                        .unwrap_or(false);
+
+                    if current_sink.is_some() && partition_changed {
                         current_sink.as_mut().unwrap().finish().await?;
                         current_sink = None;
                     }
@@ -552,5 +556,83 @@ mod tests {
         // should propagate the error about missing column
         let result = strategy.write_stream(stream).await;
         assert!(result.is_err(), "missing column error should be propagated");
+    }
+
+    #[tokio::test]
+    async fn test_partitioned_same_partition_values_reuse_sink() {
+        // test that consecutive batches with identical partition values reuse the same sink
+        // even though they have different ArrayRef pointers
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("region", DataType::Utf8, false),
+            Field::new("value", DataType::Int32, false),
+        ]));
+
+        // create two batches with the same partition value ("us-west")
+        // but different ArrayRef instances (simulating what happens in real partitioning)
+        let batch1 = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(StringArray::from(vec!["us-west"])),
+                Arc::new(Int32Array::from(vec![1])),
+            ],
+        )
+        .unwrap();
+
+        let batch2 = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(StringArray::from(vec!["us-west"])),
+                Arc::new(Int32Array::from(vec![2])),
+            ],
+        )
+        .unwrap();
+
+        let stream = create_test_stream(vec![batch1, batch2]);
+
+        let batches = Arc::new(Mutex::new(Vec::new()));
+        let finished = Arc::new(Mutex::new(false));
+        let sink_create_count = Arc::new(Mutex::new(0));
+
+        let batches_clone = Arc::clone(&batches);
+        let finished_clone = Arc::clone(&finished);
+        let sink_create_count_clone = Arc::clone(&sink_create_count);
+
+        let sink_factory = move |name: String, _schema: Arc<Schema>| {
+            *sink_create_count_clone.lock().unwrap() += 1;
+            Ok(Box::new(MockSink {
+                name,
+                batches: Arc::clone(&batches_clone),
+                finished: Arc::clone(&finished_clone),
+            }) as Box<dyn DataSink>)
+        };
+
+        let mut strategy = OutputStrategy::Partitioned {
+            sink_factory: Box::new(sink_factory),
+            columns: vec!["region".to_string()],
+            template: PathTemplate::new("output/{region}.parquet".to_string()),
+            exclude_partition_columns: false,
+        };
+
+        strategy.write_stream(stream).await.unwrap();
+
+        // verify that the sink was only created once (not twice)
+        assert_eq!(
+            *sink_create_count.lock().unwrap(),
+            1,
+            "sink should be created only once for same partition values"
+        );
+
+        // verify both batches were written to the same sink
+        assert_eq!(
+            batches.lock().unwrap().len(),
+            2,
+            "both batches should be written"
+        );
+
+        // verify the sink was finished
+        assert!(
+            *finished.lock().unwrap(),
+            "sink should be finished at end of stream"
+        );
     }
 }
