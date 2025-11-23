@@ -72,28 +72,25 @@ impl OutputStrategy {
                     if *exclude_partition_columns {
                         batch = batch.project(&non_partition_columns_indices)?;
                     }
-                    if current_sink.is_some() {
-                        if most_recent_partition_values.as_ref().unwrap() == &partition_values {
-                            current_sink.as_mut().unwrap().write_batch(batch).await?;
-                        } else {
-                            current_sink.as_mut().unwrap().finish().await?;
-                            let mut sink = sink_factory(
-                                template.resolve(&partition_values),
-                                Arc::clone(&batch.schema()),
-                            )?;
-                            sink.write_batch(batch).await?;
-                            current_sink = Some(sink);
-                            most_recent_partition_values = Some(partition_values);
-                        }
-                    } else {
-                        let mut sink = sink_factory(
+                    if current_sink.is_some()
+                        && most_recent_partition_values.as_ref().unwrap() != &partition_values
+                    {
+                        current_sink.as_mut().unwrap().finish().await?;
+                        current_sink = None;
+                    }
+
+                    if current_sink.is_none() {
+                        current_sink = Some(sink_factory(
                             template.resolve(&partition_values),
                             Arc::clone(&batch.schema()),
-                        )?;
-                        sink.write_batch(batch).await?;
-                        current_sink = Some(sink);
-                        most_recent_partition_values = Some(partition_values);
+                        )?);
                     }
+                    current_sink.as_mut().unwrap().write_batch(batch).await?;
+                    most_recent_partition_values = Some(partition_values);
+                }
+
+                if current_sink.is_some() {
+                    current_sink.as_mut().unwrap().finish().await?;
                 }
 
                 Ok(())
@@ -377,5 +374,76 @@ mod tests {
         let batches = batches_written.lock().unwrap();
         // should have 3 writes: 2 for category 1, 1 for category 2
         assert_eq!(batches.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_partitioned_finish_called_on_partition_change() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("category", DataType::Int32, false),
+            Field::new("value", DataType::Int32, false),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 1, 2, 2, 3, 3])),
+                Arc::new(Int32Array::from(vec![10, 20, 30, 40, 50, 60])),
+            ],
+        )
+        .unwrap();
+
+        let stream = create_test_stream(vec![batch]);
+
+        // track which sinks were finished
+        let sink1_finished = Arc::new(Mutex::new(false));
+        let sink2_finished = Arc::new(Mutex::new(false));
+        let sink3_finished = Arc::new(Mutex::new(false));
+
+        let sink1_clone = Arc::clone(&sink1_finished);
+        let sink2_clone = Arc::clone(&sink2_finished);
+        let sink3_clone = Arc::clone(&sink3_finished);
+
+        let call_count = Arc::new(Mutex::new(0));
+        let call_count_clone = Arc::clone(&call_count);
+
+        let sink_factory: SinkFactory = Box::new(move |name, _schema| {
+            let mut count = call_count_clone.lock().unwrap();
+            *count += 1;
+            let finished_flag = match *count {
+                1 => Arc::clone(&sink1_clone),
+                2 => Arc::clone(&sink2_clone),
+                3 => Arc::clone(&sink3_clone),
+                _ => panic!("unexpected sink creation"),
+            };
+
+            Ok(Box::new(MockSink {
+                name,
+                batches: Arc::new(Mutex::new(Vec::new())),
+                finished: finished_flag,
+            }))
+        });
+
+        let mut strategy = OutputStrategy::Partitioned {
+            columns: vec!["category".to_string()],
+            template: PathTemplate::new("output/{category}.parquet".to_string()),
+            sink_factory,
+            exclude_partition_columns: false,
+        };
+
+        strategy.write_stream(stream).await.unwrap();
+
+        // verify all sinks were finished
+        assert!(
+            *sink1_finished.lock().unwrap(),
+            "sink 1 should be finished when partition changes"
+        );
+        assert!(
+            *sink2_finished.lock().unwrap(),
+            "sink 2 should be finished when partition changes"
+        );
+        assert!(
+            *sink3_finished.lock().unwrap(),
+            "sink 3 should be finished at end of stream"
+        );
     }
 }
