@@ -35,7 +35,7 @@ fmt-fix:
 alias fmt := fmt-fix
 
 lint-check:
-    cargo clippy --all-targets --all-features --allow-dirty -- -D warnings
+    cargo clippy --all-targets --all-features -- -D warnings
 
 lint-fix:
     cargo clippy --all-targets --all-features --fix --allow-dirty -- -D warnings
