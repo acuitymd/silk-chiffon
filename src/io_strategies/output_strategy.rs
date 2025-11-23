@@ -21,7 +21,7 @@ pub enum OutputStrategy {
     Single(Box<dyn DataSink>),
     Partitioned {
         columns: Vec<String>,
-        template: PathTemplate,
+        template: Box<PathTemplate>,
         sink_factory: SinkFactory,
         exclude_partition_columns: bool,
     },
@@ -185,7 +185,7 @@ mod tests {
 
         let mut strategy = OutputStrategy::Partitioned {
             columns: vec!["category".to_string()],
-            template: PathTemplate::new("output/{category}.parquet".to_string()),
+            template: Box::new(PathTemplate::new("output/{{category}}.parquet".to_string())),
             sink_factory,
             exclude_partition_columns: false,
         };
@@ -228,7 +228,7 @@ mod tests {
 
         let mut strategy = OutputStrategy::Partitioned {
             columns: vec!["category".to_string()],
-            template: PathTemplate::new("output/{category}.parquet".to_string()),
+            template: Box::new(PathTemplate::new("output/{{category}}.parquet".to_string())),
             sink_factory,
             exclude_partition_columns: false,
         };
@@ -273,7 +273,7 @@ mod tests {
 
         let mut strategy = OutputStrategy::Partitioned {
             columns: vec!["category".to_string()],
-            template: PathTemplate::new("output/{category}.parquet".to_string()),
+            template: Box::new(PathTemplate::new("output/{{category}}.parquet".to_string())),
             sink_factory,
             exclude_partition_columns: true,
         };
@@ -318,7 +318,7 @@ mod tests {
 
         let mut strategy = OutputStrategy::Partitioned {
             columns: vec!["region".to_string()],
-            template: PathTemplate::new("output/{region}.parquet".to_string()),
+            template: Box::new(PathTemplate::new("output/{{region}}.parquet".to_string())),
             sink_factory,
             exclude_partition_columns: false,
         };
@@ -371,7 +371,7 @@ mod tests {
 
         let mut strategy = OutputStrategy::Partitioned {
             columns: vec!["category".to_string()],
-            template: PathTemplate::new("output/{category}.parquet".to_string()),
+            template: Box::new(PathTemplate::new("output/{{category}}.parquet".to_string())),
             sink_factory,
             exclude_partition_columns: false,
         };
@@ -432,7 +432,7 @@ mod tests {
 
         let mut strategy = OutputStrategy::Partitioned {
             columns: vec!["category".to_string()],
-            template: PathTemplate::new("output/{category}.parquet".to_string()),
+            template: Box::new(PathTemplate::new("output/{{category}}.parquet".to_string())),
             sink_factory,
             exclude_partition_columns: false,
         };
@@ -497,7 +497,7 @@ mod tests {
         let mut strategy = OutputStrategy::Partitioned {
             sink_factory: Box::new(sink_factory),
             columns: vec!["region".to_string()],
-            template: PathTemplate::new("output/{region}.parquet".to_string()),
+            template: Box::new(PathTemplate::new("output/{{region}}.parquet".to_string())),
             exclude_partition_columns: false,
         };
 
@@ -549,7 +549,9 @@ mod tests {
         let mut strategy = OutputStrategy::Partitioned {
             sink_factory: Box::new(sink_factory),
             columns: vec!["nonexistent_column".to_string()],
-            template: PathTemplate::new("output/{nonexistent_column}.parquet".to_string()),
+            template: Box::new(PathTemplate::new(
+                "output/{{nonexistent_column}}.parquet".to_string(),
+            )),
             exclude_partition_columns: false,
         };
 
@@ -609,7 +611,7 @@ mod tests {
         let mut strategy = OutputStrategy::Partitioned {
             sink_factory: Box::new(sink_factory),
             columns: vec!["region".to_string()],
-            template: PathTemplate::new("output/{region}.parquet".to_string()),
+            template: Box::new(PathTemplate::new("output/{{region}}.parquet".to_string())),
             exclude_partition_columns: false,
         };
 

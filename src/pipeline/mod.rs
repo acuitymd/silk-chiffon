@@ -68,7 +68,7 @@ impl Pipeline {
     ) -> Self {
         self.output_strategy = Some(OutputStrategy::Partitioned {
             columns,
-            template,
+            template: Box::new(template),
             sink_factory,
             exclude_partition_columns,
         });

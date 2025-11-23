@@ -1,40 +1,5 @@
-//! Path template resolution with Hive-style percent encoding.
-//!
-//! This module provides [`PathTemplate`] for resolving partition value placeholders
-//! in path patterns. All partition values are automatically percent-encoded according
-//! to Apache Hive's partitioning conventions before substitution.
-//!
-//! Uses the [`percent-encoding`](https://docs.rs/percent-encoding/) crate with a custom
-//! character set matching Hive's behavior.
-//!
-//! # Encoding Rules
-//!
-//! Matches the behavior of `org.apache.hadoop.hive.common.FileUtils.escapePathName`:
-//!
-//! - **Null or empty values**: Replaced with `__HIVE_DEFAULT_PARTITION__`
-//! - **Control characters** (ASCII 0x00-0x1F and 0x7F) are encoded as `%XX`
-//! - **Special characters** are encoded: `"` `#` `%` `'` `*` `/` `:` `=` `?` `\` `{` `[` `]` `^`
-//! - **Not encoded**: alphanumerics, spaces, commas, closing braces `}`, hyphens, underscores, dots
-//!
-//! # Examples
-//!
-//! ```
-//! # use std::collections::HashMap;
-//! # use std::sync::Arc;
-//! # use arrow::array::{Int32Array, StringArray};
-//! # use silk_chiffon::io_strategies::path_template::PathTemplate;
-//! let template = PathTemplate::new("data/{region}/{date}.parquet".to_string());
-//!
-//! let mut values = HashMap::new();
-//! values.insert("region".to_string(), Arc::new(StringArray::from(vec!["us-west"])) as _);
-//! values.insert("date".to_string(), Arc::new(StringArray::from(vec!["2024/01/15"])) as _);
-//!
-//! // Forward slashes in partition values are escaped
-//! let result = template.resolve(&values);
-//! assert_eq!(result, "data/us-west/2024%2F01%2F15.parquet");
-//! ```
-
 use arrow::util::display::{ArrayFormatter, FormatOptions};
+use minijinja::{AutoEscape, Environment, Value};
 use percent_encoding::{AsciiSet, CONTROLS, percent_encode};
 
 use crate::io_strategies::partitioner::PartitionValues;
@@ -60,24 +25,51 @@ const HIVE_ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b']')
     .add(b'^');
 
-/// Template for generating partition paths with Hive-style percent encoding.
-///
-/// Resolves placeholders in path patterns by substituting partition values.
-/// All values are automatically percent-encoded according to Hive partitioning rules.
 pub struct PathTemplate {
-    pattern: String,
+    env: Environment<'static>,
+    template_str: String,
 }
 
 impl PathTemplate {
     pub fn new(pattern: String) -> Self {
-        Self { pattern }
+        let mut env = Environment::new();
+
+        env.set_auto_escape_callback(|_name| AutoEscape::Custom("hive"));
+
+        env.set_formatter(|out, state, value| {
+            if matches!(state.auto_escape(), AutoEscape::Custom("hive")) {
+                if value.is_safe() {
+                    out.write_str(&value.to_string())?;
+                } else {
+                    let s = value.to_string();
+                    let escaped = Self::hive_escape_path(&s);
+                    out.write_str(&escaped)?;
+                }
+                Ok(())
+            } else {
+                minijinja::escape_formatter(out, state, value)
+            }
+        });
+
+        env.add_filter("raw", |s: &str| -> Result<Value, minijinja::Error> {
+            if s.is_empty() || s == HIVE_DEFAULT_PARTITION {
+                Ok(Value::from_safe_string(HIVE_DEFAULT_PARTITION.to_string()))
+            } else {
+                Ok(Value::from_safe_string(s.to_string()))
+            }
+        });
+
+        Self {
+            env,
+            template_str: pattern,
+        }
     }
 
-    /// Escape a path name according to Hive partitioning conventions.
+    /// Escape a path according to Hive partitioning conventions.
     /// This matches the behavior of org.apache.hadoop.hive.common.FileUtils.escapePathName
     ///
     /// Null or empty strings return `__HIVE_DEFAULT_PARTITION__`.
-    fn escape_path_name(path: &str) -> String {
+    fn hive_escape_path(path: &str) -> String {
         if path.is_empty() {
             return HIVE_DEFAULT_PARTITION.to_string();
         }
@@ -85,31 +77,11 @@ impl PathTemplate {
         percent_encode(path.as_bytes(), HIVE_ENCODE_SET).to_string()
     }
 
-    /// Resolve partition value placeholders in the template pattern.
-    ///
-    /// Replaces `{{column_name}}` placeholders with the corresponding partition values.
-    /// Values are formatted using Arrow's display formatting and then percent-encoded
-    /// according to Hive partitioning rules.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # use std::collections::HashMap;
-    /// # use std::sync::Arc;
-    /// # use arrow::array::StringArray;
-    /// # use silk_chiffon::io_strategies::path_template::PathTemplate;
-    /// let template = PathTemplate::new("output/{region}/{date}.parquet".to_string());
-    ///
-    /// let mut values = HashMap::new();
-    /// values.insert("region".to_string(), Arc::new(StringArray::from(vec!["US/West"])) as _);
-    /// values.insert("date".to_string(), Arc::new(StringArray::from(vec!["2024:01:15"])) as _);
-    ///
-    /// let path = template.resolve(&values);
-    /// // Special characters / and : are percent-encoded
-    /// assert_eq!(path, "output/US%2FWest/2024%3A01%3A15.parquet");
-    /// ```
     pub fn resolve(&self, values: &PartitionValues) -> String {
-        let mut result = self.pattern.clone();
+        use std::collections::HashMap;
+
+        let mut context = HashMap::new();
+
         for (column, value) in values {
             let formatter = ArrayFormatter::try_new(
                 value,
@@ -117,10 +89,11 @@ impl PathTemplate {
             )
             .unwrap();
             let value_str = formatter.value(0).to_string();
-            let escaped = Self::escape_path_name(&value_str);
-            result = result.replace(&format!("{{{column}}}"), &escaped);
+            context.insert(column.as_str(), value_str);
         }
-        result
+
+        let tmpl = self.env.template_from_str(&self.template_str).unwrap();
+        tmpl.render(context).unwrap()
     }
 }
 
@@ -142,7 +115,7 @@ mod tests {
 
     #[test]
     fn test_resolve_with_single_column() {
-        let template = PathTemplate::new("output/{year}.parquet".to_string());
+        let template = PathTemplate::new("output/{{year}}.parquet".to_string());
         let mut values = HashMap::new();
         values.insert(
             "year".to_string(),
@@ -155,7 +128,7 @@ mod tests {
 
     #[test]
     fn test_resolve_with_multiple_columns() {
-        let template = PathTemplate::new("output/{year}/{month}/{day}.parquet".to_string());
+        let template = PathTemplate::new("output/{{year}}/{{month}}/{{day}}.parquet".to_string());
         let mut values = HashMap::new();
         values.insert(
             "year".to_string(),
@@ -173,7 +146,7 @@ mod tests {
 
     #[test]
     fn test_resolve_with_string_column() {
-        let template = PathTemplate::new("output/{region}/{city}.parquet".to_string());
+        let template = PathTemplate::new("output/{{region}}/{{city}}.parquet".to_string());
         let mut values = HashMap::new();
         values.insert(
             "region".to_string(),
@@ -190,7 +163,7 @@ mod tests {
 
     #[test]
     fn test_resolve_with_null_value() {
-        let template = PathTemplate::new("output/{category}.parquet".to_string());
+        let template = PathTemplate::new("output/{{category}}.parquet".to_string());
         let mut values = HashMap::new();
         values.insert(
             "category".to_string(),
@@ -212,7 +185,7 @@ mod tests {
 
     #[test]
     fn test_resolve_with_repeated_placeholder() {
-        let template = PathTemplate::new("output/{id}/{id}.parquet".to_string());
+        let template = PathTemplate::new("output/{{id}}/{{id}}.parquet".to_string());
         let mut values = HashMap::new();
         values.insert("id".to_string(), Arc::new(Int32Array::from(vec![42])) as _);
 
@@ -222,7 +195,7 @@ mod tests {
 
     #[test]
     fn test_all_integer_types() {
-        let template = PathTemplate::new("output/{val}.parquet".to_string());
+        let template = PathTemplate::new("output/{{val}}.parquet".to_string());
 
         // Int8
         let mut values = HashMap::new();
@@ -286,7 +259,7 @@ mod tests {
 
     #[test]
     fn test_float_types() {
-        let template = PathTemplate::new("output/{val}.parquet".to_string());
+        let template = PathTemplate::new("output/{{val}}.parquet".to_string());
 
         // Float32
         let mut values = HashMap::new();
@@ -307,7 +280,7 @@ mod tests {
 
     #[test]
     fn test_boolean_type() {
-        let template = PathTemplate::new("output/{flag}.parquet".to_string());
+        let template = PathTemplate::new("output/{{flag}}.parquet".to_string());
 
         // true
         let mut values = HashMap::new();
@@ -328,7 +301,7 @@ mod tests {
 
     #[test]
     fn test_string_types() {
-        let template = PathTemplate::new("output/{val}.parquet".to_string());
+        let template = PathTemplate::new("output/{{val}}.parquet".to_string());
 
         // Utf8 (already tested in test_resolve_with_string_column)
 
@@ -343,7 +316,7 @@ mod tests {
 
     #[test]
     fn test_date_and_time_types() {
-        let template = PathTemplate::new("output/{val}.parquet".to_string());
+        let template = PathTemplate::new("output/{{val}}.parquet".to_string());
 
         // Date32 (days since epoch) - formats as YYYY-MM-DD
         let mut values = HashMap::new();
@@ -389,7 +362,7 @@ mod tests {
 
     #[test]
     fn test_binary_types() {
-        let template = PathTemplate::new("output/{val}.parquet".to_string());
+        let template = PathTemplate::new("output/{{val}}.parquet".to_string());
 
         // Binary
         let mut values = HashMap::new();
@@ -414,7 +387,7 @@ mod tests {
 
     #[test]
     fn test_decimal_type() {
-        let template = PathTemplate::new("output/{val}.parquet".to_string());
+        let template = PathTemplate::new("output/{{val}}.parquet".to_string());
 
         // Decimal128 with precision 10, scale 2 (e.g., for money: 123.45)
         let mut values = HashMap::new();
@@ -426,7 +399,7 @@ mod tests {
 
     #[test]
     fn test_null_values_for_various_types() {
-        let template = PathTemplate::new("output/{val}.parquet".to_string());
+        let template = PathTemplate::new("output/{{val}}.parquet".to_string());
 
         // Null Int32
         let mut values = HashMap::new();
@@ -475,7 +448,7 @@ mod tests {
 
     #[test]
     fn test_empty_string_handling() {
-        let template = PathTemplate::new("output/{val}.parquet".to_string());
+        let template = PathTemplate::new("output/{{val}}.parquet".to_string());
 
         // empty string should also use HIVE_DEFAULT_PARTITION
         let mut values = HashMap::new();
@@ -491,7 +464,7 @@ mod tests {
 
     #[test]
     fn test_list_type() {
-        let template = PathTemplate::new("output/{val}.parquet".to_string());
+        let template = PathTemplate::new("output/{{val}}.parquet".to_string());
 
         // create a list array [1, 2, 3]
         let values_data = Int32Array::from(vec![1, 2, 3]);
@@ -509,7 +482,7 @@ mod tests {
 
     #[test]
     fn test_struct_type() {
-        let template = PathTemplate::new("output/{val}.parquet".to_string());
+        let template = PathTemplate::new("output/{{val}}.parquet".to_string());
 
         // create a struct with fields {name: "Alice", age: 30}
         let name_array = Arc::new(StringArray::from(vec!["Alice"]));
@@ -536,7 +509,7 @@ mod tests {
 
     #[test]
     fn test_map_type() {
-        let template = PathTemplate::new("output/{val}.parquet".to_string());
+        let template = PathTemplate::new("output/{{val}}.parquet".to_string());
 
         // create a map {"key1": 100}
         let keys = Arc::new(StringArray::from(vec!["key1"]));
@@ -579,7 +552,7 @@ mod tests {
 
     #[test]
     fn test_nested_list() {
-        let template = PathTemplate::new("output/{val}.parquet".to_string());
+        let template = PathTemplate::new("output/{{val}}.parquet".to_string());
 
         // create a list of lists [[1, 2], [3]]
         let values_data = Int32Array::from(vec![1, 2, 3]);
@@ -610,7 +583,7 @@ mod tests {
 
     #[test]
     fn test_hive_escaping_special_characters() {
-        let template = PathTemplate::new("output/{val}.parquet".to_string());
+        let template = PathTemplate::new("output/{{val}}.parquet".to_string());
 
         // test forward slash
         let mut values = HashMap::new();
@@ -690,7 +663,7 @@ mod tests {
 
     #[test]
     fn test_hive_escaping_no_escape_needed() {
-        let template = PathTemplate::new("output/{val}.parquet".to_string());
+        let template = PathTemplate::new("output/{{val}}.parquet".to_string());
 
         // simple alphanumeric
         let mut values = HashMap::new();
@@ -711,7 +684,7 @@ mod tests {
 
     #[test]
     fn test_hive_escaping_quotes() {
-        let template = PathTemplate::new("output/{val}.parquet".to_string());
+        let template = PathTemplate::new("output/{{val}}.parquet".to_string());
 
         // double quote
         let mut values = HashMap::new();
@@ -732,7 +705,7 @@ mod tests {
 
     #[test]
     fn test_hive_escaping_struct_formatting() {
-        let template = PathTemplate::new("output/{val}.parquet".to_string());
+        let template = PathTemplate::new("output/{{val}}.parquet".to_string());
 
         // struct formatting includes special characters that need escaping
         let name_array = Arc::new(StringArray::from(vec!["Alice"]));
@@ -760,7 +733,7 @@ mod tests {
 
     #[test]
     fn test_hive_escaping_list_formatting() {
-        let template = PathTemplate::new("output/{val}.parquet".to_string());
+        let template = PathTemplate::new("output/{{val}}.parquet".to_string());
 
         // list formatting includes brackets and commas
         let values_data = Int32Array::from(vec![1, 2, 3]);
@@ -778,7 +751,7 @@ mod tests {
 
     #[test]
     fn test_hive_escaping_timestamp_formatting() {
-        let template = PathTemplate::new("output/{val}.parquet".to_string());
+        let template = PathTemplate::new("output/{{val}}.parquet".to_string());
 
         // timestamp includes colons
         let mut values = HashMap::new();
@@ -790,5 +763,108 @@ mod tests {
         let result = template.resolve(&values);
         // 2022-01-01T15:30:45 -> 2022-01-01T15%3A30%3A45
         assert_eq!(result, "output/2022-01-01T15%3A30%3A45.parquet");
+    }
+
+    #[test]
+    fn test_raw_filter_bypasses_escaping() {
+        let template = PathTemplate::new("output/{{region | raw}}.parquet".to_string());
+
+        // forward slashes should NOT be escaped with raw filter
+        let mut values = HashMap::new();
+        values.insert(
+            "region".to_string(),
+            Arc::new(StringArray::from(vec!["US/West"])) as _,
+        );
+
+        let result = template.resolve(&values);
+        assert_eq!(result, "output/US/West.parquet");
+    }
+
+    #[test]
+    fn test_raw_filter_with_special_characters() {
+        let template = PathTemplate::new("output/{{path | raw}}/data.parquet".to_string());
+
+        // special characters should NOT be escaped with raw filter
+        let mut values = HashMap::new();
+        values.insert(
+            "path".to_string(),
+            Arc::new(StringArray::from(vec!["2024/01/15"])) as _,
+        );
+
+        let result = template.resolve(&values);
+        assert_eq!(result, "output/2024/01/15/data.parquet");
+    }
+
+    #[test]
+    fn test_mixed_escaping_and_raw() {
+        let template = PathTemplate::new("output/{{region}}/{{date | raw}}.parquet".to_string());
+
+        let mut values = HashMap::new();
+        values.insert(
+            "region".to_string(),
+            Arc::new(StringArray::from(vec!["US/West"])) as _,
+        );
+        values.insert(
+            "date".to_string(),
+            Arc::new(StringArray::from(vec!["2024:01:15"])) as _,
+        );
+
+        let result = template.resolve(&values);
+        // region should be escaped, date should not
+        assert_eq!(result, "output/US%2FWest/2024:01:15.parquet");
+    }
+
+    #[test]
+    fn test_raw_filter_with_nulls() {
+        let template = PathTemplate::new("output/{{category | raw}}.parquet".to_string());
+
+        let mut values = HashMap::new();
+        values.insert(
+            "category".to_string(),
+            Arc::new(StringArray::from(vec![None::<&str>])) as _,
+        );
+
+        let result = template.resolve(&values);
+        // null should still become __HIVE_DEFAULT_PARTITION__ even with raw
+        assert_eq!(result, "output/__HIVE_DEFAULT_PARTITION__.parquet");
+    }
+
+    #[test]
+    fn test_raw_filter_with_empty_string() {
+        let template = PathTemplate::new("output/{{val | raw}}.parquet".to_string());
+
+        let mut values = HashMap::new();
+        values.insert(
+            "val".to_string(),
+            Arc::new(StringArray::from(vec![""])) as _,
+        );
+
+        let result = template.resolve(&values);
+        // empty string should become __HIVE_DEFAULT_PARTITION__
+        assert_eq!(result, "output/__HIVE_DEFAULT_PARTITION__.parquet");
+    }
+
+    #[test]
+    fn test_multiple_columns_with_raw() {
+        let template =
+            PathTemplate::new("output/{{year}}/{{month | raw}}/{{day}}.parquet".to_string());
+
+        let mut values = HashMap::new();
+        values.insert(
+            "year".to_string(),
+            Arc::new(StringArray::from(vec!["2024/Q1"])) as _,
+        );
+        values.insert(
+            "month".to_string(),
+            Arc::new(StringArray::from(vec!["01/15"])) as _,
+        );
+        values.insert(
+            "day".to_string(),
+            Arc::new(StringArray::from(vec!["15:30"])) as _,
+        );
+
+        let result = template.resolve(&values);
+        // year and day escaped, month raw
+        assert_eq!(result, "output/2024%2FQ1/01/15/15%3A30.parquet");
     }
 }
