@@ -4,6 +4,9 @@
 //! in path patterns. All partition values are automatically percent-encoded according
 //! to Apache Hive's partitioning conventions before substitution.
 //!
+//! Uses the [`percent-encoding`](https://docs.rs/percent-encoding/) crate with a custom
+//! character set matching Hive's behavior.
+//!
 //! # Encoding Rules
 //!
 //! Matches the behavior of `org.apache.hadoop.hive.common.FileUtils.escapePathName`:
@@ -32,14 +35,30 @@
 //! ```
 
 use arrow::util::display::{ArrayFormatter, FormatOptions};
+use percent_encoding::{AsciiSet, CONTROLS, percent_encode};
 
 use crate::io_strategies::partitioner::PartitionValues;
 
 /// Default value for null or empty partition values, matching Hive's default.
 const HIVE_DEFAULT_PARTITION: &str = "__HIVE_DEFAULT_PARTITION__";
-const HEX_UPPER_CHARS: [char; 16] = [
-    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F',
-];
+
+/// Hive partition encoding set: control characters plus special characters.
+/// Matches org.apache.hadoop.hive.common.FileUtils.escapePathName behavior.
+const HIVE_ENCODE_SET: &AsciiSet = &CONTROLS
+    .add(b'"')
+    .add(b'#')
+    .add(b'%')
+    .add(b'\'')
+    .add(b'*')
+    .add(b'/')
+    .add(b':')
+    .add(b'=')
+    .add(b'?')
+    .add(b'\\')
+    .add(b'{')
+    .add(b'[')
+    .add(b']')
+    .add(b'^');
 
 /// Template for generating partition paths with Hive-style percent encoding.
 ///
@@ -54,78 +73,21 @@ impl PathTemplate {
         Self { pattern }
     }
 
-    /// Check if a character needs escaping according to Hive partitioning rules.
-    /// Escapes:
-    /// - Control characters (0x00-0x1F and 0x7F)
-    /// - Special characters: " # % ' * / : = ? \ { [ ] ^
-    fn needs_escaping(c: char) -> bool {
-        matches!(
-            c,
-            '\x00'
-                ..='\x1F'
-                    | '\x7F'
-                    | '"'
-                    | '#'
-                    | '%'
-                    | '\''
-                    | '*'
-                    | '/'
-                    | ':'
-                    | '='
-                    | '?'
-                    | '\\'
-                    | '{'
-                    | '['
-                    | ']'
-                    | '^'
-        )
-    }
-
     /// Escape a path name according to Hive partitioning conventions.
     /// This matches the behavior of org.apache.hadoop.hive.common.FileUtils.escapePathName
     ///
     /// Null or empty strings return `__HIVE_DEFAULT_PARTITION__`.
     fn escape_path_name(path: &str) -> String {
-        // handle null/empty according to Hive's rules
         if path.is_empty() {
             return HIVE_DEFAULT_PARTITION.to_string();
         }
 
-        // fast-path: check if escaping is needed
-        let first_escape_index = path.chars().position(Self::needs_escaping);
-
-        match first_escape_index {
-            None => path.to_string(),
-            Some(idx) => {
-                // slow path: build escaped string
-                let mut result = String::with_capacity(path.len() * 2);
-
-                // add unescaped prefix
-                if idx > 0 {
-                    result.push_str(&path[..path.char_indices().nth(idx).unwrap().0]);
-                }
-
-                // escape from first required escape onwards
-                for c in path.chars().skip(idx) {
-                    if Self::needs_escaping(c) {
-                        // encode as %XX where XX is uppercase hex
-                        let byte = c as u8;
-                        result.push('%');
-                        result.push(HEX_UPPER_CHARS[(byte >> 4) as usize]);
-                        result.push(HEX_UPPER_CHARS[(byte & 0x0F) as usize]);
-                    } else {
-                        result.push(c);
-                    }
-                }
-
-                result
-            }
-        }
+        percent_encode(path.as_bytes(), HIVE_ENCODE_SET).to_string()
     }
 
     /// Resolve partition value placeholders in the template pattern.
     ///
-    /// Replaces `{column_name}` placeholders with the corresponding partition values.
+    /// Replaces `{{column_name}}` placeholders with the corresponding partition values.
     /// Values are formatted using Arrow's display formatting and then percent-encoded
     /// according to Hive partitioning rules.
     ///
