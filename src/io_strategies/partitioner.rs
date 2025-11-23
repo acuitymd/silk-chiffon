@@ -140,3 +140,221 @@ impl Partitioner {
         PartitionedBatchStream::new(stream, self.columns.clone())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use arrow::{
+        array::{Int32Array, RecordBatch, StringArray},
+        datatypes::{DataType, Field, Schema},
+    };
+    use datafusion::physical_plan::{SendableRecordBatchStream, stream::RecordBatchStreamAdapter};
+    use futures::{StreamExt, stream};
+
+    use super::*;
+
+    fn create_test_stream(batches: Vec<RecordBatch>) -> SendableRecordBatchStream {
+        let schema = batches[0].schema();
+        Box::pin(RecordBatchStreamAdapter::new(
+            schema,
+            stream::iter(batches.into_iter().map(Ok)),
+        ))
+    }
+
+    #[tokio::test]
+    async fn test_single_partition() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("category", DataType::Int32, false),
+            Field::new("value", DataType::Int32, false),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 1, 1])),
+                Arc::new(Int32Array::from(vec![10, 20, 30])),
+            ],
+        )
+        .unwrap();
+
+        let stream = create_test_stream(vec![batch]);
+        let partitioner = Partitioner::new(vec!["category".to_string()]);
+        let mut partitioned_stream = partitioner.partition_stream(stream);
+
+        let mut results = Vec::new();
+        while let Some(Ok((values, batch))) = partitioned_stream.next().await {
+            results.push((values, batch));
+        }
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].1.num_rows(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_multiple_partitions() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("category", DataType::Int32, false),
+            Field::new("value", DataType::Int32, false),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 1, 2, 2, 3, 3])),
+                Arc::new(Int32Array::from(vec![10, 20, 30, 40, 50, 60])),
+            ],
+        )
+        .unwrap();
+
+        let stream = create_test_stream(vec![batch]);
+        let partitioner = Partitioner::new(vec!["category".to_string()]);
+        let mut partitioned_stream = partitioner.partition_stream(stream);
+
+        let mut results = Vec::new();
+        while let Some(Ok((values, batch))) = partitioned_stream.next().await {
+            results.push((values, batch));
+        }
+
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].1.num_rows(), 2); // category 1
+        assert_eq!(results[1].1.num_rows(), 2); // category 2
+        assert_eq!(results[2].1.num_rows(), 2); // category 3
+
+        // verify partition values
+        let val1 = results[0].0.get("category").unwrap();
+        let arr1 = val1.as_any().downcast_ref::<Int32Array>().unwrap();
+        assert_eq!(arr1.value(0), 1);
+    }
+
+    #[tokio::test]
+    async fn test_partition_with_string_column() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("region", DataType::Utf8, false),
+            Field::new("value", DataType::Int32, false),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(StringArray::from(vec!["us-west", "us-west", "us-east"])),
+                Arc::new(Int32Array::from(vec![10, 20, 30])),
+            ],
+        )
+        .unwrap();
+
+        let stream = create_test_stream(vec![batch]);
+        let partitioner = Partitioner::new(vec!["region".to_string()]);
+        let mut partitioned_stream = partitioner.partition_stream(stream);
+
+        let mut results = Vec::new();
+        while let Some(Ok((values, batch))) = partitioned_stream.next().await {
+            results.push((values, batch));
+        }
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].1.num_rows(), 2); // us-west
+        assert_eq!(results[1].1.num_rows(), 1); // us-east
+    }
+
+    #[tokio::test]
+    async fn test_partition_multiple_batches() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("category", DataType::Int32, false),
+            Field::new("value", DataType::Int32, false),
+        ]));
+
+        let batch1 = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 1])),
+                Arc::new(Int32Array::from(vec![10, 20])),
+            ],
+        )
+        .unwrap();
+
+        let batch2 = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 2, 2])),
+                Arc::new(Int32Array::from(vec![30, 40, 50])),
+            ],
+        )
+        .unwrap();
+
+        let stream = create_test_stream(vec![batch1, batch2]);
+        let partitioner = Partitioner::new(vec!["category".to_string()]);
+        let mut partitioned_stream = partitioner.partition_stream(stream);
+
+        let mut results = Vec::new();
+        while let Some(Ok((values, batch))) = partitioned_stream.next().await {
+            results.push((values, batch));
+        }
+
+        // should get 3 slices: first batch (category 1), second batch first part (category 1), second batch second part (category 2)
+        assert_eq!(results.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_partition_multi_column() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("year", DataType::Int32, false),
+            Field::new("month", DataType::Int32, false),
+            Field::new("value", DataType::Int32, false),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int32Array::from(vec![2024, 2024, 2024, 2025, 2025])),
+                Arc::new(Int32Array::from(vec![1, 1, 2, 1, 1])),
+                Arc::new(Int32Array::from(vec![10, 20, 30, 40, 50])),
+            ],
+        )
+        .unwrap();
+
+        let stream = create_test_stream(vec![batch]);
+        let partitioner = Partitioner::new(vec!["year".to_string(), "month".to_string()]);
+        let mut partitioned_stream = partitioner.partition_stream(stream);
+
+        let mut results = Vec::new();
+        while let Some(Ok((values, batch))) = partitioned_stream.next().await {
+            results.push((values, batch));
+        }
+
+        // should have 3 partitions: (2024,1), (2024,2), (2025,1)
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].1.num_rows(), 2); // 2024-01
+        assert_eq!(results[1].1.num_rows(), 1); // 2024-02
+        assert_eq!(results[2].1.num_rows(), 2); // 2025-01
+    }
+
+    #[tokio::test]
+    async fn test_partition_values_are_single_row_arrays() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("category", DataType::Int32, false),
+            Field::new("value", DataType::Int32, false),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 1])),
+                Arc::new(Int32Array::from(vec![10, 20])),
+            ],
+        )
+        .unwrap();
+
+        let stream = create_test_stream(vec![batch]);
+        let partitioner = Partitioner::new(vec!["category".to_string()]);
+        let mut partitioned_stream = partitioner.partition_stream(stream);
+
+        if let Some(Ok((values, _batch))) = partitioned_stream.next().await {
+            let category_array = values.get("category").unwrap();
+            // verify it's a single-row array
+            assert_eq!(category_array.len(), 1);
+        } else {
+            panic!("Expected at least one result");
+        }
+    }
+}
