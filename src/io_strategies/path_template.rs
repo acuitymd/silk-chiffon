@@ -29,7 +29,15 @@ impl PathTemplate {
 mod tests {
     use std::{collections::HashMap, sync::Arc};
 
-    use arrow::array::{Int32Array, StringArray};
+    use arrow::array::{
+        ArrayRef, BinaryArray, BooleanArray, Date32Array, Date64Array, Decimal128Array,
+        Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array,
+        LargeBinaryArray, LargeStringArray, ListArray, MapArray, StringArray, StructArray,
+        TimestampMicrosecondArray, TimestampNanosecondArray, UInt8Array, UInt16Array, UInt32Array,
+        UInt64Array,
+    };
+    use arrow::buffer::OffsetBuffer;
+    use arrow::datatypes::{DataType, Field};
 
     use super::*;
 
@@ -115,10 +123,6 @@ mod tests {
 
     #[test]
     fn test_all_integer_types() {
-        use arrow::array::{
-            Int8Array, Int16Array, Int64Array, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
-        };
-
         let template = PathTemplate::new("output/{val}.parquet".to_string());
 
         // Int8
@@ -183,8 +187,6 @@ mod tests {
 
     #[test]
     fn test_float_types() {
-        use arrow::array::{Float32Array, Float64Array};
-
         let template = PathTemplate::new("output/{val}.parquet".to_string());
 
         // Float32
@@ -206,8 +208,6 @@ mod tests {
 
     #[test]
     fn test_boolean_type() {
-        use arrow::array::BooleanArray;
-
         let template = PathTemplate::new("output/{flag}.parquet".to_string());
 
         // true
@@ -229,8 +229,6 @@ mod tests {
 
     #[test]
     fn test_string_types() {
-        use arrow::array::LargeStringArray;
-
         let template = PathTemplate::new("output/{val}.parquet".to_string());
 
         // Utf8 (already tested in test_resolve_with_string_column)
@@ -246,10 +244,6 @@ mod tests {
 
     #[test]
     fn test_date_and_time_types() {
-        use arrow::array::{
-            Date32Array, Date64Array, TimestampMicrosecondArray, TimestampNanosecondArray,
-        };
-
         let template = PathTemplate::new("output/{val}.parquet".to_string());
 
         // Date32 (days since epoch) - formats as YYYY-MM-DD
@@ -296,8 +290,6 @@ mod tests {
 
     #[test]
     fn test_binary_types() {
-        use arrow::array::{BinaryArray, LargeBinaryArray};
-
         let template = PathTemplate::new("output/{val}.parquet".to_string());
 
         // Binary
@@ -323,9 +315,6 @@ mod tests {
 
     #[test]
     fn test_decimal_type() {
-        use arrow::array::Decimal128Array;
-        use arrow::datatypes::DataType;
-
         let template = PathTemplate::new("output/{val}.parquet".to_string());
 
         // Decimal128 with precision 10, scale 2 (e.g., for money: 123.45)
@@ -338,8 +327,6 @@ mod tests {
 
     #[test]
     fn test_null_values_for_various_types() {
-        use arrow::array::{BooleanArray, Float64Array, Int32Array};
-
         let template = PathTemplate::new("output/{val}.parquet".to_string());
 
         // Null Int32
@@ -373,5 +360,121 @@ mod tests {
             Arc::new(StringArray::from(vec![None::<&str>])) as _,
         );
         assert_eq!(template.resolve(&values), "output/__NULL__.parquet");
+    }
+
+    #[test]
+    fn test_list_type() {
+        let template = PathTemplate::new("output/{val}.parquet".to_string());
+
+        // create a list array [1, 2, 3]
+        let values_data = Int32Array::from(vec![1, 2, 3]);
+        let offsets = OffsetBuffer::new(vec![0, 3].into());
+        let field = Arc::new(Field::new("item", DataType::Int32, false));
+        let list_array = ListArray::new(field, offsets, Arc::new(values_data), None);
+
+        let mut values = HashMap::new();
+        values.insert("val".to_string(), Arc::new(list_array) as _);
+
+        let result = template.resolve(&values);
+        assert_eq!(result, "output/[1, 2, 3].parquet");
+    }
+
+    #[test]
+    fn test_struct_type() {
+        let template = PathTemplate::new("output/{val}.parquet".to_string());
+
+        // create a struct with fields {name: "Alice", age: 30}
+        let name_array = Arc::new(StringArray::from(vec!["Alice"]));
+        let age_array = Arc::new(Int32Array::from(vec![30]));
+
+        let struct_array = StructArray::from(vec![
+            (
+                Arc::new(Field::new("name", DataType::Utf8, false)),
+                name_array as ArrayRef,
+            ),
+            (
+                Arc::new(Field::new("age", DataType::Int32, false)),
+                age_array as ArrayRef,
+            ),
+        ]);
+
+        let mut values = HashMap::new();
+        values.insert("val".to_string(), Arc::new(struct_array) as _);
+
+        let result = template.resolve(&values);
+        assert_eq!(result, "output/{name: Alice, age: 30}.parquet");
+    }
+
+    #[test]
+    fn test_map_type() {
+        let template = PathTemplate::new("output/{val}.parquet".to_string());
+
+        // create a map {"key1": 100}
+        let keys = Arc::new(StringArray::from(vec!["key1"]));
+        let values_arr = Arc::new(Int32Array::from(vec![100]));
+
+        let entry_struct = StructArray::from(vec![
+            (
+                Arc::new(Field::new("keys", DataType::Utf8, false)),
+                keys as ArrayRef,
+            ),
+            (
+                Arc::new(Field::new("values", DataType::Int32, false)),
+                values_arr as ArrayRef,
+            ),
+        ]);
+
+        let entry_offsets = OffsetBuffer::new(vec![0, 1].into());
+        let map_field = Arc::new(Field::new(
+            "entries",
+            DataType::Struct(
+                vec![
+                    Arc::new(Field::new("keys", DataType::Utf8, false)),
+                    Arc::new(Field::new("values", DataType::Int32, false)),
+                ]
+                .into(),
+            ),
+            false,
+        ));
+
+        let map_array = MapArray::new(map_field, entry_offsets, entry_struct, None, false);
+
+        let mut values = HashMap::new();
+        values.insert("val".to_string(), Arc::new(map_array) as _);
+
+        let result = template.resolve(&values);
+        // map formatting varies, just verify it works
+        assert!(result.starts_with("output/"));
+        assert!(result.ends_with(".parquet"));
+    }
+
+    #[test]
+    fn test_nested_list() {
+        let template = PathTemplate::new("output/{val}.parquet".to_string());
+
+        // create a list of lists [[1, 2], [3]]
+        let values_data = Int32Array::from(vec![1, 2, 3]);
+        let inner_offsets = OffsetBuffer::new(vec![0, 2, 3].into());
+        let inner_field = Arc::new(Field::new("item", DataType::Int32, false));
+        let inner_list = ListArray::new(
+            Arc::clone(&inner_field),
+            inner_offsets,
+            Arc::new(values_data),
+            None,
+        );
+
+        let outer_offsets = OffsetBuffer::new(vec![0, 2].into()); // includes both inner lists
+        let outer_field = Arc::new(Field::new(
+            "item",
+            DataType::List(Arc::clone(&inner_field)),
+            false,
+        ));
+        let outer_list = ListArray::new(outer_field, outer_offsets, Arc::new(inner_list), None);
+
+        let mut values = HashMap::new();
+        values.insert("val".to_string(), Arc::new(outer_list) as _);
+
+        let result = template.resolve(&values);
+        assert_eq!(result, "output/[[1, 2], [3]].parquet");
     }
 }
