@@ -67,8 +67,8 @@ impl OutputStrategy {
                 let mut partitioned_stream = partitioner.partition_stream(stream);
                 let mut current_sink: Option<Box<dyn DataSink>> = None;
                 let mut most_recent_partition_values: Option<PartitionValues> = None;
-                while let Some(Ok((partition_values, mut batch))) = partitioned_stream.next().await
-                {
+                while let Some(result) = partitioned_stream.next().await {
+                    let (partition_values, mut batch) = result?;
                     if *exclude_partition_columns {
                         batch = batch.project(&non_partition_columns_indices)?;
                     }
@@ -107,7 +107,10 @@ mod tests {
         array::{Int32Array, RecordBatch, StringArray},
         datatypes::{DataType, Field, Schema},
     };
-    use datafusion::physical_plan::{SendableRecordBatchStream, stream::RecordBatchStreamAdapter};
+    use datafusion::{
+        error::DataFusionError,
+        physical_plan::{SendableRecordBatchStream, stream::RecordBatchStreamAdapter},
+    };
     use futures::stream;
 
     use crate::sinks::data_sink::{DataSink, SinkResult};
@@ -445,5 +448,109 @@ mod tests {
             *sink3_finished.lock().unwrap(),
             "sink 3 should be finished at end of stream"
         );
+    }
+
+    #[tokio::test]
+    async fn test_partitioned_error_propagation() {
+        // test that errors from the stream are properly propagated
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("region", DataType::Utf8, false),
+            Field::new("value", DataType::Int32, false),
+        ]));
+
+        // create stream that returns an error
+        let error_stream = Box::pin(RecordBatchStreamAdapter::new(
+            Arc::clone(&schema),
+            stream::iter(vec![
+                Ok(RecordBatch::try_new(
+                    Arc::clone(&schema),
+                    vec![
+                        Arc::new(StringArray::from(vec!["us-west"])),
+                        Arc::new(Int32Array::from(vec![1])),
+                    ],
+                )
+                .unwrap()),
+                Err(DataFusionError::Execution(
+                    "simulated stream error".to_string(),
+                )),
+            ]),
+        ));
+
+        let batches = Arc::new(Mutex::new(Vec::new()));
+        let finished = Arc::new(Mutex::new(false));
+
+        let batches_clone = Arc::clone(&batches);
+        let finished_clone = Arc::clone(&finished);
+
+        let sink_factory = move |name: String, _schema: Arc<Schema>| {
+            Ok(Box::new(MockSink {
+                name,
+                batches: Arc::clone(&batches_clone),
+                finished: Arc::clone(&finished_clone),
+            }) as Box<dyn DataSink>)
+        };
+
+        let mut strategy = OutputStrategy::Partitioned {
+            sink_factory: Box::new(sink_factory),
+            columns: vec!["region".to_string()],
+            template: PathTemplate::new("output/{region}.parquet".to_string()),
+            exclude_partition_columns: false,
+        };
+
+        // should propagate the error
+        let result = strategy.write_stream(error_stream).await;
+        assert!(result.is_err(), "error should be propagated");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("simulated stream error"),
+            "error message should be preserved"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_partitioned_missing_column_error() {
+        // test that partitioning on a non-existent column produces an error
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("region", DataType::Utf8, false),
+            Field::new("value", DataType::Int32, false),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(StringArray::from(vec!["us-west"])),
+                Arc::new(Int32Array::from(vec![1])),
+            ],
+        )
+        .unwrap();
+
+        let stream = create_test_stream(vec![batch]);
+
+        let batches = Arc::new(Mutex::new(Vec::new()));
+        let finished = Arc::new(Mutex::new(false));
+
+        let batches_clone = Arc::clone(&batches);
+        let finished_clone = Arc::clone(&finished);
+
+        let sink_factory = move |name: String, _schema: Arc<Schema>| {
+            Ok(Box::new(MockSink {
+                name,
+                batches: Arc::clone(&batches_clone),
+                finished: Arc::clone(&finished_clone),
+            }) as Box<dyn DataSink>)
+        };
+
+        let mut strategy = OutputStrategy::Partitioned {
+            sink_factory: Box::new(sink_factory),
+            columns: vec!["nonexistent_column".to_string()],
+            template: PathTemplate::new("output/{nonexistent_column}.parquet".to_string()),
+            exclude_partition_columns: false,
+        };
+
+        // should propagate the error about missing column
+        let result = strategy.write_stream(stream).await;
+        assert!(result.is_err(), "missing column error should be propagated");
     }
 }
