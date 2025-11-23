@@ -160,7 +160,7 @@ mod tests {
     use std::sync::Arc;
 
     use arrow::{
-        array::{Int32Array, RecordBatch, StringArray},
+        array::{Array, Int32Array, RecordBatch, StringArray},
         datatypes::{DataType, Field, Schema},
     };
     use datafusion::physical_plan::{SendableRecordBatchStream, stream::RecordBatchStreamAdapter};
@@ -452,5 +452,226 @@ mod tests {
         );
 
         assert!(!partition_values_equal(&values1, &values2));
+    }
+
+    #[test]
+    fn test_partition_values_equal_with_nulls_same() {
+        let mut values1 = HashMap::new();
+        values1.insert(
+            "category".to_string(),
+            Arc::new(Int32Array::from(vec![None])) as ArrayRef,
+        );
+
+        let mut values2 = HashMap::new();
+        values2.insert(
+            "category".to_string(),
+            Arc::new(Int32Array::from(vec![None])) as ArrayRef,
+        );
+
+        assert!(partition_values_equal(&values1, &values2));
+    }
+
+    #[test]
+    fn test_partition_values_equal_with_nulls_different() {
+        let mut values1 = HashMap::new();
+        values1.insert(
+            "category".to_string(),
+            Arc::new(Int32Array::from(vec![None])) as ArrayRef,
+        );
+
+        let mut values2 = HashMap::new();
+        values2.insert(
+            "category".to_string(),
+            Arc::new(Int32Array::from(vec![Some(42)])) as ArrayRef,
+        );
+
+        assert!(!partition_values_equal(&values1, &values2));
+    }
+
+    #[test]
+    fn test_partition_values_equal_with_nulls_multi_column() {
+        let mut values1 = HashMap::new();
+        values1.insert(
+            "region".to_string(),
+            Arc::new(StringArray::from(vec![Some("us-west")])) as ArrayRef,
+        );
+        values1.insert(
+            "category".to_string(),
+            Arc::new(Int32Array::from(vec![None])) as ArrayRef,
+        );
+
+        let mut values2 = HashMap::new();
+        values2.insert(
+            "region".to_string(),
+            Arc::new(StringArray::from(vec![Some("us-west")])) as ArrayRef,
+        );
+        values2.insert(
+            "category".to_string(),
+            Arc::new(Int32Array::from(vec![None])) as ArrayRef,
+        );
+
+        assert!(partition_values_equal(&values1, &values2));
+    }
+
+    #[tokio::test]
+    async fn test_partition_stream_with_nulls() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("category", DataType::Int32, true), // nullable
+            Field::new("value", DataType::Int32, false),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int32Array::from(vec![Some(1), None, None, Some(2)])),
+                Arc::new(Int32Array::from(vec![10, 20, 30, 40])),
+            ],
+        )
+        .unwrap();
+
+        let stream = create_test_stream(vec![batch]);
+        let partitioner = Partitioner::new(vec!["category".to_string()]);
+        let mut partitioned_stream = partitioner.partition_stream(stream);
+
+        let mut results = Vec::new();
+        while let Some(Ok((values, batch))) = partitioned_stream.next().await {
+            results.push((values, batch));
+        }
+
+        // should have 3 partitions: category=1, category=null, category=2
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].1.num_rows(), 1); // category 1
+        assert_eq!(results[1].1.num_rows(), 2); // category null
+        assert_eq!(results[2].1.num_rows(), 1); // category 2
+
+        // verify first partition has value 1
+        let cat1 = results[0].0.get("category").unwrap();
+        let arr1 = cat1.as_any().downcast_ref::<Int32Array>().unwrap();
+        assert!(!arr1.is_null(0));
+        assert_eq!(arr1.value(0), 1);
+
+        // verify second partition has null
+        let cat_null = results[1].0.get("category").unwrap();
+        let arr_null = cat_null.as_any().downcast_ref::<Int32Array>().unwrap();
+        assert!(arr_null.is_null(0));
+
+        // verify third partition has value 2
+        let cat2 = results[2].0.get("category").unwrap();
+        let arr2 = cat2.as_any().downcast_ref::<Int32Array>().unwrap();
+        assert!(!arr2.is_null(0));
+        assert_eq!(arr2.value(0), 2);
+    }
+
+    #[tokio::test]
+    async fn test_partition_stream_multi_column_with_nulls() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("year", DataType::Int32, true),
+            Field::new("month", DataType::Int32, true),
+            Field::new("value", DataType::Int32, false),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int32Array::from(vec![
+                    Some(2024),
+                    Some(2024),
+                    None,
+                    None,
+                    Some(2024),
+                ])),
+                Arc::new(Int32Array::from(vec![
+                    Some(1),
+                    Some(1),
+                    Some(2),
+                    None,
+                    None,
+                ])),
+                Arc::new(Int32Array::from(vec![10, 20, 30, 40, 50])),
+            ],
+        )
+        .unwrap();
+
+        let stream = create_test_stream(vec![batch]);
+        let partitioner = Partitioner::new(vec!["year".to_string(), "month".to_string()]);
+        let mut partitioned_stream = partitioner.partition_stream(stream);
+
+        let mut results = Vec::new();
+        while let Some(Ok((values, batch))) = partitioned_stream.next().await {
+            results.push((values, batch));
+        }
+
+        // should have 4 partitions: (2024,1), (null,2), (null,null), (2024,null)
+        assert_eq!(results.len(), 4);
+        assert_eq!(results[0].1.num_rows(), 2); // 2024-01
+        assert_eq!(results[1].1.num_rows(), 1); // null-02
+        assert_eq!(results[2].1.num_rows(), 1); // null-null
+        assert_eq!(results[3].1.num_rows(), 1); // 2024-null
+
+        // verify first partition: (2024, 1)
+        let year0 = results[0].0.get("year").unwrap();
+        let year_arr0 = year0.as_any().downcast_ref::<Int32Array>().unwrap();
+        assert_eq!(year_arr0.value(0), 2024);
+        let month0 = results[0].0.get("month").unwrap();
+        let month_arr0 = month0.as_any().downcast_ref::<Int32Array>().unwrap();
+        assert_eq!(month_arr0.value(0), 1);
+
+        // verify second partition: (null, 2)
+        let year1 = results[1].0.get("year").unwrap();
+        let year_arr1 = year1.as_any().downcast_ref::<Int32Array>().unwrap();
+        assert!(year_arr1.is_null(0));
+        let month1 = results[1].0.get("month").unwrap();
+        let month_arr1 = month1.as_any().downcast_ref::<Int32Array>().unwrap();
+        assert_eq!(month_arr1.value(0), 2);
+
+        // verify third partition: (null, null)
+        let year2 = results[2].0.get("year").unwrap();
+        let year_arr2 = year2.as_any().downcast_ref::<Int32Array>().unwrap();
+        assert!(year_arr2.is_null(0));
+        let month2 = results[2].0.get("month").unwrap();
+        let month_arr2 = month2.as_any().downcast_ref::<Int32Array>().unwrap();
+        assert!(month_arr2.is_null(0));
+    }
+
+    #[tokio::test]
+    async fn test_partition_stream_string_with_nulls() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("region", DataType::Utf8, true),
+            Field::new("value", DataType::Int32, false),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(StringArray::from(vec![
+                    Some("us-west"),
+                    Some("us-west"),
+                    None,
+                    Some("us-east"),
+                ])),
+                Arc::new(Int32Array::from(vec![10, 20, 30, 40])),
+            ],
+        )
+        .unwrap();
+
+        let stream = create_test_stream(vec![batch]);
+        let partitioner = Partitioner::new(vec!["region".to_string()]);
+        let mut partitioned_stream = partitioner.partition_stream(stream);
+
+        let mut results = Vec::new();
+        while let Some(Ok((values, batch))) = partitioned_stream.next().await {
+            results.push((values, batch));
+        }
+
+        // should have 3 partitions: us-west, null, us-east
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].1.num_rows(), 2); // us-west
+        assert_eq!(results[1].1.num_rows(), 1); // null
+        assert_eq!(results[2].1.num_rows(), 1); // us-east
+
+        // verify null partition
+        let region_null = results[1].0.get("region").unwrap();
+        let arr_null = region_null.as_any().downcast_ref::<StringArray>().unwrap();
+        assert!(arr_null.is_null(0));
     }
 }
