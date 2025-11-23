@@ -8,6 +8,7 @@
 //!
 //! Matches the behavior of `org.apache.hadoop.hive.common.FileUtils.escapePathName`:
 //!
+//! - **Null or empty values**: Replaced with `__HIVE_DEFAULT_PARTITION__`
 //! - **Control characters** (ASCII 0x00-0x1F and 0x7F) are encoded as `%XX`
 //! - **Special characters** are encoded: `"` `#` `%` `'` `*` `/` `:` `=` `?` `\` `{` `[` `]` `^`
 //! - **Not encoded**: alphanumerics, spaces, commas, closing braces `}`, hyphens, underscores, dots
@@ -34,7 +35,8 @@ use arrow::util::display::{ArrayFormatter, FormatOptions};
 
 use crate::io_strategies::partitioner::PartitionValues;
 
-const NULL_VALUE: &str = "__NULL__";
+/// Default value for null or empty partition values, matching Hive's default.
+const HIVE_DEFAULT_PARTITION: &str = "__HIVE_DEFAULT_PARTITION__";
 const HEX_UPPER_CHARS: [char; 16] = [
     '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F',
 ];
@@ -81,7 +83,14 @@ impl PathTemplate {
 
     /// Escape a path name according to Hive partitioning conventions.
     /// This matches the behavior of org.apache.hadoop.hive.common.FileUtils.escapePathName
+    ///
+    /// Null or empty strings return `__HIVE_DEFAULT_PARTITION__`.
     fn escape_path_name(path: &str) -> String {
+        // handle null/empty according to Hive's rules
+        if path.is_empty() {
+            return HIVE_DEFAULT_PARTITION.to_string();
+        }
+
         // fast-path: check if escaping is needed
         let first_escape_index = path.chars().position(Self::needs_escaping);
 
@@ -140,9 +149,11 @@ impl PathTemplate {
     pub fn resolve(&self, values: &PartitionValues) -> String {
         let mut result = self.pattern.clone();
         for (column, value) in values {
-            let formatter =
-                ArrayFormatter::try_new(value, &FormatOptions::default().with_null(NULL_VALUE))
-                    .unwrap();
+            let formatter = ArrayFormatter::try_new(
+                value,
+                &FormatOptions::default().with_null(HIVE_DEFAULT_PARTITION),
+            )
+            .unwrap();
             let value_str = formatter.value(0).to_string();
             let escaped = Self::escape_path_name(&value_str);
             result = result.replace(&format!("{{{column}}}"), &escaped);
@@ -225,7 +236,7 @@ mod tests {
         );
 
         let result = template.resolve(&values);
-        assert_eq!(result, "output/__NULL__.parquet");
+        assert_eq!(result, "output/__HIVE_DEFAULT_PARTITION__.parquet");
     }
 
     #[test]
@@ -461,7 +472,10 @@ mod tests {
             "val".to_string(),
             Arc::new(Int32Array::from(vec![None])) as _,
         );
-        assert_eq!(template.resolve(&values), "output/__NULL__.parquet");
+        assert_eq!(
+            template.resolve(&values),
+            "output/__HIVE_DEFAULT_PARTITION__.parquet"
+        );
 
         // Null Float64
         let mut values = HashMap::new();
@@ -469,7 +483,10 @@ mod tests {
             "val".to_string(),
             Arc::new(Float64Array::from(vec![None])) as _,
         );
-        assert_eq!(template.resolve(&values), "output/__NULL__.parquet");
+        assert_eq!(
+            template.resolve(&values),
+            "output/__HIVE_DEFAULT_PARTITION__.parquet"
+        );
 
         // Null Boolean
         let mut values = HashMap::new();
@@ -477,7 +494,10 @@ mod tests {
             "val".to_string(),
             Arc::new(BooleanArray::from(vec![None])) as _,
         );
-        assert_eq!(template.resolve(&values), "output/__NULL__.parquet");
+        assert_eq!(
+            template.resolve(&values),
+            "output/__HIVE_DEFAULT_PARTITION__.parquet"
+        );
 
         // Null String (already tested but included for completeness)
         let mut values = HashMap::new();
@@ -485,7 +505,26 @@ mod tests {
             "val".to_string(),
             Arc::new(StringArray::from(vec![None::<&str>])) as _,
         );
-        assert_eq!(template.resolve(&values), "output/__NULL__.parquet");
+        assert_eq!(
+            template.resolve(&values),
+            "output/__HIVE_DEFAULT_PARTITION__.parquet"
+        );
+    }
+
+    #[test]
+    fn test_empty_string_handling() {
+        let template = PathTemplate::new("output/{val}.parquet".to_string());
+
+        // empty string should also use HIVE_DEFAULT_PARTITION
+        let mut values = HashMap::new();
+        values.insert(
+            "val".to_string(),
+            Arc::new(StringArray::from(vec![""])) as _,
+        );
+        assert_eq!(
+            template.resolve(&values),
+            "output/__HIVE_DEFAULT_PARTITION__.parquet"
+        );
     }
 
     #[test]
