@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use arrow::util::display::{ArrayFormatter, FormatOptions};
 use minijinja::{AutoEscape, Environment, Value};
 use percent_encoding::{AsciiSet, CONTROLS, percent_encode};
@@ -78,8 +80,6 @@ impl PathTemplate {
     }
 
     pub fn resolve(&self, values: &PartitionValues) -> String {
-        use std::collections::HashMap;
-
         let mut context = HashMap::new();
 
         for (column, value) in values {
