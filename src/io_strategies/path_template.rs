@@ -1,9 +1,48 @@
+//! Path template resolution with Hive-style percent encoding.
+//!
+//! This module provides [`PathTemplate`] for resolving partition value placeholders
+//! in path patterns. All partition values are automatically percent-encoded according
+//! to Apache Hive's partitioning conventions before substitution.
+//!
+//! # Encoding Rules
+//!
+//! Matches the behavior of `org.apache.hadoop.hive.common.FileUtils.escapePathName`:
+//!
+//! - **Control characters** (ASCII 0x00-0x1F and 0x7F) are encoded as `%XX`
+//! - **Special characters** are encoded: `"` `#` `%` `'` `*` `/` `:` `=` `?` `\` `{` `[` `]` `^`
+//! - **Not encoded**: alphanumerics, spaces, commas, closing braces `}`, hyphens, underscores, dots
+//!
+//! # Examples
+//!
+//! ```
+//! # use std::collections::HashMap;
+//! # use std::sync::Arc;
+//! # use arrow::array::{Int32Array, StringArray};
+//! # use silk_chiffon::io_strategies::path_template::PathTemplate;
+//! let template = PathTemplate::new("data/{region}/{date}.parquet".to_string());
+//!
+//! let mut values = HashMap::new();
+//! values.insert("region".to_string(), Arc::new(StringArray::from(vec!["us-west"])) as _);
+//! values.insert("date".to_string(), Arc::new(StringArray::from(vec!["2024/01/15"])) as _);
+//!
+//! // Forward slashes in partition values are escaped
+//! let result = template.resolve(&values);
+//! assert_eq!(result, "data/us-west/2024%2F01%2F15.parquet");
+//! ```
+
 use arrow::util::display::{ArrayFormatter, FormatOptions};
 
 use crate::io_strategies::partitioner::PartitionValues;
 
 const NULL_VALUE: &str = "__NULL__";
+const HEX_UPPER_CHARS: [char; 16] = [
+    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F',
+];
 
+/// Template for generating partition paths with Hive-style percent encoding.
+///
+/// Resolves placeholders in path patterns by substituting partition values.
+/// All values are automatically percent-encoded according to Hive partitioning rules.
 pub struct PathTemplate {
     pattern: String,
 }
@@ -13,13 +52,100 @@ impl PathTemplate {
         Self { pattern }
     }
 
+    /// Check if a character needs escaping according to Hive partitioning rules.
+    /// Escapes:
+    /// - Control characters (0x00-0x1F and 0x7F)
+    /// - Special characters: " # % ' * / : = ? \ { [ ] ^
+    fn needs_escaping(c: char) -> bool {
+        matches!(
+            c,
+            '\x00'
+                ..='\x1F'
+                    | '\x7F'
+                    | '"'
+                    | '#'
+                    | '%'
+                    | '\''
+                    | '*'
+                    | '/'
+                    | ':'
+                    | '='
+                    | '?'
+                    | '\\'
+                    | '{'
+                    | '['
+                    | ']'
+                    | '^'
+        )
+    }
+
+    /// Escape a path name according to Hive partitioning conventions.
+    /// This matches the behavior of org.apache.hadoop.hive.common.FileUtils.escapePathName
+    fn escape_path_name(path: &str) -> String {
+        // fast-path: check if escaping is needed
+        let first_escape_index = path.chars().position(Self::needs_escaping);
+
+        match first_escape_index {
+            None => path.to_string(),
+            Some(idx) => {
+                // slow path: build escaped string
+                let mut result = String::with_capacity(path.len() * 2);
+
+                // add unescaped prefix
+                if idx > 0 {
+                    result.push_str(&path[..path.char_indices().nth(idx).unwrap().0]);
+                }
+
+                // escape from first required escape onwards
+                for c in path.chars().skip(idx) {
+                    if Self::needs_escaping(c) {
+                        // encode as %XX where XX is uppercase hex
+                        let byte = c as u8;
+                        result.push('%');
+                        result.push(HEX_UPPER_CHARS[(byte >> 4) as usize]);
+                        result.push(HEX_UPPER_CHARS[(byte & 0x0F) as usize]);
+                    } else {
+                        result.push(c);
+                    }
+                }
+
+                result
+            }
+        }
+    }
+
+    /// Resolve partition value placeholders in the template pattern.
+    ///
+    /// Replaces `{column_name}` placeholders with the corresponding partition values.
+    /// Values are formatted using Arrow's display formatting and then percent-encoded
+    /// according to Hive partitioning rules.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use arrow::array::StringArray;
+    /// # use silk_chiffon::io_strategies::path_template::PathTemplate;
+    /// let template = PathTemplate::new("output/{region}/{date}.parquet".to_string());
+    ///
+    /// let mut values = HashMap::new();
+    /// values.insert("region".to_string(), Arc::new(StringArray::from(vec!["US/West"])) as _);
+    /// values.insert("date".to_string(), Arc::new(StringArray::from(vec!["2024:01:15"])) as _);
+    ///
+    /// let path = template.resolve(&values);
+    /// // Special characters / and : are percent-encoded
+    /// assert_eq!(path, "output/US%2FWest/2024%3A01%3A15.parquet");
+    /// ```
     pub fn resolve(&self, values: &PartitionValues) -> String {
         let mut result = self.pattern.clone();
         for (column, value) in values {
             let formatter =
                 ArrayFormatter::try_new(value, &FormatOptions::default().with_null(NULL_VALUE))
                     .unwrap();
-            result = result.replace(&format!("{{{column}}}"), &formatter.value(0).to_string());
+            let value_str = formatter.value(0).to_string();
+            let escaped = Self::escape_path_name(&value_str);
+            result = result.replace(&format!("{{{column}}}"), &escaped);
         }
         result
     }
@@ -254,7 +380,7 @@ mod tests {
         );
         assert_eq!(template.resolve(&values), "output/2022-01-08.parquet");
 
-        // Date64 (milliseconds since epoch) - formats as ISO8601 with time
+        // Date64 (milliseconds since epoch) - formats as ISO8601 with time (colons escaped)
         let mut values = HashMap::new();
         values.insert(
             "val".to_string(),
@@ -262,10 +388,10 @@ mod tests {
         );
         assert_eq!(
             template.resolve(&values),
-            "output/2022-01-01T00:00:00.parquet"
+            "output/2022-01-01T00%3A00%3A00.parquet"
         );
 
-        // TimestampNanosecond - formats as ISO8601 (2022-01-01 15:30:45)
+        // TimestampNanosecond - formats as ISO8601 with colons escaped
         let mut values = HashMap::new();
         values.insert(
             "val".to_string(),
@@ -273,10 +399,10 @@ mod tests {
         );
         assert_eq!(
             template.resolve(&values),
-            "output/2022-01-01T15:30:45.parquet"
+            "output/2022-01-01T15%3A30%3A45.parquet"
         );
 
-        // TimestampMicrosecond - formats as ISO8601 (2022-01-01 15:30:45)
+        // TimestampMicrosecond - formats as ISO8601 with colons escaped
         let mut values = HashMap::new();
         values.insert(
             "val".to_string(),
@@ -284,7 +410,7 @@ mod tests {
         );
         assert_eq!(
             template.resolve(&values),
-            "output/2022-01-01T15:30:45.parquet"
+            "output/2022-01-01T15%3A30%3A45.parquet"
         );
     }
 
@@ -376,7 +502,8 @@ mod tests {
         values.insert("val".to_string(), Arc::new(list_array) as _);
 
         let result = template.resolve(&values);
-        assert_eq!(result, "output/[1, 2, 3].parquet");
+        // [1, 2, 3] -> %5B1, 2, 3%5D (brackets escaped, commas not)
+        assert_eq!(result, "output/%5B1, 2, 3%5D.parquet");
     }
 
     #[test]
@@ -402,7 +529,8 @@ mod tests {
         values.insert("val".to_string(), Arc::new(struct_array) as _);
 
         let result = template.resolve(&values);
-        assert_eq!(result, "output/{name: Alice, age: 30}.parquet");
+        // {name: Alice, age: 30} -> %7Bname%3A Alice, age%3A 30}
+        assert_eq!(result, "output/%7Bname%3A Alice, age%3A 30}.parquet");
     }
 
     #[test]
@@ -475,6 +603,191 @@ mod tests {
         values.insert("val".to_string(), Arc::new(outer_list) as _);
 
         let result = template.resolve(&values);
-        assert_eq!(result, "output/[[1, 2], [3]].parquet");
+        // [[1, 2], [3]] -> %5B%5B1, 2%5D, %5B3%5D%5D (commas not escaped)
+        assert_eq!(result, "output/%5B%5B1, 2%5D, %5B3%5D%5D.parquet");
+    }
+
+    #[test]
+    fn test_hive_escaping_special_characters() {
+        let template = PathTemplate::new("output/{val}.parquet".to_string());
+
+        // test forward slash
+        let mut values = HashMap::new();
+        values.insert(
+            "val".to_string(),
+            Arc::new(StringArray::from(vec!["a/b"])) as _,
+        );
+        assert_eq!(template.resolve(&values), "output/a%2Fb.parquet");
+
+        // test colon
+        let mut values = HashMap::new();
+        values.insert(
+            "val".to_string(),
+            Arc::new(StringArray::from(vec!["10:30"])) as _,
+        );
+        assert_eq!(template.resolve(&values), "output/10%3A30.parquet");
+
+        // test equals
+        let mut values = HashMap::new();
+        values.insert(
+            "val".to_string(),
+            Arc::new(StringArray::from(vec!["key=value"])) as _,
+        );
+        assert_eq!(template.resolve(&values), "output/key%3Dvalue.parquet");
+
+        // test hash
+        let mut values = HashMap::new();
+        values.insert(
+            "val".to_string(),
+            Arc::new(StringArray::from(vec!["tag#1"])) as _,
+        );
+        assert_eq!(template.resolve(&values), "output/tag%231.parquet");
+
+        // test percent
+        let mut values = HashMap::new();
+        values.insert(
+            "val".to_string(),
+            Arc::new(StringArray::from(vec!["50%"])) as _,
+        );
+        assert_eq!(template.resolve(&values), "output/50%25.parquet");
+
+        // test question mark
+        let mut values = HashMap::new();
+        values.insert(
+            "val".to_string(),
+            Arc::new(StringArray::from(vec!["what?"])) as _,
+        );
+        assert_eq!(template.resolve(&values), "output/what%3F.parquet");
+
+        // test backslash
+        let mut values = HashMap::new();
+        values.insert(
+            "val".to_string(),
+            Arc::new(StringArray::from(vec!["a\\b"])) as _,
+        );
+        assert_eq!(template.resolve(&values), "output/a%5Cb.parquet");
+
+        // test asterisk
+        let mut values = HashMap::new();
+        values.insert(
+            "val".to_string(),
+            Arc::new(StringArray::from(vec!["*.txt"])) as _,
+        );
+        assert_eq!(template.resolve(&values), "output/%2A.txt.parquet");
+
+        // test brackets and caret (note: } is not escaped, only { [ ] ^)
+        let mut values = HashMap::new();
+        values.insert(
+            "val".to_string(),
+            Arc::new(StringArray::from(vec!["a[0]{x}^2"])) as _,
+        );
+        assert_eq!(
+            template.resolve(&values),
+            "output/a%5B0%5D%7Bx}%5E2.parquet"
+        );
+    }
+
+    #[test]
+    fn test_hive_escaping_no_escape_needed() {
+        let template = PathTemplate::new("output/{val}.parquet".to_string());
+
+        // simple alphanumeric
+        let mut values = HashMap::new();
+        values.insert(
+            "val".to_string(),
+            Arc::new(StringArray::from(vec!["simple123"])) as _,
+        );
+        assert_eq!(template.resolve(&values), "output/simple123.parquet");
+
+        // with hyphens, underscores, dots
+        let mut values = HashMap::new();
+        values.insert(
+            "val".to_string(),
+            Arc::new(StringArray::from(vec!["test-value_2.0"])) as _,
+        );
+        assert_eq!(template.resolve(&values), "output/test-value_2.0.parquet");
+    }
+
+    #[test]
+    fn test_hive_escaping_quotes() {
+        let template = PathTemplate::new("output/{val}.parquet".to_string());
+
+        // double quote
+        let mut values = HashMap::new();
+        values.insert(
+            "val".to_string(),
+            Arc::new(StringArray::from(vec!["say \"hello\""])) as _,
+        );
+        assert_eq!(template.resolve(&values), "output/say %22hello%22.parquet");
+
+        // single quote
+        let mut values = HashMap::new();
+        values.insert(
+            "val".to_string(),
+            Arc::new(StringArray::from(vec!["it's"])) as _,
+        );
+        assert_eq!(template.resolve(&values), "output/it%27s.parquet");
+    }
+
+    #[test]
+    fn test_hive_escaping_struct_formatting() {
+        let template = PathTemplate::new("output/{val}.parquet".to_string());
+
+        // struct formatting includes special characters that need escaping
+        let name_array = Arc::new(StringArray::from(vec!["Alice"]));
+        let age_array = Arc::new(Int32Array::from(vec![30]));
+
+        let struct_array = StructArray::from(vec![
+            (
+                Arc::new(Field::new("name", DataType::Utf8, false)),
+                name_array as ArrayRef,
+            ),
+            (
+                Arc::new(Field::new("age", DataType::Int32, false)),
+                age_array as ArrayRef,
+            ),
+        ]);
+
+        let mut values = HashMap::new();
+        values.insert("val".to_string(), Arc::new(struct_array) as _);
+
+        let result = template.resolve(&values);
+        // {name: Alice, age: 30} -> %7Bname%3A Alice, age%3A 30}
+        // note: only { is escaped, not } or ,
+        assert_eq!(result, "output/%7Bname%3A Alice, age%3A 30}.parquet");
+    }
+
+    #[test]
+    fn test_hive_escaping_list_formatting() {
+        let template = PathTemplate::new("output/{val}.parquet".to_string());
+
+        // list formatting includes brackets and commas
+        let values_data = Int32Array::from(vec![1, 2, 3]);
+        let offsets = OffsetBuffer::new(vec![0, 3].into());
+        let field = Arc::new(Field::new("item", DataType::Int32, false));
+        let list_array = ListArray::new(field, offsets, Arc::new(values_data), None);
+
+        let mut values = HashMap::new();
+        values.insert("val".to_string(), Arc::new(list_array) as _);
+
+        let result = template.resolve(&values);
+        // [1, 2, 3] -> %5B1, 2, 3%5D (note: comma is not escaped)
+        assert_eq!(result, "output/%5B1, 2, 3%5D.parquet");
+    }
+
+    #[test]
+    fn test_hive_escaping_timestamp_formatting() {
+        let template = PathTemplate::new("output/{val}.parquet".to_string());
+
+        // timestamp includes colons
+        let mut values = HashMap::new();
+        values.insert(
+            "val".to_string(),
+            Arc::new(TimestampNanosecondArray::from(vec![1641051045000000000i64])) as _,
+        );
+
+        let result = template.resolve(&values);
+        // 2022-01-01T15:30:45 -> 2022-01-01T15%3A30%3A45
+        assert_eq!(result, "output/2022-01-01T15%3A30%3A45.parquet");
     }
 }
