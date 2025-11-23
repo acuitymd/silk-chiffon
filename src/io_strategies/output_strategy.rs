@@ -13,10 +13,10 @@ pub type SinkFactory = Box<dyn Fn(TableName, SchemaRef) -> Result<Box<dyn DataSi
 pub enum OutputStrategy {
     Single(Box<dyn DataSink>),
     Partitioned {
-        column: String,
+        columns: Vec<String>,
         template: OutputTemplate,
         sink_factory: SinkFactory,
-        exclude_partition_column: bool,
+        exclude_partition_columns: bool,
     },
 }
 

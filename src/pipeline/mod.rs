@@ -61,16 +61,16 @@ impl Pipeline {
 
     pub fn with_output_strategy_with_partitioned_sink(
         mut self,
-        column: String,
+        columns: Vec<String>,
         template: OutputTemplate,
         sink_factory: SinkFactory,
-        exclude_partition_column: bool,
+        exclude_partition_columns: bool,
     ) -> Self {
         self.output_strategy = Some(OutputStrategy::Partitioned {
-            column,
+            columns,
             template,
             sink_factory,
-            exclude_partition_column,
+            exclude_partition_columns,
         });
 
         self
