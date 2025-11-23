@@ -3,8 +3,15 @@ use std::sync::Arc;
 use anyhow::Result;
 use arrow::datatypes::SchemaRef;
 use datafusion::{execution::SendableRecordBatchStream, prelude::DataFrame};
+use futures::StreamExt;
 
-use crate::{converters::partition_arrow::OutputTemplate, sinks::data_sink::DataSink};
+use crate::{
+    io_strategies::{
+        partitioner::{PartitionValues, Partitioner},
+        path_template::PathTemplate,
+    },
+    sinks::data_sink::DataSink,
+};
 
 pub type TableName = String;
 
@@ -14,7 +21,7 @@ pub enum OutputStrategy {
     Single(Box<dyn DataSink>),
     Partitioned {
         columns: Vec<String>,
-        template: OutputTemplate,
+        template: PathTemplate,
         sink_factory: SinkFactory,
         exclude_partition_columns: bool,
     },
@@ -27,11 +34,8 @@ impl OutputStrategy {
                 sink.write_stream(df.execute_stream().await?).await?;
                 Ok(())
             }
-            OutputStrategy::Partitioned { sink_factory, .. } => {
-                let mut sink =
-                    sink_factory(TableName::from("output"), Arc::clone(df.schema().inner()))?;
-                sink.write_stream(df.execute_stream().await?).await?;
-                Ok(())
+            OutputStrategy::Partitioned { .. } => {
+                self.write_stream(df.execute_stream().await?).await
             }
         }
     }
@@ -42,12 +46,336 @@ impl OutputStrategy {
                 sink.write_stream(stream).await?;
                 Ok(())
             }
-            OutputStrategy::Partitioned { sink_factory, .. } => {
-                let mut sink =
-                    sink_factory(TableName::from("output"), Arc::clone(&stream.schema()))?;
-                sink.write_stream(stream).await?;
+            OutputStrategy::Partitioned {
+                sink_factory,
+                columns,
+                exclude_partition_columns,
+                template,
+            } => {
+                let partitioner = Partitioner::new(columns.clone());
+                let schema = stream.schema();
+                let non_partition_columns_indices: Vec<usize> = if *exclude_partition_columns {
+                    (0..schema.fields().len())
+                        .filter(|i| {
+                            let field_name = schema.field(*i).name();
+                            !columns.contains(field_name)
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                let mut partitioned_stream = partitioner.partition_stream(stream);
+                let mut current_sink: Option<Box<dyn DataSink>> = None;
+                let mut most_recent_partition_values: Option<PartitionValues> = None;
+                while let Some(Ok((partition_values, mut batch))) = partitioned_stream.next().await
+                {
+                    if *exclude_partition_columns {
+                        batch = batch.project(&non_partition_columns_indices)?;
+                    }
+                    if current_sink.is_some() {
+                        if most_recent_partition_values.as_ref().unwrap() == &partition_values {
+                            current_sink.as_mut().unwrap().write_batch(batch).await?;
+                        } else {
+                            current_sink.as_mut().unwrap().finish().await?;
+                            let mut sink = sink_factory(
+                                template.resolve(&partition_values),
+                                Arc::clone(&batch.schema()),
+                            )?;
+                            sink.write_batch(batch).await?;
+                            current_sink = Some(sink);
+                            most_recent_partition_values = Some(partition_values);
+                        }
+                    } else {
+                        let mut sink = sink_factory(
+                            template.resolve(&partition_values),
+                            Arc::clone(&batch.schema()),
+                        )?;
+                        sink.write_batch(batch).await?;
+                        current_sink = Some(sink);
+                        most_recent_partition_values = Some(partition_values);
+                    }
+                }
+
                 Ok(())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use arrow::{
+        array::{Int32Array, RecordBatch, StringArray},
+        datatypes::{DataType, Field, Schema},
+    };
+    use datafusion::physical_plan::{SendableRecordBatchStream, stream::RecordBatchStreamAdapter};
+    use futures::stream;
+
+    use crate::sinks::data_sink::{DataSink, SinkResult};
+
+    use super::*;
+
+    // mock sink for testing
+    struct MockSink {
+        name: String,
+        batches: Arc<Mutex<Vec<RecordBatch>>>,
+        finished: Arc<Mutex<bool>>,
+    }
+
+    #[async_trait::async_trait]
+    impl DataSink for MockSink {
+        async fn write_batch(&mut self, batch: RecordBatch) -> Result<()> {
+            self.batches.lock().unwrap().push(batch);
+            Ok(())
+        }
+
+        async fn finish(&mut self) -> Result<SinkResult> {
+            *self.finished.lock().unwrap() = true;
+            Ok(SinkResult {
+                files_written: vec![self.name.clone().into()],
+                rows_written: 0,
+            })
+        }
+    }
+
+    fn create_test_stream(batches: Vec<RecordBatch>) -> SendableRecordBatchStream {
+        let schema = batches[0].schema();
+        Box::pin(RecordBatchStreamAdapter::new(
+            schema,
+            stream::iter(batches.into_iter().map(Ok)),
+        ))
+    }
+
+    #[tokio::test]
+    async fn test_partitioned_single_partition() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("category", DataType::Int32, false),
+            Field::new("value", DataType::Int32, false),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 1, 1])),
+                Arc::new(Int32Array::from(vec![10, 20, 30])),
+            ],
+        )
+        .unwrap();
+
+        let stream = create_test_stream(vec![batch]);
+
+        let batches_written = Arc::new(Mutex::new(Vec::new()));
+        let finished = Arc::new(Mutex::new(false));
+        let batches_clone = Arc::clone(&batches_written);
+        let finished_clone = Arc::clone(&finished);
+
+        let sink_factory: SinkFactory = Box::new(move |name, _schema| {
+            Ok(Box::new(MockSink {
+                name,
+                batches: Arc::clone(&batches_clone),
+                finished: Arc::clone(&finished_clone),
+            }))
+        });
+
+        let mut strategy = OutputStrategy::Partitioned {
+            columns: vec!["category".to_string()],
+            template: PathTemplate::new("output/{category}.parquet".to_string()),
+            sink_factory,
+            exclude_partition_columns: false,
+        };
+
+        strategy.write_stream(stream).await.unwrap();
+
+        let batches = batches_written.lock().unwrap();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].num_rows(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_partitioned_multiple_partitions() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("category", DataType::Int32, false),
+            Field::new("value", DataType::Int32, false),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 1, 2, 2, 3, 3])),
+                Arc::new(Int32Array::from(vec![10, 20, 30, 40, 50, 60])),
+            ],
+        )
+        .unwrap();
+
+        let stream = create_test_stream(vec![batch]);
+
+        let batches_written = Arc::new(Mutex::new(Vec::new()));
+        let batches_clone = Arc::clone(&batches_written);
+
+        let sink_factory: SinkFactory = Box::new(move |_name, _schema| {
+            Ok(Box::new(MockSink {
+                name: _name,
+                batches: Arc::clone(&batches_clone),
+                finished: Arc::new(Mutex::new(false)),
+            }))
+        });
+
+        let mut strategy = OutputStrategy::Partitioned {
+            columns: vec!["category".to_string()],
+            template: PathTemplate::new("output/{category}.parquet".to_string()),
+            sink_factory,
+            exclude_partition_columns: false,
+        };
+
+        strategy.write_stream(stream).await.unwrap();
+
+        let batches = batches_written.lock().unwrap();
+        assert_eq!(batches.len(), 3);
+        assert_eq!(batches[0].num_rows(), 2); // category 1
+        assert_eq!(batches[1].num_rows(), 2); // category 2
+        assert_eq!(batches[2].num_rows(), 2); // category 3
+    }
+
+    #[tokio::test]
+    async fn test_partitioned_exclude_partition_columns() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("category", DataType::Int32, false),
+            Field::new("value", DataType::Int32, false),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 1, 2, 2])),
+                Arc::new(Int32Array::from(vec![10, 20, 30, 40])),
+            ],
+        )
+        .unwrap();
+
+        let stream = create_test_stream(vec![batch]);
+
+        let batches_written = Arc::new(Mutex::new(Vec::new()));
+        let batches_clone = Arc::clone(&batches_written);
+
+        let sink_factory: SinkFactory = Box::new(move |_name, _schema| {
+            Ok(Box::new(MockSink {
+                name: _name,
+                batches: Arc::clone(&batches_clone),
+                finished: Arc::new(Mutex::new(false)),
+            }))
+        });
+
+        let mut strategy = OutputStrategy::Partitioned {
+            columns: vec!["category".to_string()],
+            template: PathTemplate::new("output/{category}.parquet".to_string()),
+            sink_factory,
+            exclude_partition_columns: true,
+        };
+
+        strategy.write_stream(stream).await.unwrap();
+
+        let batches = batches_written.lock().unwrap();
+        assert_eq!(batches.len(), 2);
+        // partition column should be excluded
+        assert_eq!(batches[0].num_columns(), 1);
+        assert_eq!(batches[0].schema().field(0).name(), "value");
+    }
+
+    #[tokio::test]
+    async fn test_partitioned_with_string_column() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("region", DataType::Utf8, false),
+            Field::new("value", DataType::Int32, false),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(StringArray::from(vec!["us-west", "us-west", "us-east"])),
+                Arc::new(Int32Array::from(vec![10, 20, 30])),
+            ],
+        )
+        .unwrap();
+
+        let stream = create_test_stream(vec![batch]);
+
+        let batches_written = Arc::new(Mutex::new(Vec::new()));
+        let batches_clone = Arc::clone(&batches_written);
+
+        let sink_factory: SinkFactory = Box::new(move |_name, _schema| {
+            Ok(Box::new(MockSink {
+                name: _name,
+                batches: Arc::clone(&batches_clone),
+                finished: Arc::new(Mutex::new(false)),
+            }))
+        });
+
+        let mut strategy = OutputStrategy::Partitioned {
+            columns: vec!["region".to_string()],
+            template: PathTemplate::new("output/{region}.parquet".to_string()),
+            sink_factory,
+            exclude_partition_columns: false,
+        };
+
+        strategy.write_stream(stream).await.unwrap();
+
+        let batches = batches_written.lock().unwrap();
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].num_rows(), 2); // us-west
+        assert_eq!(batches[1].num_rows(), 1); // us-east
+    }
+
+    #[tokio::test]
+    async fn test_partitioned_multiple_batches() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("category", DataType::Int32, false),
+            Field::new("value", DataType::Int32, false),
+        ]));
+
+        let batch1 = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 1])),
+                Arc::new(Int32Array::from(vec![10, 20])),
+            ],
+        )
+        .unwrap();
+
+        let batch2 = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 2])),
+                Arc::new(Int32Array::from(vec![30, 40])),
+            ],
+        )
+        .unwrap();
+
+        let stream = create_test_stream(vec![batch1, batch2]);
+
+        let batches_written = Arc::new(Mutex::new(Vec::new()));
+        let batches_clone = Arc::clone(&batches_written);
+
+        let sink_factory: SinkFactory = Box::new(move |_name, _schema| {
+            Ok(Box::new(MockSink {
+                name: _name,
+                batches: Arc::clone(&batches_clone),
+                finished: Arc::new(Mutex::new(false)),
+            }))
+        });
+
+        let mut strategy = OutputStrategy::Partitioned {
+            columns: vec!["category".to_string()],
+            template: PathTemplate::new("output/{category}.parquet".to_string()),
+            sink_factory,
+            exclude_partition_columns: false,
+        };
+
+        strategy.write_stream(stream).await.unwrap();
+
+        let batches = batches_written.lock().unwrap();
+        // should have 3 writes: 2 for category 1, 1 for category 2
+        assert_eq!(batches.len(), 3);
     }
 }

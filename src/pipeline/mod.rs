@@ -3,10 +3,10 @@ use datafusion::prelude::{SessionConfig, SessionContext};
 
 use crate::{
     QueryDialect,
-    converters::partition_arrow::OutputTemplate,
     io_strategies::{
         input_strategy::InputStrategy,
         output_strategy::{OutputStrategy, SinkFactory},
+        path_template::PathTemplate,
     },
     operations::data_operation::DataOperation,
     sinks::data_sink::DataSink,
@@ -62,7 +62,7 @@ impl Pipeline {
     pub fn with_output_strategy_with_partitioned_sink(
         mut self,
         columns: Vec<String>,
-        template: OutputTemplate,
+        template: PathTemplate,
         sink_factory: SinkFactory,
         exclude_partition_columns: bool,
     ) -> Self {
