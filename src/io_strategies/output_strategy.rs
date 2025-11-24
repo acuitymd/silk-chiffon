@@ -18,7 +18,10 @@ pub type TableName = String;
 pub type SinkFactory = Box<dyn Fn(TableName, SchemaRef) -> Result<Box<dyn DataSink>>>;
 
 pub enum OutputStrategy {
-    Single(Box<dyn DataSink>),
+    Single {
+        path: TableName,
+        sink_factory: SinkFactory,
+    },
     Partitioned {
         columns: Vec<String>,
         template: Box<PathTemplate>,
@@ -29,20 +32,14 @@ pub enum OutputStrategy {
 
 impl OutputStrategy {
     pub async fn write(&mut self, df: DataFrame) -> Result<()> {
-        match self {
-            OutputStrategy::Single(sink) => {
-                sink.write_stream(df.execute_stream().await?).await?;
-                Ok(())
-            }
-            OutputStrategy::Partitioned { .. } => {
-                self.write_stream(df.execute_stream().await?).await
-            }
-        }
+        self.write_stream(df.execute_stream().await?).await
     }
 
     pub async fn write_stream(&mut self, stream: SendableRecordBatchStream) -> Result<()> {
         match self {
-            OutputStrategy::Single(sink) => {
+            OutputStrategy::Single { path, sink_factory } => {
+                let schema = stream.schema();
+                let mut sink = sink_factory(path.clone(), schema)?;
                 sink.write_stream(stream).await?;
                 Ok(())
             }
