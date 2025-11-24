@@ -97,10 +97,10 @@ impl OutputStrategy {
                         let output_path = template.resolve(&partition_values);
 
                         if !*overwrite && std::path::Path::new(&output_path).exists() {
-                            return Err(anyhow!(
+                            anyhow::bail!(
                                 "Output file '{}' already exists. Use --overwrite to overwrite.",
                                 output_path
-                            ));
+                            );
                         }
 
                         if *create_dirs {

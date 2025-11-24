@@ -78,7 +78,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
             expanded_paths.dedup();
 
             if expanded_paths.is_empty() {
-                return Err(anyhow!("No input files found"));
+                anyhow::bail!("No input files found");
             }
 
             let mut sources: Vec<Box<dyn DataSource>> = Vec::new();
@@ -92,10 +92,10 @@ pub async fn run(args: TransformCommand) -> Result<()> {
                 if let Some(ref schema) = schema {
                     let source_schema = source.schema()?;
                     if *schema != source_schema {
-                        return Err(anyhow!(
+                        anyhow::bail!(
                             "Schema mismatch for input file {} (does not match other file(s))",
                             &input_path
-                        ));
+                        );
                     }
                 } else {
                     schema = Some(source.schema()?);

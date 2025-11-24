@@ -2,7 +2,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use arrow::{array::RecordBatch, datatypes::SchemaRef};
 use datafusion::{
     catalog::TableProvider,
@@ -54,7 +54,7 @@ impl InputStrategy {
             .table_provider()),
             InputStrategy::Multiple(sources) => {
                 if sources.is_empty() {
-                    return Err(anyhow!("No sources provided"));
+                    anyhow::bail!("No sources provided");
                 }
 
                 let mut providers: Vec<Arc<dyn TableProvider>> = Vec::new();
@@ -72,7 +72,7 @@ impl InputStrategy {
                 }
 
                 if providers.is_empty() {
-                    return Err(anyhow!("No providers available after preparation"));
+                    anyhow::bail!("No providers available after preparation");
                 }
 
                 let mut df: DataFrame = ctx.read_table(Arc::clone(&providers[0]))?;
@@ -91,7 +91,7 @@ impl InputStrategy {
             InputStrategy::Single(source) => source.as_stream_with_session_context(ctx).await,
             InputStrategy::Multiple(sources) => {
                 if sources.is_empty() {
-                    return Err(anyhow!("No sources provided"));
+                    anyhow::bail!("No sources provided");
                 }
 
                 let first_stream = sources[0].as_stream_with_session_context(ctx).await?;
@@ -101,7 +101,7 @@ impl InputStrategy {
                 for source in &sources[1..] {
                     let stream = source.as_stream_with_session_context(ctx).await?;
                     if stream.schema() != schema {
-                        return Err(anyhow!("Schemas do not match"));
+                        anyhow::bail!("Schemas do not match");
                     }
                     streams.push(stream);
                 }
