@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use datafusion::{catalog::TableProvider, prelude::SessionContext};
 use tempfile::NamedTempFile;
@@ -75,6 +76,13 @@ impl DataSource for PreparedSource {
         match self {
             PreparedSource::Direct { name, .. } => name.as_str(),
             PreparedSource::Materialized { name, .. } => name.as_str(),
+        }
+    }
+
+    fn schema(&self) -> Result<SchemaRef> {
+        match self {
+            PreparedSource::Direct { table_provider, .. } => Ok(table_provider.schema()),
+            PreparedSource::Materialized { table_provider, .. } => Ok(table_provider.schema()),
         }
     }
 

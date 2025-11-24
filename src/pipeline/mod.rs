@@ -2,14 +2,13 @@ use anyhow::{Result, anyhow};
 use datafusion::prelude::{SessionConfig, SessionContext};
 
 use crate::{
-    QueryDialect,
+    ListOutputsFormat, QueryDialect,
     io_strategies::{
         input_strategy::InputStrategy,
         output_strategy::{OutputStrategy, SinkFactory},
         path_template::PathTemplate,
     },
     operations::data_operation::DataOperation,
-    sinks::data_sink::DataSink,
     sources::data_source::DataSource,
 };
 
@@ -53,24 +52,35 @@ impl Pipeline {
         self
     }
 
-    pub fn with_output_strategy_with_single_sink(mut self, sink: Box<dyn DataSink>) -> Self {
-        self.output_strategy = Some(OutputStrategy::Single(sink));
+    pub fn with_output_strategy_with_single_sink(
+        mut self,
+        path: String,
+        sink_factory: SinkFactory,
+    ) -> Self {
+        self.output_strategy = Some(OutputStrategy::Single { path, sink_factory });
 
         self
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn with_output_strategy_with_partitioned_sink(
         mut self,
         columns: Vec<String>,
         template: PathTemplate,
         sink_factory: SinkFactory,
-        exclude_partition_columns: bool,
+        exclude_columns: Vec<String>,
+        create_dirs: bool,
+        overwrite: bool,
+        list_outputs: ListOutputsFormat,
     ) -> Self {
         self.output_strategy = Some(OutputStrategy::Partitioned {
             columns,
             template: Box::new(template),
             sink_factory,
-            exclude_partition_columns,
+            exclude_columns,
+            create_dirs,
+            overwrite,
+            list_outputs,
         });
 
         self
@@ -86,12 +96,15 @@ impl Pipeline {
         self
     }
 
-    pub async fn execute(&mut self) -> Result<()> {
+    pub async fn execute(&mut self) -> Result<Vec<String>> {
         let mut ctx = self.build_session_context();
         self.execute_with_session_context(&mut ctx).await
     }
 
-    pub async fn execute_with_session_context(&mut self, ctx: &mut SessionContext) -> Result<()> {
+    pub async fn execute_with_session_context(
+        &mut self,
+        ctx: &mut SessionContext,
+    ) -> Result<Vec<String>> {
         let input_strategy = self
             .input_strategy
             .as_ref()
@@ -104,8 +117,8 @@ impl Pipeline {
 
         if self.operations.is_empty() {
             let stream = input_strategy.as_stream(ctx).await?;
-            output_strategy.write_stream(stream).await?;
-            return Ok(());
+            let files = output_strategy.write_stream(stream).await?;
+            return Ok(files);
         }
 
         let table_provider = input_strategy
@@ -115,12 +128,12 @@ impl Pipeline {
         let mut df = ctx.read_table(table_provider)?;
 
         for operation in &self.operations {
-            df = operation.apply(df).await?;
+            df = operation.apply(ctx, df).await?;
         }
 
-        output_strategy.write(df).await?;
+        let files = output_strategy.write(df).await?;
 
-        Ok(())
+        Ok(files)
     }
 
     pub fn build_session_context(&self) -> SessionContext {

@@ -1,6 +1,10 @@
-use std::sync::Arc;
+use std::{
+    fs::File,
+    sync::{Arc, Mutex},
+};
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
+use arrow::{datatypes::SchemaRef, ipc::reader::FileReader};
 use async_trait::async_trait;
 use datafusion::{
     catalog::TableProvider, execution::options::ArrowReadOptions, prelude::SessionContext,
@@ -12,11 +16,15 @@ use crate::sources::data_source::DataSource;
 #[derive(Debug)]
 pub struct ArrowFileDataSource {
     path: String,
+    schema: Mutex<Option<SchemaRef>>,
 }
 
 impl ArrowFileDataSource {
     pub fn new(path: String) -> Self {
-        Self { path }
+        Self {
+            path,
+            schema: Mutex::new(None),
+        }
     }
 }
 
@@ -24,6 +32,20 @@ impl ArrowFileDataSource {
 impl DataSource for ArrowFileDataSource {
     fn name(&self) -> &str {
         "arrow_file"
+    }
+
+    fn schema(&self) -> Result<SchemaRef> {
+        let mut guard = self
+            .schema
+            .lock()
+            .map_err(|e| anyhow!("Failed to lock schema: {}", e))?;
+        if let Some(ref schema) = *guard {
+            return Ok(Arc::clone(schema));
+        }
+        let file = File::open(&self.path)?;
+        let reader = FileReader::try_new(file, None)?;
+        *guard = Some(reader.schema());
+        Ok(reader.schema())
     }
 
     async fn as_table_provider(&self, ctx: &mut SessionContext) -> Result<Arc<dyn TableProvider>> {

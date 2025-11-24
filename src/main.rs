@@ -17,6 +17,7 @@ async fn main() -> Result<()> {
         }
         Commands::MergeArrowToArrow(args) => commands::merge_arrow_to_arrow::run(args).await?,
         Commands::MergeArrowToParquet(args) => commands::merge_arrow_to_parquet::run(args).await?,
+        Commands::Transform(args) => commands::transform::run(args).await?,
     };
     Ok(())
 }

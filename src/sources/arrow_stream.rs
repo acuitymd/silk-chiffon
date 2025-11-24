@@ -1,12 +1,12 @@
 use std::{
     fs::File,
     pin::Pin,
-    sync::Arc,
+    sync::{Arc, Mutex},
     task::{Context, Poll},
     thread,
 };
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use arrow::{array::RecordBatch, datatypes::SchemaRef, ipc::reader::StreamReader};
 use async_trait::async_trait;
 use datafusion::{
@@ -22,18 +22,15 @@ use crate::sources::data_source::DataSource;
 #[derive(Debug)]
 pub struct ArrowStreamDataSource {
     path: String,
+    schema: Mutex<Option<SchemaRef>>,
 }
 
 impl ArrowStreamDataSource {
     pub fn new(path: String) -> Self {
-        Self { path }
-    }
-
-    fn schema(&self) -> Result<SchemaRef> {
-        let file = File::open(&self.path)?;
-        let reader = StreamReader::try_new_buffered(file, None)?;
-        let schema = reader.schema();
-        Ok(schema)
+        Self {
+            path,
+            schema: Mutex::new(None),
+        }
     }
 }
 
@@ -69,6 +66,20 @@ impl RecordBatchStream for ArrowStreamChannelStream {
 impl DataSource for ArrowStreamDataSource {
     fn name(&self) -> &str {
         "arrow_stream"
+    }
+
+    fn schema(&self) -> Result<SchemaRef> {
+        let mut guard = self
+            .schema
+            .lock()
+            .map_err(|e| anyhow!("Failed to lock schema: {}", e))?;
+        if let Some(ref schema) = *guard {
+            return Ok(Arc::clone(schema));
+        }
+        let file = File::open(&self.path)?;
+        let reader = StreamReader::try_new(file, None)?;
+        *guard = Some(reader.schema());
+        Ok(reader.schema())
     }
 
     async fn as_stream(&self) -> Result<SendableRecordBatchStream> {

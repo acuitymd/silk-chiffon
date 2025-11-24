@@ -440,7 +440,10 @@ mod tests {
         let path = temp_dir.path().join("test_bloom.parquet");
         let schema = create_test_schema();
 
-        let bloom_config = BloomFilterConfig::All(crate::AllColumnsBloomFilterConfig { fpp: 0.01 });
+        let bloom_config = BloomFilterConfig::All(crate::AllColumnsBloomFilterConfig {
+            fpp: 0.01,
+            ndv: None,
+        });
 
         let builder = ParquetWriterBuilder::new().with_bloom_filters(bloom_config);
 

@@ -58,7 +58,7 @@ impl ParquetWritePropertiesBuilder {
         let schema = ArrowIPCReader::schema_from_path(input_path)?;
 
         let builder = self.create_base_builder();
-        let builder = self.apply_bloom_filters(builder, ndv_map)?;
+        let builder = self.apply_bloom_filters(builder, &schema, ndv_map)?;
         let builder = self.apply_sort_metadata(builder, &schema)?;
 
         Ok(builder.build())
@@ -76,6 +76,7 @@ impl ParquetWritePropertiesBuilder {
     fn apply_bloom_filters(
         &self,
         mut builder: WriterPropertiesBuilder,
+        schema: &SchemaRef,
         ndv_map: &HashMap<String, u64>,
     ) -> Result<WriterPropertiesBuilder> {
         match &self.bloom_filters {
@@ -86,9 +87,16 @@ impl ParquetWritePropertiesBuilder {
                     .set_bloom_filter_enabled(true)
                     .set_bloom_filter_fpp(fpp);
 
-                for (col_name, &ndv) in ndv_map {
-                    let col_path = ColumnPath::from(col_name.as_str());
-                    builder = builder.set_column_bloom_filter_ndv(col_path, ndv);
+                if let Some(user_ndv) = bloom_all.ndv {
+                    for field in schema.fields() {
+                        let col_path = ColumnPath::from(field.name().as_str());
+                        builder = builder.set_column_bloom_filter_ndv(col_path, user_ndv);
+                    }
+                } else {
+                    for (col_name, &ndv) in ndv_map {
+                        let col_path = ColumnPath::from(col_name.as_str());
+                        builder = builder.set_column_bloom_filter_ndv(col_path, ndv);
+                    }
                 }
                 Ok(builder)
             }
@@ -97,14 +105,17 @@ impl ParquetWritePropertiesBuilder {
                     let col_path = ColumnPath::from(bloom_col.name.as_str());
                     let fpp = bloom_col.config.fpp;
 
-                    let ndv = ndv_map.get(&bloom_col.name).copied().ok_or_else(|| {
-                        anyhow!("NDV not available for column {}", bloom_col.name)
-                    })?;
-
                     builder = builder
                         .set_column_bloom_filter_enabled(col_path.clone(), true)
-                        .set_column_bloom_filter_fpp(col_path.clone(), fpp)
-                        .set_column_bloom_filter_ndv(col_path, ndv);
+                        .set_column_bloom_filter_fpp(col_path.clone(), fpp);
+
+                    let ndv = bloom_col
+                        .config
+                        .ndv
+                        .or_else(|| ndv_map.get(&bloom_col.name).copied());
+                    if let Some(ndv) = ndv {
+                        builder = builder.set_column_bloom_filter_ndv(col_path, ndv);
+                    }
                 }
                 Ok(builder)
             }
@@ -147,6 +158,15 @@ mod tests {
     use crate::{
         AllColumnsBloomFilterConfig, ColumnBloomFilterConfig, ColumnSpecificBloomFilterConfig,
     };
+    use arrow::datatypes::{DataType, Field, Schema};
+    use std::sync::Arc;
+
+    fn create_test_schema() -> SchemaRef {
+        Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("name", DataType::Utf8, false),
+        ]))
+    }
 
     #[test]
     fn test_compression_variants() {
@@ -306,7 +326,10 @@ mod tests {
 
     #[test]
     fn test_apply_bloom_filters_all_columns() {
-        let bloom_config = BloomFilterConfig::All(AllColumnsBloomFilterConfig { fpp: 0.001 });
+        let bloom_config = BloomFilterConfig::All(AllColumnsBloomFilterConfig {
+            fpp: 0.001,
+            ndv: None,
+        });
 
         let builder = ParquetWritePropertiesBuilder::new(
             ParquetCompression::None,
@@ -322,8 +345,9 @@ mod tests {
         ndv_map.insert("id".to_string(), 100);
         ndv_map.insert("name".to_string(), 200);
 
+        let schema = create_test_schema();
         let props_builder = WriterProperties::builder();
-        let result = builder.apply_bloom_filters(props_builder, &ndv_map);
+        let result = builder.apply_bloom_filters(props_builder, &schema, &ndv_map);
 
         assert!(result.is_ok());
     }
@@ -332,7 +356,10 @@ mod tests {
     fn test_apply_bloom_filters_specific_columns_with_ndv() {
         let bloom_config = BloomFilterConfig::Columns(vec![ColumnSpecificBloomFilterConfig {
             name: "id".to_string(),
-            config: ColumnBloomFilterConfig { fpp: 0.005 },
+            config: ColumnBloomFilterConfig {
+                fpp: 0.005,
+                ndv: None,
+            },
         }]);
 
         let builder = ParquetWritePropertiesBuilder::new(
@@ -348,8 +375,9 @@ mod tests {
         let mut ndv_map = HashMap::new();
         ndv_map.insert("id".to_string(), 150);
 
+        let schema = create_test_schema();
         let props_builder = WriterProperties::builder();
-        let result = builder.apply_bloom_filters(props_builder, &ndv_map);
+        let result = builder.apply_bloom_filters(props_builder, &schema, &ndv_map);
 
         assert!(result.is_ok());
     }
@@ -358,7 +386,10 @@ mod tests {
     fn test_apply_bloom_filters_specific_columns_from_map() {
         let bloom_config = BloomFilterConfig::Columns(vec![ColumnSpecificBloomFilterConfig {
             name: "id".to_string(),
-            config: ColumnBloomFilterConfig { fpp: 0.01 },
+            config: ColumnBloomFilterConfig {
+                fpp: 0.01,
+                ndv: None,
+            },
         }]);
 
         let builder = ParquetWritePropertiesBuilder::new(
@@ -374,17 +405,21 @@ mod tests {
         let mut ndv_map = HashMap::new();
         ndv_map.insert("id".to_string(), 300);
 
+        let schema = create_test_schema();
         let props_builder = WriterProperties::builder();
-        let result = builder.apply_bloom_filters(props_builder, &ndv_map);
+        let result = builder.apply_bloom_filters(props_builder, &schema, &ndv_map);
 
         assert!(result.is_ok());
     }
 
     #[test]
-    fn test_apply_bloom_filters_missing_ndv() {
+    fn test_apply_bloom_filters_without_ndv() {
         let bloom_config = BloomFilterConfig::Columns(vec![ColumnSpecificBloomFilterConfig {
-            name: "missing_column".to_string(),
-            config: ColumnBloomFilterConfig { fpp: 0.01 },
+            name: "test_column".to_string(),
+            config: ColumnBloomFilterConfig {
+                fpp: 0.01,
+                ndv: None,
+            },
         }]);
 
         let builder = ParquetWritePropertiesBuilder::new(
@@ -399,22 +434,19 @@ mod tests {
 
         let ndv_map = HashMap::new();
 
+        let schema = create_test_schema();
         let props_builder = WriterProperties::builder();
-        let result = builder.apply_bloom_filters(props_builder, &ndv_map);
+        let result = builder.apply_bloom_filters(props_builder, &schema, &ndv_map);
 
-        assert!(result.is_err());
-        assert!(
-            result
-                .err()
-                .unwrap()
-                .to_string()
-                .contains("NDV not available for column missing_column")
-        );
+        assert!(result.is_ok());
     }
 
     #[test]
     fn test_apply_bloom_filters_default_fpp() {
-        let bloom_config = BloomFilterConfig::All(AllColumnsBloomFilterConfig { fpp: 0.01 });
+        let bloom_config = BloomFilterConfig::All(AllColumnsBloomFilterConfig {
+            fpp: 0.01,
+            ndv: None,
+        });
 
         let builder = ParquetWritePropertiesBuilder::new(
             ParquetCompression::None,
@@ -429,8 +461,9 @@ mod tests {
         let mut ndv_map = HashMap::new();
         ndv_map.insert("id".to_string(), 100);
 
+        let schema = create_test_schema();
         let props_builder = WriterProperties::builder();
-        let result = builder.apply_bloom_filters(props_builder, &ndv_map);
+        let result = builder.apply_bloom_filters(props_builder, &schema, &ndv_map);
 
         assert!(result.is_ok());
     }
@@ -439,7 +472,10 @@ mod tests {
     fn test_apply_bloom_filters_mixed_config() {
         let bloom_config = BloomFilterConfig::Columns(vec![ColumnSpecificBloomFilterConfig {
             name: "id".to_string(),
-            config: ColumnBloomFilterConfig { fpp: 0.001 },
+            config: ColumnBloomFilterConfig {
+                fpp: 0.001,
+                ndv: None,
+            },
         }]);
 
         let builder = ParquetWritePropertiesBuilder::new(
@@ -455,8 +491,65 @@ mod tests {
         let mut ndv_map = HashMap::new();
         ndv_map.insert("id".to_string(), 500);
 
+        let schema = create_test_schema();
         let props_builder = WriterProperties::builder();
-        let result = builder.apply_bloom_filters(props_builder, &ndv_map);
+        let result = builder.apply_bloom_filters(props_builder, &schema, &ndv_map);
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_apply_bloom_filters_all_columns_with_user_ndv() {
+        let bloom_config = BloomFilterConfig::All(AllColumnsBloomFilterConfig {
+            fpp: 0.001,
+            ndv: Some(5000),
+        });
+
+        let builder = ParquetWritePropertiesBuilder::new(
+            ParquetCompression::None,
+            ParquetStatistics::None,
+            ParquetWriterVersion::V1,
+            1000,
+            false,
+            bloom_config,
+            SortSpec::default(),
+        );
+
+        let ndv_map = HashMap::new();
+
+        let schema = create_test_schema();
+        let props_builder = WriterProperties::builder();
+        let result = builder.apply_bloom_filters(props_builder, &schema, &ndv_map);
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_apply_bloom_filters_column_with_user_ndv() {
+        let bloom_config = BloomFilterConfig::Columns(vec![ColumnSpecificBloomFilterConfig {
+            name: "id".to_string(),
+            config: ColumnBloomFilterConfig {
+                fpp: 0.001,
+                ndv: Some(10000),
+            },
+        }]);
+
+        let builder = ParquetWritePropertiesBuilder::new(
+            ParquetCompression::None,
+            ParquetStatistics::None,
+            ParquetWriterVersion::V1,
+            1000,
+            false,
+            bloom_config,
+            SortSpec::default(),
+        );
+
+        let mut ndv_map = HashMap::new();
+        ndv_map.insert("id".to_string(), 500);
+
+        let schema = create_test_schema();
+        let props_builder = WriterProperties::builder();
+        let result = builder.apply_bloom_filters(props_builder, &schema, &ndv_map);
 
         assert!(result.is_ok());
     }

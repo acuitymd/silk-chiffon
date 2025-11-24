@@ -7,7 +7,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use arrow::{
     array::RecordBatch,
     compute::BatchCoalescer,
@@ -137,7 +137,10 @@ impl DataSink for ArrowSink {
     }
 
     async fn write_batch(&mut self, batch: RecordBatch) -> Result<()> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|e| anyhow!("Failed to lock inner: {}", e))?;
         inner.coalescer.push_batch(batch)?;
 
         while let Some(completed_batch) = inner.coalescer.next_completed_batch() {
@@ -149,7 +152,10 @@ impl DataSink for ArrowSink {
     }
 
     async fn finish(&mut self) -> Result<SinkResult> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|e| anyhow!("Failed to lock inner: {}", e))?;
         inner.coalescer.finish_buffered_batch()?;
 
         if let Some(final_batch) = inner.coalescer.next_completed_batch() {
