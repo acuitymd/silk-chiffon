@@ -9,7 +9,6 @@ use crate::{
         path_template::PathTemplate,
     },
     operations::data_operation::DataOperation,
-    sinks::data_sink::DataSink,
     sources::data_source::DataSource,
 };
 
@@ -53,8 +52,12 @@ impl Pipeline {
         self
     }
 
-    pub fn with_output_strategy_with_single_sink(mut self, sink: Box<dyn DataSink>) -> Self {
-        self.output_strategy = Some(OutputStrategy::Single(sink));
+    pub fn with_output_strategy_with_single_sink(
+        mut self,
+        path: String,
+        sink_factory: SinkFactory,
+    ) -> Self {
+        self.output_strategy = Some(OutputStrategy::Single { path, sink_factory });
 
         self
     }

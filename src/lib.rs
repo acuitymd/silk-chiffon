@@ -91,6 +91,22 @@ pub enum Commands {
     ///   - Parquet file format
     #[command(verbatim_doc_comment)]
     MergeArrowToParquet(MergeArrowToParquetArgs),
+    /// Transform data between formats with optional filtering, sorting, merging, and partitioning.
+    ///
+    /// Examples:
+    ///   # Simple conversion
+    ///   silk-chiffon transform from input.arrow to output.parquet
+    ///
+    ///   # Merge multiple files
+    ///   silk-chiffon transform from-many file1.arrow file2.arrow to merged.parquet
+    ///
+    ///   # Partition into multiple files
+    ///   silk-chiffon transform from input.arrow to-many "{{region}}.parquet" --by region
+    ///
+    ///   # Merge and partition
+    ///   silk-chiffon transform from-many *.arrow to-many "{{year}}/{{month}}.parquet" --by year,month
+    #[command(verbatim_doc_comment)]
+    Transform(TransformCommand),
 }
 
 #[derive(Args, Debug)]
@@ -988,6 +1004,190 @@ impl BloomFilterConfig {
     pub fn is_configured(&self) -> bool {
         !matches!(self, BloomFilterConfig::None)
     }
+}
+
+#[derive(Args, Debug)]
+pub struct TransformCommand {
+    #[command(subcommand)]
+    pub input: InputSpec,
+
+    /// SQL query to apply to the data. The input data is available as table 'data'.
+    ///
+    /// Examples:
+    ///   --query "SELECT * FROM data WHERE status = 'active'"
+    ///   --query "SELECT id, name, amount FROM data"
+    ///   --query "SELECT region, SUM(amount) FROM data GROUP BY region"
+    ///   --query "SELECT *, amount * 1.1 as adjusted FROM data"
+    #[arg(short, long, verbatim_doc_comment)]
+    pub query: Option<String>,
+
+    /// The query dialect to use.
+    #[arg(short, long, default_value_t, value_enum)]
+    pub dialect: QueryDialect,
+
+    /// Sort the data by one or more columns before writing.
+    ///
+    /// Format: A comma-separated list like "col_a,col_b:desc,col_c".
+    #[arg(short, long)]
+    pub sort_by: Option<SortSpec>,
+
+    /// Override input format detection.
+    #[arg(long, value_enum)]
+    pub input_format: Option<DataFormat>,
+
+    /// Override output format detection.
+    #[arg(long, value_enum)]
+    pub output_format: Option<DataFormat>,
+
+    /// Arrow IPC compression codec.
+    #[arg(long, value_enum)]
+    pub arrow_compression: Option<ArrowCompression>,
+
+    /// Arrow IPC format (file or stream).
+    #[arg(long, value_enum)]
+    pub arrow_format: Option<ArrowIPCFormat>,
+
+    /// Arrow record batch size.
+    #[arg(long)]
+    pub arrow_record_batch_size: Option<usize>,
+
+    /// Parquet compression codec.
+    #[arg(long, value_enum)]
+    pub parquet_compression: Option<ParquetCompression>,
+
+    /// Enable bloom filters for all columns with optional custom settings.
+    ///
+    /// Formats:
+    ///   --parquet-bloom-all             # Use default FPP (0.01)
+    ///   --parquet-bloom-all "fpp=VALUE" # Custom FPP
+    ///
+    /// Examples:
+    ///   --parquet-bloom-all             # Use default FPP (0.01)
+    ///   --parquet-bloom-all "fpp=0.001" # Custom FPP (0.001)
+    #[arg(
+        long,
+        value_name = "[fpp=VALUE]",
+        conflicts_with = "parquet_bloom_column",
+        num_args = 0..=1,
+        default_missing_value = "",
+        verbatim_doc_comment
+    )]
+    pub parquet_bloom_all: Option<AllColumnsBloomFilterConfig>,
+
+    /// Enable bloom filter for specific columns with optional custom settings.
+    ///
+    /// Formats:
+    ///   COLUMN           # Use default FPP (0.01)
+    ///   COLUMN:fpp=VALUE # Custom FPP
+    ///
+    /// Examples:
+    ///   --parquet-bloom-column "user_id"            # Use default FPP (0.01)
+    ///   --parquet-bloom-column "user_id:fpp=0.001"  # Custom FPP (0.001)
+    #[arg(
+        long,
+        value_name = "COLUMN[:fpp=VALUE]",
+        conflicts_with = "parquet_bloom_all",
+        verbatim_doc_comment
+    )]
+    pub parquet_bloom_column: Vec<ColumnSpecificBloomFilterConfig>,
+
+    /// Maximum number of rows per Parquet row group.
+    #[arg(long)]
+    pub parquet_row_group_size: Option<usize>,
+
+    /// Parquet column statistics level.
+    #[arg(long, value_enum)]
+    pub parquet_statistics: Option<ParquetStatistics>,
+
+    /// Parquet writer version.
+    #[arg(long, value_enum)]
+    pub parquet_writer_version: Option<ParquetWriterVersion>,
+
+    /// Disable dictionary encoding for Parquet columns.
+    #[arg(long)]
+    pub parquet_no_dictionary: bool,
+
+    /// Embed metadata indicating that the file's data is sorted.
+    ///
+    /// Requires --sort-by to be set.
+    #[arg(long, default_value_t = false, requires = "sort_by")]
+    pub parquet_sorted_metadata: bool,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum InputSpec {
+    /// Single input file to single or partitioned output.
+    From {
+        /// Input file path.
+        #[arg(value_parser = clap::value_parser!(clio::Input).exists().is_file())]
+        input: clio::Input,
+
+        #[command(subcommand)]
+        to: OutputSpec,
+    },
+
+    /// Multiple input files (merge) to single or partitioned output.
+    FromMany {
+        /// Input file paths (supports glob patterns).
+        inputs: Vec<String>,
+
+        #[command(subcommand)]
+        to: OutputSpec,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum OutputSpec {
+    /// Single output file.
+    To {
+        /// Output file path.
+        #[arg(value_parser)]
+        output: clio::OutputPath,
+    },
+
+    /// Partitioned output (multiple files based on column values).
+    ToMany {
+        /// Output path template with {{column}} placeholders.
+        ///
+        /// Examples:
+        ///   "{{region}}.parquet"
+        ///   "year={{year}}/month={{month}}/data.parquet"
+        ///   "{{region | raw}}/data.parquet"  # Bypass sanitization
+        #[arg(verbatim_doc_comment)]
+        template: String,
+
+        /// Partition by column(s) (comma-separated for multi-column).
+        ///
+        /// Examples:
+        ///   --by region
+        ///   --by year,month
+        ///   --by country,state,city
+        #[arg(short, long, verbatim_doc_comment)]
+        by: String,
+
+        /// Names of columns to exclude from the output.
+        #[arg(short, long)]
+        exclude_columns: Vec<String>,
+
+        /// List the output files after creation.
+        #[arg(short, long, value_enum, default_value_t)]
+        list_outputs: ListOutputsFormat,
+
+        /// Create directories as needed.
+        #[arg(long, default_value_t = true)]
+        create_dirs: bool,
+
+        /// Overwrite existing files.
+        #[arg(long, default_value_t = false)]
+        overwrite: bool,
+    },
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug)]
+#[value(rename_all = "lowercase")]
+pub enum DataFormat {
+    Arrow,
+    Parquet,
 }
 
 #[cfg(test)]

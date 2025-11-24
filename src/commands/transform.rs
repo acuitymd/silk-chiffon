@@ -1,0 +1,241 @@
+use crate::{
+    ArrowCompression, BloomFilterConfig, DataFormat, InputSpec, OutputSpec, ParquetCompression,
+    ParquetStatistics, ParquetWriterVersion, SortSpec, TransformCommand,
+    io_strategies::{output_strategy::SinkFactory, path_template::PathTemplate},
+    operations::{query::QueryOperation, sort::SortOperation},
+    pipeline::Pipeline,
+    sinks::{
+        arrow::{ArrowSink, ArrowSinkOptions},
+        data_sink::DataSink,
+        parquet::{ParquetSink, ParquetSinkOptions},
+    },
+    sources::{
+        arrow_file::ArrowFileDataSource, data_source::DataSource, parquet::ParquetDataSource,
+    },
+    utils::{arrow_io::ArrowIPCFormat, filesystem::ensure_parent_dir_exists},
+};
+use anyhow::{Result, anyhow};
+use arrow::datatypes::SchemaRef;
+use datafusion::prelude::SessionContext;
+
+pub async fn run(args: TransformCommand) -> Result<()> {
+    let TransformCommand {
+        input,
+        query,
+        dialect,
+        sort_by,
+        input_format,
+        output_format,
+        arrow_compression,
+        arrow_format,
+        arrow_record_batch_size,
+        parquet_compression,
+        parquet_bloom_all,
+        parquet_bloom_column,
+        parquet_row_group_size,
+        parquet_statistics,
+        parquet_writer_version,
+        parquet_no_dictionary,
+        parquet_sorted_metadata,
+    } = args;
+
+    let bloom_filter = if let Some(all_config) = parquet_bloom_all {
+        BloomFilterConfig::All(all_config)
+    } else if !parquet_bloom_column.is_empty() {
+        BloomFilterConfig::Columns(parquet_bloom_column)
+    } else {
+        BloomFilterConfig::None
+    };
+
+    let parquet_sort_spec = if parquet_sorted_metadata {
+        sort_by.clone()
+    } else {
+        None
+    };
+
+    let mut pipeline = Pipeline::new().with_query_dialect(dialect);
+
+    match &input {
+        InputSpec::From { input, .. } => {
+            let input_path = input
+                .path()
+                .to_str()
+                .ok_or_else(|| anyhow!("Invalid input path"))?;
+            let detected_input_format = detect_format(input_path, input_format)?;
+
+            let source: Box<dyn DataSource> = match detected_input_format {
+                DataFormat::Arrow => Box::new(ArrowFileDataSource::new(input_path.to_string())),
+                DataFormat::Parquet => Box::new(ParquetDataSource::new(input_path.to_string())),
+            };
+
+            pipeline = pipeline.with_input_strategy_with_single_source(source);
+        }
+        InputSpec::FromMany { inputs, .. } => {
+            let mut sources: Vec<Box<dyn DataSource>> = Vec::new();
+            for input_path in inputs {
+                let detected_input_format = detect_format(input_path, input_format)?;
+                let source: Box<dyn DataSource> = match detected_input_format {
+                    DataFormat::Arrow => Box::new(ArrowFileDataSource::new(input_path.clone())),
+                    DataFormat::Parquet => Box::new(ParquetDataSource::new(input_path.clone())),
+                };
+                sources.push(source);
+            }
+            pipeline = pipeline.with_input_strategy_with_multiple_sources(sources);
+        }
+    }
+
+    let output_spec = match input {
+        InputSpec::From { to, .. } => to,
+        InputSpec::FromMany { to, .. } => to,
+    };
+
+    match output_spec {
+        OutputSpec::To { output } => {
+            ensure_parent_dir_exists(output.path()).await?;
+
+            let sink_factory = create_sink_factory(
+                output_format,
+                arrow_compression,
+                arrow_format,
+                arrow_record_batch_size,
+                parquet_compression,
+                parquet_row_group_size,
+                parquet_statistics,
+                parquet_writer_version,
+                parquet_no_dictionary,
+                bloom_filter,
+                parquet_sort_spec,
+            )?;
+
+            pipeline = pipeline.with_output_strategy_with_single_sink(
+                output.path().to_str().unwrap().to_string(),
+                sink_factory,
+            );
+        }
+        OutputSpec::ToMany {
+            template,
+            by,
+            exclude_columns,
+            list_outputs: _,
+            create_dirs: _,
+            overwrite: _,
+        } => {
+            let partition_columns: Vec<String> =
+                by.split(',').map(|s| s.trim().to_string()).collect();
+            let path_template = PathTemplate::new(template);
+
+            let sink_factory = create_sink_factory(
+                output_format,
+                arrow_compression,
+                arrow_format,
+                arrow_record_batch_size,
+                parquet_compression,
+                parquet_row_group_size,
+                parquet_statistics,
+                parquet_writer_version,
+                parquet_no_dictionary,
+                bloom_filter,
+                parquet_sort_spec,
+            )?;
+
+            pipeline = pipeline.with_output_strategy_with_partitioned_sink(
+                partition_columns,
+                path_template,
+                sink_factory,
+                !exclude_columns.is_empty(),
+            );
+        }
+    }
+
+    if let Some(q) = query {
+        let ctx_for_query = SessionContext::new();
+        pipeline = pipeline.with_operation(Box::new(QueryOperation::new(ctx_for_query, q)));
+    }
+
+    if let Some(sort_spec) = sort_by {
+        let columns: Vec<String> = sort_spec.columns.iter().map(|c| c.name.clone()).collect();
+        pipeline = pipeline.with_operation(Box::new(SortOperation::new(columns)));
+    }
+
+    pipeline.execute().await
+}
+
+fn detect_format(path: &str, explicit_format: Option<DataFormat>) -> Result<DataFormat> {
+    if let Some(format) = explicit_format {
+        return Ok(format);
+    }
+
+    let path_obj = std::path::Path::new(path);
+    if let Some(ext) = path_obj.extension() {
+        if ext.eq_ignore_ascii_case("arrow") {
+            return Ok(DataFormat::Arrow);
+        } else if ext.eq_ignore_ascii_case("parquet") {
+            return Ok(DataFormat::Parquet);
+        }
+    }
+
+    Err(anyhow!(
+        "Could not detect format from path '{}'. Use --input-format or --output-format to specify explicitly.",
+        path
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_sink_factory(
+    output_format: Option<DataFormat>,
+    arrow_compression: Option<ArrowCompression>,
+    arrow_format: Option<ArrowIPCFormat>,
+    arrow_record_batch_size: Option<usize>,
+    parquet_compression: Option<ParquetCompression>,
+    parquet_row_group_size: Option<usize>,
+    parquet_statistics: Option<ParquetStatistics>,
+    parquet_writer_version: Option<ParquetWriterVersion>,
+    parquet_no_dictionary: bool,
+    parquet_bloom_filter: BloomFilterConfig,
+    parquet_sort_spec: Option<SortSpec>,
+) -> Result<SinkFactory> {
+    Ok(Box::new(move |path: String, schema: SchemaRef| {
+        let detected_format = detect_format(&path, output_format)?;
+
+        let sink: Box<dyn DataSink> = match detected_format {
+            DataFormat::Arrow => {
+                let mut options = ArrowSinkOptions::new();
+                if let Some(compression) = arrow_compression {
+                    options = options.with_compression(compression);
+                }
+                if let Some(format) = arrow_format.clone() {
+                    options = options.with_format(format);
+                }
+                if let Some(batch_size) = arrow_record_batch_size {
+                    options = options.with_record_batch_size(batch_size);
+                }
+                Box::new(ArrowSink::create(path.into(), &schema, options)?)
+            }
+            DataFormat::Parquet => {
+                let mut options = ParquetSinkOptions::new();
+                if let Some(compression) = parquet_compression {
+                    options = options.with_compression(compression);
+                }
+                if let Some(row_group_size) = parquet_row_group_size {
+                    options = options.with_max_row_group_size(row_group_size);
+                }
+                if let Some(stats) = parquet_statistics {
+                    options = options.with_statistics(stats);
+                }
+                if let Some(version) = parquet_writer_version {
+                    options = options.with_writer_version(version);
+                }
+                if parquet_no_dictionary {
+                    options = options.with_no_dictionary(true);
+                }
+                options = options.with_bloom_filters(parquet_bloom_filter.clone());
+                if let Some(sort_spec) = parquet_sort_spec.clone() {
+                    options = options.with_sort_spec(sort_spec);
+                }
+                Box::new(ParquetSink::create(path.into(), &schema, &options)?)
+            }
+        };
+
+        Ok(sink)
+    }))
+}
