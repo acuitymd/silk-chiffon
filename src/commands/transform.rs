@@ -109,6 +109,15 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         OutputSpec::ToMany { list_outputs, .. } => Some(*list_outputs),
     };
 
+    let partition_columns_for_sort = match &output_spec {
+        OutputSpec::ToMany { by, .. } => Some(
+            by.split(',')
+                .map(|s| s.trim().to_string())
+                .collect::<Vec<_>>(),
+        ),
+        _ => None,
+    };
+
     match output_spec {
         OutputSpec::To { output } => {
             ensure_parent_dir_exists(output.path()).await?;
@@ -175,8 +184,28 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         pipeline = pipeline.with_operation(Box::new(QueryOperation::new(ctx_for_query, q)));
     }
 
-    if let Some(sort_spec) = sort_by {
-        let columns: Vec<String> = sort_spec.columns.iter().map(|c| c.name.clone()).collect();
+    let sort_columns = if let Some(mut partition_cols) = partition_columns_for_sort {
+        if let Some(sort_spec) = &sort_by {
+            let user_cols: Vec<String> = sort_spec
+                .columns
+                .iter()
+                .map(|c| c.name.clone())
+                .filter(|name| !partition_cols.contains(name))
+                .collect();
+            partition_cols.extend(user_cols);
+        }
+        if partition_cols.is_empty() {
+            None
+        } else {
+            Some(partition_cols)
+        }
+    } else {
+        sort_by
+            .as_ref()
+            .map(|sort_spec| sort_spec.columns.iter().map(|c| c.name.clone()).collect())
+    };
+
+    if let Some(columns) = sort_columns {
         pipeline = pipeline.with_operation(Box::new(SortOperation::new(columns)));
     }
 

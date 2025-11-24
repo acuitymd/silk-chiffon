@@ -71,10 +71,14 @@ impl InputStrategy {
                     );
                 }
 
-                let mut df: DataFrame = ctx.read_empty()?;
+                if providers.is_empty() {
+                    return Err(anyhow!("No providers available after preparation"));
+                }
 
-                for provider in providers {
-                    df = df.union(ctx.read_table(Arc::clone(&provider))?)?;
+                let mut df: DataFrame = ctx.read_table(Arc::clone(&providers[0]))?;
+
+                for provider in &providers[1..] {
+                    df = df.union(ctx.read_table(Arc::clone(provider))?)?;
                 }
 
                 Ok(df.into_view())
