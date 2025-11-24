@@ -9,9 +9,7 @@ use crate::{
         data_sink::DataSink,
         parquet::{ParquetSink, ParquetSinkOptions},
     },
-    sources::{
-        arrow_file::ArrowFileDataSource, data_source::DataSource, parquet::ParquetDataSource,
-    },
+    sources::{arrow::ArrowDataSource, data_source::DataSource, parquet::ParquetDataSource},
     utils::arrow_io::ArrowIPCFormat,
 };
 use anyhow::{Result, anyhow};
@@ -58,7 +56,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
             let detected_input_format = detect_format(input_path, input_format)?;
 
             let source: Box<dyn DataSource> = match detected_input_format {
-                DataFormat::Arrow => Box::new(ArrowFileDataSource::new(input_path.to_string())),
+                DataFormat::Arrow => Box::new(ArrowDataSource::new(input_path.to_string())),
                 DataFormat::Parquet => Box::new(ParquetDataSource::new(input_path.to_string())),
             };
 
@@ -93,7 +91,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
             for input_path in expanded_paths {
                 let detected_input_format = detect_format(&input_path, input_format)?;
                 let source: Box<dyn DataSource> = match detected_input_format {
-                    DataFormat::Arrow => Box::new(ArrowFileDataSource::new(input_path.clone())),
+                    DataFormat::Arrow => Box::new(ArrowDataSource::new(input_path.clone())),
                     DataFormat::Parquet => Box::new(ParquetDataSource::new(input_path.clone())),
                 };
                 if let Some(ref schema) = schema {
