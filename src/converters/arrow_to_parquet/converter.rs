@@ -548,7 +548,10 @@ mod tests {
         let batch = test_data::create_batch_with_ids_and_names(&schema, &test_ids, &test_names);
         file_helpers::write_arrow_file(&input_path, &schema, vec![batch]).unwrap();
 
-        let bloom_config = BloomFilterConfig::All(AllColumnsBloomFilterConfig { fpp: 0.001 });
+        let bloom_config = BloomFilterConfig::All(AllColumnsBloomFilterConfig {
+            fpp: 0.001,
+            ndv: None,
+        });
 
         let converter = ArrowToParquetConverter::new(
             input_path.to_str().unwrap().to_string(),
@@ -577,11 +580,17 @@ mod tests {
         let bloom_config = BloomFilterConfig::Columns(vec![
             ColumnSpecificBloomFilterConfig {
                 name: "id".to_string(),
-                config: ColumnBloomFilterConfig { fpp: 0.01 },
+                config: ColumnBloomFilterConfig {
+                    fpp: 0.01,
+                    ndv: None,
+                },
             },
             ColumnSpecificBloomFilterConfig {
                 name: "name".to_string(),
-                config: ColumnBloomFilterConfig { fpp: 0.01 },
+                config: ColumnBloomFilterConfig {
+                    fpp: 0.01,
+                    ndv: None,
+                },
             },
         ]);
 
@@ -611,7 +620,10 @@ mod tests {
 
         let bloom_config = BloomFilterConfig::Columns(vec![ColumnSpecificBloomFilterConfig {
             name: "nonexistent_column".to_string(),
-            config: ColumnBloomFilterConfig { fpp: 0.01 },
+            config: ColumnBloomFilterConfig {
+                fpp: 0.01,
+                ndv: None,
+            },
         }]);
 
         let converter =
@@ -753,7 +765,10 @@ mod tests {
 
         let bloom_config = BloomFilterConfig::Columns(vec![ColumnSpecificBloomFilterConfig {
             name: "id".to_string(),
-            config: ColumnBloomFilterConfig { fpp: 0.001 },
+            config: ColumnBloomFilterConfig {
+                fpp: 0.001,
+                ndv: None,
+            },
         }]);
 
         let converter = ArrowToParquetConverter::new(

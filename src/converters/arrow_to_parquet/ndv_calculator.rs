@@ -175,11 +175,17 @@ mod tests {
 
     #[test]
     fn test_needs_calculation_with_bloom_filters() {
-        let bloom_config = BloomFilterConfig::All(AllColumnsBloomFilterConfig { fpp: 0.01 });
+        let bloom_config = BloomFilterConfig::All(AllColumnsBloomFilterConfig {
+            fpp: 0.01,
+            ndv: None,
+        });
         let calculator = NdvCalculator::new(bloom_config, 1_000_000);
         assert!(calculator.needs_calculation());
 
-        let bloom_config = BloomFilterConfig::All(AllColumnsBloomFilterConfig { fpp: 0.001 });
+        let bloom_config = BloomFilterConfig::All(AllColumnsBloomFilterConfig {
+            fpp: 0.001,
+            ndv: None,
+        });
         let calculator = NdvCalculator::new(bloom_config, 1_000_000);
         assert!(calculator.needs_calculation());
     }
@@ -193,7 +199,10 @@ mod tests {
 
     #[test]
     fn test_get_columns_needing_ndv_all_columns() {
-        let bloom_config = BloomFilterConfig::All(AllColumnsBloomFilterConfig { fpp: 0.01 });
+        let bloom_config = BloomFilterConfig::All(AllColumnsBloomFilterConfig {
+            fpp: 0.01,
+            ndv: None,
+        });
         let calculator = NdvCalculator::new(bloom_config, 1_000_000);
 
         let schema = Schema::new(vec![
@@ -212,11 +221,17 @@ mod tests {
         let bloom_config = BloomFilterConfig::Columns(vec![
             ColumnSpecificBloomFilterConfig {
                 name: "id".to_string(),
-                config: ColumnBloomFilterConfig { fpp: 0.01 },
+                config: ColumnBloomFilterConfig {
+                    fpp: 0.01,
+                    ndv: None,
+                },
             },
             ColumnSpecificBloomFilterConfig {
                 name: "name".to_string(),
-                config: ColumnBloomFilterConfig { fpp: 0.01 },
+                config: ColumnBloomFilterConfig {
+                    fpp: 0.01,
+                    ndv: None,
+                },
             },
         ]);
         let calculator = NdvCalculator::new(bloom_config, 1_000_000);
@@ -292,7 +307,10 @@ mod tests {
 
         file_helpers::write_arrow_file(&arrow_path, &schema, batches).unwrap();
 
-        let bloom_config = BloomFilterConfig::All(AllColumnsBloomFilterConfig { fpp: 0.01 });
+        let bloom_config = BloomFilterConfig::All(AllColumnsBloomFilterConfig {
+            fpp: 0.01,
+            ndv: None,
+        });
         let calculator = NdvCalculator::new(bloom_config, 5);
 
         let result = calculator.calculate(&arrow_path).await.unwrap();

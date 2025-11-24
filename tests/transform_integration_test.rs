@@ -590,7 +590,10 @@ async fn test_transform_with_parquet_bloom_filters() {
         parquet_bloom_all: None,
         parquet_bloom_column: vec![ColumnSpecificBloomFilterConfig {
             name: "id".to_string(),
-            config: silk_chiffon::ColumnBloomFilterConfig { fpp: 0.01 },
+            config: silk_chiffon::ColumnBloomFilterConfig {
+                fpp: 0.01,
+                ndv: None,
+            },
         }],
         parquet_row_group_size: None,
         parquet_statistics: None,
@@ -1284,7 +1287,10 @@ async fn test_transform_parquet_bloom_all() {
         arrow_format: None,
         arrow_record_batch_size: None,
         parquet_compression: None,
-        parquet_bloom_all: Some(AllColumnsBloomFilterConfig { fpp: 0.01 }),
+        parquet_bloom_all: Some(AllColumnsBloomFilterConfig {
+            fpp: 0.01,
+            ndv: None,
+        }),
         parquet_bloom_column: vec![],
         parquet_row_group_size: None,
         parquet_statistics: None,

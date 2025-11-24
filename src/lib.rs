@@ -153,15 +153,19 @@ pub struct ArrowToParquetArgs {
     /// Mutually exclusive with --bloom-column.
     ///
     /// Formats:
-    ///   --bloom-all             # Use default FPP (0.01)
-    ///   --bloom-all "fpp=VALUE" # Custom FPP
+    ///   --bloom-all                       # Use defaults (fpp=0.01, auto NDV)
+    ///   --bloom-all "fpp=VALUE"           # Custom FPP
+    ///   --bloom-all "ndv=VALUE"           # Custom NDV
+    ///   --bloom-all "fpp=VALUE,ndv=VALUE" # Custom FPP and NDV
     ///
     /// Examples:
-    ///   --bloom-all             # Use default FPP (0.01)
-    ///   --bloom-all "fpp=0.001" # Custom FPP (0.001)
+    ///   --bloom-all                     # Use defaults
+    ///   --bloom-all "fpp=0.001"         # Custom FPP
+    ///   --bloom-all "ndv=10000"         # Custom NDV (10k distinct values)
+    ///   --bloom-all "fpp=0.001,ndv=10000" # Custom FPP and NDV
     #[arg(
         long,
-        value_name = "[fpp=VALUE]",
+        value_name = "[fpp=VALUE][,ndv=VALUE]",
         conflicts_with = "bloom_column",
         num_args = 0..=1,
         default_missing_value = "",
@@ -173,16 +177,20 @@ pub struct ArrowToParquetArgs {
     /// Can be specified multiple times. Mutually exclusive with --bloom-all.
     ///
     /// Formats:
-    ///   COLUMN           # Use default FPP (0.01)
-    ///   COLUMN:fpp=VALUE # Custom FPP
+    ///   COLUMN                     # Use defaults (fpp=0.01, auto NDV)
+    ///   COLUMN:fpp=VALUE           # Custom FPP
+    ///   COLUMN:ndv=VALUE           # Custom NDV
+    ///   COLUMN:fpp=VALUE,ndv=VALUE # Custom FPP and NDV
     ///
     /// Examples:
-    ///   --bloom-column "user_id"            # Use default FPP (0.01)
-    ///   --bloom-column "user_id:fpp=0.001"  # Custom FPP (0.001)
+    ///   --bloom-column "user_id"                   # Use defaults
+    ///   --bloom-column "user_id:fpp=0.001"         # Custom FPP
+    ///   --bloom-column "user_id:ndv=50000"         # Custom NDV (50k distinct values)
+    ///   --bloom-column "user_id:fpp=0.001,ndv=50000" # Custom FPP and NDV
     ///   --bloom-column "user_id" --bloom-column "name:fpp=0.05" # Multiple columns
     #[arg(
         long,
-        value_name = "COLUMN[:fpp=VALUE]",
+        value_name = "COLUMN[:fpp=VALUE][,ndv=VALUE]",
         conflicts_with = "bloom_all",
         verbatim_doc_comment
     )]
@@ -586,15 +594,19 @@ pub struct MergeArrowToParquetArgs {
     /// Mutually exclusive with --bloom-column.
     ///
     /// Formats:
-    ///   --bloom-all             # Use default FPP (0.01)
-    ///   --bloom-all "fpp=VALUE" # Custom FPP
+    ///   --bloom-all                       # Use defaults (fpp=0.01, auto NDV)
+    ///   --bloom-all "fpp=VALUE"           # Custom FPP
+    ///   --bloom-all "ndv=VALUE"           # Custom NDV
+    ///   --bloom-all "fpp=VALUE,ndv=VALUE" # Custom FPP and NDV
     ///
     /// Examples:
-    ///   --bloom-all             # Use default FPP (0.01)
-    ///   --bloom-all "fpp=0.001" # Custom FPP (0.001)
+    ///   --bloom-all                     # Use defaults
+    ///   --bloom-all "fpp=0.001"         # Custom FPP
+    ///   --bloom-all "ndv=10000"         # Custom NDV (10k distinct values)
+    ///   --bloom-all "fpp=0.001,ndv=10000" # Custom FPP and NDV
     #[arg(
         long,
-        value_name = "[fpp=VALUE]",
+        value_name = "[fpp=VALUE][,ndv=VALUE]",
         conflicts_with = "bloom_column",
         num_args = 0..=1,
         default_missing_value = "",
@@ -606,16 +618,20 @@ pub struct MergeArrowToParquetArgs {
     /// Can be specified multiple times. Mutually exclusive with --bloom-all.
     ///
     /// Formats:
-    ///   COLUMN           # Use default FPP (0.01)
-    ///   COLUMN:fpp=VALUE # Custom FPP
+    ///   COLUMN                     # Use defaults (fpp=0.01, auto NDV)
+    ///   COLUMN:fpp=VALUE           # Custom FPP
+    ///   COLUMN:ndv=VALUE           # Custom NDV
+    ///   COLUMN:fpp=VALUE,ndv=VALUE # Custom FPP and NDV
     ///
     /// Examples:
-    ///   --bloom-column "user_id"            # Use default FPP (0.01)
-    ///   --bloom-column "user_id:fpp=0.001"  # Custom FPP (0.001)
+    ///   --bloom-column "user_id"                   # Use defaults
+    ///   --bloom-column "user_id:fpp=0.001"         # Custom FPP
+    ///   --bloom-column "user_id:ndv=50000"         # Custom NDV (50k distinct values)
+    ///   --bloom-column "user_id:fpp=0.001,ndv=50000" # Custom FPP and NDV
     ///   --bloom-column "user_id" --bloom-column "name:fpp=0.05" # Multiple columns
     #[arg(
         long,
-        value_name = "COLUMN[:fpp=VALUE]",
+        value_name = "COLUMN[:fpp=VALUE][,ndv=VALUE]",
         conflicts_with = "bloom_all",
         verbatim_doc_comment
     )]
@@ -820,6 +836,7 @@ pub const DEFAULT_BLOOM_FILTER_FPP: f64 = 0.01;
 #[derive(Debug, Clone)]
 pub struct AllColumnsBloomFilterConfig {
     pub fpp: f64,
+    pub ndv: Option<u64>,
 }
 
 impl FromStr for AllColumnsBloomFilterConfig {
@@ -829,20 +846,18 @@ impl FromStr for AllColumnsBloomFilterConfig {
         if s.trim().is_empty() {
             return Ok(AllColumnsBloomFilterConfig {
                 fpp: DEFAULT_BLOOM_FILTER_FPP,
+                ndv: None,
             });
         }
 
         let mut fpp = None;
+        let mut ndv = None;
 
         let parts = s
-            .split(':')
+            .split(',')
             .map(|p| p.trim())
             .filter(|p| !p.is_empty())
             .collect::<Vec<&str>>();
-
-        if parts.len() > 1 {
-            return Err(anyhow!("Invalid bloom filter specification: {}", s));
-        }
 
         for part in parts {
             if part.is_empty() {
@@ -866,9 +881,21 @@ impl FromStr for AllColumnsBloomFilterConfig {
                             anyhow::anyhow!("Invalid fpp value '{}': {}", value, e)
                         })?);
                     }
+                    "ndv" => {
+                        if ndv.is_some() {
+                            return Err(anyhow!(
+                                "Invalid bloom filter specification, ndv is set twice: {}",
+                                s
+                            ));
+                        }
+
+                        ndv = Some(value.parse::<u64>().map_err(|e| {
+                            anyhow::anyhow!("Invalid ndv value '{}': {}", value, e)
+                        })?);
+                    }
                     _ => {
                         return Err(anyhow::anyhow!(
-                            "Unknown parameter '{}'. Valid parameter is 'fpp'",
+                            "Unknown parameter '{}'. Valid parameters are 'fpp' and 'ndv'",
                             key
                         ));
                     }
@@ -883,6 +910,7 @@ impl FromStr for AllColumnsBloomFilterConfig {
 
         Ok(AllColumnsBloomFilterConfig {
             fpp: fpp.unwrap_or(DEFAULT_BLOOM_FILTER_FPP),
+            ndv,
         })
     }
 }
@@ -890,6 +918,7 @@ impl FromStr for AllColumnsBloomFilterConfig {
 #[derive(Debug, Clone)]
 pub struct ColumnBloomFilterConfig {
     pub fpp: f64,
+    pub ndv: Option<u64>,
 }
 
 impl FromStr for ColumnBloomFilterConfig {
@@ -897,16 +926,13 @@ impl FromStr for ColumnBloomFilterConfig {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let mut fpp = None;
+        let mut ndv = None;
 
         let parts = s
-            .split(':')
+            .split(',')
             .map(|p| p.trim())
             .filter(|p| !p.is_empty())
             .collect::<Vec<&str>>();
-
-        if parts.len() > 1 {
-            return Err(anyhow!("Invalid bloom filter specification: {}", s));
-        }
 
         for part in parts {
             if part.is_empty() {
@@ -930,9 +956,21 @@ impl FromStr for ColumnBloomFilterConfig {
                             anyhow::anyhow!("Invalid fpp value '{}': {}", value, e)
                         })?);
                     }
+                    "ndv" => {
+                        if ndv.is_some() {
+                            return Err(anyhow!(
+                                "Invalid bloom filter specification, ndv is set twice: {}",
+                                s
+                            ));
+                        }
+
+                        ndv = Some(value.parse::<u64>().map_err(|e| {
+                            anyhow::anyhow!("Invalid ndv value '{}': {}", value, e)
+                        })?);
+                    }
                     _ => {
                         return Err(anyhow::anyhow!(
-                            "Unknown parameter '{}'. Valid parameter is 'fpp'",
+                            "Unknown parameter '{}'. Valid parameters are 'fpp' and 'ndv'",
                             key
                         ));
                     }
@@ -947,6 +985,7 @@ impl FromStr for ColumnBloomFilterConfig {
 
         Ok(ColumnBloomFilterConfig {
             fpp: fpp.unwrap_or(DEFAULT_BLOOM_FILTER_FPP),
+            ndv,
         })
     }
 }
@@ -986,6 +1025,7 @@ impl FromStr for ColumnSpecificBloomFilterConfig {
                 name: column_name.to_string(),
                 config: ColumnBloomFilterConfig {
                     fpp: DEFAULT_BLOOM_FILTER_FPP,
+                    ndv: None,
                 },
             })
         }
@@ -1058,15 +1098,19 @@ pub struct TransformCommand {
     /// Enable bloom filters for all columns with optional custom settings.
     ///
     /// Formats:
-    ///   --parquet-bloom-all             # Use default FPP (0.01)
-    ///   --parquet-bloom-all "fpp=VALUE" # Custom FPP
+    ///   --parquet-bloom-all                       # Use defaults (fpp=0.01, auto NDV)
+    ///   --parquet-bloom-all "fpp=VALUE"           # Custom FPP
+    ///   --parquet-bloom-all "ndv=VALUE"           # Custom NDV
+    ///   --parquet-bloom-all "fpp=VALUE,ndv=VALUE" # Custom FPP and NDV
     ///
     /// Examples:
-    ///   --parquet-bloom-all             # Use default FPP (0.01)
-    ///   --parquet-bloom-all "fpp=0.001" # Custom FPP (0.001)
+    ///   --parquet-bloom-all                     # Use defaults
+    ///   --parquet-bloom-all "fpp=0.001"         # Custom FPP
+    ///   --parquet-bloom-all "ndv=10000"         # Custom NDV (10k distinct values)
+    ///   --parquet-bloom-all "fpp=0.001,ndv=10000" # Custom FPP and NDV
     #[arg(
         long,
-        value_name = "[fpp=VALUE]",
+        value_name = "[fpp=VALUE][,ndv=VALUE]",
         conflicts_with = "parquet_bloom_column",
         num_args = 0..=1,
         default_missing_value = "",
@@ -1077,15 +1121,19 @@ pub struct TransformCommand {
     /// Enable bloom filter for specific columns with optional custom settings.
     ///
     /// Formats:
-    ///   COLUMN           # Use default FPP (0.01)
-    ///   COLUMN:fpp=VALUE # Custom FPP
+    ///   COLUMN                     # Use defaults (fpp=0.01, auto NDV)
+    ///   COLUMN:fpp=VALUE           # Custom FPP
+    ///   COLUMN:ndv=VALUE           # Custom NDV
+    ///   COLUMN:fpp=VALUE,ndv=VALUE # Custom FPP and NDV
     ///
     /// Examples:
-    ///   --parquet-bloom-column "user_id"            # Use default FPP (0.01)
-    ///   --parquet-bloom-column "user_id:fpp=0.001"  # Custom FPP (0.001)
+    ///   --parquet-bloom-column "user_id"                   # Use defaults
+    ///   --parquet-bloom-column "user_id:fpp=0.001"         # Custom FPP
+    ///   --parquet-bloom-column "user_id:ndv=50000"         # Custom NDV (50k distinct values)
+    ///   --parquet-bloom-column "user_id:fpp=0.001,ndv=50000" # Custom FPP and NDV
     #[arg(
         long,
-        value_name = "COLUMN[:fpp=VALUE]",
+        value_name = "COLUMN[:fpp=VALUE][,ndv=VALUE]",
         conflicts_with = "parquet_bloom_all",
         verbatim_doc_comment
     )]

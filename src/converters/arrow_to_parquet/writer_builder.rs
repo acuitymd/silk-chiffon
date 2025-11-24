@@ -86,9 +86,18 @@ impl ParquetWritePropertiesBuilder {
                     .set_bloom_filter_enabled(true)
                     .set_bloom_filter_fpp(fpp);
 
-                for (col_name, &ndv) in ndv_map {
-                    let col_path = ColumnPath::from(col_name.as_str());
-                    builder = builder.set_column_bloom_filter_ndv(col_path, ndv);
+                // if user provided NDV, use it for all columns
+                // otherwise use calculated NDV from ndv_map if available
+                if let Some(user_ndv) = bloom_all.ndv {
+                    for col_name in ndv_map.keys() {
+                        let col_path = ColumnPath::from(col_name.as_str());
+                        builder = builder.set_column_bloom_filter_ndv(col_path, user_ndv);
+                    }
+                } else {
+                    for (col_name, &ndv) in ndv_map {
+                        let col_path = ColumnPath::from(col_name.as_str());
+                        builder = builder.set_column_bloom_filter_ndv(col_path, ndv);
+                    }
                 }
                 Ok(builder)
             }
@@ -101,7 +110,12 @@ impl ParquetWritePropertiesBuilder {
                         .set_column_bloom_filter_enabled(col_path.clone(), true)
                         .set_column_bloom_filter_fpp(col_path.clone(), fpp);
 
-                    if let Some(&ndv) = ndv_map.get(&bloom_col.name) {
+                    // use user-provided NDV if available, otherwise use calculated NDV
+                    let ndv = bloom_col
+                        .config
+                        .ndv
+                        .or_else(|| ndv_map.get(&bloom_col.name).copied());
+                    if let Some(ndv) = ndv {
                         builder = builder.set_column_bloom_filter_ndv(col_path, ndv);
                     }
                 }
@@ -305,7 +319,10 @@ mod tests {
 
     #[test]
     fn test_apply_bloom_filters_all_columns() {
-        let bloom_config = BloomFilterConfig::All(AllColumnsBloomFilterConfig { fpp: 0.001 });
+        let bloom_config = BloomFilterConfig::All(AllColumnsBloomFilterConfig {
+            fpp: 0.001,
+            ndv: None,
+        });
 
         let builder = ParquetWritePropertiesBuilder::new(
             ParquetCompression::None,
@@ -331,7 +348,10 @@ mod tests {
     fn test_apply_bloom_filters_specific_columns_with_ndv() {
         let bloom_config = BloomFilterConfig::Columns(vec![ColumnSpecificBloomFilterConfig {
             name: "id".to_string(),
-            config: ColumnBloomFilterConfig { fpp: 0.005 },
+            config: ColumnBloomFilterConfig {
+                fpp: 0.005,
+                ndv: None,
+            },
         }]);
 
         let builder = ParquetWritePropertiesBuilder::new(
@@ -357,7 +377,10 @@ mod tests {
     fn test_apply_bloom_filters_specific_columns_from_map() {
         let bloom_config = BloomFilterConfig::Columns(vec![ColumnSpecificBloomFilterConfig {
             name: "id".to_string(),
-            config: ColumnBloomFilterConfig { fpp: 0.01 },
+            config: ColumnBloomFilterConfig {
+                fpp: 0.01,
+                ndv: None,
+            },
         }]);
 
         let builder = ParquetWritePropertiesBuilder::new(
@@ -383,7 +406,10 @@ mod tests {
     fn test_apply_bloom_filters_without_ndv() {
         let bloom_config = BloomFilterConfig::Columns(vec![ColumnSpecificBloomFilterConfig {
             name: "test_column".to_string(),
-            config: ColumnBloomFilterConfig { fpp: 0.01 },
+            config: ColumnBloomFilterConfig {
+                fpp: 0.01,
+                ndv: None,
+            },
         }]);
 
         let builder = ParquetWritePropertiesBuilder::new(
@@ -406,7 +432,10 @@ mod tests {
 
     #[test]
     fn test_apply_bloom_filters_default_fpp() {
-        let bloom_config = BloomFilterConfig::All(AllColumnsBloomFilterConfig { fpp: 0.01 });
+        let bloom_config = BloomFilterConfig::All(AllColumnsBloomFilterConfig {
+            fpp: 0.01,
+            ndv: None,
+        });
 
         let builder = ParquetWritePropertiesBuilder::new(
             ParquetCompression::None,
@@ -431,7 +460,10 @@ mod tests {
     fn test_apply_bloom_filters_mixed_config() {
         let bloom_config = BloomFilterConfig::Columns(vec![ColumnSpecificBloomFilterConfig {
             name: "id".to_string(),
-            config: ColumnBloomFilterConfig { fpp: 0.001 },
+            config: ColumnBloomFilterConfig {
+                fpp: 0.001,
+                ndv: None,
+            },
         }]);
 
         let builder = ParquetWritePropertiesBuilder::new(

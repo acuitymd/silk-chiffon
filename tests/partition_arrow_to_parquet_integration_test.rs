@@ -121,7 +121,10 @@ async fn test_partition_arrow_to_parquet_with_bloom_filters() {
         writer_version: silk_chiffon::ParquetWriterVersion::V2,
         no_dictionary: false,
         write_sorted_metadata: false,
-        bloom_all: Some(silk_chiffon::AllColumnsBloomFilterConfig { fpp: 0.01 }),
+        bloom_all: Some(silk_chiffon::AllColumnsBloomFilterConfig {
+            fpp: 0.01,
+            ndv: None,
+        }),
         bloom_column: vec![],
         list_outputs: silk_chiffon::ListOutputsFormat::None,
         exclude_columns: vec![],
