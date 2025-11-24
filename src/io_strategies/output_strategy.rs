@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use arrow::datatypes::SchemaRef;
 use datafusion::{execution::SendableRecordBatchStream, prelude::DataFrame};
 use futures::StreamExt;
@@ -85,7 +85,11 @@ impl OutputStrategy {
                         .unwrap_or(false);
 
                     if current_sink.is_some() && partition_changed {
-                        current_sink.as_mut().unwrap().finish().await?;
+                        current_sink
+                            .as_mut()
+                            .ok_or_else(|| anyhow!("current_sink is None"))?
+                            .finish()
+                            .await?;
                         current_sink = None;
                     }
 
@@ -114,12 +118,20 @@ impl OutputStrategy {
                         )?);
                         created_files.push(output_path);
                     }
-                    current_sink.as_mut().unwrap().write_batch(batch).await?;
+                    current_sink
+                        .as_mut()
+                        .ok_or_else(|| anyhow!("current_sink is None"))?
+                        .write_batch(batch)
+                        .await?;
                     most_recent_partition_values = Some(partition_values);
                 }
 
                 if current_sink.is_some() {
-                    current_sink.as_mut().unwrap().finish().await?;
+                    current_sink
+                        .as_mut()
+                        .ok_or_else(|| anyhow!("current_sink is None"))?
+                        .finish()
+                        .await?;
                 }
 
                 Ok(created_files)
@@ -156,12 +168,18 @@ mod tests {
     #[async_trait::async_trait]
     impl DataSink for MockSink {
         async fn write_batch(&mut self, batch: RecordBatch) -> Result<()> {
-            self.batches.lock().unwrap().push(batch);
+            self.batches
+                .lock()
+                .map_err(|e| anyhow!("Failed to lock batches: {}", e))?
+                .push(batch);
             Ok(())
         }
 
         async fn finish(&mut self) -> Result<SinkResult> {
-            *self.finished.lock().unwrap() = true;
+            *self
+                .finished
+                .lock()
+                .map_err(|e| anyhow!("Failed to lock finished: {}", e))? = true;
             Ok(SinkResult {
                 files_written: vec![self.name.clone().into()],
                 rows_written: 0,
