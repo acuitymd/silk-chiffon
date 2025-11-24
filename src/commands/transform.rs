@@ -16,6 +16,7 @@ use crate::{
 };
 use anyhow::{Result, anyhow};
 use arrow::datatypes::SchemaRef;
+use glob::glob;
 
 pub async fn run(args: TransformCommand) -> Result<()> {
     let TransformCommand {
@@ -68,7 +69,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
             let mut expanded_paths = Vec::new();
 
             for pattern in inputs {
-                for entry in glob::glob(pattern)? {
+                for entry in glob(pattern)? {
                     expanded_paths.push(entry?.to_string_lossy().to_string());
                 }
             }
