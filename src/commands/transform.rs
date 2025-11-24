@@ -16,7 +16,6 @@ use crate::{
 };
 use anyhow::{Result, anyhow};
 use arrow::datatypes::SchemaRef;
-use datafusion::prelude::SessionContext;
 
 pub async fn run(args: TransformCommand) -> Result<()> {
     let TransformCommand {
@@ -207,8 +206,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
     }
 
     if let Some(q) = query {
-        let ctx_for_query = SessionContext::new();
-        pipeline = pipeline.with_operation(Box::new(QueryOperation::new(ctx_for_query, q)));
+        pipeline = pipeline.with_operation(Box::new(QueryOperation::new(q)));
     }
 
     if !full_sort_spec.is_empty() {

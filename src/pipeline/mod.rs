@@ -128,7 +128,7 @@ impl Pipeline {
         let mut df = ctx.read_table(table_provider)?;
 
         for operation in &self.operations {
-            df = operation.apply(df).await?;
+            df = operation.apply(ctx, df).await?;
         }
 
         let files = output_strategy.write(df).await?;
