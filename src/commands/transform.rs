@@ -69,8 +69,15 @@ pub async fn run(args: TransformCommand) -> Result<()> {
             let mut expanded_paths = Vec::new();
 
             for pattern in inputs {
-                for entry in glob(pattern)? {
-                    expanded_paths.push(entry?.to_string_lossy().to_string());
+                for entry in glob(pattern)
+                    .map_err(|e| anyhow!("Error expanding glob pattern {}: {}", pattern, e))?
+                {
+                    expanded_paths.push(
+                        entry
+                            .map_err(|e| anyhow!("Error decoding file path: {}", e))?
+                            .to_string_lossy()
+                            .to_string(),
+                    );
                 }
             }
 
@@ -128,8 +135,6 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         _ => SortSpec::default(),
     };
 
-    let partition_columns = partition_sort_spec.column_names();
-
     let user_sort_spec = sort_by.clone().unwrap_or(SortSpec::default());
 
     let user_sort_spec_without_partition_cols =
@@ -172,13 +177,16 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         }
         OutputSpec::ToMany {
             template,
-            by: _,
+            by: _, // already extracted as partition_sort_spec above
             exclude_columns,
             list_outputs,
             create_dirs,
             overwrite,
         } => {
             let path_template = PathTemplate::new(template);
+            // relying on the partition_sort_spec since it appropriately handles duplicate column names
+            // and is used to perform the sort operation that we will be partitioning on later
+            let partition_columns = partition_sort_spec.column_names();
 
             pipeline = pipeline.with_output_strategy_with_partitioned_sink(
                 partition_columns,
