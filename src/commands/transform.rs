@@ -126,6 +126,27 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         OutputSpec::ToMany { list_outputs, .. } => Some(*list_outputs),
     };
 
+    // The overall sort order is determined by the following:
+    //
+    //   1. The sort order specified by the partition columns
+    //   2. The sort order specified by the user
+    //
+    // We need the data sorted by the partition columns first so that the data can
+    // be partitioned into individual files per partition as we output the data. Any
+    // other alternative would require us to either:
+    //
+    //   1. Keep the files open per partition for the entire duration of the partition,
+    //      which would be inefficient and require us to manage a lot of open file handles
+    //      and use a lot of memory.
+    //   2. Write multiple files per partition, managing how many file handles are open
+    //      at any given time and how much memory is currently being used. If you still
+    //      wanted to have a single file per partition you would need to come back later
+    //      and merge the files together.
+    //
+    // Once we have sorted the data for partitioning there is nothing to sort for those
+    // columns within each file since they are just a single value, so we remove them from
+    // the user-specified sort order.
+
     let partition_sort_spec = match &output_spec {
         OutputSpec::ToMany { by, .. } => SortSpec::from(
             by.split(',')
