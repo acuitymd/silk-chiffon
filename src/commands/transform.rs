@@ -92,13 +92,16 @@ pub async fn run(args: TransformCommand) -> Result<()> {
             for input_path in expanded_paths {
                 let detected_input_format = detect_format(&input_path, input_format)?;
                 let source: Box<dyn DataSource> = match detected_input_format {
-                    DataFormat::Arrow => Box::new(ArrowFileDataSource::new(input_path)),
-                    DataFormat::Parquet => Box::new(ParquetDataSource::new(input_path)),
+                    DataFormat::Arrow => Box::new(ArrowFileDataSource::new(input_path.clone())),
+                    DataFormat::Parquet => Box::new(ParquetDataSource::new(input_path.clone())),
                 };
                 if let Some(ref schema) = schema {
                     let source_schema = source.schema()?;
                     if *schema != source_schema {
-                        return Err(anyhow!("Schema mismatch"));
+                        return Err(anyhow!(
+                            "Schema mismatch for input file {} (does not match other file(s))",
+                            &input_path
+                        ));
                     }
                 } else {
                     schema = Some(source.schema()?);
