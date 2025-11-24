@@ -71,12 +71,27 @@ pub async fn run(args: TransformCommand) -> Result<()> {
             pipeline = pipeline.with_input_strategy_with_single_source(source);
         }
         InputSpec::FromMany { inputs, .. } => {
+            let mut expanded_paths = Vec::new();
+
+            for pattern in inputs {
+                for entry in glob::glob(pattern)? {
+                    expanded_paths.push(entry?.to_string_lossy().to_string());
+                }
+            }
+
+            expanded_paths.sort();
+            expanded_paths.dedup();
+
+            if expanded_paths.is_empty() {
+                anyhow::bail!("No input files found");
+            }
+
             let mut sources: Vec<Box<dyn DataSource>> = Vec::new();
-            for input_path in inputs {
-                let detected_input_format = detect_format(input_path, input_format)?;
+            for input_path in expanded_paths {
+                let detected_input_format = detect_format(&input_path, input_format)?;
                 let source: Box<dyn DataSource> = match detected_input_format {
-                    DataFormat::Arrow => Box::new(ArrowFileDataSource::new(input_path.clone())),
-                    DataFormat::Parquet => Box::new(ParquetDataSource::new(input_path.clone())),
+                    DataFormat::Arrow => Box::new(ArrowFileDataSource::new(input_path)),
+                    DataFormat::Parquet => Box::new(ParquetDataSource::new(input_path)),
                 };
                 sources.push(source);
             }
