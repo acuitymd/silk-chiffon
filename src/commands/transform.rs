@@ -189,7 +189,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
                 partition_columns,
                 path_template,
                 sink_factory,
-                !exclude_columns.is_empty(),
+                exclude_columns.clone(),
                 create_dirs,
                 overwrite,
                 list_outputs,

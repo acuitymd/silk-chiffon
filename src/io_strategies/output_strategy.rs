@@ -28,7 +28,7 @@ pub enum OutputStrategy {
         columns: Vec<String>,
         template: Box<PathTemplate>,
         sink_factory: SinkFactory,
-        exclude_partition_columns: bool,
+        exclude_columns: Vec<String>,
         create_dirs: bool,
         overwrite: bool,
         list_outputs: ListOutputsFormat,
@@ -51,7 +51,7 @@ impl OutputStrategy {
             OutputStrategy::Partitioned {
                 sink_factory,
                 columns,
-                exclude_partition_columns,
+                exclude_columns,
                 template,
                 create_dirs,
                 overwrite,
@@ -59,15 +59,14 @@ impl OutputStrategy {
             } => {
                 let partitioner = Partitioner::new(columns.clone());
                 let schema = stream.schema();
-                let non_partition_columns_indices: Vec<usize> = if *exclude_partition_columns {
-                    (0..schema.fields().len())
-                        .filter(|i| {
-                            let field_name = schema.field(*i).name();
-                            !columns.contains(field_name)
-                        })
-                        .collect()
+                let projected_column_indices: Option<Vec<usize>> = if !exclude_columns.is_empty() {
+                    Some(
+                        (0..schema.fields().len())
+                            .filter(|i| !exclude_columns.contains(&schema.field(*i).name()))
+                            .collect(),
+                    )
                 } else {
-                    Vec::new()
+                    None
                 };
                 let mut partitioned_stream = partitioner.partition_stream(stream);
                 let mut current_sink: Option<Box<dyn DataSink>> = None;
@@ -76,8 +75,8 @@ impl OutputStrategy {
 
                 while let Some(result) = partitioned_stream.next().await {
                     let (partition_values, mut batch) = result?;
-                    if *exclude_partition_columns {
-                        batch = batch.project(&non_partition_columns_indices)?;
+                    if let Some(ref projected_column_indices) = projected_column_indices {
+                        batch = batch.project(projected_column_indices)?;
                     }
 
                     let partition_changed = most_recent_partition_values
@@ -213,7 +212,7 @@ mod tests {
             columns: vec!["category".to_string()],
             template: Box::new(PathTemplate::new("output/{{category}}.parquet".to_string())),
             sink_factory,
-            exclude_partition_columns: false,
+            exclude_columns: vec![],
             create_dirs: false,
             overwrite: false,
             list_outputs: ListOutputsFormat::None,
@@ -259,7 +258,7 @@ mod tests {
             columns: vec!["category".to_string()],
             template: Box::new(PathTemplate::new("output/{{category}}.parquet".to_string())),
             sink_factory,
-            exclude_partition_columns: false,
+            exclude_columns: vec![],
             create_dirs: false,
             overwrite: false,
             list_outputs: ListOutputsFormat::None,
@@ -307,7 +306,7 @@ mod tests {
             columns: vec!["category".to_string()],
             template: Box::new(PathTemplate::new("output/{{category}}.parquet".to_string())),
             sink_factory,
-            exclude_partition_columns: true,
+            exclude_columns: vec!["category".to_string()],
             create_dirs: false,
             overwrite: false,
             list_outputs: ListOutputsFormat::None,
@@ -355,7 +354,7 @@ mod tests {
             columns: vec!["region".to_string()],
             template: Box::new(PathTemplate::new("output/{{region}}.parquet".to_string())),
             sink_factory,
-            exclude_partition_columns: false,
+            exclude_columns: vec![],
             create_dirs: false,
             overwrite: false,
             list_outputs: ListOutputsFormat::None,
@@ -411,7 +410,7 @@ mod tests {
             columns: vec!["category".to_string()],
             template: Box::new(PathTemplate::new("output/{{category}}.parquet".to_string())),
             sink_factory,
-            exclude_partition_columns: false,
+            exclude_columns: vec![],
             create_dirs: false,
             overwrite: false,
             list_outputs: ListOutputsFormat::None,
@@ -475,7 +474,7 @@ mod tests {
             columns: vec!["category".to_string()],
             template: Box::new(PathTemplate::new("output/{{category}}.parquet".to_string())),
             sink_factory,
-            exclude_partition_columns: false,
+            exclude_columns: vec![],
             create_dirs: false,
             overwrite: false,
             list_outputs: ListOutputsFormat::None,
@@ -542,7 +541,7 @@ mod tests {
             sink_factory: Box::new(sink_factory),
             columns: vec!["region".to_string()],
             template: Box::new(PathTemplate::new("output/{{region}}.parquet".to_string())),
-            exclude_partition_columns: false,
+            exclude_columns: vec![],
             create_dirs: false,
             overwrite: false,
             list_outputs: ListOutputsFormat::None,
@@ -599,7 +598,7 @@ mod tests {
             template: Box::new(PathTemplate::new(
                 "output/{{nonexistent_column}}.parquet".to_string(),
             )),
-            exclude_partition_columns: false,
+            exclude_columns: vec![],
             create_dirs: false,
             overwrite: false,
             list_outputs: ListOutputsFormat::None,
@@ -662,7 +661,7 @@ mod tests {
             sink_factory: Box::new(sink_factory),
             columns: vec!["region".to_string()],
             template: Box::new(PathTemplate::new("output/{{region}}.parquet".to_string())),
-            exclude_partition_columns: false,
+            exclude_columns: vec![],
             create_dirs: false,
             overwrite: false,
             list_outputs: ListOutputsFormat::None,
