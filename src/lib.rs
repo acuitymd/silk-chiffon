@@ -7,7 +7,10 @@ pub mod sinks;
 pub mod sources;
 pub mod utils;
 
-use crate::utils::arrow_io::ArrowIPCFormat;
+use crate::utils::{
+    arrow_io::ArrowIPCFormat,
+    collections::{uniq, uniq_by},
+};
 use anyhow::{Result, anyhow};
 use arrow::ipc::CompressionType;
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -767,11 +770,8 @@ pub struct SortSpec {
 
 impl From<Vec<String>> for SortSpec {
     fn from(names: Vec<String>) -> Self {
-        let mut column_names = names.clone();
-        column_names.dedup_by(|a, b| a == b);
-
         Self {
-            columns: column_names
+            columns: uniq(&names)
                 .iter()
                 .map(|name| SortColumn {
                     name: name.clone(),
@@ -812,7 +812,7 @@ impl SortSpec {
 
     pub fn extend(&mut self, other: &Self) {
         self.columns.extend(other.columns.iter().cloned());
-        self.columns.dedup_by(|a, b| a.name == b.name);
+        self.columns = uniq_by(&self.columns, |c| &c.name);
     }
 }
 
@@ -854,9 +854,9 @@ impl FromStr for SortSpec {
             });
         }
 
-        columns.dedup_by(|a, b| a.name == b.name);
-
-        Ok(SortSpec { columns })
+        Ok(SortSpec {
+            columns: uniq_by(&columns, |c| &c.name),
+        })
     }
 }
 
