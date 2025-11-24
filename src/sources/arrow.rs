@@ -1,10 +1,9 @@
-use std::{
-    fs::File,
-    sync::{Arc, Mutex},
-};
+use std::fs::File;
+use std::sync::Arc;
 
-use anyhow::{Result, anyhow};
-use arrow::{datatypes::SchemaRef, ipc::reader::FileReader};
+use anyhow::Result;
+use arrow::datatypes::SchemaRef;
+use arrow::ipc::reader::{FileReader, StreamReader};
 use async_trait::async_trait;
 use datafusion::{
     catalog::TableProvider, execution::options::ArrowReadOptions, prelude::SessionContext,
@@ -14,42 +13,36 @@ use uuid::Uuid;
 use crate::sources::data_source::DataSource;
 
 #[derive(Debug)]
-pub struct ArrowFileDataSource {
+pub struct ArrowDataSource {
     path: String,
-    schema: Mutex<Option<SchemaRef>>,
 }
 
-impl ArrowFileDataSource {
+impl ArrowDataSource {
     pub fn new(path: String) -> Self {
-        Self {
-            path,
-            schema: Mutex::new(None),
-        }
+        Self { path }
     }
 }
 
 #[async_trait]
-impl DataSource for ArrowFileDataSource {
+impl DataSource for ArrowDataSource {
     fn name(&self) -> &str {
-        "arrow_file"
+        "arrow"
     }
 
     fn schema(&self) -> Result<SchemaRef> {
-        let mut guard = self
-            .schema
-            .lock()
-            .map_err(|e| anyhow!("Failed to lock schema: {}", e))?;
-        if let Some(ref schema) = *guard {
-            return Ok(Arc::clone(schema));
+        if let Ok(reader) = FileReader::try_new(File::open(&self.path)?, None) {
+            return Ok(reader.schema());
         }
-        let file = File::open(&self.path)?;
-        let reader = FileReader::try_new(file, None)?;
-        *guard = Some(reader.schema());
-        Ok(reader.schema())
+
+        if let Ok(reader) = StreamReader::try_new(File::open(&self.path)?, None) {
+            return Ok(reader.schema());
+        }
+
+        anyhow::bail!("Could not read Arrow file: {}", &self.path)
     }
 
     async fn as_table_provider(&self, ctx: &mut SessionContext) -> Result<Arc<dyn TableProvider>> {
-        let table_name = format!("arrow_file_{}", Uuid::new_v4().as_simple());
+        let table_name = format!("arrow_{}", Uuid::new_v4().as_simple());
         ctx.register_arrow(&table_name, &self.path, ArrowReadOptions::default())
             .await?;
         let table = ctx.table(&table_name).await?;
@@ -69,22 +62,31 @@ mod tests {
     use super::*;
 
     const TEST_ARROW_FILE_PATH: &str = "tests/files/people.file.arrow";
+    const TEST_ARROW_STREAM_PATH: &str = "tests/files/people.stream.arrow";
 
     #[test]
     fn test_new() {
-        let source = ArrowFileDataSource::new(TEST_ARROW_FILE_PATH.to_string());
+        let source = ArrowDataSource::new(TEST_ARROW_FILE_PATH.to_string());
         assert_eq!(source.path, TEST_ARROW_FILE_PATH);
     }
 
     #[test]
     fn test_name() {
-        let source = ArrowFileDataSource::new(TEST_ARROW_FILE_PATH.to_string());
-        assert_eq!(source.name(), "arrow_file");
+        let source = ArrowDataSource::new(TEST_ARROW_FILE_PATH.to_string());
+        assert_eq!(source.name(), "arrow");
     }
 
     #[tokio::test]
-    async fn test_as_table_provider() {
-        let source = ArrowFileDataSource::new(TEST_ARROW_FILE_PATH.to_string());
+    async fn test_as_table_provider_file_format() {
+        let source = ArrowDataSource::new(TEST_ARROW_FILE_PATH.to_string());
+        let mut ctx = SessionContext::new();
+        let table_provider = source.as_table_provider(&mut ctx).await.unwrap();
+        assert!(!table_provider.schema().fields().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_as_table_provider_stream_format() {
+        let source = ArrowDataSource::new(TEST_ARROW_STREAM_PATH.to_string());
         let mut ctx = SessionContext::new();
         let table_provider = source.as_table_provider(&mut ctx).await.unwrap();
         assert!(!table_provider.schema().fields().is_empty());
@@ -92,7 +94,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_as_table_provider_can_be_queried() {
-        let source = ArrowFileDataSource::new(TEST_ARROW_FILE_PATH.to_string());
+        let source = ArrowDataSource::new(TEST_ARROW_FILE_PATH.to_string());
         let mut ctx = SessionContext::new();
         let table_provider = source.as_table_provider(&mut ctx).await.unwrap();
 
@@ -108,8 +110,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_as_stream() {
-        let source = ArrowFileDataSource::new(TEST_ARROW_FILE_PATH.to_string());
+    async fn test_as_stream_file_format() {
+        let source = ArrowDataSource::new(TEST_ARROW_FILE_PATH.to_string());
+        let mut stream = source.as_stream().await.unwrap();
+
+        assert!(!stream.schema().fields().is_empty());
+        let batch = stream.next().await.unwrap().unwrap();
+        assert!(stream.next().await.is_none());
+        assert!(batch.num_rows() > 0);
+    }
+
+    #[tokio::test]
+    async fn test_as_stream_stream_format() {
+        let source = ArrowDataSource::new(TEST_ARROW_STREAM_PATH.to_string());
         let mut stream = source.as_stream().await.unwrap();
 
         assert!(!stream.schema().fields().is_empty());

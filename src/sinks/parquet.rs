@@ -466,7 +466,7 @@ mod tests {
 
             file_helpers::write_arrow_file(&input_path, &schema, vec![batch1, batch2]).unwrap();
 
-            let source = crate::sources::arrow_file::ArrowFileDataSource::new(
+            let source = crate::sources::arrow::ArrowDataSource::new(
                 input_path.to_str().unwrap().to_string(),
             );
             let stream = source.as_stream().await.unwrap();

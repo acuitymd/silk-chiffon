@@ -12,7 +12,7 @@ use datafusion::{
 };
 use futures::stream::{SelectAll, Stream, select_all};
 
-use crate::sources::{data_source::DataSource, prepared_source::PreparedSource};
+use crate::sources::data_source::DataSource;
 
 struct MergedSendableRecordBatchStreams {
     schema: SchemaRef,
@@ -42,16 +42,10 @@ impl InputStrategy {
     pub async fn as_table_provider(
         &self,
         ctx: &mut SessionContext,
-        working_directory: Option<String>,
+        _working_directory: Option<String>,
     ) -> Result<Arc<dyn TableProvider>> {
         match self {
-            InputStrategy::Single(source) => Ok(PreparedSource::from_data_source(
-                source.as_ref(),
-                ctx,
-                working_directory.clone(),
-            )
-            .await?
-            .table_provider()),
+            InputStrategy::Single(source) => source.as_table_provider(ctx).await,
             InputStrategy::Multiple(sources) => {
                 if sources.is_empty() {
                     anyhow::bail!("No sources provided");
@@ -60,19 +54,7 @@ impl InputStrategy {
                 let mut providers: Vec<Arc<dyn TableProvider>> = Vec::new();
 
                 for source in sources {
-                    providers.push(
-                        PreparedSource::from_data_source(
-                            source.as_ref(),
-                            ctx,
-                            working_directory.clone(),
-                        )
-                        .await?
-                        .table_provider(),
-                    );
-                }
-
-                if providers.is_empty() {
-                    anyhow::bail!("No providers available after preparation");
+                    providers.push(source.as_table_provider(ctx).await?);
                 }
 
                 let mut df: DataFrame = ctx.read_table(Arc::clone(&providers[0]))?;
