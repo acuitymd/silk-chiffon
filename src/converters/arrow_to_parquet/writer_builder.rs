@@ -500,7 +500,6 @@ mod tests {
 
     #[test]
     fn test_apply_bloom_filters_all_columns_with_user_ndv() {
-        // when user provides NDV, it should be applied to all columns from schema
         let bloom_config = BloomFilterConfig::All(AllColumnsBloomFilterConfig {
             fpp: 0.001,
             ndv: Some(5000),
@@ -516,7 +515,6 @@ mod tests {
             SortSpec::default(),
         );
 
-        // ndv_map is empty, but user NDV should still be applied
         let ndv_map = HashMap::new();
 
         let schema = create_test_schema();
@@ -528,7 +526,6 @@ mod tests {
 
     #[test]
     fn test_apply_bloom_filters_column_with_user_ndv() {
-        // when user provides NDV for specific column, it should override calculated NDV
         let bloom_config = BloomFilterConfig::Columns(vec![ColumnSpecificBloomFilterConfig {
             name: "id".to_string(),
             config: ColumnBloomFilterConfig {
@@ -547,7 +544,6 @@ mod tests {
             SortSpec::default(),
         );
 
-        // calculated NDV should be ignored when user provides NDV
         let mut ndv_map = HashMap::new();
         ndv_map.insert("id".to_string(), 500);
 

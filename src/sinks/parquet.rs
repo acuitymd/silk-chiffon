@@ -138,8 +138,12 @@ impl ParquetSink {
             .set_statistics_enabled(options.statistics.into())
             .set_dictionary_enabled(!options.no_dictionary);
 
-        writer_builder =
-            Self::apply_bloom_filters(writer_builder, &options.bloom_filters, &options.ndv_map)?;
+        writer_builder = Self::apply_bloom_filters(
+            writer_builder,
+            schema,
+            &options.bloom_filters,
+            &options.ndv_map,
+        )?;
 
         writer_builder = Self::apply_sort_metadata(&options.sort_spec, writer_builder, schema)?;
 
@@ -160,6 +164,7 @@ impl ParquetSink {
 
     fn apply_bloom_filters(
         mut builder: WriterPropertiesBuilder,
+        schema: &SchemaRef,
         bloom_filters: &BloomFilterConfig,
         ndv_map: &HashMap<String, u64>,
     ) -> Result<WriterPropertiesBuilder> {
@@ -171,11 +176,9 @@ impl ParquetSink {
                     .set_bloom_filter_enabled(true)
                     .set_bloom_filter_fpp(fpp);
 
-                // if user provided NDV, use it for all columns
-                // otherwise use calculated NDV from ndv_map if available
                 if let Some(user_ndv) = bloom_all.ndv {
-                    for col_name in ndv_map.keys() {
-                        let col_path = ColumnPath::from(col_name.as_str());
+                    for field in schema.fields() {
+                        let col_path = ColumnPath::from(field.name().as_str());
                         builder = builder.set_column_bloom_filter_ndv(col_path, user_ndv);
                     }
                 } else {
@@ -195,7 +198,6 @@ impl ParquetSink {
                         .set_column_bloom_filter_enabled(col_path.clone(), true)
                         .set_column_bloom_filter_fpp(col_path.clone(), fpp);
 
-                    // use user-provided NDV if available, otherwise use calculated NDV
                     let ndv = bloom_col
                         .config
                         .ndv
@@ -803,6 +805,67 @@ mod tests {
             }]);
 
             let options = ParquetSinkOptions::new().with_bloom_filters(bloom_filters);
+
+            let mut sink = ParquetSink::create(output_path.clone(), &schema, &options).unwrap();
+
+            sink.write_batch(batch).await.unwrap();
+            sink.finish().await.unwrap();
+
+            let file = read_entire_parquet_file(&output_path).unwrap();
+            assert!(file.has_any_bloom_filters);
+            assert!(file.row_groups[0].columns[0].has_bloom_filter);
+        }
+
+        #[tokio::test]
+        async fn test_sink_bloom_filter_all_columns_with_user_ndv() {
+            let temp_dir = tempdir().unwrap();
+            let output_path = temp_dir.path().join("output.parquet");
+
+            let schema = test_data::simple_schema();
+            let batch =
+                test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["a", "b", "c"]);
+
+            let bloom_filters = BloomFilterConfig::All(AllColumnsBloomFilterConfig {
+                fpp: 0.01,
+                ndv: Some(5000),
+            });
+
+            let options = ParquetSinkOptions::new().with_bloom_filters(bloom_filters);
+
+            let mut sink = ParquetSink::create(output_path.clone(), &schema, &options).unwrap();
+
+            sink.write_batch(batch).await.unwrap();
+            sink.finish().await.unwrap();
+
+            let file = read_entire_parquet_file(&output_path).unwrap();
+            assert!(file.has_any_bloom_filters);
+            assert!(file.row_groups[0].columns[0].has_bloom_filter);
+            assert!(file.row_groups[0].columns[1].has_bloom_filter);
+        }
+
+        #[tokio::test]
+        async fn test_sink_bloom_filter_column_with_user_ndv() {
+            let temp_dir = tempdir().unwrap();
+            let output_path = temp_dir.path().join("output.parquet");
+
+            let schema = test_data::simple_schema();
+            let batch =
+                test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["a", "b", "c"]);
+
+            let bloom_filters = BloomFilterConfig::Columns(vec![ColumnSpecificBloomFilterConfig {
+                name: "id".to_string(),
+                config: ColumnBloomFilterConfig {
+                    fpp: 0.01,
+                    ndv: Some(10000),
+                },
+            }]);
+
+            let mut ndv_map = HashMap::new();
+            ndv_map.insert("id".to_string(), 500);
+
+            let options = ParquetSinkOptions::new()
+                .with_bloom_filters(bloom_filters)
+                .with_ndv_map(ndv_map);
 
             let mut sink = ParquetSink::create(output_path.clone(), &schema, &options).unwrap();
 
