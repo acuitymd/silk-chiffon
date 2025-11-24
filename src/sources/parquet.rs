@@ -1,11 +1,16 @@
-use std::sync::Arc;
+use std::{
+    fs::File,
+    sync::{Arc, Mutex},
+};
 
 use anyhow::Result;
+use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use datafusion::{
     catalog::TableProvider,
     prelude::{ParquetReadOptions, SessionContext},
 };
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use uuid::Uuid;
 
 use crate::sources::data_source::DataSource;
@@ -13,11 +18,15 @@ use crate::sources::data_source::DataSource;
 #[derive(Debug)]
 pub struct ParquetDataSource {
     path: String,
+    schema: Mutex<Option<SchemaRef>>,
 }
 
 impl ParquetDataSource {
     pub fn new(path: String) -> Self {
-        Self { path }
+        Self {
+            path,
+            schema: Mutex::new(None),
+        }
     }
 }
 
@@ -25,6 +34,17 @@ impl ParquetDataSource {
 impl DataSource for ParquetDataSource {
     fn name(&self) -> &str {
         "parquet"
+    }
+
+    fn schema(&self) -> Result<SchemaRef> {
+        let mut guard = self.schema.lock().unwrap();
+        if let Some(ref schema) = *guard {
+            return Ok(Arc::clone(schema));
+        }
+        let file = File::open(&self.path)?;
+        let reader = ParquetRecordBatchReaderBuilder::try_new(file)?;
+        *guard = Some(Arc::clone(reader.schema()));
+        Ok(Arc::clone(reader.schema()))
     }
 
     async fn as_table_provider(&self, ctx: &mut SessionContext) -> Result<Arc<dyn TableProvider>> {

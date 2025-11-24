@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
+use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use datafusion::{
     catalog::TableProvider, execution::SendableRecordBatchStream, prelude::SessionContext,
@@ -9,6 +10,8 @@ use datafusion::{
 #[async_trait]
 pub trait DataSource: Send + Sync {
     fn name(&self) -> &str;
+
+    fn schema(&self) -> Result<SchemaRef>;
 
     async fn as_table_provider(&self, _ctx: &mut SessionContext) -> Result<Arc<dyn TableProvider>> {
         Err(anyhow!("as_table_provider is not implemented"))

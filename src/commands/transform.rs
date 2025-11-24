@@ -12,7 +12,7 @@ use crate::{
     sources::{
         arrow_file::ArrowFileDataSource, data_source::DataSource, parquet::ParquetDataSource,
     },
-    utils::{arrow_io::ArrowIPCFormat, filesystem::ensure_parent_dir_exists},
+    utils::arrow_io::ArrowIPCFormat,
 };
 use anyhow::{Result, anyhow};
 use arrow::datatypes::SchemaRef;
@@ -55,7 +55,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
 
     let mut pipeline = Pipeline::new().with_query_dialect(dialect);
 
-    match &input {
+    let setup_result: Result<()> = match &input {
         InputSpec::From { input, .. } => {
             let input_path = input
                 .path()
@@ -69,6 +69,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
             };
 
             pipeline = pipeline.with_input_strategy_with_single_source(source);
+            Ok(())
         }
         InputSpec::FromMany { inputs, .. } => {
             let mut expanded_paths = Vec::new();
@@ -83,29 +84,41 @@ pub async fn run(args: TransformCommand) -> Result<()> {
             expanded_paths.dedup();
 
             if expanded_paths.is_empty() {
-                anyhow::bail!("No input files found");
+                return Err(anyhow!("No input files found"));
             }
 
             let mut sources: Vec<Box<dyn DataSource>> = Vec::new();
+            let mut schema: Option<SchemaRef> = None;
             for input_path in expanded_paths {
                 let detected_input_format = detect_format(&input_path, input_format)?;
                 let source: Box<dyn DataSource> = match detected_input_format {
                     DataFormat::Arrow => Box::new(ArrowFileDataSource::new(input_path)),
                     DataFormat::Parquet => Box::new(ParquetDataSource::new(input_path)),
                 };
+                if let Some(ref schema) = schema {
+                    let source_schema = source.schema()?;
+                    if *schema != source_schema {
+                        return Err(anyhow!("Schema mismatch"));
+                    }
+                } else {
+                    schema = Some(source.schema()?);
+                }
                 sources.push(source);
             }
             pipeline = pipeline.with_input_strategy_with_multiple_sources(sources);
+            Ok(())
         }
-    }
+    };
 
-    let (output_spec, list_outputs_format) = match input {
-        InputSpec::From { to, .. } => (to, None),
-        InputSpec::FromMany { to, .. } => (to, None),
+    setup_result?;
+
+    let output_spec = match input {
+        InputSpec::From { to, .. } => to,
+        InputSpec::FromMany { to, .. } => to,
     };
 
     let list_outputs_format = match &output_spec {
-        OutputSpec::To { .. } => list_outputs_format,
+        OutputSpec::To { .. } => None,
         OutputSpec::ToMany { list_outputs, .. } => Some(*list_outputs),
     };
 
@@ -120,8 +133,6 @@ pub async fn run(args: TransformCommand) -> Result<()> {
 
     match output_spec {
         OutputSpec::To { output } => {
-            ensure_parent_dir_exists(output.path()).await?;
-
             let sink_factory = create_sink_factory(
                 output_format,
                 arrow_compression,
