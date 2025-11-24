@@ -97,14 +97,13 @@ impl ParquetWritePropertiesBuilder {
                     let col_path = ColumnPath::from(bloom_col.name.as_str());
                     let fpp = bloom_col.config.fpp;
 
-                    let ndv = ndv_map.get(&bloom_col.name).copied().ok_or_else(|| {
-                        anyhow!("NDV not available for column {}", bloom_col.name)
-                    })?;
-
                     builder = builder
                         .set_column_bloom_filter_enabled(col_path.clone(), true)
-                        .set_column_bloom_filter_fpp(col_path.clone(), fpp)
-                        .set_column_bloom_filter_ndv(col_path, ndv);
+                        .set_column_bloom_filter_fpp(col_path.clone(), fpp);
+
+                    if let Some(&ndv) = ndv_map.get(&bloom_col.name) {
+                        builder = builder.set_column_bloom_filter_ndv(col_path, ndv);
+                    }
                 }
                 Ok(builder)
             }
@@ -381,9 +380,9 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_bloom_filters_missing_ndv() {
+    fn test_apply_bloom_filters_without_ndv() {
         let bloom_config = BloomFilterConfig::Columns(vec![ColumnSpecificBloomFilterConfig {
-            name: "missing_column".to_string(),
+            name: "test_column".to_string(),
             config: ColumnBloomFilterConfig { fpp: 0.01 },
         }]);
 
@@ -402,14 +401,7 @@ mod tests {
         let props_builder = WriterProperties::builder();
         let result = builder.apply_bloom_filters(props_builder, &ndv_map);
 
-        assert!(result.is_err());
-        assert!(
-            result
-                .err()
-                .unwrap()
-                .to_string()
-                .contains("NDV not available for column missing_column")
-        );
+        assert!(result.is_ok());
     }
 
     #[test]

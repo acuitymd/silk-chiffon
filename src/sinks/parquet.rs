@@ -182,14 +182,13 @@ impl ParquetSink {
                     let col_path = ColumnPath::from(bloom_col.name.as_str());
                     let fpp = bloom_col.config.fpp;
 
-                    let ndv = ndv_map.get(&bloom_col.name).copied().ok_or_else(|| {
-                        anyhow!("NDV not available for column {}", bloom_col.name)
-                    })?;
-
                     builder = builder
                         .set_column_bloom_filter_enabled(col_path.clone(), true)
-                        .set_column_bloom_filter_fpp(col_path.clone(), fpp)
-                        .set_column_bloom_filter_ndv(col_path, ndv);
+                        .set_column_bloom_filter_fpp(col_path.clone(), fpp);
+
+                    if let Some(&ndv) = ndv_map.get(&bloom_col.name) {
+                        builder = builder.set_column_bloom_filter_ndv(col_path, ndv);
+                    }
                 }
                 Ok(builder)
             }
@@ -761,11 +760,13 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn test_sink_bloom_filter_missing_ndv() {
+        async fn test_sink_bloom_filter_without_ndv() {
             let temp_dir = tempdir().unwrap();
             let output_path = temp_dir.path().join("output.parquet");
 
             let schema = test_data::simple_schema();
+            let batch =
+                test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["a", "b", "c"]);
 
             let bloom_filters = BloomFilterConfig::Columns(vec![ColumnSpecificBloomFilterConfig {
                 name: "id".to_string(),
@@ -774,11 +775,14 @@ mod tests {
 
             let options = ParquetSinkOptions::new().with_bloom_filters(bloom_filters);
 
-            let result = ParquetSink::create(output_path.clone(), &schema, &options);
+            let mut sink = ParquetSink::create(output_path.clone(), &schema, &options).unwrap();
 
-            assert!(result.is_err());
-            let err = result.err().unwrap();
-            assert!(err.to_string().contains("NDV"));
+            sink.write_batch(batch).await.unwrap();
+            sink.finish().await.unwrap();
+
+            let file = read_entire_parquet_file(&output_path).unwrap();
+            assert!(file.has_any_bloom_filters);
+            assert!(file.row_groups[0].columns[0].has_bloom_filter);
         }
 
         #[tokio::test]
