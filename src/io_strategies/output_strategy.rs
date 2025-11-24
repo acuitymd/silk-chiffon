@@ -36,10 +36,12 @@ pub enum OutputStrategy {
 }
 
 impl OutputStrategy {
+    /// May only be called once. Each subsequent call will overwrite the previous output.
     pub async fn write(&mut self, df: DataFrame) -> Result<Vec<String>> {
         self.write_stream(df.execute_stream().await?).await
     }
 
+    /// May only be called once. Each subsequent call will overwrite the previous output.
     pub async fn write_stream(&mut self, stream: SendableRecordBatchStream) -> Result<Vec<String>> {
         match self {
             OutputStrategy::Single { path, sink_factory } => {
