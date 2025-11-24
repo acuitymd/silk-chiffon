@@ -1156,8 +1156,6 @@ async fn test_transform_sort_descending() {
     let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total_rows, 3);
 
-    // note: currently SortOperation always sorts ascending due to implementation limitation
-    // verify data is sorted (even if ascending)
     let mut all_ids = Vec::new();
     for batch in batches {
         let ids = batch
@@ -1169,9 +1167,10 @@ async fn test_transform_sort_descending() {
             all_ids.push(ids.value(i));
         }
     }
-    // verify sorted (currently always ascending)
+
     let mut sorted = all_ids.clone();
     sorted.sort();
+    sorted.reverse();
     assert_eq!(all_ids, sorted);
 }
 

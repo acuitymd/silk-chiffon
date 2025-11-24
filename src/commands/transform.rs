@@ -47,12 +47,6 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         BloomFilterConfig::None
     };
 
-    let parquet_sort_spec = if parquet_sorted_metadata {
-        sort_by.clone()
-    } else {
-        None
-    };
-
     let mut pipeline = Pipeline::new().with_query_dialect(dialect);
 
     let setup_result: Result<()> = match &input {
@@ -125,14 +119,29 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         OutputSpec::ToMany { list_outputs, .. } => Some(*list_outputs),
     };
 
-    let partition_columns_for_sort = match &output_spec {
-        OutputSpec::ToMany { by, .. } => Some(
+    let partition_sort_spec = match &output_spec {
+        OutputSpec::ToMany { by, .. } => SortSpec::from(
             by.split(',')
                 .map(|s| s.trim().to_string())
                 .collect::<Vec<_>>(),
         ),
-        _ => None,
+        _ => SortSpec::default(),
     };
+
+    let user_sort_spec = sort_by.clone().unwrap_or(SortSpec::default());
+
+    let user_sort_spec_without_partition_cols =
+        user_sort_spec.without_columns_named(&partition_sort_spec.column_names());
+
+    let parquet_sort_spec =
+        if parquet_sorted_metadata && !user_sort_spec_without_partition_cols.is_empty() {
+            Some(user_sort_spec_without_partition_cols.clone())
+        } else {
+            None
+        };
+
+    let mut full_sort_spec = partition_sort_spec.clone();
+    full_sort_spec.extend(&user_sort_spec_without_partition_cols);
 
     match output_spec {
         OutputSpec::To { output } => {
@@ -202,29 +211,8 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         pipeline = pipeline.with_operation(Box::new(QueryOperation::new(ctx_for_query, q)));
     }
 
-    let sort_columns = if let Some(mut partition_cols) = partition_columns_for_sort {
-        if let Some(sort_spec) = &sort_by {
-            let user_cols: Vec<String> = sort_spec
-                .columns
-                .iter()
-                .map(|c| c.name.clone())
-                .filter(|name| !partition_cols.contains(name))
-                .collect();
-            partition_cols.extend(user_cols);
-        }
-        if partition_cols.is_empty() {
-            None
-        } else {
-            Some(partition_cols)
-        }
-    } else {
-        sort_by
-            .as_ref()
-            .map(|sort_spec| sort_spec.columns.iter().map(|c| c.name.clone()).collect())
-    };
-
-    if let Some(columns) = sort_columns {
-        pipeline = pipeline.with_operation(Box::new(SortOperation::new(columns)));
+    if !full_sort_spec.is_empty() {
+        pipeline = pipeline.with_operation(Box::new(SortOperation::new(full_sort_spec.columns)));
     }
 
     let files = pipeline.execute().await?;

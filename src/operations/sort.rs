@@ -2,14 +2,14 @@ use anyhow::Result;
 use async_trait::async_trait;
 use datafusion::prelude::{DataFrame, col};
 
-use crate::operations::data_operation::DataOperation;
+use crate::{SortColumn, SortDirection, operations::data_operation::DataOperation};
 
 pub struct SortOperation {
-    columns: Vec<String>,
+    columns: Vec<SortColumn>,
 }
 
 impl SortOperation {
-    pub fn new(columns: Vec<String>) -> Self {
+    pub fn new(columns: Vec<SortColumn>) -> Self {
         Self { columns }
     }
 }
@@ -20,7 +20,7 @@ impl DataOperation for SortOperation {
         Ok(df.sort(
             self.columns
                 .iter()
-                .map(|c| col(c).sort(true, false))
+                .map(|c| col(&c.name).sort(c.direction == SortDirection::Ascending, false))
                 .collect(),
         )?)
     }

@@ -62,7 +62,7 @@ impl OutputStrategy {
                 let projected_column_indices: Option<Vec<usize>> = if !exclude_columns.is_empty() {
                     Some(
                         (0..schema.fields().len())
-                            .filter(|i| !exclude_columns.contains(&schema.field(*i).name()))
+                            .filter(|i| !exclude_columns.contains(schema.field(*i).name()))
                             .collect(),
                     )
                 } else {

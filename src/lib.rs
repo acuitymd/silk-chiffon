@@ -765,6 +765,23 @@ pub struct SortSpec {
     pub columns: Vec<SortColumn>,
 }
 
+impl From<Vec<String>> for SortSpec {
+    fn from(names: Vec<String>) -> Self {
+        let mut column_names = names.clone();
+        column_names.dedup_by(|a, b| a == b);
+
+        Self {
+            columns: column_names
+                .iter()
+                .map(|name| SortColumn {
+                    name: name.clone(),
+                    direction: SortDirection::Ascending,
+                })
+                .collect(),
+        }
+    }
+}
+
 impl SortSpec {
     pub fn is_empty(&self) -> bool {
         self.columns.is_empty()
@@ -772,6 +789,30 @@ impl SortSpec {
 
     pub fn is_configured(&self) -> bool {
         !self.is_empty()
+    }
+
+    pub fn contains(&self, column_name: &str) -> bool {
+        self.columns.iter().any(|c| c.name == column_name)
+    }
+
+    pub fn column_names(&self) -> Vec<String> {
+        self.columns.iter().map(|c| c.name.clone()).collect()
+    }
+
+    pub fn without_columns_named(&self, column_names: &[String]) -> Self {
+        Self {
+            columns: self
+                .columns
+                .iter()
+                .filter(|c| !column_names.contains(&c.name))
+                .cloned()
+                .collect(),
+        }
+    }
+
+    pub fn extend(&mut self, other: &Self) {
+        self.columns.extend(other.columns.iter().cloned());
+        self.columns.dedup_by(|a, b| a.name == b.name);
     }
 }
 
@@ -812,6 +853,8 @@ impl FromStr for SortSpec {
                 },
             });
         }
+
+        columns.dedup_by(|a, b| a.name == b.name);
 
         Ok(SortSpec { columns })
     }
