@@ -1,6 +1,6 @@
 use crate::{
-    ArrowCompression, BloomFilterConfig, DataFormat, InputSpec, OutputSpec, ParquetCompression,
-    ParquetStatistics, ParquetWriterVersion, SortSpec, TransformCommand,
+    ArrowCompression, BloomFilterConfig, DataFormat, InputSpec, ListOutputsFormat, OutputSpec,
+    ParquetCompression, ParquetStatistics, ParquetWriterVersion, SortSpec, TransformCommand,
     io_strategies::{output_strategy::SinkFactory, path_template::PathTemplate},
     operations::{query::QueryOperation, sort::SortOperation},
     pipeline::Pipeline,
@@ -84,9 +84,14 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         }
     }
 
-    let output_spec = match input {
-        InputSpec::From { to, .. } => to,
-        InputSpec::FromMany { to, .. } => to,
+    let (output_spec, list_outputs_format) = match input {
+        InputSpec::From { to, .. } => (to, None),
+        InputSpec::FromMany { to, .. } => (to, None),
+    };
+
+    let list_outputs_format = match &output_spec {
+        OutputSpec::To { .. } => list_outputs_format,
+        OutputSpec::ToMany { list_outputs, .. } => Some(*list_outputs),
     };
 
     match output_spec {
@@ -116,9 +121,9 @@ pub async fn run(args: TransformCommand) -> Result<()> {
             template,
             by,
             exclude_columns,
-            list_outputs: _,
-            create_dirs: _,
-            overwrite: _,
+            list_outputs,
+            create_dirs,
+            overwrite,
         } => {
             let partition_columns: Vec<String> =
                 by.split(',').map(|s| s.trim().to_string()).collect();
@@ -143,6 +148,9 @@ pub async fn run(args: TransformCommand) -> Result<()> {
                 path_template,
                 sink_factory,
                 !exclude_columns.is_empty(),
+                create_dirs,
+                overwrite,
+                list_outputs,
             );
         }
     }
@@ -157,7 +165,31 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         pipeline = pipeline.with_operation(Box::new(SortOperation::new(columns)));
     }
 
-    pipeline.execute().await
+    let files = pipeline.execute().await?;
+
+    if let Some(format) = list_outputs_format {
+        print_output_files(&files, format)?;
+    }
+
+    Ok(())
+}
+
+fn print_output_files(files: &[String], format: ListOutputsFormat) -> Result<()> {
+    match format {
+        ListOutputsFormat::None => {}
+        ListOutputsFormat::Text => {
+            let mut sorted_files = files.to_vec();
+            sorted_files.sort();
+            for file in sorted_files {
+                println!("{}", file);
+            }
+        }
+        ListOutputsFormat::Json => {
+            let json = serde_json::to_string_pretty(files)?;
+            println!("{}", json);
+        }
+    }
+    Ok(())
 }
 
 fn detect_format(path: &str, explicit_format: Option<DataFormat>) -> Result<DataFormat> {

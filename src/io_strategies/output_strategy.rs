@@ -1,16 +1,18 @@
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use arrow::datatypes::SchemaRef;
 use datafusion::{execution::SendableRecordBatchStream, prelude::DataFrame};
 use futures::StreamExt;
 
 use crate::{
+    ListOutputsFormat,
     io_strategies::{
         partitioner::{PartitionValues, Partitioner, partition_values_equal},
         path_template::PathTemplate,
     },
     sinks::data_sink::DataSink,
+    utils::filesystem::ensure_parent_dir_exists,
 };
 
 pub type TableName = String;
@@ -27,27 +29,33 @@ pub enum OutputStrategy {
         template: Box<PathTemplate>,
         sink_factory: SinkFactory,
         exclude_partition_columns: bool,
+        create_dirs: bool,
+        overwrite: bool,
+        list_outputs: ListOutputsFormat,
     },
 }
 
 impl OutputStrategy {
-    pub async fn write(&mut self, df: DataFrame) -> Result<()> {
+    pub async fn write(&mut self, df: DataFrame) -> Result<Vec<String>> {
         self.write_stream(df.execute_stream().await?).await
     }
 
-    pub async fn write_stream(&mut self, stream: SendableRecordBatchStream) -> Result<()> {
+    pub async fn write_stream(&mut self, stream: SendableRecordBatchStream) -> Result<Vec<String>> {
         match self {
             OutputStrategy::Single { path, sink_factory } => {
                 let schema = stream.schema();
                 let mut sink = sink_factory(path.clone(), schema)?;
                 sink.write_stream(stream).await?;
-                Ok(())
+                Ok(vec![path.clone()])
             }
             OutputStrategy::Partitioned {
                 sink_factory,
                 columns,
                 exclude_partition_columns,
                 template,
+                create_dirs,
+                overwrite,
+                list_outputs: _,
             } => {
                 let partitioner = Partitioner::new(columns.clone());
                 let schema = stream.schema();
@@ -64,6 +72,8 @@ impl OutputStrategy {
                 let mut partitioned_stream = partitioner.partition_stream(stream);
                 let mut current_sink: Option<Box<dyn DataSink>> = None;
                 let mut most_recent_partition_values: Option<PartitionValues> = None;
+                let mut created_files: Vec<String> = Vec::new();
+
                 while let Some(result) = partitioned_stream.next().await {
                     let (partition_values, mut batch) = result?;
                     if *exclude_partition_columns {
@@ -81,10 +91,29 @@ impl OutputStrategy {
                     }
 
                     if current_sink.is_none() {
+                        let output_path = template.resolve(&partition_values);
+
+                        if !*overwrite && std::path::Path::new(&output_path).exists() {
+                            anyhow::bail!(
+                                "Output file '{}' already exists. Use --overwrite to overwrite.",
+                                output_path
+                            );
+                        }
+
+                        if *create_dirs {
+                            ensure_parent_dir_exists(std::path::Path::new(&output_path))
+                                .await
+                                .context(format!(
+                                    "Failed to create parent directory for '{}'",
+                                    output_path
+                                ))?;
+                        }
+
                         current_sink = Some(sink_factory(
-                            template.resolve(&partition_values),
+                            output_path.clone(),
                             Arc::clone(&batch.schema()),
                         )?);
+                        created_files.push(output_path);
                     }
                     current_sink.as_mut().unwrap().write_batch(batch).await?;
                     most_recent_partition_values = Some(partition_values);
@@ -94,7 +123,7 @@ impl OutputStrategy {
                     current_sink.as_mut().unwrap().finish().await?;
                 }
 
-                Ok(())
+                Ok(created_files)
             }
         }
     }
@@ -185,6 +214,9 @@ mod tests {
             template: Box::new(PathTemplate::new("output/{{category}}.parquet".to_string())),
             sink_factory,
             exclude_partition_columns: false,
+            create_dirs: false,
+            overwrite: false,
+            list_outputs: ListOutputsFormat::None,
         };
 
         strategy.write_stream(stream).await.unwrap();
@@ -228,6 +260,9 @@ mod tests {
             template: Box::new(PathTemplate::new("output/{{category}}.parquet".to_string())),
             sink_factory,
             exclude_partition_columns: false,
+            create_dirs: false,
+            overwrite: false,
+            list_outputs: ListOutputsFormat::None,
         };
 
         strategy.write_stream(stream).await.unwrap();
@@ -273,6 +308,9 @@ mod tests {
             template: Box::new(PathTemplate::new("output/{{category}}.parquet".to_string())),
             sink_factory,
             exclude_partition_columns: true,
+            create_dirs: false,
+            overwrite: false,
+            list_outputs: ListOutputsFormat::None,
         };
 
         strategy.write_stream(stream).await.unwrap();
@@ -318,6 +356,9 @@ mod tests {
             template: Box::new(PathTemplate::new("output/{{region}}.parquet".to_string())),
             sink_factory,
             exclude_partition_columns: false,
+            create_dirs: false,
+            overwrite: false,
+            list_outputs: ListOutputsFormat::None,
         };
 
         strategy.write_stream(stream).await.unwrap();
@@ -371,6 +412,9 @@ mod tests {
             template: Box::new(PathTemplate::new("output/{{category}}.parquet".to_string())),
             sink_factory,
             exclude_partition_columns: false,
+            create_dirs: false,
+            overwrite: false,
+            list_outputs: ListOutputsFormat::None,
         };
 
         strategy.write_stream(stream).await.unwrap();
@@ -432,6 +476,9 @@ mod tests {
             template: Box::new(PathTemplate::new("output/{{category}}.parquet".to_string())),
             sink_factory,
             exclude_partition_columns: false,
+            create_dirs: false,
+            overwrite: false,
+            list_outputs: ListOutputsFormat::None,
         };
 
         strategy.write_stream(stream).await.unwrap();
@@ -496,6 +543,9 @@ mod tests {
             columns: vec!["region".to_string()],
             template: Box::new(PathTemplate::new("output/{{region}}.parquet".to_string())),
             exclude_partition_columns: false,
+            create_dirs: false,
+            overwrite: false,
+            list_outputs: ListOutputsFormat::None,
         };
 
         // should propagate the error
@@ -550,6 +600,9 @@ mod tests {
                 "output/{{nonexistent_column}}.parquet".to_string(),
             )),
             exclude_partition_columns: false,
+            create_dirs: false,
+            overwrite: false,
+            list_outputs: ListOutputsFormat::None,
         };
 
         // should propagate the error about missing column
@@ -610,6 +663,9 @@ mod tests {
             columns: vec!["region".to_string()],
             template: Box::new(PathTemplate::new("output/{{region}}.parquet".to_string())),
             exclude_partition_columns: false,
+            create_dirs: false,
+            overwrite: false,
+            list_outputs: ListOutputsFormat::None,
         };
 
         strategy.write_stream(stream).await.unwrap();
