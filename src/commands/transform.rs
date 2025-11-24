@@ -127,6 +127,8 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         _ => SortSpec::default(),
     };
 
+    let partition_columns = partition_sort_spec.column_names();
+
     let user_sort_spec = sort_by.clone().unwrap_or(SortSpec::default());
 
     let user_sort_spec_without_partition_cols =
@@ -142,22 +144,22 @@ pub async fn run(args: TransformCommand) -> Result<()> {
     let mut full_sort_spec = partition_sort_spec.clone();
     full_sort_spec.extend(&user_sort_spec_without_partition_cols);
 
+    let sink_factory = create_sink_factory(
+        output_format,
+        arrow_compression,
+        arrow_format,
+        arrow_record_batch_size,
+        parquet_compression,
+        parquet_row_group_size,
+        parquet_statistics,
+        parquet_writer_version,
+        parquet_no_dictionary,
+        bloom_filter,
+        parquet_sort_spec,
+    )?;
+
     match output_spec {
         OutputSpec::To { output } => {
-            let sink_factory = create_sink_factory(
-                output_format,
-                arrow_compression,
-                arrow_format,
-                arrow_record_batch_size,
-                parquet_compression,
-                parquet_row_group_size,
-                parquet_statistics,
-                parquet_writer_version,
-                parquet_no_dictionary,
-                bloom_filter,
-                parquet_sort_spec,
-            )?;
-
             pipeline = pipeline.with_output_strategy_with_single_sink(
                 output
                     .path()
@@ -169,29 +171,13 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         }
         OutputSpec::ToMany {
             template,
-            by,
+            by: _,
             exclude_columns,
             list_outputs,
             create_dirs,
             overwrite,
         } => {
-            let partition_columns: Vec<String> =
-                by.split(',').map(|s| s.trim().to_string()).collect();
             let path_template = PathTemplate::new(template);
-
-            let sink_factory = create_sink_factory(
-                output_format,
-                arrow_compression,
-                arrow_format,
-                arrow_record_batch_size,
-                parquet_compression,
-                parquet_row_group_size,
-                parquet_statistics,
-                parquet_writer_version,
-                parquet_no_dictionary,
-                bloom_filter,
-                parquet_sort_spec,
-            )?;
 
             pipeline = pipeline.with_output_strategy_with_partitioned_sink(
                 partition_columns,
