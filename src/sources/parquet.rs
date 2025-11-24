@@ -3,7 +3,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use datafusion::{
@@ -37,7 +37,10 @@ impl DataSource for ParquetDataSource {
     }
 
     fn schema(&self) -> Result<SchemaRef> {
-        let mut guard = self.schema.lock().unwrap();
+        let mut guard = self
+            .schema
+            .lock()
+            .map_err(|e| anyhow!("Failed to lock schema: {}", e))?;
         if let Some(ref schema) = *guard {
             return Ok(Arc::clone(schema));
         }

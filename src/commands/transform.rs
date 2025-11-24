@@ -151,7 +151,11 @@ pub async fn run(args: TransformCommand) -> Result<()> {
             )?;
 
             pipeline = pipeline.with_output_strategy_with_single_sink(
-                output.path().to_str().unwrap().to_string(),
+                output
+                    .path()
+                    .to_str()
+                    .ok_or_else(|| anyhow!("Invalid output path"))?
+                    .to_string(),
                 sink_factory,
             );
         }

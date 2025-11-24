@@ -251,7 +251,10 @@ impl DataSink for ParquetSink {
     }
 
     async fn write_batch(&mut self, batch: RecordBatch) -> Result<()> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|e| anyhow!("Failed to lock inner: {}", e))?;
         inner.writer.write(&batch)?;
         inner.rows_written += batch.num_rows() as u64;
 
@@ -259,7 +262,10 @@ impl DataSink for ParquetSink {
     }
 
     async fn finish(&mut self) -> Result<SinkResult> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|e| anyhow!("Failed to lock inner: {}", e))?;
         inner.writer.finish()?;
 
         Ok(SinkResult {

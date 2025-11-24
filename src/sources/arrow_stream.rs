@@ -6,7 +6,7 @@ use std::{
     thread,
 };
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use arrow::{array::RecordBatch, datatypes::SchemaRef, ipc::reader::StreamReader};
 use async_trait::async_trait;
 use datafusion::{
@@ -69,7 +69,10 @@ impl DataSource for ArrowStreamDataSource {
     }
 
     fn schema(&self) -> Result<SchemaRef> {
-        let mut guard = self.schema.lock().unwrap();
+        let mut guard = self
+            .schema
+            .lock()
+            .map_err(|e| anyhow!("Failed to lock schema: {}", e))?;
         if let Some(ref schema) = *guard {
             return Ok(Arc::clone(schema));
         }
