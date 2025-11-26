@@ -56,8 +56,17 @@ impl Pipeline {
         mut self,
         path: String,
         sink_factory: SinkFactory,
+        exclude_columns: Vec<String>,
+        create_dirs: bool,
+        overwrite: bool,
     ) -> Self {
-        self.output_strategy = Some(OutputStrategy::Single { path, sink_factory });
+        self.output_strategy = Some(OutputStrategy::Single {
+            path,
+            sink_factory,
+            exclude_columns,
+            create_dirs,
+            overwrite,
+        });
 
         self
     }

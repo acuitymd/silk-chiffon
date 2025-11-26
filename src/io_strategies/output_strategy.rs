@@ -23,6 +23,9 @@ pub enum OutputStrategy {
     Single {
         path: TableName,
         sink_factory: SinkFactory,
+        exclude_columns: Vec<String>,
+        create_dirs: bool,
+        overwrite: bool,
     },
     Partitioned {
         columns: Vec<String>,
@@ -44,10 +47,57 @@ impl OutputStrategy {
     /// May only be called once. Each subsequent call will overwrite the previous output.
     pub async fn write_stream(&mut self, stream: SendableRecordBatchStream) -> Result<Vec<String>> {
         match self {
-            OutputStrategy::Single { path, sink_factory } => {
-                let schema = stream.schema();
-                let mut sink = sink_factory(path.clone(), schema)?;
-                sink.write_stream(stream).await?;
+            OutputStrategy::Single {
+                path,
+                sink_factory,
+                exclude_columns,
+                create_dirs,
+                overwrite,
+            } => {
+                if !*overwrite && std::path::Path::new(path).exists() {
+                    anyhow::bail!(
+                        "Output file '{}' already exists. Use --overwrite to overwrite.",
+                        path
+                    );
+                }
+
+                if *create_dirs {
+                    ensure_parent_dir_exists(std::path::Path::new(path))
+                        .await
+                        .context(format!("Failed to create parent directory for '{}'", path))?;
+                }
+
+                let mut schema = stream.schema();
+
+                let projected_column_indices: Option<Vec<usize>> = if !exclude_columns.is_empty() {
+                    Some(
+                        (0..schema.fields().len())
+                            .filter(|i| !exclude_columns.contains(schema.field(*i).name()))
+                            .collect(),
+                    )
+                } else {
+                    None
+                };
+
+                if let Some(ref indices) = projected_column_indices {
+                    let projected_schema = Arc::new(schema.project(indices)?);
+                    schema = projected_schema;
+                }
+
+                let mut sink = sink_factory(path.clone(), Arc::clone(&schema))?;
+
+                if let Some(indices) = projected_column_indices {
+                    let mut stream = Box::pin(stream);
+                    while let Some(result) = stream.next().await {
+                        let batch = result?;
+                        let projected_batch = batch.project(&indices)?;
+                        sink.write_batch(projected_batch).await?;
+                    }
+                    sink.finish().await?;
+                } else {
+                    sink.write_stream(stream).await?;
+                }
+
                 Ok(vec![path.clone()])
             }
             OutputStrategy::Partitioned {

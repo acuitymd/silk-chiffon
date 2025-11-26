@@ -98,16 +98,16 @@ pub enum Commands {
     ///
     /// Examples:
     ///   # Simple conversion
-    ///   silk-chiffon transform from input.arrow to output.parquet
+    ///   silk-chiffon transform --from input.arrow --to output.parquet
     ///
     ///   # Merge multiple files
-    ///   silk-chiffon transform from-many file1.arrow file2.arrow to merged.parquet
+    ///   silk-chiffon transform --from-many file1.arrow --from-many file2.arrow --to merged.parquet
     ///
     ///   # Partition into multiple files
-    ///   silk-chiffon transform from input.arrow to-many "{{region}}.parquet" --by region
+    ///   silk-chiffon transform --from input.arrow --to-many "{{region}}.parquet" --by region
     ///
-    ///   # Merge and partition
-    ///   silk-chiffon transform from-many *.arrow to-many "{{year}}/{{month}}.parquet" --by year,month
+    ///   # Merge and partition with glob
+    ///   silk-chiffon transform --from-many '*.arrow' --to-many "{{year}}/{{month}}.parquet" --by year,month
     #[command(verbatim_doc_comment)]
     Transform(TransformCommand),
 }
@@ -1091,8 +1091,46 @@ impl BloomFilterConfig {
 
 #[derive(Args, Debug)]
 pub struct TransformCommand {
-    #[command(subcommand)]
-    pub input: InputSpec,
+    /// Single input file path.
+    #[arg(long, conflicts_with_all = ["from_many"], required_unless_present = "from_many")]
+    pub from: Option<String>,
+
+    /// Multiple input file paths (supports glob patterns). Can be specified multiple times.
+    #[arg(long, conflicts_with = "from", required_unless_present = "from")]
+    pub from_many: Vec<String>,
+
+    /// Single output file path.
+    #[arg(long, conflicts_with_all = ["to_many", "by"], required_unless_present = "to_many")]
+    pub to: Option<String>,
+
+    /// Output path template for partitioning (e.g., "{{region}}.parquet"). Requires --by.
+    #[arg(
+        long,
+        conflicts_with = "to",
+        requires = "by",
+        required_unless_present = "to"
+    )]
+    pub to_many: Option<String>,
+
+    /// Column(s) to partition by (comma-separated for multi-column partitioning).
+    #[arg(long, short, requires = "to_many")]
+    pub by: Option<String>,
+
+    /// Names of columns to exclude from the output.
+    #[arg(long, short = 'e')]
+    pub exclude_columns: Vec<String>,
+
+    /// List the output files after creation (only with --to-many).
+    #[arg(long, short = 'l', value_enum, requires = "to_many")]
+    pub list_outputs: Option<ListOutputsFormat>,
+
+    /// Create directories as needed.
+    #[arg(long, default_value_t = true)]
+    pub create_dirs: bool,
+
+    /// Overwrite existing files.
+    #[arg(long)]
+    pub overwrite: bool,
 
     /// SQL query to apply to the data. The input data is available as table 'data'.
     ///
@@ -1203,75 +1241,6 @@ pub struct TransformCommand {
     /// Requires --sort-by to be set.
     #[arg(long, default_value_t = false, requires = "sort_by")]
     pub parquet_sorted_metadata: bool,
-}
-
-#[derive(Subcommand, Debug)]
-pub enum InputSpec {
-    /// Single input file to single or partitioned output.
-    From {
-        /// Input file path.
-        #[arg(value_parser = clap::value_parser!(clio::Input).exists().is_file())]
-        input: clio::Input,
-
-        #[command(subcommand)]
-        to: OutputSpec,
-    },
-
-    /// Multiple input files (merge) to single or partitioned output.
-    FromMany {
-        /// Input file paths (supports glob patterns).
-        inputs: Vec<String>,
-
-        #[command(subcommand)]
-        to: OutputSpec,
-    },
-}
-
-#[derive(Subcommand, Debug)]
-pub enum OutputSpec {
-    /// Single output file.
-    To {
-        /// Output file path.
-        #[arg(value_parser)]
-        output: clio::OutputPath,
-    },
-
-    /// Partitioned output (multiple files based on column values).
-    ToMany {
-        /// Output path template with {{column}} placeholders.
-        ///
-        /// Examples:
-        ///   "{{region}}.parquet"
-        ///   "year={{year}}/month={{month}}/data.parquet"
-        ///   "{{region | raw}}/data.parquet"  # Bypass sanitization
-        #[arg(verbatim_doc_comment)]
-        template: String,
-
-        /// Partition by column(s) (comma-separated for multi-column).
-        ///
-        /// Examples:
-        ///   --by region
-        ///   --by year,month
-        ///   --by country,state,city
-        #[arg(short, long, verbatim_doc_comment)]
-        by: String,
-
-        /// Names of columns to exclude from the output.
-        #[arg(short, long)]
-        exclude_columns: Vec<String>,
-
-        /// List the output files after creation.
-        #[arg(short, long, value_enum, default_value_t)]
-        list_outputs: ListOutputsFormat,
-
-        /// Create directories as needed.
-        #[arg(long, default_value_t = true)]
-        create_dirs: bool,
-
-        /// Overwrite existing files.
-        #[arg(long, default_value_t = false)]
-        overwrite: bool,
-    },
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug)]

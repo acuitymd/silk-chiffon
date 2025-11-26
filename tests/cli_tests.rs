@@ -1,6 +1,52 @@
+use arrow::array::{Int32Array, RecordBatch, StringArray};
+use arrow::datatypes::{DataType, Field, Schema};
 use assert_cmd::cargo;
 use predicates::prelude::*;
+use std::fs::File;
+use std::path::Path;
+use std::sync::Arc;
 use tempfile::TempDir;
+
+// helper functions for creating test data
+fn simple_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int32, false),
+        Field::new("name", DataType::Utf8, false),
+    ]))
+}
+
+fn create_batch(schema: &Arc<Schema>, ids: &[i32], names: &[&str]) -> RecordBatch {
+    RecordBatch::try_new(
+        Arc::clone(schema),
+        vec![
+            Arc::new(Int32Array::from(ids.to_vec())),
+            Arc::new(StringArray::from(names.to_vec())),
+        ],
+    )
+    .unwrap()
+}
+
+fn write_arrow_file(path: &Path, schema: &Arc<Schema>, batches: Vec<RecordBatch>) {
+    use arrow::ipc::writer::FileWriter;
+
+    let file = File::create(path).unwrap();
+    let mut writer = FileWriter::try_new(file, schema).unwrap();
+    for batch in batches {
+        writer.write(&batch).unwrap();
+    }
+    writer.finish().unwrap();
+}
+
+fn write_parquet_file(path: &Path, schema: &Arc<Schema>, batches: Vec<RecordBatch>) {
+    use parquet::arrow::ArrowWriter;
+
+    let file = File::create(path).unwrap();
+    let mut writer = ArrowWriter::try_new(file, Arc::clone(schema), None).unwrap();
+    for batch in batches {
+        writer.write(&batch).unwrap();
+    }
+    writer.close().unwrap();
+}
 
 #[test]
 fn test_help_command() {
@@ -186,4 +232,467 @@ fn test_partition_arrow_to_parquet_non_existent_input() {
     .assert()
     .failure()
     .stderr(predicate::str::contains("No such file or directory"));
+}
+
+#[test]
+fn test_transform_help() {
+    let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
+    cmd.args(["transform", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Transform data between formats"))
+        .stdout(predicate::str::contains("Single input file"))
+        .stdout(predicate::str::contains("Multiple input file"))
+        .stdout(predicate::str::contains("Single output file"))
+        .stdout(predicate::str::contains(
+            "Output path template for partitioning",
+        ));
+}
+
+#[test]
+fn test_transform_missing_args() {
+    let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
+    cmd.arg("transform")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("required").or(predicate::str::contains("Usage:")));
+}
+
+#[test]
+fn test_transform_from_missing_to() {
+    let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
+    cmd.args(["transform", "--from", "/non/existent/file.arrow"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("required").or(predicate::str::contains("Usage:")));
+}
+
+#[test]
+fn test_transform_from_many_missing_to() {
+    let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
+    cmd.args(["transform", "--from-many", "*.arrow"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("required").or(predicate::str::contains("Usage:")));
+}
+
+// end-to-end CLI tests for transform command variations
+
+#[test]
+fn test_transform_from_to_arrow_to_arrow() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let output = temp_dir.path().join("output.arrow");
+
+    let schema = simple_schema();
+    let batch = create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
+    write_arrow_file(&input, &schema, vec![batch]);
+
+    let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
+    cmd.args([
+        "transform",
+        "--from",
+        input.to_str().unwrap(),
+        "--to",
+        output.to_str().unwrap(),
+    ])
+    .assert()
+    .success();
+
+    assert!(output.exists());
+    assert!(std::fs::metadata(&output).unwrap().len() > 0);
+}
+
+#[test]
+fn test_transform_from_to_arrow_to_parquet() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let output = temp_dir.path().join("output.parquet");
+
+    let schema = simple_schema();
+    let batch = create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
+    write_arrow_file(&input, &schema, vec![batch]);
+
+    let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
+    cmd.args([
+        "transform",
+        "--from",
+        input.to_str().unwrap(),
+        "--to",
+        output.to_str().unwrap(),
+    ])
+    .assert()
+    .success();
+
+    assert!(output.exists());
+    assert!(std::fs::metadata(&output).unwrap().len() > 0);
+}
+
+#[test]
+fn test_transform_from_to_parquet_to_arrow() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.parquet");
+    let output = temp_dir.path().join("output.arrow");
+
+    let schema = simple_schema();
+    let batch = create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
+    write_parquet_file(&input, &schema, vec![batch]);
+
+    let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
+    cmd.args([
+        "transform",
+        "--from",
+        input.to_str().unwrap(),
+        "--to",
+        output.to_str().unwrap(),
+    ])
+    .assert()
+    .success();
+
+    assert!(output.exists());
+    assert!(std::fs::metadata(&output).unwrap().len() > 0);
+}
+
+#[test]
+fn test_transform_from_to_parquet_to_parquet() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.parquet");
+    let output = temp_dir.path().join("output.parquet");
+
+    let schema = simple_schema();
+    let batch = create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
+    write_parquet_file(&input, &schema, vec![batch]);
+
+    let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
+    cmd.args([
+        "transform",
+        "--from",
+        input.to_str().unwrap(),
+        "--to",
+        output.to_str().unwrap(),
+    ])
+    .assert()
+    .success();
+
+    assert!(output.exists());
+    assert!(std::fs::metadata(&output).unwrap().len() > 0);
+}
+
+#[test]
+fn test_transform_from_many_to_arrow() {
+    let temp_dir = TempDir::new().unwrap();
+    let input1 = temp_dir.path().join("input1.arrow");
+    let input2 = temp_dir.path().join("input2.arrow");
+    let output = temp_dir.path().join("output.arrow");
+
+    let schema = simple_schema();
+    let batch1 = create_batch(&schema, &[1, 2], &["a", "b"]);
+    let batch2 = create_batch(&schema, &[3, 4], &["c", "d"]);
+    write_arrow_file(&input1, &schema, vec![batch1]);
+    write_arrow_file(&input2, &schema, vec![batch2]);
+
+    let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
+    cmd.args([
+        "transform",
+        "--from-many",
+        input1.to_str().unwrap(),
+        "--from-many",
+        input2.to_str().unwrap(),
+        "--to",
+        output.to_str().unwrap(),
+    ])
+    .assert()
+    .success();
+
+    assert!(output.exists());
+    assert!(std::fs::metadata(&output).unwrap().len() > 0);
+}
+
+#[test]
+fn test_transform_from_many_to_parquet() {
+    let temp_dir = TempDir::new().unwrap();
+    let input1 = temp_dir.path().join("input1.arrow");
+    let input2 = temp_dir.path().join("input2.arrow");
+    let output = temp_dir.path().join("output.parquet");
+
+    let schema = simple_schema();
+    let batch1 = create_batch(&schema, &[1, 2], &["a", "b"]);
+    let batch2 = create_batch(&schema, &[3, 4], &["c", "d"]);
+    write_arrow_file(&input1, &schema, vec![batch1]);
+    write_arrow_file(&input2, &schema, vec![batch2]);
+
+    let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
+    cmd.args([
+        "transform",
+        "--from-many",
+        input1.to_str().unwrap(),
+        "--from-many",
+        input2.to_str().unwrap(),
+        "--to",
+        output.to_str().unwrap(),
+    ])
+    .assert()
+    .success();
+
+    assert!(output.exists());
+    assert!(std::fs::metadata(&output).unwrap().len() > 0);
+}
+
+#[test]
+fn test_transform_from_many_glob_to_arrow() {
+    let temp_dir = TempDir::new().unwrap();
+    let input1 = temp_dir.path().join("input1.arrow");
+    let input2 = temp_dir.path().join("input2.arrow");
+    let output = temp_dir.path().join("output.arrow");
+
+    let schema = simple_schema();
+    let batch1 = create_batch(&schema, &[1, 2], &["a", "b"]);
+    let batch2 = create_batch(&schema, &[3, 4], &["c", "d"]);
+    write_arrow_file(&input1, &schema, vec![batch1]);
+    write_arrow_file(&input2, &schema, vec![batch2]);
+
+    let glob_pattern = temp_dir.path().join("*.arrow");
+
+    let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
+    cmd.args([
+        "transform",
+        "--from-many",
+        glob_pattern.to_str().unwrap(),
+        "--to",
+        output.to_str().unwrap(),
+    ])
+    .assert()
+    .success();
+
+    assert!(output.exists());
+    assert!(std::fs::metadata(&output).unwrap().len() > 0);
+}
+
+#[test]
+fn test_transform_from_to_many_arrow_partitioned() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let output_template = temp_dir.path().join("{{name}}.arrow");
+
+    let schema = simple_schema();
+    let batch = create_batch(&schema, &[1, 2, 3], &["a", "b", "a"]);
+    write_arrow_file(&input, &schema, vec![batch]);
+
+    let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
+    cmd.args([
+        "transform",
+        "--from",
+        input.to_str().unwrap(),
+        "--to-many",
+        output_template.to_str().unwrap(),
+        "--by",
+        "name",
+    ])
+    .assert()
+    .success();
+
+    // check that partition files were created
+    let output_a = temp_dir.path().join("a.arrow");
+    let output_b = temp_dir.path().join("b.arrow");
+    assert!(output_a.exists());
+    assert!(output_b.exists());
+}
+
+#[test]
+fn test_transform_from_to_many_parquet_partitioned() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let output_template = temp_dir.path().join("{{name}}.parquet");
+
+    let schema = simple_schema();
+    let batch = create_batch(&schema, &[1, 2, 3], &["a", "b", "a"]);
+    write_arrow_file(&input, &schema, vec![batch]);
+
+    let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
+    cmd.args([
+        "transform",
+        "--from",
+        input.to_str().unwrap(),
+        "--to-many",
+        output_template.to_str().unwrap(),
+        "--by",
+        "name",
+    ])
+    .assert()
+    .success();
+
+    // check that partition files were created
+    let output_a = temp_dir.path().join("a.parquet");
+    let output_b = temp_dir.path().join("b.parquet");
+    assert!(output_a.exists());
+    assert!(output_b.exists());
+}
+
+#[test]
+fn test_transform_from_many_to_many_partitioned() {
+    let temp_dir = TempDir::new().unwrap();
+    let input1 = temp_dir.path().join("input1.arrow");
+    let input2 = temp_dir.path().join("input2.arrow");
+    let output_template = temp_dir.path().join("{{name}}.parquet");
+
+    let schema = simple_schema();
+    let batch1 = create_batch(&schema, &[1, 2], &["a", "b"]);
+    let batch2 = create_batch(&schema, &[3, 4], &["a", "c"]);
+    write_arrow_file(&input1, &schema, vec![batch1]);
+    write_arrow_file(&input2, &schema, vec![batch2]);
+
+    let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
+    cmd.args([
+        "transform",
+        "--from-many",
+        input1.to_str().unwrap(),
+        "--from-many",
+        input2.to_str().unwrap(),
+        "--to-many",
+        output_template.to_str().unwrap(),
+        "--by",
+        "name",
+    ])
+    .assert()
+    .success();
+
+    // check that partition files were created
+    let output_a = temp_dir.path().join("a.parquet");
+    let output_b = temp_dir.path().join("b.parquet");
+    let output_c = temp_dir.path().join("c.parquet");
+    assert!(output_a.exists());
+    assert!(output_b.exists());
+    assert!(output_c.exists());
+}
+
+#[test]
+fn test_transform_with_query() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let output = temp_dir.path().join("output.arrow");
+
+    let schema = simple_schema();
+    let batch = create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
+    write_arrow_file(&input, &schema, vec![batch]);
+
+    let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
+    cmd.args([
+        "transform",
+        "--query",
+        "SELECT * FROM data WHERE id > 1",
+        "--from",
+        input.to_str().unwrap(),
+        "--to",
+        output.to_str().unwrap(),
+    ])
+    .assert()
+    .success();
+
+    assert!(output.exists());
+}
+
+#[test]
+fn test_transform_with_sort() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let output = temp_dir.path().join("output.arrow");
+
+    let schema = simple_schema();
+    let batch = create_batch(&schema, &[3, 1, 2], &["c", "a", "b"]);
+    write_arrow_file(&input, &schema, vec![batch]);
+
+    let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
+    cmd.args([
+        "transform",
+        "--sort-by",
+        "id",
+        "--from",
+        input.to_str().unwrap(),
+        "--to",
+        output.to_str().unwrap(),
+    ])
+    .assert()
+    .success();
+
+    assert!(output.exists());
+}
+
+#[test]
+fn test_transform_with_arrow_compression() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let output = temp_dir.path().join("output.arrow");
+
+    let schema = simple_schema();
+    let batch = create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
+    write_arrow_file(&input, &schema, vec![batch]);
+
+    let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
+    cmd.args([
+        "transform",
+        "--arrow-compression",
+        "zstd",
+        "--from",
+        input.to_str().unwrap(),
+        "--to",
+        output.to_str().unwrap(),
+    ])
+    .assert()
+    .success();
+
+    assert!(output.exists());
+}
+
+#[test]
+fn test_transform_with_parquet_compression() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let output = temp_dir.path().join("output.parquet");
+
+    let schema = simple_schema();
+    let batch = create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
+    write_arrow_file(&input, &schema, vec![batch]);
+
+    let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
+    cmd.args([
+        "transform",
+        "--parquet-compression",
+        "snappy",
+        "--from",
+        input.to_str().unwrap(),
+        "--to",
+        output.to_str().unwrap(),
+    ])
+    .assert()
+    .success();
+
+    assert!(output.exists());
+}
+
+#[test]
+fn test_transform_explicit_formats() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.data");
+    let output = temp_dir.path().join("output.data");
+
+    let schema = simple_schema();
+    let batch = create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
+    write_arrow_file(&input, &schema, vec![batch]);
+
+    let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
+    cmd.args([
+        "transform",
+        "--input-format",
+        "arrow",
+        "--output-format",
+        "parquet",
+        "--from",
+        input.to_str().unwrap(),
+        "--to",
+        output.to_str().unwrap(),
+    ])
+    .assert()
+    .success();
+
+    assert!(output.exists());
 }

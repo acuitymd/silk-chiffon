@@ -106,12 +106,15 @@ async fn test_transform_arrow_to_arrow_basic() {
     test_helpers::write_arrow_file(&input, &schema, vec![batch]);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        input: silk_chiffon::InputSpec::From {
-            input: clio::Input::new(&input).unwrap(),
-            to: silk_chiffon::OutputSpec::To {
-                output: clio::OutputPath::new(&output).unwrap(),
-            },
-        },
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: Some(output.to_string_lossy().to_string()),
+        to_many: None,
+        by: None,
+        exclude_columns: vec![],
+        list_outputs: None,
+        create_dirs: true,
+        overwrite: false,
         query: None,
         dialect: QueryDialect::default(),
         sort_by: None,
@@ -148,12 +151,15 @@ async fn test_transform_arrow_to_parquet() {
     test_helpers::write_arrow_file(&input, &schema, vec![batch]);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        input: silk_chiffon::InputSpec::From {
-            input: clio::Input::new(&input).unwrap(),
-            to: silk_chiffon::OutputSpec::To {
-                output: clio::OutputPath::new(&output).unwrap(),
-            },
-        },
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: Some(output.to_string_lossy().to_string()),
+        to_many: None,
+        by: None,
+        exclude_columns: vec![],
+        list_outputs: None,
+        create_dirs: true,
+        overwrite: false,
         query: None,
         dialect: QueryDialect::default(),
         sort_by: None,
@@ -191,12 +197,15 @@ async fn test_transform_parquet_to_arrow() {
     test_helpers::write_parquet_file(&input, &schema, vec![batch]);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        input: silk_chiffon::InputSpec::From {
-            input: clio::Input::new(&input).unwrap(),
-            to: silk_chiffon::OutputSpec::To {
-                output: clio::OutputPath::new(&output).unwrap(),
-            },
-        },
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: Some(output.to_string_lossy().to_string()),
+        to_many: None,
+        by: None,
+        exclude_columns: vec![],
+        list_outputs: None,
+        create_dirs: true,
+        overwrite: false,
         query: None,
         dialect: QueryDialect::default(),
         sort_by: None,
@@ -233,12 +242,15 @@ async fn test_transform_parquet_to_parquet() {
     test_helpers::write_parquet_file(&input, &schema, vec![batch]);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        input: silk_chiffon::InputSpec::From {
-            input: clio::Input::new(&input).unwrap(),
-            to: silk_chiffon::OutputSpec::To {
-                output: clio::OutputPath::new(&output).unwrap(),
-            },
-        },
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: Some(output.to_string_lossy().to_string()),
+        to_many: None,
+        by: None,
+        exclude_columns: vec![],
+        list_outputs: None,
+        create_dirs: true,
+        overwrite: false,
         query: None,
         dialect: QueryDialect::default(),
         sort_by: None,
@@ -279,15 +291,18 @@ async fn test_transform_from_many_basic() {
     test_helpers::write_arrow_file(&input2, &schema, vec![batch2]);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        input: silk_chiffon::InputSpec::FromMany {
-            inputs: vec![
-                input1.to_string_lossy().to_string(),
-                input2.to_string_lossy().to_string(),
-            ],
-            to: silk_chiffon::OutputSpec::To {
-                output: clio::OutputPath::new(&output).unwrap(),
-            },
-        },
+        from: None,
+        from_many: vec![
+            input1.to_string_lossy().to_string(),
+            input2.to_string_lossy().to_string(),
+        ],
+        to: Some(output.to_string_lossy().to_string()),
+        to_many: None,
+        by: None,
+        exclude_columns: vec![],
+        list_outputs: None,
+        create_dirs: true,
+        overwrite: false,
         query: None,
         dialect: QueryDialect::default(),
         sort_by: None,
@@ -332,12 +347,15 @@ async fn test_transform_from_many_with_glob() {
     let glob_pattern = temp_dir.path().join("file*.arrow");
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        input: silk_chiffon::InputSpec::FromMany {
-            inputs: vec![glob_pattern.to_string_lossy().to_string()],
-            to: silk_chiffon::OutputSpec::To {
-                output: clio::OutputPath::new(&output).unwrap(),
-            },
-        },
+        from: None,
+        from_many: vec![glob_pattern.to_string_lossy().to_string()],
+        to: Some(output.to_string_lossy().to_string()),
+        to_many: None,
+        by: None,
+        exclude_columns: vec![],
+        list_outputs: None,
+        create_dirs: true,
+        overwrite: false,
         query: None,
         dialect: QueryDialect::default(),
         sort_by: None,
@@ -375,17 +393,15 @@ async fn test_transform_to_many_partitioned() {
     let template = temp_dir.path().join("{{name}}.arrow");
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        input: silk_chiffon::InputSpec::From {
-            input: clio::Input::new(&input).unwrap(),
-            to: silk_chiffon::OutputSpec::ToMany {
-                template: template.to_string_lossy().to_string(),
-                by: "name".to_string(),
-                exclude_columns: vec![],
-                list_outputs: ListOutputsFormat::None,
-                create_dirs: false,
-                overwrite: false,
-            },
-        },
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: None,
+        to_many: Some(template.to_string_lossy().to_string()),
+        by: Some("name".to_string()),
+        exclude_columns: vec![],
+        list_outputs: None,
+        create_dirs: false,
+        overwrite: false,
         query: None,
         dialect: QueryDialect::default(),
         sort_by: None,
@@ -430,12 +446,15 @@ async fn test_transform_with_query() {
     test_helpers::write_arrow_file(&input, &schema, vec![batch]);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        input: silk_chiffon::InputSpec::From {
-            input: clio::Input::new(&input).unwrap(),
-            to: silk_chiffon::OutputSpec::To {
-                output: clio::OutputPath::new(&output).unwrap(),
-            },
-        },
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: Some(output.to_string_lossy().to_string()),
+        to_many: None,
+        by: None,
+        exclude_columns: vec![],
+        list_outputs: None,
+        create_dirs: true,
+        overwrite: false,
         query: Some("SELECT * FROM data WHERE id > 1".to_string()),
         dialect: QueryDialect::default(),
         sort_by: None,
@@ -472,12 +491,15 @@ async fn test_transform_with_sorting() {
     test_helpers::write_arrow_file(&input, &schema, vec![batch]);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        input: silk_chiffon::InputSpec::From {
-            input: clio::Input::new(&input).unwrap(),
-            to: silk_chiffon::OutputSpec::To {
-                output: clio::OutputPath::new(&output).unwrap(),
-            },
-        },
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: Some(output.to_string_lossy().to_string()),
+        to_many: None,
+        by: None,
+        exclude_columns: vec![],
+        list_outputs: None,
+        create_dirs: true,
+        overwrite: false,
         query: None,
         dialect: QueryDialect::default(),
         sort_by: Some(SortSpec {
@@ -526,12 +548,15 @@ async fn test_transform_with_arrow_compression() {
     test_helpers::write_arrow_file(&input, &schema, vec![batch]);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        input: silk_chiffon::InputSpec::From {
-            input: clio::Input::new(&input).unwrap(),
-            to: silk_chiffon::OutputSpec::To {
-                output: clio::OutputPath::new(&output).unwrap(),
-            },
-        },
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: Some(output.to_string_lossy().to_string()),
+        to_many: None,
+        by: None,
+        exclude_columns: vec![],
+        list_outputs: None,
+        create_dirs: true,
+        overwrite: false,
         query: None,
         dialect: QueryDialect::default(),
         sort_by: None,
@@ -572,12 +597,15 @@ async fn test_transform_with_parquet_bloom_filters() {
     test_helpers::write_arrow_file(&input, &schema, vec![batch]);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        input: silk_chiffon::InputSpec::From {
-            input: clio::Input::new(&input).unwrap(),
-            to: silk_chiffon::OutputSpec::To {
-                output: clio::OutputPath::new(&output).unwrap(),
-            },
-        },
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: Some(output.to_string_lossy().to_string()),
+        to_many: None,
+        by: None,
+        exclude_columns: vec![],
+        list_outputs: None,
+        create_dirs: true,
+        overwrite: false,
         query: None,
         dialect: QueryDialect::default(),
         sort_by: None,
@@ -621,12 +649,15 @@ async fn test_transform_with_sorted_metadata() {
     test_helpers::write_arrow_file(&input, &schema, vec![batch]);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        input: silk_chiffon::InputSpec::From {
-            input: clio::Input::new(&input).unwrap(),
-            to: silk_chiffon::OutputSpec::To {
-                output: clio::OutputPath::new(&output).unwrap(),
-            },
-        },
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: Some(output.to_string_lossy().to_string()),
+        to_many: None,
+        by: None,
+        exclude_columns: vec![],
+        list_outputs: None,
+        create_dirs: true,
+        overwrite: false,
         query: None,
         dialect: QueryDialect::default(),
         sort_by: Some(SortSpec {
@@ -672,17 +703,15 @@ async fn test_transform_partition_with_create_dirs() {
     let template = temp_dir.path().join("nested/{{name}}.arrow");
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        input: silk_chiffon::InputSpec::From {
-            input: clio::Input::new(&input).unwrap(),
-            to: silk_chiffon::OutputSpec::ToMany {
-                template: template.to_string_lossy().to_string(),
-                by: "name".to_string(),
-                exclude_columns: vec![],
-                list_outputs: ListOutputsFormat::None,
-                create_dirs: true,
-                overwrite: false,
-            },
-        },
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: None,
+        to_many: Some(template.to_string_lossy().to_string()),
+        by: Some("name".to_string()),
+        exclude_columns: vec![],
+        list_outputs: None,
+        create_dirs: true,
+        overwrite: false,
         query: None,
         dialect: QueryDialect::default(),
         sort_by: None,
@@ -722,17 +751,15 @@ async fn test_transform_partition_with_overwrite() {
     let template = temp_dir.path().join("{{name}}.arrow");
 
     let result = silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        input: silk_chiffon::InputSpec::From {
-            input: clio::Input::new(&input).unwrap(),
-            to: silk_chiffon::OutputSpec::ToMany {
-                template: template.to_string_lossy().to_string(),
-                by: "name".to_string(),
-                exclude_columns: vec![],
-                list_outputs: ListOutputsFormat::None,
-                create_dirs: false,
-                overwrite: false,
-            },
-        },
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: None,
+        to_many: Some(template.to_string_lossy().to_string()),
+        by: Some("name".to_string()),
+        exclude_columns: vec![],
+        list_outputs: None,
+        create_dirs: false,
+        overwrite: false,
         query: None,
         dialect: QueryDialect::default(),
         sort_by: None,
@@ -756,17 +783,15 @@ async fn test_transform_partition_with_overwrite() {
     assert!(result.unwrap_err().to_string().contains("already exists"));
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        input: silk_chiffon::InputSpec::From {
-            input: clio::Input::new(&input).unwrap(),
-            to: silk_chiffon::OutputSpec::ToMany {
-                template: template.to_string_lossy().to_string(),
-                by: "name".to_string(),
-                exclude_columns: vec![],
-                list_outputs: ListOutputsFormat::None,
-                create_dirs: false,
-                overwrite: true,
-            },
-        },
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: None,
+        to_many: Some(template.to_string_lossy().to_string()),
+        by: Some("name".to_string()),
+        exclude_columns: vec![],
+        list_outputs: None,
+        create_dirs: false,
+        overwrite: true,
         query: None,
         dialect: QueryDialect::default(),
         sort_by: None,
@@ -796,12 +821,15 @@ async fn test_transform_from_many_empty_glob() {
     let glob_pattern = temp_dir.path().join("nonexistent*.arrow");
 
     let result = silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        input: silk_chiffon::InputSpec::FromMany {
-            inputs: vec![glob_pattern.to_string_lossy().to_string()],
-            to: silk_chiffon::OutputSpec::To {
-                output: clio::OutputPath::new(&output).unwrap(),
-            },
-        },
+        from: None,
+        from_many: vec![glob_pattern.to_string_lossy().to_string()],
+        to: Some(output.to_string_lossy().to_string()),
+        to_many: None,
+        by: None,
+        exclude_columns: vec![],
+        list_outputs: None,
+        create_dirs: true,
+        overwrite: false,
         query: None,
         dialect: QueryDialect::default(),
         sort_by: None,
@@ -842,17 +870,15 @@ async fn test_transform_partition_exclude_columns() {
     let template = temp_dir.path().join("{{name}}.arrow");
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        input: silk_chiffon::InputSpec::From {
-            input: clio::Input::new(&input).unwrap(),
-            to: silk_chiffon::OutputSpec::ToMany {
-                template: template.to_string_lossy().to_string(),
-                by: "name".to_string(),
-                exclude_columns: vec!["name".to_string()],
-                list_outputs: ListOutputsFormat::None,
-                create_dirs: false,
-                overwrite: false,
-            },
-        },
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: None,
+        to_many: Some(template.to_string_lossy().to_string()),
+        by: Some("name".to_string()),
+        exclude_columns: vec!["name".to_string()],
+        list_outputs: None,
+        create_dirs: false,
+        overwrite: false,
         query: None,
         dialect: QueryDialect::default(),
         sort_by: None,
@@ -892,12 +918,15 @@ async fn test_transform_with_projection_query() {
     test_helpers::write_arrow_file(&input, &schema, vec![batch]);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        input: silk_chiffon::InputSpec::From {
-            input: clio::Input::new(&input).unwrap(),
-            to: silk_chiffon::OutputSpec::To {
-                output: clio::OutputPath::new(&output).unwrap(),
-            },
-        },
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: Some(output.to_string_lossy().to_string()),
+        to_many: None,
+        by: None,
+        exclude_columns: vec![],
+        list_outputs: None,
+        create_dirs: true,
+        overwrite: false,
         query: Some("SELECT id FROM data".to_string()),
         dialect: QueryDialect::default(),
         sort_by: None,
@@ -935,12 +964,15 @@ async fn test_transform_with_aggregation_query() {
     test_helpers::write_arrow_file(&input, &schema, vec![batch]);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        input: silk_chiffon::InputSpec::From {
-            input: clio::Input::new(&input).unwrap(),
-            to: silk_chiffon::OutputSpec::To {
-                output: clio::OutputPath::new(&output).unwrap(),
-            },
-        },
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: Some(output.to_string_lossy().to_string()),
+        to_many: None,
+        by: None,
+        exclude_columns: vec![],
+        list_outputs: None,
+        create_dirs: true,
+        overwrite: false,
         query: Some("SELECT COUNT(*) as count FROM data".to_string()),
         dialect: QueryDialect::default(),
         sort_by: None,
@@ -983,12 +1015,15 @@ async fn test_transform_query_and_sort_combined() {
     test_helpers::write_arrow_file(&input, &schema, vec![batch]);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        input: silk_chiffon::InputSpec::From {
-            input: clio::Input::new(&input).unwrap(),
-            to: silk_chiffon::OutputSpec::To {
-                output: clio::OutputPath::new(&output).unwrap(),
-            },
-        },
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: Some(output.to_string_lossy().to_string()),
+        to_many: None,
+        by: None,
+        exclude_columns: vec![],
+        list_outputs: None,
+        create_dirs: true,
+        overwrite: false,
         query: Some("SELECT * FROM data WHERE id > 1".to_string()),
         dialect: QueryDialect::default(),
         sort_by: Some(SortSpec {
@@ -1049,12 +1084,15 @@ async fn test_transform_multi_column_sort() {
     let output = temp_dir.path().join("output.arrow");
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        input: silk_chiffon::InputSpec::From {
-            input: clio::Input::new(&input).unwrap(),
-            to: silk_chiffon::OutputSpec::To {
-                output: clio::OutputPath::new(&output).unwrap(),
-            },
-        },
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: Some(output.to_string_lossy().to_string()),
+        to_many: None,
+        by: None,
+        exclude_columns: vec![],
+        list_outputs: None,
+        create_dirs: true,
+        overwrite: false,
         query: None,
         dialect: QueryDialect::default(),
         sort_by: Some(SortSpec {
@@ -1120,12 +1158,15 @@ async fn test_transform_sort_descending() {
     test_helpers::write_arrow_file(&input, &schema, vec![batch]);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        input: silk_chiffon::InputSpec::From {
-            input: clio::Input::new(&input).unwrap(),
-            to: silk_chiffon::OutputSpec::To {
-                output: clio::OutputPath::new(&output).unwrap(),
-            },
-        },
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: Some(output.to_string_lossy().to_string()),
+        to_many: None,
+        by: None,
+        exclude_columns: vec![],
+        list_outputs: None,
+        create_dirs: true,
+        overwrite: false,
         query: None,
         dialect: QueryDialect::default(),
         sort_by: Some(SortSpec {
@@ -1185,12 +1226,15 @@ async fn test_transform_parquet_compression_gzip() {
     test_helpers::write_arrow_file(&input, &schema, vec![batch]);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        input: silk_chiffon::InputSpec::From {
-            input: clio::Input::new(&input).unwrap(),
-            to: silk_chiffon::OutputSpec::To {
-                output: clio::OutputPath::new(&output).unwrap(),
-            },
-        },
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: Some(output.to_string_lossy().to_string()),
+        to_many: None,
+        by: None,
+        exclude_columns: vec![],
+        list_outputs: None,
+        create_dirs: true,
+        overwrite: false,
         query: None,
         dialect: QueryDialect::default(),
         sort_by: None,
@@ -1228,12 +1272,15 @@ async fn test_transform_parquet_compression_lz4() {
     test_helpers::write_arrow_file(&input, &schema, vec![batch]);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        input: silk_chiffon::InputSpec::From {
-            input: clio::Input::new(&input).unwrap(),
-            to: silk_chiffon::OutputSpec::To {
-                output: clio::OutputPath::new(&output).unwrap(),
-            },
-        },
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: Some(output.to_string_lossy().to_string()),
+        to_many: None,
+        by: None,
+        exclude_columns: vec![],
+        list_outputs: None,
+        create_dirs: true,
+        overwrite: false,
         query: None,
         dialect: QueryDialect::default(),
         sort_by: None,
@@ -1271,12 +1318,15 @@ async fn test_transform_parquet_bloom_all() {
     test_helpers::write_arrow_file(&input, &schema, vec![batch]);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        input: silk_chiffon::InputSpec::From {
-            input: clio::Input::new(&input).unwrap(),
-            to: silk_chiffon::OutputSpec::To {
-                output: clio::OutputPath::new(&output).unwrap(),
-            },
-        },
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: Some(output.to_string_lossy().to_string()),
+        to_many: None,
+        by: None,
+        exclude_columns: vec![],
+        list_outputs: None,
+        create_dirs: true,
+        overwrite: false,
         query: None,
         dialect: QueryDialect::default(),
         sort_by: None,
@@ -1316,12 +1366,15 @@ async fn test_transform_parquet_statistics() {
     test_helpers::write_arrow_file(&input, &schema, vec![batch]);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        input: silk_chiffon::InputSpec::From {
-            input: clio::Input::new(&input).unwrap(),
-            to: silk_chiffon::OutputSpec::To {
-                output: clio::OutputPath::new(&output).unwrap(),
-            },
-        },
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: Some(output.to_string_lossy().to_string()),
+        to_many: None,
+        by: None,
+        exclude_columns: vec![],
+        list_outputs: None,
+        create_dirs: true,
+        overwrite: false,
         query: None,
         dialect: QueryDialect::default(),
         sort_by: None,
@@ -1358,12 +1411,15 @@ async fn test_transform_parquet_writer_version() {
     test_helpers::write_arrow_file(&input, &schema, vec![batch]);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        input: silk_chiffon::InputSpec::From {
-            input: clio::Input::new(&input).unwrap(),
-            to: silk_chiffon::OutputSpec::To {
-                output: clio::OutputPath::new(&output).unwrap(),
-            },
-        },
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: Some(output.to_string_lossy().to_string()),
+        to_many: None,
+        by: None,
+        exclude_columns: vec![],
+        list_outputs: None,
+        create_dirs: true,
+        overwrite: false,
         query: None,
         dialect: QueryDialect::default(),
         sort_by: None,
@@ -1400,12 +1456,15 @@ async fn test_transform_parquet_no_dictionary() {
     test_helpers::write_arrow_file(&input, &schema, vec![batch]);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        input: silk_chiffon::InputSpec::From {
-            input: clio::Input::new(&input).unwrap(),
-            to: silk_chiffon::OutputSpec::To {
-                output: clio::OutputPath::new(&output).unwrap(),
-            },
-        },
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: Some(output.to_string_lossy().to_string()),
+        to_many: None,
+        by: None,
+        exclude_columns: vec![],
+        list_outputs: None,
+        create_dirs: true,
+        overwrite: false,
         query: None,
         dialect: QueryDialect::default(),
         sort_by: None,
@@ -1442,12 +1501,15 @@ async fn test_transform_arrow_format_stream() {
     test_helpers::write_arrow_file(&input, &schema, vec![batch]);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        input: silk_chiffon::InputSpec::From {
-            input: clio::Input::new(&input).unwrap(),
-            to: silk_chiffon::OutputSpec::To {
-                output: clio::OutputPath::new(&output).unwrap(),
-            },
-        },
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: Some(output.to_string_lossy().to_string()),
+        to_many: None,
+        by: None,
+        exclude_columns: vec![],
+        list_outputs: None,
+        create_dirs: true,
+        overwrite: false,
         query: None,
         dialect: QueryDialect::default(),
         sort_by: None,
@@ -1484,12 +1546,15 @@ async fn test_transform_arrow_record_batch_size() {
     test_helpers::write_arrow_file(&input, &schema, vec![batch]);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        input: silk_chiffon::InputSpec::From {
-            input: clio::Input::new(&input).unwrap(),
-            to: silk_chiffon::OutputSpec::To {
-                output: clio::OutputPath::new(&output).unwrap(),
-            },
-        },
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: Some(output.to_string_lossy().to_string()),
+        to_many: None,
+        by: None,
+        exclude_columns: vec![],
+        list_outputs: None,
+        create_dirs: true,
+        overwrite: false,
         query: None,
         dialect: QueryDialect::default(),
         sort_by: None,
@@ -1526,12 +1591,15 @@ async fn test_transform_parquet_row_group_size() {
     test_helpers::write_arrow_file(&input, &schema, vec![batch]);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        input: silk_chiffon::InputSpec::From {
-            input: clio::Input::new(&input).unwrap(),
-            to: silk_chiffon::OutputSpec::To {
-                output: clio::OutputPath::new(&output).unwrap(),
-            },
-        },
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: Some(output.to_string_lossy().to_string()),
+        to_many: None,
+        by: None,
+        exclude_columns: vec![],
+        list_outputs: None,
+        create_dirs: true,
+        overwrite: false,
         query: None,
         dialect: QueryDialect::default(),
         sort_by: None,
@@ -1569,17 +1637,15 @@ async fn test_transform_partition_to_parquet() {
     let template = temp_dir.path().join("{{name}}.parquet");
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        input: silk_chiffon::InputSpec::From {
-            input: clio::Input::new(&input).unwrap(),
-            to: silk_chiffon::OutputSpec::ToMany {
-                template: template.to_string_lossy().to_string(),
-                by: "name".to_string(),
-                exclude_columns: vec![],
-                list_outputs: ListOutputsFormat::None,
-                create_dirs: false,
-                overwrite: false,
-            },
-        },
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: None,
+        to_many: Some(template.to_string_lossy().to_string()),
+        by: Some("name".to_string()),
+        exclude_columns: vec![],
+        list_outputs: None,
+        create_dirs: false,
+        overwrite: false,
         query: None,
         dialect: QueryDialect::default(),
         sort_by: None,
@@ -1638,17 +1704,15 @@ async fn test_transform_multi_column_partition() {
     let template = temp_dir.path().join("year={{year}}/month={{month}}.arrow");
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        input: silk_chiffon::InputSpec::From {
-            input: clio::Input::new(&input).unwrap(),
-            to: silk_chiffon::OutputSpec::ToMany {
-                template: template.to_string_lossy().to_string(),
-                by: "year,month".to_string(),
-                exclude_columns: vec![],
-                list_outputs: ListOutputsFormat::None,
-                create_dirs: true,
-                overwrite: false,
-            },
-        },
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: None,
+        to_many: Some(template.to_string_lossy().to_string()),
+        by: Some("year,month".to_string()),
+        exclude_columns: vec![],
+        list_outputs: None,
+        create_dirs: true,
+        overwrite: false,
         query: None,
         dialect: QueryDialect::default(),
         sort_by: None,
@@ -1693,20 +1757,18 @@ async fn test_transform_from_many_to_partitioned() {
     let template = temp_dir.path().join("{{name}}.arrow");
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        input: silk_chiffon::InputSpec::FromMany {
-            inputs: vec![
-                input1.to_string_lossy().to_string(),
-                input2.to_string_lossy().to_string(),
-            ],
-            to: silk_chiffon::OutputSpec::ToMany {
-                template: template.to_string_lossy().to_string(),
-                by: "name".to_string(),
-                exclude_columns: vec![],
-                list_outputs: ListOutputsFormat::None,
-                create_dirs: false,
-                overwrite: true,
-            },
-        },
+        from: None,
+        from_many: vec![
+            input1.to_string_lossy().to_string(),
+            input2.to_string_lossy().to_string(),
+        ],
+        to: None,
+        to_many: Some(template.to_string_lossy().to_string()),
+        by: Some("name".to_string()),
+        exclude_columns: vec![],
+        list_outputs: None,
+        create_dirs: false,
+        overwrite: true,
         query: None,
         dialect: QueryDialect::default(),
         sort_by: None,
@@ -1770,12 +1832,15 @@ async fn test_transform_invalid_query() {
     test_helpers::write_arrow_file(&input, &schema, vec![batch]);
 
     let result = silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        input: silk_chiffon::InputSpec::From {
-            input: clio::Input::new(&input).unwrap(),
-            to: silk_chiffon::OutputSpec::To {
-                output: clio::OutputPath::new(&output).unwrap(),
-            },
-        },
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: Some(output.to_string_lossy().to_string()),
+        to_many: None,
+        by: None,
+        exclude_columns: vec![],
+        list_outputs: None,
+        create_dirs: true,
+        overwrite: false,
         query: Some("SELECT nonexistent FROM data".to_string()),
         dialect: QueryDialect::default(),
         sort_by: None,
@@ -1808,12 +1873,15 @@ async fn test_transform_empty_file() {
     test_helpers::write_arrow_file(&input, &schema, vec![]);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        input: silk_chiffon::InputSpec::From {
-            input: clio::Input::new(&input).unwrap(),
-            to: silk_chiffon::OutputSpec::To {
-                output: clio::OutputPath::new(&output).unwrap(),
-            },
-        },
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: Some(output.to_string_lossy().to_string()),
+        to_many: None,
+        by: None,
+        exclude_columns: vec![],
+        list_outputs: None,
+        create_dirs: true,
+        overwrite: false,
         query: None,
         dialect: QueryDialect::default(),
         sort_by: None,
@@ -1850,12 +1918,15 @@ async fn test_transform_bloom_filter_with_custom_ndv() {
     test_helpers::write_arrow_file(&input, &schema, vec![batch]);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        input: silk_chiffon::InputSpec::From {
-            input: clio::Input::new(&input).unwrap(),
-            to: silk_chiffon::OutputSpec::To {
-                output: clio::OutputPath::new(&output).unwrap(),
-            },
-        },
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: Some(output.to_string_lossy().to_string()),
+        to_many: None,
+        by: None,
+        exclude_columns: vec![],
+        list_outputs: None,
+        create_dirs: true,
+        overwrite: false,
         query: None,
         dialect: QueryDialect::default(),
         sort_by: None,
@@ -1895,12 +1966,15 @@ async fn test_transform_bloom_filter_column_specific_with_ndv() {
     test_helpers::write_arrow_file(&input, &schema, vec![batch]);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        input: silk_chiffon::InputSpec::From {
-            input: clio::Input::new(&input).unwrap(),
-            to: silk_chiffon::OutputSpec::To {
-                output: clio::OutputPath::new(&output).unwrap(),
-            },
-        },
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: Some(output.to_string_lossy().to_string()),
+        to_many: None,
+        by: None,
+        exclude_columns: vec![],
+        list_outputs: None,
+        create_dirs: true,
+        overwrite: false,
         query: None,
         dialect: QueryDialect::default(),
         sort_by: None,
@@ -1951,12 +2025,15 @@ async fn test_transform_mixed_parquet_and_arrow_inputs() {
     let glob_pattern = temp_dir.path().join("data*.arrow");
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        input: silk_chiffon::InputSpec::FromMany {
-            inputs: vec![glob_pattern.to_string_lossy().to_string()],
-            to: silk_chiffon::OutputSpec::To {
-                output: clio::OutputPath::new(&output).unwrap(),
-            },
-        },
+        from: None,
+        from_many: vec![glob_pattern.to_string_lossy().to_string()],
+        to: Some(output.to_string_lossy().to_string()),
+        to_many: None,
+        by: None,
+        exclude_columns: vec![],
+        list_outputs: None,
+        create_dirs: true,
+        overwrite: false,
         query: None,
         dialect: QueryDialect::default(),
         sort_by: None,
@@ -1994,17 +2071,15 @@ async fn test_transform_partition_list_outputs_text() {
     let template = temp_dir.path().join("{{name}}.arrow");
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        input: silk_chiffon::InputSpec::From {
-            input: clio::Input::new(&input).unwrap(),
-            to: silk_chiffon::OutputSpec::ToMany {
-                template: template.to_string_lossy().to_string(),
-                by: "name".to_string(),
-                exclude_columns: vec![],
-                list_outputs: ListOutputsFormat::Text,
-                create_dirs: false,
-                overwrite: false,
-            },
-        },
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: None,
+        to_many: Some(template.to_string_lossy().to_string()),
+        by: Some("name".to_string()),
+        exclude_columns: vec![],
+        list_outputs: Some(ListOutputsFormat::Text),
+        create_dirs: false,
+        overwrite: false,
         query: None,
         dialect: QueryDialect::default(),
         sort_by: None,
@@ -2044,17 +2119,15 @@ async fn test_transform_partition_list_outputs_json() {
     let template = temp_dir.path().join("{{name}}.arrow");
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        input: silk_chiffon::InputSpec::From {
-            input: clio::Input::new(&input).unwrap(),
-            to: silk_chiffon::OutputSpec::ToMany {
-                template: template.to_string_lossy().to_string(),
-                by: "name".to_string(),
-                exclude_columns: vec![],
-                list_outputs: ListOutputsFormat::Json,
-                create_dirs: false,
-                overwrite: false,
-            },
-        },
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: None,
+        to_many: Some(template.to_string_lossy().to_string()),
+        by: Some("name".to_string()),
+        exclude_columns: vec![],
+        list_outputs: Some(ListOutputsFormat::Json),
+        create_dirs: false,
+        overwrite: false,
         query: None,
         dialect: QueryDialect::default(),
         sort_by: None,
@@ -2093,12 +2166,15 @@ async fn test_transform_explicit_input_format_arrow_to_parquet() {
     test_helpers::write_arrow_file(&input, &schema, vec![batch]);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        input: silk_chiffon::InputSpec::From {
-            input: clio::Input::new(&input).unwrap(),
-            to: silk_chiffon::OutputSpec::To {
-                output: clio::OutputPath::new(&output).unwrap(),
-            },
-        },
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: Some(output.to_string_lossy().to_string()),
+        to_many: None,
+        by: None,
+        exclude_columns: vec![],
+        list_outputs: None,
+        create_dirs: true,
+        overwrite: false,
         query: None,
         dialect: QueryDialect::default(),
         sort_by: None,
@@ -2135,12 +2211,15 @@ async fn test_transform_explicit_output_format_parquet() {
     test_helpers::write_parquet_file(&input, &schema, vec![batch]);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        input: silk_chiffon::InputSpec::From {
-            input: clio::Input::new(&input).unwrap(),
-            to: silk_chiffon::OutputSpec::To {
-                output: clio::OutputPath::new(&output).unwrap(),
-            },
-        },
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: Some(output.to_string_lossy().to_string()),
+        to_many: None,
+        by: None,
+        exclude_columns: vec![],
+        list_outputs: None,
+        create_dirs: true,
+        overwrite: false,
         query: None,
         dialect: QueryDialect::default(),
         sort_by: None,
@@ -2177,12 +2256,15 @@ async fn test_transform_arrow_compression_lz4() {
     test_helpers::write_arrow_file(&input, &schema, vec![batch]);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        input: silk_chiffon::InputSpec::From {
-            input: clio::Input::new(&input).unwrap(),
-            to: silk_chiffon::OutputSpec::To {
-                output: clio::OutputPath::new(&output).unwrap(),
-            },
-        },
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: Some(output.to_string_lossy().to_string()),
+        to_many: None,
+        by: None,
+        exclude_columns: vec![],
+        list_outputs: None,
+        create_dirs: true,
+        overwrite: false,
         query: None,
         dialect: QueryDialect::default(),
         sort_by: None,
@@ -2233,17 +2315,15 @@ async fn test_transform_query_with_partition() {
     let template = temp_dir.path().join("{{category}}.arrow");
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        input: silk_chiffon::InputSpec::From {
-            input: clio::Input::new(&input).unwrap(),
-            to: silk_chiffon::OutputSpec::ToMany {
-                template: template.to_string_lossy().to_string(),
-                by: "category".to_string(),
-                exclude_columns: vec![],
-                list_outputs: ListOutputsFormat::None,
-                create_dirs: false,
-                overwrite: true,
-            },
-        },
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: None,
+        to_many: Some(template.to_string_lossy().to_string()),
+        by: Some("category".to_string()),
+        exclude_columns: vec![],
+        list_outputs: None,
+        create_dirs: false,
+        overwrite: true,
         query: Some("SELECT * FROM data WHERE value > 15".to_string()),
         dialect: QueryDialect::default(),
         sort_by: None,
@@ -2300,12 +2380,15 @@ async fn test_transform_query_with_different_dialect() {
     test_helpers::write_arrow_file(&input, &schema, vec![batch]);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        input: silk_chiffon::InputSpec::From {
-            input: clio::Input::new(&input).unwrap(),
-            to: silk_chiffon::OutputSpec::To {
-                output: clio::OutputPath::new(&output).unwrap(),
-            },
-        },
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: Some(output.to_string_lossy().to_string()),
+        to_many: None,
+        by: None,
+        exclude_columns: vec![],
+        list_outputs: None,
+        create_dirs: true,
+        overwrite: false,
         query: Some("SELECT * FROM data WHERE id >= 2".to_string()),
         dialect: QueryDialect::PostgreSQL,
         sort_by: None,
@@ -2358,17 +2441,15 @@ async fn test_transform_partition_with_query_and_sort() {
     let template = temp_dir.path().join("{{region}}.arrow");
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        input: silk_chiffon::InputSpec::From {
-            input: clio::Input::new(&input).unwrap(),
-            to: silk_chiffon::OutputSpec::ToMany {
-                template: template.to_string_lossy().to_string(),
-                by: "region".to_string(),
-                exclude_columns: vec![],
-                list_outputs: ListOutputsFormat::None,
-                create_dirs: false,
-                overwrite: false,
-            },
-        },
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: None,
+        to_many: Some(template.to_string_lossy().to_string()),
+        by: Some("region".to_string()),
+        exclude_columns: vec![],
+        list_outputs: None,
+        create_dirs: false,
+        overwrite: false,
         query: Some("SELECT * FROM data WHERE score > 100".to_string()),
         dialect: QueryDialect::default(),
         sort_by: Some(SortSpec {
