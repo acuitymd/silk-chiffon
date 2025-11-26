@@ -1,6 +1,6 @@
 use crate::{
-    ArrowCompression, BloomFilterConfig, DataFormat, InputSpec, ListOutputsFormat, OutputSpec,
-    ParquetCompression, ParquetStatistics, ParquetWriterVersion, SortSpec, TransformCommand,
+    ArrowCompression, BloomFilterConfig, DataFormat, ListOutputsFormat, ParquetCompression,
+    ParquetStatistics, ParquetWriterVersion, SortSpec, TransformCommand,
     io_strategies::{output_strategy::SinkFactory, path_template::PathTemplate},
     operations::{query::QueryOperation, sort::SortOperation},
     pipeline::Pipeline,
@@ -18,7 +18,15 @@ use glob::glob;
 
 pub async fn run(args: TransformCommand) -> Result<()> {
     let TransformCommand {
-        input,
+        from,
+        from_many,
+        to,
+        to_many,
+        by,
+        exclude_columns,
+        list_outputs,
+        create_dirs,
+        overwrite,
         query,
         dialect,
         sort_by,
@@ -47,26 +55,28 @@ pub async fn run(args: TransformCommand) -> Result<()> {
 
     let mut pipeline = Pipeline::new().with_query_dialect(dialect);
 
-    let setup_result: Result<()> = match &input {
-        InputSpec::From { input, .. } => {
-            let input_path = input
-                .path()
-                .to_str()
-                .ok_or_else(|| anyhow!("Invalid input path"))?;
+    let (input_paths, should_glob) = if let Some(single_input) = from {
+        (vec![single_input], false)
+    } else {
+        (from_many, true)
+    };
+
+    let setup_result: Result<()> = {
+        if !should_glob && input_paths.len() == 1 {
+            let input_path = &input_paths[0];
             let detected_input_format = detect_format(input_path, input_format)?;
 
             let source: Box<dyn DataSource> = match detected_input_format {
-                DataFormat::Arrow => Box::new(ArrowDataSource::new(input_path.to_string())),
-                DataFormat::Parquet => Box::new(ParquetDataSource::new(input_path.to_string())),
+                DataFormat::Arrow => Box::new(ArrowDataSource::new(input_path.clone())),
+                DataFormat::Parquet => Box::new(ParquetDataSource::new(input_path.clone())),
             };
 
             pipeline = pipeline.with_input_strategy_with_single_source(source);
             Ok(())
-        }
-        InputSpec::FromMany { inputs, .. } => {
+        } else {
             let mut expanded_paths = Vec::new();
 
-            for pattern in inputs {
+            for pattern in &input_paths {
                 for entry in glob(pattern)
                     .map_err(|e| anyhow!("Error expanding glob pattern {}: {}", pattern, e))?
                 {
@@ -114,15 +124,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
 
     setup_result?;
 
-    let output_spec = match input {
-        InputSpec::From { to, .. } => to,
-        InputSpec::FromMany { to, .. } => to,
-    };
-
-    let list_outputs_format = match &output_spec {
-        OutputSpec::To { .. } => None,
-        OutputSpec::ToMany { list_outputs, .. } => Some(*list_outputs),
-    };
+    let list_outputs_format = list_outputs;
 
     // The overall sort order is determined by the following:
     //
@@ -145,13 +147,15 @@ pub async fn run(args: TransformCommand) -> Result<()> {
     // columns within each file since they are just a single value, so we remove them from
     // the user-specified sort order.
 
-    let partition_sort_spec = match &output_spec {
-        OutputSpec::ToMany { by, .. } => SortSpec::from(
-            by.split(',')
+    let partition_sort_spec = if let Some(ref by_cols) = by {
+        SortSpec::from(
+            by_cols
+                .split(',')
                 .map(|s| s.trim().to_string())
                 .collect::<Vec<_>>(),
-        ),
-        _ => SortSpec::default(),
+        )
+    } else {
+        SortSpec::default()
     };
 
     let user_sort_spec = sort_by.clone().unwrap_or(SortSpec::default());
@@ -183,40 +187,29 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         parquet_sort_spec,
     )?;
 
-    match output_spec {
-        OutputSpec::To { output } => {
-            pipeline = pipeline.with_output_strategy_with_single_sink(
-                output
-                    .path()
-                    .to_str()
-                    .ok_or_else(|| anyhow!("Invalid output path"))?
-                    .to_string(),
-                sink_factory,
-            );
-        }
-        OutputSpec::ToMany {
-            template,
-            by: _, // already extracted as partition_sort_spec above
-            exclude_columns,
-            list_outputs,
+    if let Some(output_path) = to {
+        pipeline = pipeline.with_output_strategy_with_single_sink(
+            output_path,
+            sink_factory,
+            exclude_columns.clone(),
             create_dirs,
             overwrite,
-        } => {
-            let path_template = PathTemplate::new(template);
-            // relying on the partition_sort_spec since it appropriately handles duplicate column names
-            // and is used to perform the sort operation that we will be partitioning on later
-            let partition_columns = partition_sort_spec.column_names();
+        );
+    } else if let Some(template) = to_many {
+        let path_template = PathTemplate::new(template);
+        // relying on the partition_sort_spec since it appropriately handles duplicate column names
+        // and is used to perform the sort operation that we will be partitioning on later
+        let partition_columns = partition_sort_spec.column_names();
 
-            pipeline = pipeline.with_output_strategy_with_partitioned_sink(
-                partition_columns,
-                path_template,
-                sink_factory,
-                exclude_columns.clone(),
-                create_dirs,
-                overwrite,
-                list_outputs,
-            );
-        }
+        pipeline = pipeline.with_output_strategy_with_partitioned_sink(
+            partition_columns,
+            path_template,
+            sink_factory,
+            exclude_columns.clone(),
+            create_dirs,
+            overwrite,
+            list_outputs.unwrap_or_default(),
+        );
     }
 
     if let Some(q) = query {
