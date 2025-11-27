@@ -2,16 +2,16 @@
 
 > _Converting Arrow files has never been silkier..._
 
-A blazingly fast, memory-efficient CLI tool for converting between the Apache Arrow IPC data format and Parquet. Written in Rust for maximum performance.
-
 ## ✨ What is Silk Chiffon?
 
-Silk Chiffon is a versatile tool for Arrow-to-X data format conversions. Like its namesake fabric -- light, flowing, and effortlessly elegant -- this tool makes data transformations silky smooth.
+Silk Chiffon is a blazingly fast, memory-efficient CLI tool for converting from/to the Apache Arrow IPC and Parquet columnar data formats. Written in Rust for maximum performance.
+
+Like its namesake fabric -- light, flowing, and effortlessly elegant -- this tool makes data transformations silky smooth.
 
 ### ️🎯 Core Features
 
 - **⚡ Lightning Fast**: Built with Rust for native performance.
-- **🤹🏻‍♀ Multi-Format Support**: Convert between Arrow IPC (file/stream) and Parquet.
+- **🤹🏻‍♀ Multi-Format Support**: Convert to/from Arrow IPC (file/stream) and Parquet.
 - **🪓 Partitioning**: Partition data into multiple files based on column values.
 - **🔗 Merging**: Merge data from multiple files into a single file.
 - **🧠 Smart Processing**: Sort, compress, filter with SQL, and optimize your data on-the-fly.
