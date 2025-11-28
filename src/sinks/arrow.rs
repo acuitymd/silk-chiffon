@@ -177,15 +177,6 @@ pub trait ArrowRecordBatchWriter: RecordBatchWriter + Send {
     fn write_metadata(&mut self, key: &str, value: &str);
 }
 
-impl ArrowRecordBatchWriter for FileWriter<File> {
-    fn finish(&mut self) -> Result<(), ArrowError> {
-        self.finish()
-    }
-
-    fn write_metadata(&mut self, key: &str, value: &str) {
-        self.write_metadata(key, value);
-    }
-}
 impl ArrowRecordBatchWriter for FileWriter<BufWriter<File>> {
     fn finish(&mut self) -> Result<(), ArrowError> {
         self.finish()
@@ -195,17 +186,6 @@ impl ArrowRecordBatchWriter for FileWriter<BufWriter<File>> {
         self.write_metadata(key, value);
     }
 }
-
-impl ArrowRecordBatchWriter for StreamWriter<File> {
-    fn finish(&mut self) -> Result<(), ArrowError> {
-        self.finish()
-    }
-
-    fn write_metadata(&mut self, _key: &str, _value: &str) {
-        // NOOP for stream writer, they don't support metadata
-    }
-}
-
 impl ArrowRecordBatchWriter for StreamWriter<BufWriter<File>> {
     fn finish(&mut self) -> Result<(), ArrowError> {
         self.finish()
