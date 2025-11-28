@@ -1,6 +1,6 @@
 use crate::{
-    ArrowCompression, BloomFilterConfig, DataFormat, ListOutputsFormat, ParquetCompression,
-    ParquetStatistics, ParquetWriterVersion, SortSpec, TransformCommand,
+    ArrowCompression, ArrowIPCFormat, BloomFilterConfig, DataFormat, ListOutputsFormat,
+    ParquetCompression, ParquetStatistics, ParquetWriterVersion, SortSpec, TransformCommand,
     io_strategies::{output_strategy::SinkFactory, path_template::PathTemplate},
     operations::{query::QueryOperation, sort::SortOperation},
     pipeline::Pipeline,
@@ -10,7 +10,6 @@ use crate::{
         parquet::{ParquetSink, ParquetSinkOptions},
     },
     sources::{arrow::ArrowDataSource, data_source::DataSource, parquet::ParquetDataSource},
-    utils::arrow_io::ArrowIPCFormat,
 };
 use anyhow::{Result, anyhow};
 use arrow::datatypes::SchemaRef;

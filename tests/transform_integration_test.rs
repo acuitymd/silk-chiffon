@@ -1,10 +1,9 @@
 use anyhow::Result;
 use arrow::array::{Array, Int32Array, Int64Array, StringArray};
-use silk_chiffon::utils::arrow_io::ArrowIPCFormat;
 use silk_chiffon::{
-    AllColumnsBloomFilterConfig, ArrowCompression, ColumnSpecificBloomFilterConfig, DataFormat,
-    ListOutputsFormat, ParquetCompression, ParquetStatistics, ParquetWriterVersion, QueryDialect,
-    SortColumn, SortDirection, SortSpec,
+    AllColumnsBloomFilterConfig, ArrowCompression, ArrowIPCFormat, ColumnSpecificBloomFilterConfig,
+    DataFormat, ListOutputsFormat, ParquetCompression, ParquetStatistics, ParquetWriterVersion,
+    QueryDialect, SortColumn, SortDirection, SortSpec,
 };
 use tempfile::TempDir;
 

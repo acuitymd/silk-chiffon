@@ -9,18 +9,18 @@ use std::{
 
 use anyhow::{Result, anyhow};
 use arrow::{
-    array::RecordBatch,
+    array::{RecordBatch, RecordBatchWriter},
     compute::BatchCoalescer,
     datatypes::SchemaRef,
+    error::ArrowError,
     ipc::writer::{FileWriter, IpcWriteOptions, StreamWriter},
 };
 use async_trait::async_trait;
 use datafusion::execution::SendableRecordBatchStream;
 
 use crate::{
-    ArrowCompression,
+    ArrowCompression, ArrowIPCFormat,
     sinks::data_sink::{DataSink, SinkResult},
-    utils::arrow_io::{ArrowIPCFormat, ArrowRecordBatchWriter},
 };
 
 pub struct ArrowSinkOptions {
@@ -172,15 +172,36 @@ impl DataSink for ArrowSink {
     }
 }
 
+pub trait ArrowRecordBatchWriter: RecordBatchWriter + Send {
+    fn finish(&mut self) -> Result<(), ArrowError>;
+    fn write_metadata(&mut self, key: &str, value: &str);
+}
+
+impl ArrowRecordBatchWriter for FileWriter<BufWriter<File>> {
+    fn finish(&mut self) -> Result<(), ArrowError> {
+        self.finish()
+    }
+
+    fn write_metadata(&mut self, key: &str, value: &str) {
+        self.write_metadata(key, value);
+    }
+}
+impl ArrowRecordBatchWriter for StreamWriter<BufWriter<File>> {
+    fn finish(&mut self) -> Result<(), ArrowError> {
+        self.finish()
+    }
+
+    fn write_metadata(&mut self, _key: &str, _value: &str) {
+        // NOOP for stream writer, they don't support metadata
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
         sources::data_source::DataSource,
-        utils::{
-            arrow_io::ArrowIPCFormat,
-            test_helpers::{file_helpers, test_data, verify},
-        },
+        utils::test_helpers::{file_helpers, test_data, verify},
     };
     use tempfile::tempdir;
 
