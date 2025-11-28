@@ -1,4 +1,3 @@
-pub mod arrow_io;
 pub mod collections;
 pub mod filesystem;
 pub mod parquet_inspection;

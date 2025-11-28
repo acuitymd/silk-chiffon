@@ -1,5 +1,4 @@
 pub mod commands;
-pub mod converters;
 pub mod io_strategies;
 pub mod operations;
 pub mod pipeline;
@@ -7,10 +6,7 @@ pub mod sinks;
 pub mod sources;
 pub mod utils;
 
-use crate::utils::{
-    arrow_io::ArrowIPCFormat,
-    collections::{uniq, uniq_by},
-};
+use crate::utils::collections::{uniq, uniq_by};
 use anyhow::{Result, anyhow};
 use arrow::ipc::CompressionType;
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -19,7 +15,10 @@ use parquet::{
     basic::{Compression, GzipLevel, ZstdLevel},
     file::properties::{EnabledStatistics, WriterVersion},
 };
-use std::{fmt, str::FromStr};
+use std::{
+    fmt::{self, Formatter},
+    str::FromStr,
+};
 use strum_macros::Display;
 
 #[derive(Parser, Debug)]
@@ -685,6 +684,40 @@ pub struct TransformCommand {
 pub enum DataFormat {
     Arrow,
     Parquet,
+}
+
+#[derive(ValueEnum, PartialEq, Clone, Debug, Default)]
+pub enum ArrowIPCFormat {
+    #[default]
+    #[value(name = "file")]
+    File,
+    #[value(name = "stream")]
+    Stream,
+}
+
+impl fmt::Display for ArrowIPCFormat {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Self::File => "file",
+            Self::Stream => "stream",
+        };
+        write!(f, "{s}")
+    }
+}
+
+impl FromStr for ArrowIPCFormat {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "file" => Ok(ArrowIPCFormat::File),
+            "stream" => Ok(ArrowIPCFormat::Stream),
+            _ => Err(anyhow!(
+                "Invalid Arrow IPC format: {}. Valid options: file, stream",
+                s
+            )),
+        }
+    }
 }
 
 #[cfg(test)]
