@@ -667,3 +667,440 @@ fn test_single_row() {
     let batches = read_parquet_file(&output);
     assert_eq!(extract_ids(&batches), vec![42]);
 }
+
+#[tokio::test]
+async fn test_arrow_to_vortex() {
+    let temp = TempDir::new().unwrap();
+    let input = temp.path().join("input.arrow");
+    let output = temp.path().join("output.vortex");
+
+    let schema = simple_schema();
+    let batch = create_batch(&schema, &[1, 2, 3], &["Alice", "Bob", "Charlie"]);
+    write_arrow_file(&input, &schema, vec![batch]);
+
+    cargo::cargo_bin_cmd!("silk-chiffon")
+        .args([
+            "transform",
+            "--from",
+            input.to_str().unwrap(),
+            "--to",
+            output.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    assert!(output.exists());
+    assert!(output.metadata().unwrap().len() > 0);
+}
+
+#[tokio::test]
+async fn test_vortex_to_arrow() {
+    let temp = TempDir::new().unwrap();
+    let arrow1 = temp.path().join("input.arrow");
+    let vortex = temp.path().join("intermediate.vortex");
+    let arrow2 = temp.path().join("output.arrow");
+
+    let schema = simple_schema();
+    let batch = create_batch(&schema, &[1, 2, 3], &["Alice", "Bob", "Charlie"]);
+    write_arrow_file(&arrow1, &schema, vec![batch.clone()]);
+
+    cargo::cargo_bin_cmd!("silk-chiffon")
+        .args([
+            "transform",
+            "--from",
+            arrow1.to_str().unwrap(),
+            "--to",
+            vortex.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    cargo::cargo_bin_cmd!("silk-chiffon")
+        .args([
+            "transform",
+            "--from",
+            vortex.to_str().unwrap(),
+            "--to",
+            arrow2.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let result_batches = read_arrow_file(&arrow2);
+    assert_eq!(result_batches.len(), 1);
+    assert_eq!(result_batches[0].num_rows(), 3);
+    assert_eq!(result_batches[0].num_columns(), 2);
+}
+
+#[tokio::test]
+async fn test_vortex_round_trip() {
+    let temp = TempDir::new().unwrap();
+    let input = temp.path().join("input.arrow");
+    let vortex_file = temp.path().join("data.vortex");
+    let output = temp.path().join("output.arrow");
+
+    let schema = simple_schema();
+    let batches = vec![
+        create_batch(&schema, &[1, 2], &["Alice", "Bob"]),
+        create_batch(&schema, &[3, 4], &["Charlie", "Diana"]),
+        create_batch(&schema, &[5], &["Eve"]),
+    ];
+    write_arrow_file(&input, &schema, batches);
+
+    cargo::cargo_bin_cmd!("silk-chiffon")
+        .args([
+            "transform",
+            "--from",
+            input.to_str().unwrap(),
+            "--to",
+            vortex_file.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    cargo::cargo_bin_cmd!("silk-chiffon")
+        .args([
+            "transform",
+            "--from",
+            vortex_file.to_str().unwrap(),
+            "--to",
+            output.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let result_batches = read_arrow_file(&output);
+    let total_rows: usize = result_batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total_rows, 5);
+}
+
+#[tokio::test]
+async fn test_vortex_with_query() {
+    let temp = TempDir::new().unwrap();
+    let input = temp.path().join("input.arrow");
+    let vortex_file = temp.path().join("data.vortex");
+    let output = temp.path().join("output.arrow");
+
+    let schema = simple_schema();
+    let batch = create_batch(&schema, &[1, 2, 3, 4, 5], &["A", "B", "C", "D", "E"]);
+    write_arrow_file(&input, &schema, vec![batch]);
+
+    cargo::cargo_bin_cmd!("silk-chiffon")
+        .args([
+            "transform",
+            "--from",
+            input.to_str().unwrap(),
+            "--to",
+            vortex_file.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    cargo::cargo_bin_cmd!("silk-chiffon")
+        .args([
+            "transform",
+            "--from",
+            vortex_file.to_str().unwrap(),
+            "--to",
+            output.to_str().unwrap(),
+            "--query",
+            "SELECT * FROM data WHERE id > 2",
+        ])
+        .assert()
+        .success();
+
+    let result_batches = read_arrow_file(&output);
+    let total_rows: usize = result_batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total_rows, 3);
+}
+
+#[tokio::test]
+async fn test_vortex_with_sort() {
+    let temp = TempDir::new().unwrap();
+    let input = temp.path().join("input.arrow");
+    let vortex_file = temp.path().join("data.vortex");
+    let output = temp.path().join("output.arrow");
+
+    let schema = simple_schema();
+    let batch = create_batch(&schema, &[3, 1, 2], &["C", "A", "B"]);
+    write_arrow_file(&input, &schema, vec![batch]);
+
+    cargo::cargo_bin_cmd!("silk-chiffon")
+        .args([
+            "transform",
+            "--from",
+            input.to_str().unwrap(),
+            "--to",
+            vortex_file.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    cargo::cargo_bin_cmd!("silk-chiffon")
+        .args([
+            "transform",
+            "--from",
+            vortex_file.to_str().unwrap(),
+            "--to",
+            output.to_str().unwrap(),
+            "--sort-by",
+            "id",
+        ])
+        .assert()
+        .success();
+
+    let result_batches = read_arrow_file(&output);
+    assert_eq!(result_batches.len(), 1);
+    let id_array = result_batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap();
+    assert_eq!(id_array.value(0), 1);
+    assert_eq!(id_array.value(1), 2);
+    assert_eq!(id_array.value(2), 3);
+}
+
+#[tokio::test]
+async fn test_vortex_with_batch_size() {
+    let temp = TempDir::new().unwrap();
+    let input = temp.path().join("input.arrow");
+    let output = temp.path().join("output.vortex");
+
+    let schema = simple_schema();
+    let batch = create_batch(&schema, &[1, 2, 3, 4, 5], &["A", "B", "C", "D", "E"]);
+    write_arrow_file(&input, &schema, vec![batch]);
+
+    cargo::cargo_bin_cmd!("silk-chiffon")
+        .args([
+            "transform",
+            "--from",
+            input.to_str().unwrap(),
+            "--to",
+            output.to_str().unwrap(),
+            "--vortex-record-batch-size",
+            "2",
+        ])
+        .assert()
+        .success();
+
+    assert!(output.exists());
+}
+
+#[tokio::test]
+async fn test_vortex_query_with_aggregates() {
+    let temp = TempDir::new().unwrap();
+    let input = temp.path().join("input.arrow");
+    let vortex_file = temp.path().join("data.vortex");
+    let output = temp.path().join("output.arrow");
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("category", DataType::Utf8, false),
+        Field::new("amount", DataType::Int32, false),
+    ]));
+
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(StringArray::from(vec!["A", "B", "A", "B", "A"])),
+            Arc::new(Int32Array::from(vec![100, 200, 150, 250, 50])),
+        ],
+    )
+    .unwrap();
+    write_arrow_file(&input, &schema, vec![batch]);
+
+    cargo::cargo_bin_cmd!("silk-chiffon")
+        .args([
+            "transform",
+            "--from",
+            input.to_str().unwrap(),
+            "--to",
+            vortex_file.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    cargo::cargo_bin_cmd!("silk-chiffon")
+        .args([
+            "transform",
+            "--from",
+            vortex_file.to_str().unwrap(),
+            "--to",
+            output.to_str().unwrap(),
+            "--query",
+            "SELECT category, SUM(amount) as total FROM data GROUP BY category ORDER BY category",
+        ])
+        .assert()
+        .success();
+
+    let result_batches = read_arrow_file(&output);
+    assert_eq!(result_batches.len(), 1);
+    assert_eq!(result_batches[0].num_rows(), 2);
+    assert_eq!(result_batches[0].num_columns(), 2);
+}
+
+#[tokio::test]
+async fn test_vortex_query_with_filter_and_projection() {
+    let temp = TempDir::new().unwrap();
+    let input = temp.path().join("input.arrow");
+    let vortex_file = temp.path().join("data.vortex");
+    let output = temp.path().join("output.arrow");
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int32, false),
+        Field::new("name", DataType::Utf8, false),
+        Field::new("age", DataType::Int32, false),
+    ]));
+
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(Int32Array::from(vec![1, 2, 3, 4, 5])),
+            Arc::new(StringArray::from(vec![
+                "Alice", "Bob", "Charlie", "Diana", "Eve",
+            ])),
+            Arc::new(Int32Array::from(vec![25, 30, 35, 28, 32])),
+        ],
+    )
+    .unwrap();
+    write_arrow_file(&input, &schema, vec![batch]);
+
+    cargo::cargo_bin_cmd!("silk-chiffon")
+        .args([
+            "transform",
+            "--from",
+            input.to_str().unwrap(),
+            "--to",
+            vortex_file.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    cargo::cargo_bin_cmd!("silk-chiffon")
+        .args([
+            "transform",
+            "--from",
+            vortex_file.to_str().unwrap(),
+            "--to",
+            output.to_str().unwrap(),
+            "--query",
+            "SELECT name, age FROM data WHERE age > 30",
+        ])
+        .assert()
+        .success();
+
+    let result_batches = read_arrow_file(&output);
+    assert_eq!(result_batches.len(), 1);
+    assert_eq!(result_batches[0].num_rows(), 2);
+    assert_eq!(result_batches[0].num_columns(), 2);
+}
+
+#[tokio::test]
+async fn test_vortex_query_with_scalar_functions() {
+    let temp = TempDir::new().unwrap();
+    let input = temp.path().join("input.arrow");
+    let vortex_file = temp.path().join("data.vortex");
+    let output = temp.path().join("output.arrow");
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("name", DataType::Utf8, false),
+        Field::new("value", DataType::Int32, false),
+    ]));
+
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(StringArray::from(vec!["alice", "bob", "charlie"])),
+            Arc::new(Int32Array::from(vec![10, 20, 30])),
+        ],
+    )
+    .unwrap();
+    write_arrow_file(&input, &schema, vec![batch]);
+
+    cargo::cargo_bin_cmd!("silk-chiffon")
+        .args([
+            "transform",
+            "--from",
+            input.to_str().unwrap(),
+            "--to",
+            vortex_file.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    cargo::cargo_bin_cmd!("silk-chiffon")
+        .args([
+            "transform",
+            "--from",
+            vortex_file.to_str().unwrap(),
+            "--to",
+            output.to_str().unwrap(),
+            "--query",
+            "SELECT UPPER(name) as upper_name, value * 2 as doubled FROM data",
+        ])
+        .assert()
+        .success();
+
+    let result_batches = read_arrow_file(&output);
+    assert_eq!(result_batches.len(), 1);
+    assert_eq!(result_batches[0].num_rows(), 3);
+    assert_eq!(result_batches[0].num_columns(), 2);
+}
+
+#[tokio::test]
+async fn test_vortex_query_with_count_and_avg() {
+    let temp = TempDir::new().unwrap();
+    let input = temp.path().join("input.arrow");
+    let vortex_file = temp.path().join("data.vortex");
+    let output = temp.path().join("output.arrow");
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("department", DataType::Utf8, false),
+        Field::new("salary", DataType::Int32, false),
+    ]));
+
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(StringArray::from(vec![
+                "Engineering",
+                "Engineering",
+                "Sales",
+                "Sales",
+                "Sales",
+            ])),
+            Arc::new(Int32Array::from(vec![100000, 120000, 80000, 90000, 85000])),
+        ],
+    )
+    .unwrap();
+    write_arrow_file(&input, &schema, vec![batch]);
+
+    cargo::cargo_bin_cmd!("silk-chiffon")
+        .args([
+            "transform",
+            "--from",
+            input.to_str().unwrap(),
+            "--to",
+            vortex_file.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    cargo::cargo_bin_cmd!("silk-chiffon")
+        .args([
+            "transform",
+            "--from",
+            vortex_file.to_str().unwrap(),
+            "--to",
+            output.to_str().unwrap(),
+            "--query",
+            "SELECT department, COUNT(*) as count, AVG(salary) as avg_salary FROM data GROUP BY department ORDER BY department",
+        ])
+        .assert()
+        .success();
+
+    let result_batches = read_arrow_file(&output);
+    assert_eq!(result_batches.len(), 1);
+    assert_eq!(result_batches[0].num_rows(), 2);
+    assert_eq!(result_batches[0].num_columns(), 3);
+}

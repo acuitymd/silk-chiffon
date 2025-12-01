@@ -677,6 +677,10 @@ pub struct TransformCommand {
     /// Requires --sort-by to be set.
     #[arg(long, default_value_t = false, requires = "sort_by")]
     pub parquet_sorted_metadata: bool,
+
+    /// Vortex record batch size.
+    #[arg(long)]
+    pub vortex_record_batch_size: Option<usize>,
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug)]
@@ -684,6 +688,7 @@ pub struct TransformCommand {
 pub enum DataFormat {
     Arrow,
     Parquet,
+    Vortex,
 }
 
 #[derive(ValueEnum, PartialEq, Clone, Debug, Default)]
