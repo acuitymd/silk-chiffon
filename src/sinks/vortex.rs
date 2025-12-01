@@ -102,7 +102,7 @@ impl VortexSink {
         let path_clone = path.clone();
         let schema_clone = Arc::clone(schema);
 
-        // the mega-hack! vortex doesn't support push-based writing in a way that
+        // the vortex lib doesn't support push-based writing in a way that
         // results in a Send struct, which we need for storing it in a struct that
         // implements async_trait. so we hack this by giving it a stream hooked up
         // to a channel and spawning a task that writes the arrays to the file
