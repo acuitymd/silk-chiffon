@@ -144,7 +144,7 @@ impl VortexExec {
         let properties = PlanProperties::new(
             EquivalenceProperties::new(projected_schema),
             Partitioning::UnknownPartitioning(1),
-            EmissionType::Final,
+            EmissionType::Incremental,
             Boundedness::Bounded,
         );
 
