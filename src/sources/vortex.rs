@@ -27,7 +27,10 @@ use vortex_session::VortexSession;
 use arrow_array::RecordBatch as RecordBatchv56;
 use arrow_array::StructArray as StructArrayv56;
 
-use crate::{sources::data_source::DataSource, utils::arrow_versioning::convert_arrow_56_to_57};
+use crate::{
+    sources::data_source::DataSource,
+    utils::arrow_versioning::{convert_record_batch_56_to_57, convert_schema_56_to_57},
+};
 
 pub struct VortexDataSource {
     path: String,
@@ -60,10 +63,7 @@ impl DataSource for VortexDataSource {
                     anyhow::anyhow!("Failed to convert Vortex DType to Arrow Schema: {}", e)
                 })?;
 
-                let batch_v56 = RecordBatchv56::new_empty(Arc::new(arrow_schema_v56));
-                let batch_v57 = convert_arrow_56_to_57(&batch_v56)?;
-
-                Ok(batch_v57.schema())
+                convert_schema_56_to_57(Arc::new(arrow_schema_v56))
             })
         })
     }
@@ -254,7 +254,7 @@ impl ExecutionPlan for VortexExec {
 
                 let batch_v56 = RecordBatchv56::from(struct_array_v56);
 
-                let mut batch = convert_arrow_56_to_57(&batch_v56)
+                let mut batch = convert_record_batch_56_to_57(&batch_v56)
                     .map_err(|e| DataFusionError::External(Box::<dyn Error + Send + Sync>::from(e)))?;
 
                 if let Some(ref proj) = projection {

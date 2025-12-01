@@ -19,7 +19,7 @@ use vortex_session::VortexSession;
 
 use crate::{
     sinks::data_sink::{DataSink, SinkResult},
-    utils::arrow_versioning::convert_arrow_57_to_56,
+    utils::arrow_versioning::{convert_record_batch_57_to_56, convert_schema_57_to_56},
 };
 
 #[derive(Clone, Copy)]
@@ -67,7 +67,7 @@ impl VortexSink {
                 .map_err(|e| anyhow::anyhow!("Failed to lock inner: {}", e))?;
             inner.coalescer.next_completed_batch()
         } {
-            let batch_v56 = convert_arrow_57_to_56(&completed_batch)?;
+            let batch_v56 = convert_record_batch_57_to_56(&completed_batch)?;
             let vortex_array = ArrayRef::from_arrow(batch_v56, false);
 
             let sender_clone = {
@@ -137,9 +137,8 @@ impl VortexSink {
 
         let session = VortexSession::default();
 
-        let batch_v56 = convert_arrow_57_to_56(&RecordBatch::new_empty(schema))?;
         // need an arrow 56 schema to convert to vortex dtype, so we can't just use the passed in schema
-        let dtype = DType::from_arrow(batch_v56.schema());
+        let dtype = DType::from_arrow(convert_schema_57_to_56(schema)?);
 
         let array_stream = ArrayStreamAdapter::new(
             dtype.clone(),
