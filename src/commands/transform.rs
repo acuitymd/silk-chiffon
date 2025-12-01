@@ -8,8 +8,12 @@ use crate::{
         arrow::{ArrowSink, ArrowSinkOptions},
         data_sink::DataSink,
         parquet::{ParquetSink, ParquetSinkOptions},
+        vortex::{VortexSink, VortexSinkOptions},
     },
-    sources::{arrow::ArrowDataSource, data_source::DataSource, parquet::ParquetDataSource},
+    sources::{
+        arrow::ArrowDataSource, data_source::DataSource, parquet::ParquetDataSource,
+        vortex::VortexDataSource,
+    },
 };
 use anyhow::{Result, anyhow};
 use arrow::datatypes::SchemaRef;
@@ -42,6 +46,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         parquet_writer_version,
         parquet_no_dictionary,
         parquet_sorted_metadata,
+        vortex_record_batch_size,
     } = args;
 
     let bloom_filter = if let Some(all_config) = parquet_bloom_all {
@@ -68,6 +73,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
             let source: Box<dyn DataSource> = match detected_input_format {
                 DataFormat::Arrow => Box::new(ArrowDataSource::new(input_path.clone())),
                 DataFormat::Parquet => Box::new(ParquetDataSource::new(input_path.clone())),
+                DataFormat::Vortex => Box::new(VortexDataSource::new(input_path.clone())),
             };
 
             pipeline = pipeline.with_input_strategy_with_single_source(source);
@@ -102,6 +108,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
                 let source: Box<dyn DataSource> = match detected_input_format {
                     DataFormat::Arrow => Box::new(ArrowDataSource::new(input_path.clone())),
                     DataFormat::Parquet => Box::new(ParquetDataSource::new(input_path.clone())),
+                    DataFormat::Vortex => Box::new(VortexDataSource::new(input_path.clone())),
                 };
                 if let Some(ref schema) = schema {
                     let source_schema = source.schema()?;
@@ -184,6 +191,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         parquet_no_dictionary,
         bloom_filter,
         parquet_sort_spec,
+        vortex_record_batch_size,
     )?;
 
     if let Some(output_path) = to {
@@ -257,6 +265,8 @@ fn detect_format(path: &str, explicit_format: Option<DataFormat>) -> Result<Data
             return Ok(DataFormat::Arrow);
         } else if ext.eq_ignore_ascii_case("parquet") {
             return Ok(DataFormat::Parquet);
+        } else if ext.eq_ignore_ascii_case("vortex") {
+            return Ok(DataFormat::Vortex);
         }
     }
 
@@ -279,6 +289,7 @@ fn create_sink_factory(
     parquet_no_dictionary: bool,
     parquet_bloom_filter: BloomFilterConfig,
     parquet_sort_spec: Option<SortSpec>,
+    vortex_record_batch_size: Option<usize>,
 ) -> Result<SinkFactory> {
     Ok(Box::new(move |path: String, schema: SchemaRef| {
         let detected_format = detect_format(&path, output_format)?;
@@ -319,6 +330,13 @@ fn create_sink_factory(
                     options = options.with_sort_spec(sort_spec);
                 }
                 Box::new(ParquetSink::create(path.into(), &schema, &options)?)
+            }
+            DataFormat::Vortex => {
+                let mut options = VortexSinkOptions::new();
+                if let Some(batch_size) = vortex_record_batch_size {
+                    options = options.with_record_batch_size(batch_size);
+                }
+                Box::new(VortexSink::create(path.into(), &schema, options)?)
             }
         };
 

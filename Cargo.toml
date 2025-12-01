@@ -36,6 +36,14 @@ async-trait = "^0.1.89"
 strum_macros = "^0.27.2"
 uuid = { version = "^1.18.1", features = ["v4"] }
 
+# Vortex support (Arrow 56 - compatible with our Arrow 57)
+vortex = { version = "0.56.0", features = ["tokio", "files"] }
+vortex-session = "0.56.0"
+async-stream = "0.3"
+arrow-array = "56"
+arrow-ipc = "56"
+arrow-schema = "56"
+
 [features]
 default = []
 
