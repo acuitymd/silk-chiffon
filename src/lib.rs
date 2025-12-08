@@ -1,4 +1,5 @@
 pub mod commands;
+pub mod inspect;
 pub mod io_strategies;
 pub mod operations;
 pub mod pipeline;
@@ -30,6 +31,13 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
+    /// Inspect file metadata and schema without reading data.
+    ///
+    /// Examples:
+    ///   silk-chiffon inspect data.arrow
+    #[command(verbatim_doc_comment)]
+    Inspect(InspectCommand),
+
     /// Transform data between formats with optional filtering, sorting, merging, and partitioning.
     ///
     /// Examples:
@@ -45,7 +53,13 @@ pub enum Commands {
     ///   # Merge and partition with glob
     ///   silk-chiffon transform --from-many '*.arrow' --to-many "{{year}}/{{month}}.parquet" --by year,month
     #[command(verbatim_doc_comment)]
-    Transform(TransformCommand),
+    Transform(Box<TransformCommand>),
+}
+
+#[derive(Args, Debug)]
+pub struct InspectCommand {
+    /// Path to the Arrow IPC file to inspect.
+    pub file: std::path::PathBuf,
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug, Default, Display)]

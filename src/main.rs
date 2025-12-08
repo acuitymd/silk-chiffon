@@ -7,7 +7,8 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Transform(args) => commands::transform::run(args).await?,
+        Commands::Inspect(args) => commands::inspect::execute(&args).await?,
+        Commands::Transform(args) => commands::transform::run(*args).await?,
     };
     Ok(())
 }
