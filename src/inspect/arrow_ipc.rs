@@ -1,5 +1,5 @@
 use super::{FileFormat, FileInfo, FileInspector};
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use arrow::ipc::reader::{FileReader as ArrowFileReader, StreamReader as ArrowStreamReader};
 use arrow_ipc::reader::read_footer_length;
 use arrow_ipc::{root_as_footer, root_as_message};
@@ -7,10 +7,6 @@ use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
-// max sizes to prevent unbounded allocations from malformed files
-const MAX_FOOTER_SIZE: usize = 64 * 1024 * 1024;
-const MAX_METADATA_SIZE: usize = 16 * 1024 * 1024;
-const MAX_BATCHES: usize = 10_000_000;
 const CONTINUATION_MARKER: [u8; 4] = [0xff; 4];
 
 pub struct ArrowIpcInspector;
@@ -51,14 +47,6 @@ fn read_file_batch_metadata<R: Read + Seek>(reader: &mut R, num_batches: usize) 
     reader.read_exact(&mut buf)?;
     let footer_len = read_footer_length(buf).context("invalid footer")?;
 
-    if footer_len > MAX_FOOTER_SIZE {
-        bail!(
-            "footer size {} exceeds maximum {}",
-            footer_len,
-            MAX_FOOTER_SIZE
-        );
-    }
-
     // read footer - footer_len is already usize from read_footer_length
     let footer_len_i64 = i64::try_from(footer_len).context("footer length overflow")?;
     reader.seek(SeekFrom::End(-10 - footer_len_i64))?;
@@ -76,22 +64,9 @@ fn read_file_batch_metadata<R: Read + Seek>(reader: &mut R, num_batches: usize) 
     let mut total_rows = 0i64;
     let mut metadata_buf = Vec::with_capacity(4096);
 
-    if blocks.len() > MAX_BATCHES {
-        bail!("too many batches in file (> {})", MAX_BATCHES);
-    }
-
     for block in blocks.iter() {
         let metadata_len =
             usize::try_from(block.metaDataLength()).context("metadata length overflow")?;
-
-        if metadata_len > MAX_METADATA_SIZE {
-            bail!(
-                "metadata size {} exceeds maximum {}",
-                metadata_len,
-                MAX_METADATA_SIZE
-            );
-        }
-
         let block_offset = u64::try_from(block.offset()).context("block offset overflow")?;
 
         reader.seek(SeekFrom::Start(block_offset))?;
@@ -148,7 +123,6 @@ fn try_inspect_stream(path: &Path) -> Result<FileInfo> {
 /// reads stream message headers to get batch info without reading body data
 fn read_stream_batch_metadata<R: Read + Seek>(mut reader: R) -> Result<i64> {
     let mut total_rows = 0i64;
-    let mut batch_count = 0usize;
     let mut metadata_buf = Vec::with_capacity(4096);
 
     loop {
@@ -170,14 +144,6 @@ fn read_stream_batch_metadata<R: Read + Seek>(mut reader: R) -> Result<i64> {
 
         let metadata_len = usize::try_from(metadata_len_i32).context("metadata length overflow")?;
 
-        if metadata_len > MAX_METADATA_SIZE {
-            bail!(
-                "metadata size {} exceeds maximum {}",
-                metadata_len,
-                MAX_METADATA_SIZE
-            );
-        }
-
         metadata_buf.clear();
         metadata_buf.resize(metadata_len, 0);
         reader.read_exact(&mut metadata_buf)?;
@@ -186,11 +152,6 @@ fn read_stream_batch_metadata<R: Read + Seek>(mut reader: R) -> Result<i64> {
             let body_len = message.bodyLength();
 
             if let Some(header) = message.header_as_record_batch() {
-                batch_count += 1;
-                if batch_count > MAX_BATCHES {
-                    bail!("too many batches in stream (> {})", MAX_BATCHES);
-                }
-
                 let num_rows = header.length();
                 if num_rows >= 0 {
                     total_rows = total_rows.saturating_add(num_rows);
