@@ -11,6 +11,7 @@ Like its namesake fabric -- light, flowing, and effortlessly elegant -- this too
 ### ️🎯 Core Features
 
 - **⚡ Lightning Fast**: Built with Rust for native performance.
+- **🔍 File Inspection**: Quickly inspect Arrow IPC file metadata and schema without reading data.
 - **🤹🏻‍♀ Multi-Format Support**: Convert to/from Arrow IPC (file/stream) and Parquet.
 - **🪓 Partitioning**: Partition data into multiple files based on column values.
 - **🔗 Merging**: Merge data from multiple files into a single file.
@@ -44,6 +45,27 @@ You can download prebuilt binaries from [each of our releases](https://github.co
 
 ## 🚀 Quick Start
 
+### Inspecting Files
+
+Quickly view file metadata and schema without loading data:
+
+```bash
+silk-chiffon inspect data.arrow
+```
+
+Output:
+
+```
+File: data.arrow
+Format: Arrow IPC (file)
+Rows: 1,234,567
+
+Schema (3 fields):
+  id      Int64      (not null)
+  name    Utf8       (nullable)
+  amount  Float64    (not null)
+```
+
 ### Basic Conversions
 
 Convert Arrow to Parquet with compression and sorting:
@@ -55,7 +77,7 @@ silk-chiffon transform --from input.arrow --to output.parquet --parquet-compress
 Convert between Arrow formats:
 
 ```bash
-silk-chiffon transform --from stream.arrows --to file.arrow --arrow-compression lz4
+silk-chiffon transform --from stream.arrow --to file.arrow --arrow-compression lz4
 ```
 
 ### Merging Multiple Files
@@ -110,6 +132,21 @@ silk-chiffon transform \
 ```
 
 ## 🗒️ Command Reference
+
+### Inspect Command
+
+The `inspect` command displays file metadata and schema without reading the actual data:
+
+```bash
+silk-chiffon inspect <FILE>
+```
+
+**Supported Formats:**
+
+- Arrow IPC file format
+- Arrow IPC stream format
+
+The inspector reads only metadata from the file footer (for file format) or message headers (for stream format), making it extremely fast even for large files.
 
 ### Transform Command
 
