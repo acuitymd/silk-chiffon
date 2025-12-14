@@ -1,6 +1,7 @@
 use crate::{
-    ArrowCompression, ArrowIPCFormat, BloomFilterConfig, DataFormat, ListOutputsFormat,
-    ParquetCompression, ParquetStatistics, ParquetWriterVersion, SortSpec, TransformCommand,
+    ArrowCompression, ArrowIPCFormat, BloomFilterConfig, ColumnEncodingConfig, DataFormat,
+    ListOutputsFormat, ParquetCompression, ParquetEncoding, ParquetStatistics,
+    ParquetWriterVersion, SortSpec, TransformCommand,
     io_strategies::{output_strategy::SinkFactory, path_template::PathTemplate},
     operations::{query::QueryOperation, sort::SortOperation},
     pipeline::Pipeline,
@@ -45,6 +46,8 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         parquet_statistics,
         parquet_writer_version,
         parquet_no_dictionary,
+        parquet_encoding,
+        parquet_column_encoding,
         parquet_sorted_metadata,
         vortex_record_batch_size,
     } = args;
@@ -56,6 +59,12 @@ pub async fn run(args: TransformCommand) -> Result<()> {
     } else {
         BloomFilterConfig::None
     };
+
+    warn_encoding_version_compatibility(
+        parquet_writer_version,
+        parquet_encoding,
+        &parquet_column_encoding,
+    );
 
     let mut pipeline = Pipeline::new().with_query_dialect(dialect);
 
@@ -189,6 +198,8 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         parquet_statistics,
         parquet_writer_version,
         parquet_no_dictionary,
+        parquet_encoding,
+        parquet_column_encoding,
         bloom_filter,
         parquet_sort_spec,
         vortex_record_batch_size,
@@ -276,6 +287,43 @@ fn detect_format(path: &str, explicit_format: Option<DataFormat>) -> Result<Data
     ))
 }
 
+fn warn_encoding_version_compatibility(
+    writer_version: Option<ParquetWriterVersion>,
+    default_encoding: Option<ParquetEncoding>,
+    column_encodings: &[ColumnEncodingConfig],
+) {
+    let is_v1 = matches!(writer_version, Some(ParquetWriterVersion::V1));
+    if !is_v1 {
+        return;
+    }
+
+    let mut v2_encodings = Vec::new();
+
+    if let Some(enc) = default_encoding
+        && enc.requires_v2()
+    {
+        v2_encodings.push(format!("default encoding '{}'", enc));
+    }
+
+    for col_enc in column_encodings {
+        if col_enc.encoding.requires_v2() {
+            v2_encodings.push(format!(
+                "column '{}' with encoding '{}'",
+                col_enc.name, col_enc.encoding
+            ));
+        }
+    }
+
+    if !v2_encodings.is_empty() {
+        eprintln!(
+            "Warning: Using advanced encodings with parquet-writer-version=v1 may cause compatibility issues with some readers:"
+        );
+        for enc in &v2_encodings {
+            eprintln!("  - {}", enc);
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn create_sink_factory(
     output_format: Option<DataFormat>,
@@ -287,6 +335,8 @@ fn create_sink_factory(
     parquet_statistics: Option<ParquetStatistics>,
     parquet_writer_version: Option<ParquetWriterVersion>,
     parquet_no_dictionary: bool,
+    parquet_encoding: Option<ParquetEncoding>,
+    parquet_column_encoding: Vec<ColumnEncodingConfig>,
     parquet_bloom_filter: BloomFilterConfig,
     parquet_sort_spec: Option<SortSpec>,
     vortex_record_batch_size: Option<usize>,
@@ -325,6 +375,9 @@ fn create_sink_factory(
                 if parquet_no_dictionary {
                     options = options.with_no_dictionary(true);
                 }
+                options = options
+                    .with_encoding(parquet_encoding)
+                    .with_column_encodings(parquet_column_encoding.clone());
                 options = options.with_bloom_filters(parquet_bloom_filter.clone());
                 if let Some(sort_spec) = parquet_sort_spec.clone() {
                     options = options.with_sort_spec(sort_spec);

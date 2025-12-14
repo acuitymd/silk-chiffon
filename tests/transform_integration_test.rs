@@ -129,6 +129,8 @@ async fn test_transform_arrow_to_arrow_basic() {
         parquet_statistics: None,
         parquet_writer_version: None,
         parquet_no_dictionary: false,
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
         vortex_record_batch_size: None,
     })
@@ -175,6 +177,8 @@ async fn test_transform_arrow_to_parquet() {
         parquet_statistics: None,
         parquet_writer_version: None,
         parquet_no_dictionary: false,
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
         vortex_record_batch_size: None,
     })
@@ -222,6 +226,8 @@ async fn test_transform_parquet_to_arrow() {
         parquet_statistics: None,
         parquet_writer_version: None,
         parquet_no_dictionary: false,
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
         vortex_record_batch_size: None,
     })
@@ -268,6 +274,8 @@ async fn test_transform_parquet_to_parquet() {
         parquet_statistics: None,
         parquet_writer_version: None,
         parquet_no_dictionary: false,
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
         vortex_record_batch_size: None,
     })
@@ -321,6 +329,8 @@ async fn test_transform_from_many_basic() {
         parquet_statistics: None,
         parquet_writer_version: None,
         parquet_no_dictionary: false,
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
         vortex_record_batch_size: None,
     })
@@ -375,6 +385,8 @@ async fn test_transform_from_many_with_glob() {
         parquet_statistics: None,
         parquet_writer_version: None,
         parquet_no_dictionary: false,
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
         vortex_record_batch_size: None,
     })
@@ -422,6 +434,8 @@ async fn test_transform_to_many_partitioned() {
         parquet_statistics: None,
         parquet_writer_version: None,
         parquet_no_dictionary: false,
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
         vortex_record_batch_size: None,
     })
@@ -476,6 +490,8 @@ async fn test_transform_with_query() {
         parquet_statistics: None,
         parquet_writer_version: None,
         parquet_no_dictionary: false,
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
         vortex_record_batch_size: None,
     })
@@ -527,6 +543,8 @@ async fn test_transform_with_sorting() {
         parquet_statistics: None,
         parquet_writer_version: None,
         parquet_no_dictionary: false,
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
         vortex_record_batch_size: None,
     })
@@ -580,6 +598,8 @@ async fn test_transform_with_arrow_compression() {
         parquet_statistics: None,
         parquet_writer_version: None,
         parquet_no_dictionary: false,
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
         vortex_record_batch_size: None,
     })
@@ -636,6 +656,8 @@ async fn test_transform_with_parquet_bloom_filters() {
         parquet_statistics: None,
         parquet_writer_version: None,
         parquet_no_dictionary: false,
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
         vortex_record_batch_size: None,
     })
@@ -688,6 +710,8 @@ async fn test_transform_with_sorted_metadata() {
         parquet_statistics: None,
         parquet_writer_version: None,
         parquet_no_dictionary: false,
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
         parquet_sorted_metadata: true,
         vortex_record_batch_size: None,
     })
@@ -738,6 +762,8 @@ async fn test_transform_partition_with_create_dirs() {
         parquet_statistics: None,
         parquet_writer_version: None,
         parquet_no_dictionary: false,
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
         vortex_record_batch_size: None,
     })
@@ -787,6 +813,8 @@ async fn test_transform_partition_with_overwrite() {
         parquet_statistics: None,
         parquet_writer_version: None,
         parquet_no_dictionary: false,
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
         vortex_record_batch_size: None,
     })
@@ -820,6 +848,8 @@ async fn test_transform_partition_with_overwrite() {
         parquet_statistics: None,
         parquet_writer_version: None,
         parquet_no_dictionary: false,
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
         vortex_record_batch_size: None,
     })
@@ -859,6 +889,8 @@ async fn test_transform_from_many_empty_glob() {
         parquet_statistics: None,
         parquet_writer_version: None,
         parquet_no_dictionary: false,
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
         vortex_record_batch_size: None,
     })
@@ -909,6 +941,8 @@ async fn test_transform_partition_exclude_columns() {
         parquet_statistics: None,
         parquet_writer_version: None,
         parquet_no_dictionary: false,
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
         vortex_record_batch_size: None,
     })
@@ -958,6 +992,8 @@ async fn test_transform_with_projection_query() {
         parquet_statistics: None,
         parquet_writer_version: None,
         parquet_no_dictionary: false,
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
         vortex_record_batch_size: None,
     })
@@ -1005,6 +1041,8 @@ async fn test_transform_with_aggregation_query() {
         parquet_statistics: None,
         parquet_writer_version: None,
         parquet_no_dictionary: false,
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
         vortex_record_batch_size: None,
     })
@@ -1062,6 +1100,8 @@ async fn test_transform_query_and_sort_combined() {
         parquet_statistics: None,
         parquet_writer_version: None,
         parquet_no_dictionary: false,
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
         vortex_record_batch_size: None,
     })
@@ -1138,6 +1178,8 @@ async fn test_transform_multi_column_sort() {
         parquet_statistics: None,
         parquet_writer_version: None,
         parquet_no_dictionary: false,
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
         vortex_record_batch_size: None,
     })
@@ -1207,6 +1249,8 @@ async fn test_transform_sort_descending() {
         parquet_statistics: None,
         parquet_writer_version: None,
         parquet_no_dictionary: false,
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
         vortex_record_batch_size: None,
     })
@@ -1271,6 +1315,8 @@ async fn test_transform_parquet_compression_gzip() {
         parquet_statistics: None,
         parquet_writer_version: None,
         parquet_no_dictionary: false,
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
         vortex_record_batch_size: None,
     })
@@ -1318,6 +1364,8 @@ async fn test_transform_parquet_compression_lz4() {
         parquet_statistics: None,
         parquet_writer_version: None,
         parquet_no_dictionary: false,
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
         vortex_record_batch_size: None,
     })
@@ -1368,6 +1416,8 @@ async fn test_transform_parquet_bloom_all() {
         parquet_statistics: None,
         parquet_writer_version: None,
         parquet_no_dictionary: false,
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
         vortex_record_batch_size: None,
     })
@@ -1414,6 +1464,8 @@ async fn test_transform_parquet_statistics() {
         parquet_statistics: Some(ParquetStatistics::Chunk),
         parquet_writer_version: None,
         parquet_no_dictionary: false,
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
         vortex_record_batch_size: None,
     })
@@ -1460,6 +1512,8 @@ async fn test_transform_parquet_writer_version() {
         parquet_statistics: None,
         parquet_writer_version: Some(ParquetWriterVersion::V1),
         parquet_no_dictionary: false,
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
         vortex_record_batch_size: None,
     })
@@ -1506,6 +1560,8 @@ async fn test_transform_parquet_no_dictionary() {
         parquet_statistics: None,
         parquet_writer_version: None,
         parquet_no_dictionary: true,
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
         vortex_record_batch_size: None,
     })
@@ -1552,6 +1608,8 @@ async fn test_transform_arrow_format_stream() {
         parquet_statistics: None,
         parquet_writer_version: None,
         parquet_no_dictionary: false,
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
         vortex_record_batch_size: None,
     })
@@ -1598,6 +1656,8 @@ async fn test_transform_arrow_record_batch_size() {
         parquet_statistics: None,
         parquet_writer_version: None,
         parquet_no_dictionary: false,
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
         vortex_record_batch_size: None,
     })
@@ -1644,6 +1704,8 @@ async fn test_transform_parquet_row_group_size() {
         parquet_statistics: None,
         parquet_writer_version: None,
         parquet_no_dictionary: false,
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
         vortex_record_batch_size: None,
     })
@@ -1691,6 +1753,8 @@ async fn test_transform_partition_to_parquet() {
         parquet_statistics: None,
         parquet_writer_version: None,
         parquet_no_dictionary: false,
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
         vortex_record_batch_size: None,
     })
@@ -1759,6 +1823,8 @@ async fn test_transform_multi_column_partition() {
         parquet_statistics: None,
         parquet_writer_version: None,
         parquet_no_dictionary: false,
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
         vortex_record_batch_size: None,
     })
@@ -1816,6 +1882,8 @@ async fn test_transform_from_many_to_partitioned() {
         parquet_statistics: None,
         parquet_writer_version: None,
         parquet_no_dictionary: false,
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
         vortex_record_batch_size: None,
     })
@@ -1889,6 +1957,8 @@ async fn test_transform_invalid_query() {
         parquet_statistics: None,
         parquet_writer_version: None,
         parquet_no_dictionary: false,
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
         vortex_record_batch_size: None,
     })
@@ -1931,6 +2001,8 @@ async fn test_transform_empty_file() {
         parquet_statistics: None,
         parquet_writer_version: None,
         parquet_no_dictionary: false,
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
         vortex_record_batch_size: None,
     })
@@ -1980,6 +2052,8 @@ async fn test_transform_bloom_filter_with_custom_ndv() {
         parquet_statistics: None,
         parquet_writer_version: None,
         parquet_no_dictionary: false,
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
         vortex_record_batch_size: None,
     })
@@ -2032,6 +2106,8 @@ async fn test_transform_bloom_filter_column_specific_with_ndv() {
         parquet_statistics: None,
         parquet_writer_version: None,
         parquet_no_dictionary: false,
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
         vortex_record_batch_size: None,
     })
@@ -2086,6 +2162,8 @@ async fn test_transform_mixed_parquet_and_arrow_inputs() {
         parquet_statistics: None,
         parquet_writer_version: None,
         parquet_no_dictionary: false,
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
         vortex_record_batch_size: None,
     })
@@ -2133,6 +2211,8 @@ async fn test_transform_partition_list_outputs_text() {
         parquet_statistics: None,
         parquet_writer_version: None,
         parquet_no_dictionary: false,
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
         vortex_record_batch_size: None,
     })
@@ -2182,6 +2262,8 @@ async fn test_transform_partition_list_outputs_json() {
         parquet_statistics: None,
         parquet_writer_version: None,
         parquet_no_dictionary: false,
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
         vortex_record_batch_size: None,
     })
@@ -2230,6 +2312,8 @@ async fn test_transform_explicit_input_format_arrow_to_parquet() {
         parquet_statistics: None,
         parquet_writer_version: None,
         parquet_no_dictionary: false,
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
         vortex_record_batch_size: None,
     })
@@ -2276,6 +2360,8 @@ async fn test_transform_explicit_output_format_parquet() {
         parquet_statistics: None,
         parquet_writer_version: None,
         parquet_no_dictionary: false,
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
         vortex_record_batch_size: None,
     })
@@ -2322,6 +2408,8 @@ async fn test_transform_arrow_compression_lz4() {
         parquet_statistics: None,
         parquet_writer_version: None,
         parquet_no_dictionary: false,
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
         vortex_record_batch_size: None,
     })
@@ -2382,6 +2470,8 @@ async fn test_transform_query_with_partition() {
         parquet_statistics: None,
         parquet_writer_version: None,
         parquet_no_dictionary: false,
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
         vortex_record_batch_size: None,
     })
@@ -2448,6 +2538,8 @@ async fn test_transform_query_with_different_dialect() {
         parquet_statistics: None,
         parquet_writer_version: None,
         parquet_no_dictionary: false,
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
         vortex_record_batch_size: None,
     })
@@ -2515,6 +2607,8 @@ async fn test_transform_partition_with_query_and_sort() {
         parquet_statistics: None,
         parquet_writer_version: None,
         parquet_no_dictionary: false,
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
         vortex_record_batch_size: None,
     })
