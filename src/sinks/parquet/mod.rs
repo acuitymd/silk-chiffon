@@ -1,19 +1,16 @@
+mod writer;
+
+pub use writer::ParquetWriter;
+
 use futures::stream::StreamExt;
 use parquet::{
-    arrow::ArrowWriter,
     file::{
         metadata::SortingColumn,
         properties::{WriterProperties, WriterPropertiesBuilder},
     },
     schema::types::ColumnPath,
 };
-use std::{
-    collections::HashMap,
-    fs::File,
-    io::BufWriter,
-    path::PathBuf,
-    sync::{Arc, Mutex},
-};
+use std::{collections::HashMap, path::PathBuf, sync::Mutex};
 
 use anyhow::{Result, anyhow};
 use arrow::{array::RecordBatch, datatypes::SchemaRef};
@@ -21,20 +18,23 @@ use async_trait::async_trait;
 use datafusion::execution::SendableRecordBatchStream;
 
 use crate::{
-    BloomFilterConfig, ParquetCompression, ParquetStatistics, ParquetWriterVersion, SortDirection,
-    SortSpec,
+    BloomFilterConfig, ColumnEncodingConfig, ParquetCompression, ParquetEncoding,
+    ParquetStatistics, ParquetWriterVersion, SortDirection, SortSpec,
     sinks::data_sink::{DataSink, SinkResult},
 };
 
 pub struct ParquetSinkOptions {
     record_batch_size: usize,
     max_row_group_size: usize,
+    max_parallelism: Option<usize>,
     sort_spec: SortSpec,
     compression: ParquetCompression,
     bloom_filters: BloomFilterConfig,
     statistics: ParquetStatistics,
     no_dictionary: bool,
     writer_version: ParquetWriterVersion,
+    encoding: Option<ParquetEncoding>,
+    column_encodings: Vec<ColumnEncodingConfig>,
     ndv_map: HashMap<String, u64>,
     metadata: HashMap<String, Option<String>>,
 }
@@ -50,12 +50,15 @@ impl ParquetSinkOptions {
         Self {
             record_batch_size: 122_880,
             max_row_group_size: 1_048_576,
+            max_parallelism: None,
             sort_spec: SortSpec::default(),
             compression: ParquetCompression::default(),
             bloom_filters: BloomFilterConfig::default(),
             statistics: ParquetStatistics::default(),
             no_dictionary: false,
             writer_version: ParquetWriterVersion::default(),
+            encoding: None,
+            column_encodings: Vec::new(),
             ndv_map: HashMap::new(),
             metadata: HashMap::new(),
         }
@@ -68,6 +71,11 @@ impl ParquetSinkOptions {
 
     pub fn with_max_row_group_size(mut self, max_row_group_size: usize) -> Self {
         self.max_row_group_size = max_row_group_size;
+        self
+    }
+
+    pub fn with_max_parallelism(mut self, max_parallelism: Option<usize>) -> Self {
+        self.max_parallelism = max_parallelism;
         self
     }
 
@@ -101,6 +109,16 @@ impl ParquetSinkOptions {
         self
     }
 
+    pub fn with_encoding(mut self, encoding: Option<ParquetEncoding>) -> Self {
+        self.encoding = encoding;
+        self
+    }
+
+    pub fn with_column_encodings(mut self, column_encodings: Vec<ColumnEncodingConfig>) -> Self {
+        self.column_encodings = column_encodings;
+        self
+    }
+
     pub fn with_metadata_value(mut self, key: String, value: Option<String>) -> Self {
         self.metadata.insert(key, value);
         self
@@ -119,8 +137,7 @@ impl ParquetSinkOptions {
 
 pub struct ParquetSinkInner {
     path: PathBuf,
-    rows_written: u64,
-    writer: ArrowWriter<BufWriter<File>>,
+    writer: Option<ParquetWriter>,
 }
 
 pub struct ParquetSink {
@@ -129,14 +146,15 @@ pub struct ParquetSink {
 
 impl ParquetSink {
     pub fn create(path: PathBuf, schema: &SchemaRef, options: &ParquetSinkOptions) -> Result<Self> {
-        let file = BufWriter::new(File::create(&path)?);
-
         let mut writer_builder = WriterProperties::builder()
             .set_max_row_group_size(options.max_row_group_size)
             .set_compression(options.compression.into())
             .set_writer_version(options.writer_version.into())
             .set_statistics_enabled(options.statistics.into())
             .set_dictionary_enabled(!options.no_dictionary);
+
+        writer_builder =
+            Self::apply_encodings(writer_builder, &options.encoding, &options.column_encodings);
 
         writer_builder = Self::apply_bloom_filters(
             writer_builder,
@@ -147,12 +165,19 @@ impl ParquetSink {
 
         writer_builder = Self::apply_sort_metadata(&options.sort_spec, writer_builder, schema)?;
 
-        let writer = ArrowWriter::try_new(file, Arc::clone(schema), Some(writer_builder.build()))?;
+        let props = writer_builder.build();
+
+        let writer = ParquetWriter::try_new(
+            &path,
+            schema,
+            props,
+            options.max_row_group_size,
+            options.max_parallelism,
+        )?;
 
         let inner = ParquetSinkInner {
             path,
-            rows_written: 0,
-            writer,
+            writer: Some(writer),
         };
 
         let sink = Self {
@@ -160,6 +185,23 @@ impl ParquetSink {
         };
 
         Ok(sink)
+    }
+
+    fn apply_encodings(
+        mut builder: WriterPropertiesBuilder,
+        default_encoding: &Option<ParquetEncoding>,
+        column_encodings: &[ColumnEncodingConfig],
+    ) -> WriterPropertiesBuilder {
+        if let Some(encoding) = default_encoding {
+            builder = builder.set_encoding((*encoding).into());
+        }
+
+        for col_encoding in column_encodings {
+            let col_path = ColumnPath::from(col_encoding.name.as_str());
+            builder = builder.set_column_encoding(col_path, col_encoding.encoding.into());
+        }
+
+        builder
     }
 
     fn apply_bloom_filters(
@@ -257,8 +299,12 @@ impl DataSink for ParquetSink {
             .inner
             .lock()
             .map_err(|e| anyhow!("Failed to lock inner: {}", e))?;
-        inner.writer.write(&batch)?;
-        inner.rows_written += batch.num_rows() as u64;
+
+        let writer = inner
+            .writer
+            .as_mut()
+            .ok_or_else(|| anyhow!("Writer already closed"))?;
+        writer.write(&batch)?;
 
         Ok(())
     }
@@ -268,11 +314,16 @@ impl DataSink for ParquetSink {
             .inner
             .lock()
             .map_err(|e| anyhow!("Failed to lock inner: {}", e))?;
-        inner.writer.finish()?;
+
+        let writer = inner
+            .writer
+            .take()
+            .ok_or_else(|| anyhow!("Writer already closed"))?;
+        let rows_written = writer.close()?;
 
         Ok(SinkResult {
             files_written: vec![inner.path.clone()],
-            rows_written: inner.rows_written,
+            rows_written,
         })
     }
 }
@@ -998,6 +1049,121 @@ mod tests {
             let options = ParquetSinkOptions::new().with_metadata(metadata.clone());
 
             assert_eq!(options.metadata, metadata);
+        }
+
+        #[test]
+        fn test_encoding_options() {
+            use crate::{ColumnEncodingConfig, ParquetEncoding};
+
+            let options = ParquetSinkOptions::new()
+                .with_encoding(Some(ParquetEncoding::DeltaBinaryPacked))
+                .with_column_encodings(vec![ColumnEncodingConfig {
+                    name: "name".to_string(),
+                    encoding: ParquetEncoding::DeltaByteArray,
+                }]);
+
+            assert_eq!(options.encoding, Some(ParquetEncoding::DeltaBinaryPacked));
+            assert_eq!(options.column_encodings.len(), 1);
+            assert_eq!(options.column_encodings[0].name, "name");
+            assert_eq!(
+                options.column_encodings[0].encoding,
+                ParquetEncoding::DeltaByteArray
+            );
+        }
+    }
+
+    mod encoding_tests {
+        use super::*;
+        use crate::{ColumnEncodingConfig, ParquetEncoding};
+
+        #[tokio::test]
+        async fn test_sink_with_default_encoding() {
+            let temp_dir = tempdir().unwrap();
+            let output_path = temp_dir.path().join("output.parquet");
+
+            let schema = test_data::simple_schema();
+            let batch =
+                test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["a", "b", "c"]);
+
+            let mut sink = ParquetSink::create(
+                output_path.clone(),
+                &schema,
+                &ParquetSinkOptions::new().with_encoding(Some(ParquetEncoding::Plain)),
+            )
+            .unwrap();
+
+            sink.write_batch(batch).await.unwrap();
+            let result = sink.finish().await.unwrap();
+
+            assert_eq!(result.rows_written, 3);
+            assert!(output_path.exists());
+
+            let batches = verify::read_parquet_file(&output_path).unwrap();
+            verify::assert_id_name_batch_data_matches(&batches[0], &[1, 2, 3], &["a", "b", "c"]);
+        }
+
+        #[tokio::test]
+        async fn test_sink_with_column_encoding() {
+            let temp_dir = tempdir().unwrap();
+            let output_path = temp_dir.path().join("output.parquet");
+
+            let schema = test_data::simple_schema();
+            let batch =
+                test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["a", "b", "c"]);
+
+            let mut sink = ParquetSink::create(
+                output_path.clone(),
+                &schema,
+                &ParquetSinkOptions::new().with_column_encodings(vec![ColumnEncodingConfig {
+                    name: "id".to_string(),
+                    encoding: ParquetEncoding::DeltaBinaryPacked,
+                }]),
+            )
+            .unwrap();
+
+            sink.write_batch(batch).await.unwrap();
+            let result = sink.finish().await.unwrap();
+
+            assert_eq!(result.rows_written, 3);
+            assert!(output_path.exists());
+
+            let batches = verify::read_parquet_file(&output_path).unwrap();
+            verify::assert_id_name_batch_data_matches(&batches[0], &[1, 2, 3], &["a", "b", "c"]);
+        }
+
+        #[tokio::test]
+        async fn test_sink_with_multiple_column_encodings() {
+            let temp_dir = tempdir().unwrap();
+            let output_path = temp_dir.path().join("output.parquet");
+
+            let schema = test_data::simple_schema();
+            let batch =
+                test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["a", "b", "c"]);
+
+            let mut sink = ParquetSink::create(
+                output_path.clone(),
+                &schema,
+                &ParquetSinkOptions::new().with_column_encodings(vec![
+                    ColumnEncodingConfig {
+                        name: "id".to_string(),
+                        encoding: ParquetEncoding::DeltaBinaryPacked,
+                    },
+                    ColumnEncodingConfig {
+                        name: "name".to_string(),
+                        encoding: ParquetEncoding::DeltaByteArray,
+                    },
+                ]),
+            )
+            .unwrap();
+
+            sink.write_batch(batch).await.unwrap();
+            let result = sink.finish().await.unwrap();
+
+            assert_eq!(result.rows_written, 3);
+            assert!(output_path.exists());
+
+            let batches = verify::read_parquet_file(&output_path).unwrap();
+            verify::assert_id_name_batch_data_matches(&batches[0], &[1, 2, 3], &["a", "b", "c"]);
         }
     }
 }

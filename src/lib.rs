@@ -12,7 +12,7 @@ use arrow::ipc::CompressionType;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use datafusion::config::Dialect;
 use parquet::{
-    basic::{Compression, GzipLevel, ZstdLevel},
+    basic::{Compression, Encoding, GzipLevel, ZstdLevel},
     file::properties::{EnabledStatistics, WriterVersion},
 };
 use std::{
@@ -162,6 +162,96 @@ impl From<ParquetWriterVersion> for i32 {
             ParquetWriterVersion::V1 => 1,
             ParquetWriterVersion::V2 => 2,
         }
+    }
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq)]
+#[value(rename_all = "kebab-case")]
+pub enum ParquetEncoding {
+    #[default]
+    Plain,
+    Rle,
+    DeltaBinaryPacked,
+    DeltaLengthByteArray,
+    DeltaByteArray,
+    ByteStreamSplit,
+}
+
+impl ParquetEncoding {
+    /// Returns true if this encoding requires parquet writer version 2 for compatibility.
+    pub fn requires_v2(&self) -> bool {
+        matches!(
+            self,
+            ParquetEncoding::DeltaBinaryPacked
+                | ParquetEncoding::DeltaLengthByteArray
+                | ParquetEncoding::DeltaByteArray
+                | ParquetEncoding::ByteStreamSplit
+        )
+    }
+}
+
+impl From<ParquetEncoding> for Encoding {
+    fn from(encoding: ParquetEncoding) -> Self {
+        match encoding {
+            ParquetEncoding::Plain => Encoding::PLAIN,
+            ParquetEncoding::Rle => Encoding::RLE,
+            ParquetEncoding::DeltaBinaryPacked => Encoding::DELTA_BINARY_PACKED,
+            ParquetEncoding::DeltaLengthByteArray => Encoding::DELTA_LENGTH_BYTE_ARRAY,
+            ParquetEncoding::DeltaByteArray => Encoding::DELTA_BYTE_ARRAY,
+            ParquetEncoding::ByteStreamSplit => Encoding::BYTE_STREAM_SPLIT,
+        }
+    }
+}
+
+impl fmt::Display for ParquetEncoding {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            ParquetEncoding::Plain => "plain",
+            ParquetEncoding::Rle => "rle",
+            ParquetEncoding::DeltaBinaryPacked => "delta-binary-packed",
+            ParquetEncoding::DeltaLengthByteArray => "delta-length-byte-array",
+            ParquetEncoding::DeltaByteArray => "delta-byte-array",
+            ParquetEncoding::ByteStreamSplit => "byte-stream-split",
+        };
+        write!(f, "{s}")
+    }
+}
+
+/// Per-column encoding configuration, parsed from "column=encoding" format.
+#[derive(Debug, Clone)]
+pub struct ColumnEncodingConfig {
+    pub name: String,
+    pub encoding: ParquetEncoding,
+}
+
+impl FromStr for ColumnEncodingConfig {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (name, encoding_str) = s.split_once('=').ok_or_else(|| {
+            anyhow!(
+                "Invalid column encoding format '{}'. Expected 'column=encoding' (e.g., 'id=delta-binary-packed')",
+                s
+            )
+        })?;
+
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(anyhow!("Column name cannot be empty in '{}'", s));
+        }
+
+        let encoding_str = encoding_str.trim();
+        let encoding = ParquetEncoding::from_str(encoding_str, true).map_err(|_| {
+            anyhow!(
+                "Invalid encoding '{}'. Valid options: plain, rle, delta-binary-packed, delta-length-byte-array, delta-byte-array, byte-stream-split",
+                encoding_str
+            )
+        })?;
+
+        Ok(ColumnEncodingConfig {
+            name: name.to_string(),
+            encoding,
+        })
     }
 }
 
@@ -660,6 +750,10 @@ pub struct TransformCommand {
     #[arg(long)]
     pub parquet_row_group_size: Option<usize>,
 
+    /// Maximum thread count for parallel Parquet encoding. Defaults to all CPUs.
+    #[arg(long)]
+    pub parquet_parallelism: Option<usize>,
+
     /// Parquet column statistics level.
     #[arg(long, value_enum)]
     pub parquet_statistics: Option<ParquetStatistics>,
@@ -671,6 +765,35 @@ pub struct TransformCommand {
     /// Disable dictionary encoding for Parquet columns.
     #[arg(long)]
     pub parquet_no_dictionary: bool,
+
+    /// Encoding for Parquet column data pages.
+    ///
+    /// If dictionary encoding is disabled (via --parquet-no-dictionary), this is the primary
+    /// encoding for all columns. If dictionary encoding is enabled (the default), this is the
+    /// fallback encoding when dictionary encoding falls back (e.g., dictionary size exceeded).
+    ///
+    /// Options: plain, rle, delta-binary-packed, delta-length-byte-array, delta-byte-array, byte-stream-split
+    #[arg(long, value_enum)]
+    pub parquet_encoding: Option<ParquetEncoding>,
+
+    /// Set encoding for specific columns. Can be specified multiple times.
+    /// Overrides --parquet-encoding for the named column.
+    ///
+    /// If dictionary encoding is disabled for this column, this is the primary encoding.
+    /// If dictionary encoding is enabled (the default), this is the fallback encoding
+    /// when dictionary encoding falls back (e.g., dictionary size exceeded).
+    ///
+    /// Format: COLUMN=ENCODING
+    ///
+    /// Encoding options: plain, rle, delta-binary-packed, delta-length-byte-array,
+    /// delta-byte-array, byte-stream-split
+    ///
+    /// Examples:
+    ///   --parquet-column-encoding id=delta-binary-packed
+    ///   --parquet-column-encoding name=delta-byte-array
+    ///   --parquet-column-encoding price=byte-stream-split
+    #[arg(long, value_name = "COLUMN=ENCODING", verbatim_doc_comment)]
+    pub parquet_column_encoding: Vec<ColumnEncodingConfig>,
 
     /// Embed metadata indicating that the file's data is sorted.
     ///
@@ -748,5 +871,135 @@ mod tests {
             QueryDialect::from_str("sqlite", true),
             Ok(QueryDialect::SQLite)
         );
+    }
+
+    mod parquet_encoding_tests {
+        use super::*;
+
+        #[test]
+        fn test_parquet_encoding_from_str() {
+            assert_eq!(
+                ParquetEncoding::from_str("plain", true),
+                Ok(ParquetEncoding::Plain)
+            );
+            assert_eq!(
+                ParquetEncoding::from_str("rle", true),
+                Ok(ParquetEncoding::Rle)
+            );
+            assert_eq!(
+                ParquetEncoding::from_str("delta-binary-packed", true),
+                Ok(ParquetEncoding::DeltaBinaryPacked)
+            );
+            assert_eq!(
+                ParquetEncoding::from_str("delta-length-byte-array", true),
+                Ok(ParquetEncoding::DeltaLengthByteArray)
+            );
+            assert_eq!(
+                ParquetEncoding::from_str("delta-byte-array", true),
+                Ok(ParquetEncoding::DeltaByteArray)
+            );
+            assert_eq!(
+                ParquetEncoding::from_str("byte-stream-split", true),
+                Ok(ParquetEncoding::ByteStreamSplit)
+            );
+        }
+
+        #[test]
+        fn test_parquet_encoding_requires_v2() {
+            assert!(!ParquetEncoding::Plain.requires_v2());
+            assert!(!ParquetEncoding::Rle.requires_v2());
+            assert!(ParquetEncoding::DeltaBinaryPacked.requires_v2());
+            assert!(ParquetEncoding::DeltaLengthByteArray.requires_v2());
+            assert!(ParquetEncoding::DeltaByteArray.requires_v2());
+            assert!(ParquetEncoding::ByteStreamSplit.requires_v2());
+        }
+
+        #[test]
+        fn test_parquet_encoding_display() {
+            assert_eq!(format!("{}", ParquetEncoding::Plain), "plain");
+            assert_eq!(format!("{}", ParquetEncoding::Rle), "rle");
+            assert_eq!(
+                format!("{}", ParquetEncoding::DeltaBinaryPacked),
+                "delta-binary-packed"
+            );
+            assert_eq!(
+                format!("{}", ParquetEncoding::DeltaLengthByteArray),
+                "delta-length-byte-array"
+            );
+            assert_eq!(
+                format!("{}", ParquetEncoding::DeltaByteArray),
+                "delta-byte-array"
+            );
+            assert_eq!(
+                format!("{}", ParquetEncoding::ByteStreamSplit),
+                "byte-stream-split"
+            );
+        }
+    }
+
+    mod column_encoding_config_tests {
+        use super::*;
+
+        #[test]
+        fn test_parse_column_encoding_config() {
+            let config: ColumnEncodingConfig = "id=delta-binary-packed".parse().unwrap();
+            assert_eq!(config.name, "id");
+            assert_eq!(config.encoding, ParquetEncoding::DeltaBinaryPacked);
+        }
+
+        #[test]
+        fn test_parse_column_encoding_config_with_spaces() {
+            let config: ColumnEncodingConfig = "  name  =  delta-byte-array  ".parse().unwrap();
+            assert_eq!(config.name, "name");
+            assert_eq!(config.encoding, ParquetEncoding::DeltaByteArray);
+        }
+
+        #[test]
+        fn test_parse_column_encoding_config_all_encodings() {
+            let test_cases = [
+                ("col=plain", ParquetEncoding::Plain),
+                ("col=rle", ParquetEncoding::Rle),
+                (
+                    "col=delta-binary-packed",
+                    ParquetEncoding::DeltaBinaryPacked,
+                ),
+                (
+                    "col=delta-length-byte-array",
+                    ParquetEncoding::DeltaLengthByteArray,
+                ),
+                ("col=delta-byte-array", ParquetEncoding::DeltaByteArray),
+                ("col=byte-stream-split", ParquetEncoding::ByteStreamSplit),
+            ];
+
+            for (input, expected_encoding) in test_cases {
+                let config: ColumnEncodingConfig = input.parse().unwrap();
+                assert_eq!(
+                    config.encoding, expected_encoding,
+                    "Failed for input: {}",
+                    input
+                );
+            }
+        }
+
+        #[test]
+        fn test_parse_column_encoding_config_missing_equals() {
+            let result: Result<ColumnEncodingConfig, _> = "id".parse();
+            assert!(result.is_err());
+            assert!(result.unwrap_err().to_string().contains("column=encoding"));
+        }
+
+        #[test]
+        fn test_parse_column_encoding_config_empty_column_name() {
+            let result: Result<ColumnEncodingConfig, _> = "=plain".parse();
+            assert!(result.is_err());
+            assert!(result.unwrap_err().to_string().contains("empty"));
+        }
+
+        #[test]
+        fn test_parse_column_encoding_config_invalid_encoding() {
+            let result: Result<ColumnEncodingConfig, _> = "id=invalid".parse();
+            assert!(result.is_err());
+            assert!(result.unwrap_err().to_string().contains("Invalid encoding"));
+        }
     }
 }
