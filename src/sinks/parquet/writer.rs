@@ -379,6 +379,7 @@ impl ParquetWriter {
                 let num_rows = batch.num_rows();
 
                 semaphore.acquire()?;
+                let task_semaphore = Arc::clone(semaphore);
 
                 rg_pool.spawn(move || {
                     let result = col_pool
@@ -396,8 +397,11 @@ impl ParquetWriter {
                         },
                     };
 
-                    // send result (ignore error if receiver dropped - writer will handle)
-                    let _ = sender.send(msg);
+                    // normally writer thread releases the permit after writing;
+                    // if send fails (writer dead), release here to prevent deadlock
+                    if sender.send(msg).is_err() {
+                        task_semaphore.release();
+                    }
                 });
 
                 Ok(())
