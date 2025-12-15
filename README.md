@@ -180,6 +180,34 @@ Enable bloom filters for specific columns:
 - `--overwrite` - Overwrite existing files
 - `--list-outputs <FORMAT>` - List output files after creation (text, json)
 
+### Shell Completions
+
+Generate shell completions for your shell:
+
+```bash
+# To add completions for your current shell session only
+
+## zsh
+eval "$(silk-chiffon completions zsh)"
+
+## bash
+eval "$(silk-chiffon completions bash)"
+
+## fish
+silk-chiffon completions fish | source
+
+# To persist completions across sessions
+
+## zsh
+echo 'eval "$(silk-chiffon completions zsh)"' >> ~/.zshrc
+
+## bash
+echo 'eval "$(silk-chiffon completions bash)"' >> ~/.bashrc
+
+## fish
+silk-chiffon completions fish > ~/.config/fish/completions/silk-chiffon.fish
+```
+
 ## 📚 Examples
 
 ### Convert with Sorting
