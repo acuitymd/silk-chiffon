@@ -43,6 +43,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         parquet_bloom_all,
         parquet_bloom_column,
         parquet_row_group_size,
+        parquet_parallelism,
         parquet_statistics,
         parquet_writer_version,
         parquet_no_dictionary,
@@ -195,6 +196,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         arrow_record_batch_size,
         parquet_compression,
         parquet_row_group_size,
+        parquet_parallelism,
         parquet_statistics,
         parquet_writer_version,
         parquet_no_dictionary,
@@ -332,6 +334,7 @@ fn create_sink_factory(
     arrow_record_batch_size: Option<usize>,
     parquet_compression: Option<ParquetCompression>,
     parquet_row_group_size: Option<usize>,
+    parquet_parallelism: Option<usize>,
     parquet_statistics: Option<ParquetStatistics>,
     parquet_writer_version: Option<ParquetWriterVersion>,
     parquet_no_dictionary: bool,
@@ -366,6 +369,7 @@ fn create_sink_factory(
                 if let Some(row_group_size) = parquet_row_group_size {
                     options = options.with_max_row_group_size(row_group_size);
                 }
+                options = options.with_max_parallelism(parquet_parallelism);
                 if let Some(stats) = parquet_statistics {
                     options = options.with_statistics(stats);
                 }
@@ -377,8 +381,8 @@ fn create_sink_factory(
                 }
                 options = options
                     .with_encoding(parquet_encoding)
-                    .with_column_encodings(parquet_column_encoding.clone());
-                options = options.with_bloom_filters(parquet_bloom_filter.clone());
+                    .with_column_encodings(parquet_column_encoding.clone())
+                    .with_bloom_filters(parquet_bloom_filter.clone());
                 if let Some(sort_spec) = parquet_sort_spec.clone() {
                     options = options.with_sort_spec(sort_spec);
                 }

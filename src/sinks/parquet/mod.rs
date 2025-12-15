@@ -1,19 +1,16 @@
+mod writer;
+
+pub use writer::ParquetWriter;
+
 use futures::stream::StreamExt;
 use parquet::{
-    arrow::ArrowWriter,
     file::{
         metadata::SortingColumn,
         properties::{WriterProperties, WriterPropertiesBuilder},
     },
     schema::types::ColumnPath,
 };
-use std::{
-    collections::HashMap,
-    fs::File,
-    io::BufWriter,
-    path::PathBuf,
-    sync::{Arc, Mutex},
-};
+use std::{collections::HashMap, path::PathBuf, sync::Mutex};
 
 use anyhow::{Result, anyhow};
 use arrow::{array::RecordBatch, datatypes::SchemaRef};
@@ -29,6 +26,7 @@ use crate::{
 pub struct ParquetSinkOptions {
     record_batch_size: usize,
     max_row_group_size: usize,
+    max_parallelism: Option<usize>,
     sort_spec: SortSpec,
     compression: ParquetCompression,
     bloom_filters: BloomFilterConfig,
@@ -52,6 +50,7 @@ impl ParquetSinkOptions {
         Self {
             record_batch_size: 122_880,
             max_row_group_size: 1_048_576,
+            max_parallelism: None,
             sort_spec: SortSpec::default(),
             compression: ParquetCompression::default(),
             bloom_filters: BloomFilterConfig::default(),
@@ -72,6 +71,11 @@ impl ParquetSinkOptions {
 
     pub fn with_max_row_group_size(mut self, max_row_group_size: usize) -> Self {
         self.max_row_group_size = max_row_group_size;
+        self
+    }
+
+    pub fn with_max_parallelism(mut self, max_parallelism: Option<usize>) -> Self {
+        self.max_parallelism = max_parallelism;
         self
     }
 
@@ -133,8 +137,7 @@ impl ParquetSinkOptions {
 
 pub struct ParquetSinkInner {
     path: PathBuf,
-    rows_written: u64,
-    writer: ArrowWriter<BufWriter<File>>,
+    writer: Option<ParquetWriter>,
 }
 
 pub struct ParquetSink {
@@ -143,8 +146,6 @@ pub struct ParquetSink {
 
 impl ParquetSink {
     pub fn create(path: PathBuf, schema: &SchemaRef, options: &ParquetSinkOptions) -> Result<Self> {
-        let file = BufWriter::new(File::create(&path)?);
-
         let mut writer_builder = WriterProperties::builder()
             .set_max_row_group_size(options.max_row_group_size)
             .set_compression(options.compression.into())
@@ -164,12 +165,19 @@ impl ParquetSink {
 
         writer_builder = Self::apply_sort_metadata(&options.sort_spec, writer_builder, schema)?;
 
-        let writer = ArrowWriter::try_new(file, Arc::clone(schema), Some(writer_builder.build()))?;
+        let props = writer_builder.build();
+
+        let writer = ParquetWriter::try_new(
+            &path,
+            schema,
+            props,
+            options.max_row_group_size,
+            options.max_parallelism,
+        )?;
 
         let inner = ParquetSinkInner {
             path,
-            rows_written: 0,
-            writer,
+            writer: Some(writer),
         };
 
         let sink = Self {
@@ -291,8 +299,12 @@ impl DataSink for ParquetSink {
             .inner
             .lock()
             .map_err(|e| anyhow!("Failed to lock inner: {}", e))?;
-        inner.writer.write(&batch)?;
-        inner.rows_written += batch.num_rows() as u64;
+
+        let writer = inner
+            .writer
+            .as_mut()
+            .ok_or_else(|| anyhow!("Writer already closed"))?;
+        writer.write(&batch)?;
 
         Ok(())
     }
@@ -302,11 +314,16 @@ impl DataSink for ParquetSink {
             .inner
             .lock()
             .map_err(|e| anyhow!("Failed to lock inner: {}", e))?;
-        inner.writer.finish()?;
+
+        let writer = inner
+            .writer
+            .take()
+            .ok_or_else(|| anyhow!("Writer already closed"))?;
+        let rows_written = writer.close()?;
 
         Ok(SinkResult {
             files_written: vec![inner.path.clone()],
-            rows_written: inner.rows_written,
+            rows_written,
         })
     }
 }

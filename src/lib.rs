@@ -217,7 +217,7 @@ impl fmt::Display for ParquetEncoding {
     }
 }
 
-/// per-column encoding configuration, parsed from "column=encoding" format
+/// Per-column encoding configuration, parsed from "column=encoding" format.
 #[derive(Debug, Clone)]
 pub struct ColumnEncodingConfig {
     pub name: String,
@@ -749,6 +749,10 @@ pub struct TransformCommand {
     /// Maximum number of rows per Parquet row group.
     #[arg(long)]
     pub parquet_row_group_size: Option<usize>,
+
+    /// Maximum thread count for parallel Parquet encoding. Defaults to all CPUs.
+    #[arg(long)]
+    pub parquet_parallelism: Option<usize>,
 
     /// Parquet column statistics level.
     #[arg(long, value_enum)]
