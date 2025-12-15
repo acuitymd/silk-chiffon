@@ -9,7 +9,8 @@ pub mod utils;
 use crate::utils::collections::{uniq, uniq_by};
 use anyhow::{Result, anyhow};
 use arrow::ipc::CompressionType;
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
+use clap_complete::Shell;
 use datafusion::config::Dialect;
 use parquet::{
     basic::{Compression, Encoding, GzipLevel, ZstdLevel},
@@ -29,6 +30,7 @@ pub struct Cli {
 }
 
 #[derive(Subcommand, Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum Commands {
     /// Transform data between formats with optional filtering, sorting, merging, and partitioning.
     ///
@@ -46,6 +48,34 @@ pub enum Commands {
     ///   silk-chiffon transform --from-many '*.arrow' --to-many "{{year}}/{{month}}.parquet" --by year,month
     #[command(verbatim_doc_comment)]
     Transform(TransformCommand),
+
+    /// Generate shell completions for your shell.
+    ///
+    /// To add completions for your current shell session only:
+    ///   zsh:  eval "$(silk-chiffon completions zsh)"
+    ///   bash: eval "$(silk-chiffon completions bash)"
+    ///   fish: silk-chiffon completions fish | source
+    ///
+    /// To persist completions across sessions:
+    ///   zsh:  echo 'eval "$(silk-chiffon completions zsh)"' >> ~/.zshrc
+    ///   bash: echo 'eval "$(silk-chiffon completions bash)"' >> ~/.bashrc
+    ///   fish: silk-chiffon completions fish > ~/.config/fish/completions/silk-chiffon.fish
+    #[command(verbatim_doc_comment)]
+    Completions {
+        /// Shell to generate completions for
+        shell: Shell,
+    },
+}
+
+impl Commands {
+    pub fn generate_completions(shell: Shell) {
+        clap_complete::generate(
+            shell,
+            &mut Cli::command(),
+            "silk-chiffon",
+            &mut std::io::stdout(),
+        );
+    }
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug, Default, Display)]
