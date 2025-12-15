@@ -766,15 +766,22 @@ pub struct TransformCommand {
     #[arg(long)]
     pub parquet_no_dictionary: bool,
 
-    /// Encoding for Parquet column data pages. Only applies when dictionary encoding
-    /// is disabled (via --parquet-no-dictionary) or falls back (e.g., dictionary size exceeded).
+    /// Encoding for Parquet column data pages.
+    ///
+    /// If dictionary encoding is disabled (via --parquet-no-dictionary), this is the primary
+    /// encoding for all columns. If dictionary encoding is enabled (the default), this is the
+    /// fallback encoding when dictionary encoding falls back (e.g., dictionary size exceeded).
     ///
     /// Options: plain, rle, delta-binary-packed, delta-length-byte-array, delta-byte-array, byte-stream-split
     #[arg(long, value_enum)]
     pub parquet_encoding: Option<ParquetEncoding>,
 
-    /// Set encoding for specific columns (same caveats as --parquet-encoding).
-    /// Can be specified multiple times. Overrides --parquet-encoding for the named column.
+    /// Set encoding for specific columns. Can be specified multiple times.
+    /// Overrides --parquet-encoding for the named column.
+    ///
+    /// If dictionary encoding is disabled for this column, this is the primary encoding.
+    /// If dictionary encoding is enabled (the default), this is the fallback encoding
+    /// when dictionary encoding falls back (e.g., dictionary size exceeded).
     ///
     /// Format: COLUMN=ENCODING
     ///
