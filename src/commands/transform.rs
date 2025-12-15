@@ -61,11 +61,11 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         BloomFilterConfig::None
     };
 
-    warn_encoding_version_compatibility(
+    validate_encoding_version_compatibility(
         parquet_writer_version,
         parquet_encoding,
         &parquet_column_encoding,
-    );
+    )?;
 
     let mut pipeline = Pipeline::new().with_query_dialect(dialect);
 
@@ -289,14 +289,14 @@ fn detect_format(path: &str, explicit_format: Option<DataFormat>) -> Result<Data
     ))
 }
 
-fn warn_encoding_version_compatibility(
+fn validate_encoding_version_compatibility(
     writer_version: Option<ParquetWriterVersion>,
     default_encoding: Option<ParquetEncoding>,
     column_encodings: &[ColumnEncodingConfig],
-) {
-    let is_v1 = matches!(writer_version, Some(ParquetWriterVersion::V1));
-    if !is_v1 {
-        return;
+) -> Result<()> {
+    // some encodings are only supported in v2
+    if !matches!(writer_version, Some(ParquetWriterVersion::V1)) {
+        return Ok(());
     }
 
     let mut v2_encodings = Vec::new();
@@ -317,13 +317,13 @@ fn warn_encoding_version_compatibility(
     }
 
     if !v2_encodings.is_empty() {
-        eprintln!(
-            "Warning: Using advanced encodings with parquet-writer-version=v1 may cause compatibility issues with some readers:"
+        anyhow::bail!(
+            "v2-only encodings cannot be used with parquet-writer-version=v1:\n  - {}",
+            v2_encodings.join("\n  - ")
         );
-        for enc in &v2_encodings {
-            eprintln!("  - {}", enc);
-        }
     }
+
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
