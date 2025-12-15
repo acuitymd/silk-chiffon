@@ -482,11 +482,19 @@ impl ParquetWriter {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::similar_names,
+    clippy::cast_lossless,
+    clippy::cast_possible_wrap,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
 mod tests {
     use super::*;
     use arrow::array::{
-        Array, Float64Array, Int32Array, Int32Builder, Int64Array, ListBuilder, StringArray,
-        StructArray, TimestampMicrosecondArray,
+        Array, Float64Array, Int32Array, Int32Builder, Int64Array, Int64Builder, ListBuilder,
+        StringArray, StringBuilder, StructArray, StructBuilder, TimestampMicrosecondArray,
     };
     use arrow::datatypes::{DataType, Field, Fields, Schema, TimeUnit};
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -925,8 +933,6 @@ mod tests {
             "parallel writer output differs from sequential ArrowWriter with nested struct"
         );
     }
-
-    // ========== CONCURRENCY STRESS TESTS ==========
 
     #[test]
     fn test_stress_many_row_groups() {
@@ -1685,5 +1691,1631 @@ mod tests {
         let batches = read_parquet_to_batches(&path);
         let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total_rows, 6);
+    }
+
+    #[test]
+    fn test_type_boolean() {
+        let temp_dir = tempdir().unwrap();
+        let sequential_path = temp_dir.path().join("sequential.parquet");
+        let parallel_path = temp_dir.path().join("parallel.parquet");
+
+        use arrow::array::BooleanArray;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("flag", DataType::Boolean, false),
+            Field::new("nullable_flag", DataType::Boolean, true),
+        ]));
+
+        let batches: Vec<RecordBatch> = (0..10)
+            .map(|i| {
+                let ids: Vec<i32> = (i * 100..(i + 1) * 100).collect();
+                let flags: Vec<bool> = (i * 100..(i + 1) * 100).map(|x| x % 2 == 0).collect();
+                let nullable_flags: Vec<Option<bool>> = (i * 100..(i + 1) * 100)
+                    .map(|x| if x % 3 == 0 { None } else { Some(x % 2 == 0) })
+                    .collect();
+
+                RecordBatch::try_new(
+                    Arc::clone(&schema),
+                    vec![
+                        Arc::new(Int32Array::from(ids)),
+                        Arc::new(BooleanArray::from(flags)),
+                        Arc::new(BooleanArray::from(nullable_flags)),
+                    ],
+                )
+                .unwrap()
+            })
+            .collect();
+
+        let props = WriterProperties::builder()
+            .set_max_row_group_size(200)
+            .build();
+        let file = File::create(&sequential_path).unwrap();
+        let mut sequential_writer =
+            ArrowWriter::try_new(file, Arc::clone(&schema), Some(props)).unwrap();
+        for batch in &batches {
+            sequential_writer.write(batch).unwrap();
+        }
+        sequential_writer.close().unwrap();
+
+        let props = WriterProperties::builder().build();
+        let mut parallel_writer =
+            ParquetWriter::try_new(&parallel_path, &schema, props, 200, None).unwrap();
+        for batch in &batches {
+            parallel_writer.write(batch).unwrap();
+        }
+        parallel_writer.close().unwrap();
+
+        let sequential_data = concat_batches(&read_parquet_to_batches(&sequential_path));
+        let parallel_data = concat_batches(&read_parquet_to_batches(&parallel_path));
+
+        assert!(
+            batches_equal(&sequential_data, &parallel_data),
+            "boolean columns should produce identical data"
+        );
+    }
+
+    #[test]
+    fn test_type_binary() {
+        let temp_dir = tempdir().unwrap();
+        let sequential_path = temp_dir.path().join("sequential.parquet");
+        let parallel_path = temp_dir.path().join("parallel.parquet");
+
+        use arrow::array::{BinaryArray, LargeBinaryArray};
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("data", DataType::Binary, false),
+            Field::new("large_data", DataType::LargeBinary, false),
+            Field::new("nullable_data", DataType::Binary, true),
+        ]));
+
+        let batches: Vec<RecordBatch> = (0..10)
+            .map(|i| {
+                let ids: Vec<i32> = (i * 100..(i + 1) * 100).collect();
+                let data: Vec<&[u8]> = (i * 100..(i + 1) * 100)
+                    .map(|x| {
+                        let bytes: &[u8] = match x % 4 {
+                            0 => b"hello",
+                            1 => b"world",
+                            2 => b"\x00\x01\x02\x03",
+                            _ => b"test data here",
+                        };
+                        bytes
+                    })
+                    .collect();
+                let large_data: Vec<&[u8]> = data.clone();
+                let nullable_data: Vec<Option<&[u8]>> = (i * 100..(i + 1) * 100)
+                    .map(|x| {
+                        if x % 5 == 0 {
+                            None
+                        } else {
+                            Some(b"value" as &[u8])
+                        }
+                    })
+                    .collect();
+
+                RecordBatch::try_new(
+                    Arc::clone(&schema),
+                    vec![
+                        Arc::new(Int32Array::from(ids)),
+                        Arc::new(BinaryArray::from(data)),
+                        Arc::new(LargeBinaryArray::from(large_data)),
+                        Arc::new(BinaryArray::from(nullable_data)),
+                    ],
+                )
+                .unwrap()
+            })
+            .collect();
+
+        let props = WriterProperties::builder()
+            .set_max_row_group_size(200)
+            .build();
+        let file = File::create(&sequential_path).unwrap();
+        let mut sequential_writer =
+            ArrowWriter::try_new(file, Arc::clone(&schema), Some(props)).unwrap();
+        for batch in &batches {
+            sequential_writer.write(batch).unwrap();
+        }
+        sequential_writer.close().unwrap();
+
+        let props = WriterProperties::builder().build();
+        let mut parallel_writer =
+            ParquetWriter::try_new(&parallel_path, &schema, props, 200, None).unwrap();
+        for batch in &batches {
+            parallel_writer.write(batch).unwrap();
+        }
+        parallel_writer.close().unwrap();
+
+        let sequential_data = concat_batches(&read_parquet_to_batches(&sequential_path));
+        let parallel_data = concat_batches(&read_parquet_to_batches(&parallel_path));
+
+        assert!(
+            batches_equal(&sequential_data, &parallel_data),
+            "binary columns should produce identical data"
+        );
+    }
+
+    #[test]
+    fn test_type_date() {
+        let temp_dir = tempdir().unwrap();
+        let sequential_path = temp_dir.path().join("sequential.parquet");
+        let parallel_path = temp_dir.path().join("parallel.parquet");
+
+        use arrow::array::{Date32Array, Date64Array};
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("date32", DataType::Date32, false),
+            Field::new("date64", DataType::Date64, false),
+            Field::new("nullable_date", DataType::Date32, true),
+        ]));
+
+        let batches: Vec<RecordBatch> = (0..10)
+            .map(|i| {
+                let ids: Vec<i32> = (i * 100..(i + 1) * 100).collect();
+                // date32: days since epoch
+                let date32_values: Vec<i32> = (i * 100..(i + 1) * 100).map(|x| 18000 + x).collect();
+                // date64: milliseconds since epoch
+                let date64_values: Vec<i64> = (i * 100..(i + 1) * 100)
+                    .map(|x| (18000 + x) as i64 * 86400 * 1000)
+                    .collect();
+                let nullable_dates: Vec<Option<i32>> = (i * 100..(i + 1) * 100)
+                    .map(|x| if x % 4 == 0 { None } else { Some(18000 + x) })
+                    .collect();
+
+                RecordBatch::try_new(
+                    Arc::clone(&schema),
+                    vec![
+                        Arc::new(Int32Array::from(ids)),
+                        Arc::new(Date32Array::from(date32_values)),
+                        Arc::new(Date64Array::from(date64_values)),
+                        Arc::new(Date32Array::from(nullable_dates)),
+                    ],
+                )
+                .unwrap()
+            })
+            .collect();
+
+        let props = WriterProperties::builder()
+            .set_max_row_group_size(200)
+            .build();
+        let file = File::create(&sequential_path).unwrap();
+        let mut sequential_writer =
+            ArrowWriter::try_new(file, Arc::clone(&schema), Some(props)).unwrap();
+        for batch in &batches {
+            sequential_writer.write(batch).unwrap();
+        }
+        sequential_writer.close().unwrap();
+
+        let props = WriterProperties::builder().build();
+        let mut parallel_writer =
+            ParquetWriter::try_new(&parallel_path, &schema, props, 200, None).unwrap();
+        for batch in &batches {
+            parallel_writer.write(batch).unwrap();
+        }
+        parallel_writer.close().unwrap();
+
+        let sequential_data = concat_batches(&read_parquet_to_batches(&sequential_path));
+        let parallel_data = concat_batches(&read_parquet_to_batches(&parallel_path));
+
+        assert!(
+            batches_equal(&sequential_data, &parallel_data),
+            "date columns should produce identical data"
+        );
+    }
+
+    #[test]
+    fn test_type_time() {
+        let temp_dir = tempdir().unwrap();
+        let sequential_path = temp_dir.path().join("sequential.parquet");
+        let parallel_path = temp_dir.path().join("parallel.parquet");
+
+        use arrow::array::{Time32MillisecondArray, Time64MicrosecondArray, Time64NanosecondArray};
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("time32_ms", DataType::Time32(TimeUnit::Millisecond), false),
+            Field::new("time64_us", DataType::Time64(TimeUnit::Microsecond), false),
+            Field::new("time64_ns", DataType::Time64(TimeUnit::Nanosecond), false),
+        ]));
+
+        let batches: Vec<RecordBatch> = (0..10)
+            .map(|i| {
+                let ids: Vec<i32> = (i * 100..(i + 1) * 100).collect();
+                // time32: milliseconds since midnight (max ~86400000)
+                let time32_values: Vec<i32> = (i * 100..(i + 1) * 100)
+                    .map(|x| (x * 1000) % 86400000)
+                    .collect();
+                // time64: microseconds since midnight
+                let time64_us_values: Vec<i64> = (i * 100..(i + 1) * 100)
+                    .map(|x| ((x * 1000) % 86400000) as i64 * 1000)
+                    .collect();
+                // time64: nanoseconds since midnight
+                let time64_ns_values: Vec<i64> = (i * 100..(i + 1) * 100)
+                    .map(|x| ((x * 1000) % 86400000) as i64 * 1000000)
+                    .collect();
+
+                RecordBatch::try_new(
+                    Arc::clone(&schema),
+                    vec![
+                        Arc::new(Int32Array::from(ids)),
+                        Arc::new(Time32MillisecondArray::from(time32_values)),
+                        Arc::new(Time64MicrosecondArray::from(time64_us_values)),
+                        Arc::new(Time64NanosecondArray::from(time64_ns_values)),
+                    ],
+                )
+                .unwrap()
+            })
+            .collect();
+
+        let props = WriterProperties::builder()
+            .set_max_row_group_size(200)
+            .build();
+        let file = File::create(&sequential_path).unwrap();
+        let mut sequential_writer =
+            ArrowWriter::try_new(file, Arc::clone(&schema), Some(props)).unwrap();
+        for batch in &batches {
+            sequential_writer.write(batch).unwrap();
+        }
+        sequential_writer.close().unwrap();
+
+        let props = WriterProperties::builder().build();
+        let mut parallel_writer =
+            ParquetWriter::try_new(&parallel_path, &schema, props, 200, None).unwrap();
+        for batch in &batches {
+            parallel_writer.write(batch).unwrap();
+        }
+        parallel_writer.close().unwrap();
+
+        let sequential_data = concat_batches(&read_parquet_to_batches(&sequential_path));
+        let parallel_data = concat_batches(&read_parquet_to_batches(&parallel_path));
+
+        assert!(
+            batches_equal(&sequential_data, &parallel_data),
+            "time columns should produce identical data"
+        );
+    }
+
+    #[test]
+    fn test_type_duration() {
+        let temp_dir = tempdir().unwrap();
+        let sequential_path = temp_dir.path().join("sequential.parquet");
+        let parallel_path = temp_dir.path().join("parallel.parquet");
+
+        use arrow::array::DurationMicrosecondArray;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new(
+                "duration_us",
+                DataType::Duration(TimeUnit::Microsecond),
+                false,
+            ),
+        ]));
+
+        let batches: Vec<RecordBatch> = (0..10)
+            .map(|i| {
+                let ids: Vec<i32> = (i * 100..(i + 1) * 100).collect();
+                let durations: Vec<i64> = (i * 100..(i + 1) * 100)
+                    .map(|x| x as i64 * 1_000_000)
+                    .collect();
+
+                RecordBatch::try_new(
+                    Arc::clone(&schema),
+                    vec![
+                        Arc::new(Int32Array::from(ids)),
+                        Arc::new(DurationMicrosecondArray::from(durations)),
+                    ],
+                )
+                .unwrap()
+            })
+            .collect();
+
+        let props = WriterProperties::builder()
+            .set_max_row_group_size(200)
+            .build();
+        let file = File::create(&sequential_path).unwrap();
+        let mut sequential_writer =
+            ArrowWriter::try_new(file, Arc::clone(&schema), Some(props)).unwrap();
+        for batch in &batches {
+            sequential_writer.write(batch).unwrap();
+        }
+        sequential_writer.close().unwrap();
+
+        let props = WriterProperties::builder().build();
+        let mut parallel_writer =
+            ParquetWriter::try_new(&parallel_path, &schema, props, 200, None).unwrap();
+        for batch in &batches {
+            parallel_writer.write(batch).unwrap();
+        }
+        parallel_writer.close().unwrap();
+
+        let sequential_data = concat_batches(&read_parquet_to_batches(&sequential_path));
+        let parallel_data = concat_batches(&read_parquet_to_batches(&parallel_path));
+
+        assert!(
+            batches_equal(&sequential_data, &parallel_data),
+            "duration columns should produce identical data"
+        );
+    }
+
+    #[test]
+    fn test_type_decimal128() {
+        let temp_dir = tempdir().unwrap();
+        let sequential_path = temp_dir.path().join("sequential.parquet");
+        let parallel_path = temp_dir.path().join("parallel.parquet");
+
+        use arrow::array::Decimal128Array;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("price", DataType::Decimal128(18, 2), false),
+            Field::new("nullable_price", DataType::Decimal128(18, 4), true),
+        ]));
+
+        let batches: Vec<RecordBatch> = (0..10)
+            .map(|i| {
+                let ids: Vec<i32> = (i * 100..(i + 1) * 100).collect();
+                // decimal values stored as i128, scale=2 means 12345 = 123.45
+                let prices: Vec<i128> = (i * 100..(i + 1) * 100)
+                    .map(|x| x as i128 * 100 + 99)
+                    .collect();
+                let nullable_prices: Vec<Option<i128>> = (i * 100..(i + 1) * 100)
+                    .map(|x| {
+                        if x % 7 == 0 {
+                            None
+                        } else {
+                            Some(x as i128 * 10000 + 1234)
+                        }
+                    })
+                    .collect();
+
+                RecordBatch::try_new(
+                    Arc::clone(&schema),
+                    vec![
+                        Arc::new(Int32Array::from(ids)),
+                        Arc::new(
+                            Decimal128Array::from(prices)
+                                .with_precision_and_scale(18, 2)
+                                .unwrap(),
+                        ),
+                        Arc::new(
+                            Decimal128Array::from(nullable_prices)
+                                .with_precision_and_scale(18, 4)
+                                .unwrap(),
+                        ),
+                    ],
+                )
+                .unwrap()
+            })
+            .collect();
+
+        let props = WriterProperties::builder()
+            .set_max_row_group_size(200)
+            .build();
+        let file = File::create(&sequential_path).unwrap();
+        let mut sequential_writer =
+            ArrowWriter::try_new(file, Arc::clone(&schema), Some(props)).unwrap();
+        for batch in &batches {
+            sequential_writer.write(batch).unwrap();
+        }
+        sequential_writer.close().unwrap();
+
+        let props = WriterProperties::builder().build();
+        let mut parallel_writer =
+            ParquetWriter::try_new(&parallel_path, &schema, props, 200, None).unwrap();
+        for batch in &batches {
+            parallel_writer.write(batch).unwrap();
+        }
+        parallel_writer.close().unwrap();
+
+        let sequential_data = concat_batches(&read_parquet_to_batches(&sequential_path));
+        let parallel_data = concat_batches(&read_parquet_to_batches(&parallel_path));
+
+        assert!(
+            batches_equal(&sequential_data, &parallel_data),
+            "decimal128 columns should produce identical data"
+        );
+    }
+
+    #[test]
+    fn test_type_large_utf8() {
+        let temp_dir = tempdir().unwrap();
+        let sequential_path = temp_dir.path().join("sequential.parquet");
+        let parallel_path = temp_dir.path().join("parallel.parquet");
+
+        use arrow::array::LargeStringArray;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("text", DataType::LargeUtf8, false),
+            Field::new("nullable_text", DataType::LargeUtf8, true),
+        ]));
+
+        let batches: Vec<RecordBatch> = (0..10)
+            .map(|i| {
+                let ids: Vec<i32> = (i * 100..(i + 1) * 100).collect();
+                let texts: Vec<String> = (i * 100..(i + 1) * 100)
+                    .map(|x| format!("large_string_value_{}_with_more_content", x))
+                    .collect();
+                let nullable_texts: Vec<Option<String>> = (i * 100..(i + 1) * 100)
+                    .map(|x| {
+                        if x % 6 == 0 {
+                            None
+                        } else {
+                            Some(format!("nullable_{}", x))
+                        }
+                    })
+                    .collect();
+
+                RecordBatch::try_new(
+                    Arc::clone(&schema),
+                    vec![
+                        Arc::new(Int32Array::from(ids)),
+                        Arc::new(LargeStringArray::from(texts)),
+                        Arc::new(LargeStringArray::from(nullable_texts)),
+                    ],
+                )
+                .unwrap()
+            })
+            .collect();
+
+        let props = WriterProperties::builder()
+            .set_max_row_group_size(200)
+            .build();
+        let file = File::create(&sequential_path).unwrap();
+        let mut sequential_writer =
+            ArrowWriter::try_new(file, Arc::clone(&schema), Some(props)).unwrap();
+        for batch in &batches {
+            sequential_writer.write(batch).unwrap();
+        }
+        sequential_writer.close().unwrap();
+
+        let props = WriterProperties::builder().build();
+        let mut parallel_writer =
+            ParquetWriter::try_new(&parallel_path, &schema, props, 200, None).unwrap();
+        for batch in &batches {
+            parallel_writer.write(batch).unwrap();
+        }
+        parallel_writer.close().unwrap();
+
+        let sequential_data = concat_batches(&read_parquet_to_batches(&sequential_path));
+        let parallel_data = concat_batches(&read_parquet_to_batches(&parallel_path));
+
+        assert!(
+            batches_equal(&sequential_data, &parallel_data),
+            "large utf8 columns should produce identical data"
+        );
+    }
+
+    #[test]
+    fn test_type_large_list() {
+        let temp_dir = tempdir().unwrap();
+        let sequential_path = temp_dir.path().join("sequential.parquet");
+        let parallel_path = temp_dir.path().join("parallel.parquet");
+
+        use arrow::array::LargeListBuilder;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new(
+                "values",
+                DataType::LargeList(Arc::new(Field::new("item", DataType::Int64, true))),
+                false,
+            ),
+        ]));
+
+        let batches: Vec<RecordBatch> = (0..10)
+            .map(|batch_idx| {
+                let ids: Vec<i32> = (batch_idx * 50..(batch_idx + 1) * 50).collect();
+
+                let mut list_builder = LargeListBuilder::new(Int64Builder::new());
+                for i in batch_idx * 50..(batch_idx + 1) * 50 {
+                    let num_elements = (i % 5 + 1) as usize;
+                    for j in 0..num_elements {
+                        list_builder.values().append_value(i as i64 * 10 + j as i64);
+                    }
+                    list_builder.append(true);
+                }
+                let list_array = list_builder.finish();
+
+                RecordBatch::try_new(
+                    Arc::clone(&schema),
+                    vec![Arc::new(Int32Array::from(ids)), Arc::new(list_array)],
+                )
+                .unwrap()
+            })
+            .collect();
+
+        let props = WriterProperties::builder()
+            .set_max_row_group_size(100)
+            .build();
+        let file = File::create(&sequential_path).unwrap();
+        let mut sequential_writer =
+            ArrowWriter::try_new(file, Arc::clone(&schema), Some(props)).unwrap();
+        for batch in &batches {
+            sequential_writer.write(batch).unwrap();
+        }
+        sequential_writer.close().unwrap();
+
+        let props = WriterProperties::builder().build();
+        let mut parallel_writer =
+            ParquetWriter::try_new(&parallel_path, &schema, props, 100, None).unwrap();
+        for batch in &batches {
+            parallel_writer.write(batch).unwrap();
+        }
+        parallel_writer.close().unwrap();
+
+        let sequential_data = concat_batches(&read_parquet_to_batches(&sequential_path));
+        let parallel_data = concat_batches(&read_parquet_to_batches(&parallel_path));
+
+        assert!(
+            batches_equal(&sequential_data, &parallel_data),
+            "large list columns should produce identical data"
+        );
+    }
+
+    #[test]
+    fn test_type_fixed_size_list() {
+        let temp_dir = tempdir().unwrap();
+        let sequential_path = temp_dir.path().join("sequential.parquet");
+        let parallel_path = temp_dir.path().join("parallel.parquet");
+
+        use arrow::array::FixedSizeListArray;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new(
+                "coords",
+                DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float64, false)), 3),
+                false,
+            ),
+        ]));
+
+        let batches: Vec<RecordBatch> = (0..10)
+            .map(|batch_idx| {
+                let ids: Vec<i32> = (batch_idx * 100..(batch_idx + 1) * 100).collect();
+                // 3 floats per row (x, y, z coordinates)
+                let coords: Vec<f64> = (batch_idx * 100..(batch_idx + 1) * 100)
+                    .flat_map(|i| vec![i as f64, i as f64 * 2.0, i as f64 * 3.0])
+                    .collect();
+
+                let field = Arc::new(Field::new("item", DataType::Float64, false));
+                let coords_array =
+                    FixedSizeListArray::new(field, 3, Arc::new(Float64Array::from(coords)), None);
+
+                RecordBatch::try_new(
+                    Arc::clone(&schema),
+                    vec![Arc::new(Int32Array::from(ids)), Arc::new(coords_array)],
+                )
+                .unwrap()
+            })
+            .collect();
+
+        let props = WriterProperties::builder()
+            .set_max_row_group_size(200)
+            .build();
+        let file = File::create(&sequential_path).unwrap();
+        let mut sequential_writer =
+            ArrowWriter::try_new(file, Arc::clone(&schema), Some(props)).unwrap();
+        for batch in &batches {
+            sequential_writer.write(batch).unwrap();
+        }
+        sequential_writer.close().unwrap();
+
+        let props = WriterProperties::builder().build();
+        let mut parallel_writer =
+            ParquetWriter::try_new(&parallel_path, &schema, props, 200, None).unwrap();
+        for batch in &batches {
+            parallel_writer.write(batch).unwrap();
+        }
+        parallel_writer.close().unwrap();
+
+        let sequential_data = concat_batches(&read_parquet_to_batches(&sequential_path));
+        let parallel_data = concat_batches(&read_parquet_to_batches(&parallel_path));
+
+        assert!(
+            batches_equal(&sequential_data, &parallel_data),
+            "fixed size list columns should produce identical data"
+        );
+    }
+
+    #[test]
+    fn test_type_map() {
+        let temp_dir = tempdir().unwrap();
+        let sequential_path = temp_dir.path().join("sequential.parquet");
+        let parallel_path = temp_dir.path().join("parallel.parquet");
+
+        use arrow::array::MapBuilder;
+
+        // use field names that MapBuilder produces by default
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new(
+                "attributes",
+                DataType::Map(
+                    Arc::new(Field::new(
+                        "entries",
+                        DataType::Struct(
+                            vec![
+                                Field::new("keys", DataType::Utf8, false),
+                                Field::new("values", DataType::Int32, true),
+                            ]
+                            .into(),
+                        ),
+                        false,
+                    )),
+                    false,
+                ),
+                false,
+            ),
+        ]));
+
+        let batches: Vec<RecordBatch> = (0..10)
+            .map(|batch_idx| {
+                let ids: Vec<i32> = (batch_idx * 50..(batch_idx + 1) * 50).collect();
+
+                let mut map_builder =
+                    MapBuilder::new(None, StringBuilder::new(), Int32Builder::new());
+
+                for i in batch_idx * 50..(batch_idx + 1) * 50 {
+                    // each row has i % 3 + 1 key-value pairs
+                    let num_pairs = (i % 3 + 1) as usize;
+                    for j in 0..num_pairs {
+                        map_builder.keys().append_value(format!("key_{}", j));
+                        map_builder.values().append_value(i * 10 + j as i32);
+                    }
+                    map_builder.append(true).unwrap();
+                }
+                let map_array = map_builder.finish();
+
+                RecordBatch::try_new(
+                    Arc::clone(&schema),
+                    vec![Arc::new(Int32Array::from(ids)), Arc::new(map_array)],
+                )
+                .unwrap()
+            })
+            .collect();
+
+        let props = WriterProperties::builder()
+            .set_max_row_group_size(100)
+            .build();
+        let file = File::create(&sequential_path).unwrap();
+        let mut sequential_writer =
+            ArrowWriter::try_new(file, Arc::clone(&schema), Some(props)).unwrap();
+        for batch in &batches {
+            sequential_writer.write(batch).unwrap();
+        }
+        sequential_writer.close().unwrap();
+
+        let props = WriterProperties::builder().build();
+        let mut parallel_writer =
+            ParquetWriter::try_new(&parallel_path, &schema, props, 100, None).unwrap();
+        for batch in &batches {
+            parallel_writer.write(batch).unwrap();
+        }
+        parallel_writer.close().unwrap();
+
+        let sequential_data = concat_batches(&read_parquet_to_batches(&sequential_path));
+        let parallel_data = concat_batches(&read_parquet_to_batches(&parallel_path));
+
+        assert!(
+            batches_equal(&sequential_data, &parallel_data),
+            "map columns should produce identical data"
+        );
+    }
+
+    #[test]
+    fn test_type_nested_list() {
+        let temp_dir = tempdir().unwrap();
+        let sequential_path = temp_dir.path().join("sequential.parquet");
+        let parallel_path = temp_dir.path().join("parallel.parquet");
+
+        // List<List<Int32>> - nested lists
+        // use default field names that ListBuilder produces
+        let inner_field = Field::new("item", DataType::Int32, true);
+        let outer_field = Field::new("item", DataType::List(Arc::new(inner_field.clone())), true);
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("matrix", DataType::List(Arc::new(outer_field)), false),
+        ]));
+
+        let batches: Vec<RecordBatch> = (0..10)
+            .map(|batch_idx| {
+                let ids: Vec<i32> = (batch_idx * 50..(batch_idx + 1) * 50).collect();
+
+                let inner_builder = ListBuilder::new(Int32Builder::new());
+                let mut outer_builder = ListBuilder::new(inner_builder);
+
+                for i in batch_idx * 50..(batch_idx + 1) * 50 {
+                    // each row has i % 3 + 1 inner lists
+                    let num_inner_lists = (i % 3 + 1) as usize;
+                    for j in 0..num_inner_lists {
+                        // each inner list has j + 1 elements
+                        for k in 0..=j {
+                            outer_builder
+                                .values()
+                                .values()
+                                .append_value(i * 100 + j as i32 * 10 + k as i32);
+                        }
+                        outer_builder.values().append(true);
+                    }
+                    outer_builder.append(true);
+                }
+                let nested_list_array = outer_builder.finish();
+
+                RecordBatch::try_new(
+                    Arc::clone(&schema),
+                    vec![Arc::new(Int32Array::from(ids)), Arc::new(nested_list_array)],
+                )
+                .unwrap()
+            })
+            .collect();
+
+        let props = WriterProperties::builder()
+            .set_max_row_group_size(100)
+            .build();
+        let file = File::create(&sequential_path).unwrap();
+        let mut sequential_writer =
+            ArrowWriter::try_new(file, Arc::clone(&schema), Some(props)).unwrap();
+        for batch in &batches {
+            sequential_writer.write(batch).unwrap();
+        }
+        sequential_writer.close().unwrap();
+
+        let props = WriterProperties::builder().build();
+        let mut parallel_writer =
+            ParquetWriter::try_new(&parallel_path, &schema, props, 100, None).unwrap();
+        for batch in &batches {
+            parallel_writer.write(batch).unwrap();
+        }
+        parallel_writer.close().unwrap();
+
+        let sequential_data = concat_batches(&read_parquet_to_batches(&sequential_path));
+        let parallel_data = concat_batches(&read_parquet_to_batches(&parallel_path));
+
+        assert!(
+            batches_equal(&sequential_data, &parallel_data),
+            "nested list columns should produce identical data"
+        );
+    }
+
+    #[test]
+    fn test_type_list_of_struct() {
+        let temp_dir = tempdir().unwrap();
+        let sequential_path = temp_dir.path().join("sequential.parquet");
+        let parallel_path = temp_dir.path().join("parallel.parquet");
+
+        // List<Struct<x: Int32, y: Int32>>
+        // use "item" field name to match ListBuilder default
+        let struct_fields: Fields = vec![
+            Field::new("x", DataType::Int32, false),
+            Field::new("y", DataType::Int32, false),
+        ]
+        .into();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new(
+                "points",
+                DataType::List(Arc::new(Field::new(
+                    "item",
+                    DataType::Struct(struct_fields.clone()),
+                    true,
+                ))),
+                false,
+            ),
+        ]));
+
+        let batches: Vec<RecordBatch> = (0..10)
+            .map(|batch_idx| {
+                let ids: Vec<i32> = (batch_idx * 50..(batch_idx + 1) * 50).collect();
+
+                // build a list of structs
+                let x_builder = Int32Builder::new();
+                let y_builder = Int32Builder::new();
+                let struct_builder = StructBuilder::new(
+                    struct_fields.clone(),
+                    vec![Box::new(x_builder), Box::new(y_builder)],
+                );
+                let mut list_builder = ListBuilder::new(struct_builder);
+
+                for i in batch_idx * 50..(batch_idx + 1) * 50 {
+                    let num_points = (i % 4 + 1) as usize;
+                    for j in 0..num_points {
+                        list_builder
+                            .values()
+                            .field_builder::<Int32Builder>(0)
+                            .unwrap()
+                            .append_value(i * 10 + j as i32);
+                        list_builder
+                            .values()
+                            .field_builder::<Int32Builder>(1)
+                            .unwrap()
+                            .append_value(i * 10 + j as i32 + 100);
+                        list_builder.values().append(true);
+                    }
+                    list_builder.append(true);
+                }
+                let list_array = list_builder.finish();
+
+                RecordBatch::try_new(
+                    Arc::clone(&schema),
+                    vec![Arc::new(Int32Array::from(ids)), Arc::new(list_array)],
+                )
+                .unwrap()
+            })
+            .collect();
+
+        let props = WriterProperties::builder()
+            .set_max_row_group_size(100)
+            .build();
+        let file = File::create(&sequential_path).unwrap();
+        let mut sequential_writer =
+            ArrowWriter::try_new(file, Arc::clone(&schema), Some(props)).unwrap();
+        for batch in &batches {
+            sequential_writer.write(batch).unwrap();
+        }
+        sequential_writer.close().unwrap();
+
+        let props = WriterProperties::builder().build();
+        let mut parallel_writer =
+            ParquetWriter::try_new(&parallel_path, &schema, props, 100, None).unwrap();
+        for batch in &batches {
+            parallel_writer.write(batch).unwrap();
+        }
+        parallel_writer.close().unwrap();
+
+        let sequential_data = concat_batches(&read_parquet_to_batches(&sequential_path));
+        let parallel_data = concat_batches(&read_parquet_to_batches(&parallel_path));
+
+        assert!(
+            batches_equal(&sequential_data, &parallel_data),
+            "list of struct columns should produce identical data"
+        );
+    }
+
+    #[test]
+    fn test_type_struct_containing_list() {
+        let temp_dir = tempdir().unwrap();
+        let sequential_path = temp_dir.path().join("sequential.parquet");
+        let parallel_path = temp_dir.path().join("parallel.parquet");
+
+        // Struct<name: Utf8, scores: List<Int32>>
+        let list_field = Field::new(
+            "scores",
+            DataType::List(Arc::new(Field::new("item", DataType::Int32, true))),
+            false,
+        );
+        let struct_fields: Fields =
+            vec![Field::new("name", DataType::Utf8, false), list_field].into();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("player", DataType::Struct(struct_fields.clone()), false),
+        ]));
+
+        let batches: Vec<RecordBatch> = (0..10)
+            .map(|batch_idx| {
+                let ids: Vec<i32> = (batch_idx * 50..(batch_idx + 1) * 50).collect();
+
+                // build struct with list inside
+                let name_builder = StringBuilder::new();
+                let scores_builder = ListBuilder::new(Int32Builder::new());
+                let mut struct_builder = StructBuilder::new(
+                    struct_fields.clone(),
+                    vec![Box::new(name_builder), Box::new(scores_builder)],
+                );
+
+                for i in batch_idx * 50..(batch_idx + 1) * 50 {
+                    struct_builder
+                        .field_builder::<StringBuilder>(0)
+                        .unwrap()
+                        .append_value(format!("player_{}", i));
+
+                    let scores_list_builder = struct_builder
+                        .field_builder::<ListBuilder<Int32Builder>>(1)
+                        .unwrap();
+                    let num_scores = (i % 5 + 1) as usize;
+                    for j in 0..num_scores {
+                        scores_list_builder.values().append_value(i * 10 + j as i32);
+                    }
+                    scores_list_builder.append(true);
+
+                    struct_builder.append(true);
+                }
+                let struct_array = struct_builder.finish();
+
+                RecordBatch::try_new(
+                    Arc::clone(&schema),
+                    vec![Arc::new(Int32Array::from(ids)), Arc::new(struct_array)],
+                )
+                .unwrap()
+            })
+            .collect();
+
+        let props = WriterProperties::builder()
+            .set_max_row_group_size(100)
+            .build();
+        let file = File::create(&sequential_path).unwrap();
+        let mut sequential_writer =
+            ArrowWriter::try_new(file, Arc::clone(&schema), Some(props)).unwrap();
+        for batch in &batches {
+            sequential_writer.write(batch).unwrap();
+        }
+        sequential_writer.close().unwrap();
+
+        let props = WriterProperties::builder().build();
+        let mut parallel_writer =
+            ParquetWriter::try_new(&parallel_path, &schema, props, 100, None).unwrap();
+        for batch in &batches {
+            parallel_writer.write(batch).unwrap();
+        }
+        parallel_writer.close().unwrap();
+
+        let sequential_data = concat_batches(&read_parquet_to_batches(&sequential_path));
+        let parallel_data = concat_batches(&read_parquet_to_batches(&parallel_path));
+
+        assert!(
+            batches_equal(&sequential_data, &parallel_data),
+            "struct containing list should produce identical data"
+        );
+    }
+
+    #[test]
+    fn test_type_all_timestamps() {
+        let temp_dir = tempdir().unwrap();
+        let sequential_path = temp_dir.path().join("sequential.parquet");
+        let parallel_path = temp_dir.path().join("parallel.parquet");
+
+        use arrow::array::{
+            TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray,
+        };
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("ts_sec", DataType::Timestamp(TimeUnit::Second, None), false),
+            Field::new(
+                "ts_ms",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new(
+                "ts_us",
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                false,
+            ),
+            Field::new(
+                "ts_ns",
+                DataType::Timestamp(TimeUnit::Nanosecond, None),
+                false,
+            ),
+            Field::new(
+                "ts_with_tz",
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                true,
+            ),
+        ]));
+
+        let batches: Vec<RecordBatch> = (0..10)
+            .map(|i| {
+                let ids: Vec<i32> = (i * 100..(i + 1) * 100).collect();
+                let base_ts = 1_700_000_000i64;
+                let ts_sec: Vec<i64> = (i * 100..(i + 1) * 100)
+                    .map(|x| base_ts + x as i64)
+                    .collect();
+                let ts_ms: Vec<i64> = (i * 100..(i + 1) * 100)
+                    .map(|x| (base_ts + x as i64) * 1000)
+                    .collect();
+                let ts_us: Vec<i64> = (i * 100..(i + 1) * 100)
+                    .map(|x| (base_ts + x as i64) * 1_000_000)
+                    .collect();
+                let ts_ns: Vec<i64> = (i * 100..(i + 1) * 100)
+                    .map(|x| (base_ts + x as i64) * 1_000_000_000)
+                    .collect();
+                let ts_with_tz: Vec<Option<i64>> = (i * 100..(i + 1) * 100)
+                    .map(|x| {
+                        if x % 8 == 0 {
+                            None
+                        } else {
+                            Some((base_ts + x as i64) * 1_000_000)
+                        }
+                    })
+                    .collect();
+
+                RecordBatch::try_new(
+                    Arc::clone(&schema),
+                    vec![
+                        Arc::new(Int32Array::from(ids)),
+                        Arc::new(TimestampSecondArray::from(ts_sec)),
+                        Arc::new(TimestampMillisecondArray::from(ts_ms)),
+                        Arc::new(TimestampMicrosecondArray::from(ts_us)),
+                        Arc::new(TimestampNanosecondArray::from(ts_ns)),
+                        Arc::new(TimestampMicrosecondArray::from(ts_with_tz).with_timezone("UTC")),
+                    ],
+                )
+                .unwrap()
+            })
+            .collect();
+
+        let props = WriterProperties::builder()
+            .set_max_row_group_size(200)
+            .build();
+        let file = File::create(&sequential_path).unwrap();
+        let mut sequential_writer =
+            ArrowWriter::try_new(file, Arc::clone(&schema), Some(props)).unwrap();
+        for batch in &batches {
+            sequential_writer.write(batch).unwrap();
+        }
+        sequential_writer.close().unwrap();
+
+        let props = WriterProperties::builder().build();
+        let mut parallel_writer =
+            ParquetWriter::try_new(&parallel_path, &schema, props, 200, None).unwrap();
+        for batch in &batches {
+            parallel_writer.write(batch).unwrap();
+        }
+        parallel_writer.close().unwrap();
+
+        let sequential_data = concat_batches(&read_parquet_to_batches(&sequential_path));
+        let parallel_data = concat_batches(&read_parquet_to_batches(&parallel_path));
+
+        assert!(
+            batches_equal(&sequential_data, &parallel_data),
+            "all timestamp variants should produce identical data"
+        );
+    }
+
+    #[test]
+    fn test_type_float32() {
+        let temp_dir = tempdir().unwrap();
+        let sequential_path = temp_dir.path().join("sequential.parquet");
+        let parallel_path = temp_dir.path().join("parallel.parquet");
+
+        use arrow::array::Float32Array;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("f32", DataType::Float32, false),
+            Field::new("nullable_f32", DataType::Float32, true),
+        ]));
+
+        let batches: Vec<RecordBatch> = (0..10)
+            .map(|i| {
+                let ids: Vec<i32> = (i * 100..(i + 1) * 100).collect();
+                let f32_values: Vec<f32> =
+                    (i * 100..(i + 1) * 100).map(|x| x as f32 * 1.5).collect();
+                let nullable_f32: Vec<Option<f32>> = (i * 100..(i + 1) * 100)
+                    .map(|x| {
+                        if x % 9 == 0 {
+                            None
+                        } else {
+                            Some(x as f32 * 0.5)
+                        }
+                    })
+                    .collect();
+
+                RecordBatch::try_new(
+                    Arc::clone(&schema),
+                    vec![
+                        Arc::new(Int32Array::from(ids)),
+                        Arc::new(Float32Array::from(f32_values)),
+                        Arc::new(Float32Array::from(nullable_f32)),
+                    ],
+                )
+                .unwrap()
+            })
+            .collect();
+
+        let props = WriterProperties::builder()
+            .set_max_row_group_size(200)
+            .build();
+        let file = File::create(&sequential_path).unwrap();
+        let mut sequential_writer =
+            ArrowWriter::try_new(file, Arc::clone(&schema), Some(props)).unwrap();
+        for batch in &batches {
+            sequential_writer.write(batch).unwrap();
+        }
+        sequential_writer.close().unwrap();
+
+        let props = WriterProperties::builder().build();
+        let mut parallel_writer =
+            ParquetWriter::try_new(&parallel_path, &schema, props, 200, None).unwrap();
+        for batch in &batches {
+            parallel_writer.write(batch).unwrap();
+        }
+        parallel_writer.close().unwrap();
+
+        let sequential_data = concat_batches(&read_parquet_to_batches(&sequential_path));
+        let parallel_data = concat_batches(&read_parquet_to_batches(&parallel_path));
+
+        assert!(
+            batches_equal(&sequential_data, &parallel_data),
+            "float32 columns should produce identical data"
+        );
+    }
+
+    #[test]
+    fn test_parallel_stress_mixed_types_many_row_groups() {
+        let temp_dir = tempdir().unwrap();
+        let sequential_path = temp_dir.path().join("sequential.parquet");
+        let parallel_path = temp_dir.path().join("parallel.parquet");
+
+        use arrow::array::{BooleanArray, Date32Array, Decimal128Array, Float32Array};
+
+        // wide schema with many different types
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("bool_col", DataType::Boolean, false),
+            Field::new("i32_col", DataType::Int32, true),
+            Field::new("i64_col", DataType::Int64, false),
+            Field::new("f32_col", DataType::Float32, true),
+            Field::new("f64_col", DataType::Float64, false),
+            Field::new("str_col", DataType::Utf8, true),
+            Field::new("date_col", DataType::Date32, false),
+            Field::new(
+                "ts_col",
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                true,
+            ),
+            Field::new("decimal_col", DataType::Decimal128(18, 2), false),
+        ]));
+
+        // create many small batches to force many row groups
+        let batches: Vec<RecordBatch> = (0..50)
+            .map(|i| {
+                let size = 100;
+                let ids: Vec<i32> = (i * size..(i + 1) * size).collect();
+                let bools: Vec<bool> = (i * size..(i + 1) * size).map(|x| x % 2 == 0).collect();
+                let i32s: Vec<Option<i32>> = (i * size..(i + 1) * size)
+                    .map(|x| if x % 7 == 0 { None } else { Some(x) })
+                    .collect();
+                let i64s: Vec<i64> = (i * size..(i + 1) * size).map(|x| x as i64 * 2).collect();
+                let f32s: Vec<Option<f32>> = (i * size..(i + 1) * size)
+                    .map(|x| {
+                        if x % 11 == 0 {
+                            None
+                        } else {
+                            Some(x as f32 * 0.5)
+                        }
+                    })
+                    .collect();
+                let f64s: Vec<f64> = (i * size..(i + 1) * size).map(|x| x as f64 * 1.5).collect();
+                let strs: Vec<Option<&str>> = (i * size..(i + 1) * size)
+                    .map(|x| if x % 5 == 0 { None } else { Some("value") })
+                    .collect();
+                let dates: Vec<i32> = (i * size..(i + 1) * size).map(|x| 18000 + x).collect();
+                let timestamps: Vec<Option<i64>> = (i * size..(i + 1) * size)
+                    .map(|x| {
+                        if x % 13 == 0 {
+                            None
+                        } else {
+                            Some(1_700_000_000_000_000i64 + x as i64 * 1_000_000)
+                        }
+                    })
+                    .collect();
+                let decimals: Vec<i128> = (i * size..(i + 1) * size)
+                    .map(|x| x as i128 * 100)
+                    .collect();
+
+                RecordBatch::try_new(
+                    Arc::clone(&schema),
+                    vec![
+                        Arc::new(Int32Array::from(ids)),
+                        Arc::new(BooleanArray::from(bools)),
+                        Arc::new(Int32Array::from(i32s)),
+                        Arc::new(Int64Array::from(i64s)),
+                        Arc::new(Float32Array::from(f32s)),
+                        Arc::new(Float64Array::from(f64s)),
+                        Arc::new(StringArray::from(strs)),
+                        Arc::new(Date32Array::from(dates)),
+                        Arc::new(TimestampMicrosecondArray::from(timestamps)),
+                        Arc::new(
+                            Decimal128Array::from(decimals)
+                                .with_precision_and_scale(18, 2)
+                                .unwrap(),
+                        ),
+                    ],
+                )
+                .unwrap()
+            })
+            .collect();
+
+        // small row group size to create many row groups
+        let props = WriterProperties::builder()
+            .set_max_row_group_size(150)
+            .build();
+        let file = File::create(&sequential_path).unwrap();
+        let mut sequential_writer =
+            ArrowWriter::try_new(file, Arc::clone(&schema), Some(props)).unwrap();
+        for batch in &batches {
+            sequential_writer.write(batch).unwrap();
+        }
+        sequential_writer.close().unwrap();
+
+        let props = WriterProperties::builder().build();
+        let mut parallel_writer =
+            ParquetWriter::try_new(&parallel_path, &schema, props, 150, None).unwrap();
+        for batch in &batches {
+            parallel_writer.write(batch).unwrap();
+        }
+        parallel_writer.close().unwrap();
+
+        let sequential_data = concat_batches(&read_parquet_to_batches(&sequential_path));
+        let parallel_data = concat_batches(&read_parquet_to_batches(&parallel_path));
+
+        assert!(
+            batches_equal(&sequential_data, &parallel_data),
+            "mixed types with many row groups should produce identical data"
+        );
+    }
+
+    #[test]
+    fn test_parallel_stress_nested_types_many_row_groups() {
+        let temp_dir = tempdir().unwrap();
+        let sequential_path = temp_dir.path().join("sequential.parquet");
+        let parallel_path = temp_dir.path().join("parallel.parquet");
+
+        // complex nested schema
+        let inner_struct: Fields = vec![
+            Field::new("a", DataType::Int32, false),
+            Field::new("b", DataType::Utf8, true),
+        ]
+        .into();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new(
+                "list_col",
+                DataType::List(Arc::new(Field::new("item", DataType::Int64, true))),
+                false,
+            ),
+            Field::new("struct_col", DataType::Struct(inner_struct.clone()), false),
+        ]));
+
+        let batches: Vec<RecordBatch> = (0..30)
+            .map(|batch_idx| {
+                let ids: Vec<i32> = (batch_idx * 50..(batch_idx + 1) * 50).collect();
+
+                // list column
+                let mut list_builder = ListBuilder::new(Int64Builder::new());
+                for i in batch_idx * 50..(batch_idx + 1) * 50 {
+                    let num_elements = (i % 5 + 1) as usize;
+                    for j in 0..num_elements {
+                        if (i + j as i32) % 3 == 0 {
+                            list_builder.values().append_null();
+                        } else {
+                            list_builder.values().append_value(i as i64 * 10 + j as i64);
+                        }
+                    }
+                    list_builder.append(true);
+                }
+                let list_array = list_builder.finish();
+
+                // struct column
+                let a_values: Vec<i32> = (batch_idx * 50..(batch_idx + 1) * 50)
+                    .map(|x| x * 2)
+                    .collect();
+                let b_values: Vec<Option<String>> = (batch_idx * 50..(batch_idx + 1) * 50)
+                    .map(|x| {
+                        if x % 4 == 0 {
+                            None
+                        } else {
+                            Some(format!("str_{}", x))
+                        }
+                    })
+                    .collect();
+                let struct_array = StructArray::from(vec![
+                    (
+                        Arc::new(Field::new("a", DataType::Int32, false)),
+                        Arc::new(Int32Array::from(a_values)) as Arc<dyn Array>,
+                    ),
+                    (
+                        Arc::new(Field::new("b", DataType::Utf8, true)),
+                        Arc::new(StringArray::from(b_values)) as Arc<dyn Array>,
+                    ),
+                ]);
+
+                RecordBatch::try_new(
+                    Arc::clone(&schema),
+                    vec![
+                        Arc::new(Int32Array::from(ids)),
+                        Arc::new(list_array),
+                        Arc::new(struct_array),
+                    ],
+                )
+                .unwrap()
+            })
+            .collect();
+
+        let props = WriterProperties::builder()
+            .set_max_row_group_size(75)
+            .build();
+        let file = File::create(&sequential_path).unwrap();
+        let mut sequential_writer =
+            ArrowWriter::try_new(file, Arc::clone(&schema), Some(props)).unwrap();
+        for batch in &batches {
+            sequential_writer.write(batch).unwrap();
+        }
+        sequential_writer.close().unwrap();
+
+        let props = WriterProperties::builder().build();
+        let mut parallel_writer =
+            ParquetWriter::try_new(&parallel_path, &schema, props, 75, None).unwrap();
+        for batch in &batches {
+            parallel_writer.write(batch).unwrap();
+        }
+        parallel_writer.close().unwrap();
+
+        let sequential_data = concat_batches(&read_parquet_to_batches(&sequential_path));
+        let parallel_data = concat_batches(&read_parquet_to_batches(&parallel_path));
+
+        assert!(
+            batches_equal(&sequential_data, &parallel_data),
+            "nested types with many row groups should produce identical data"
+        );
+    }
+
+    #[test]
+    fn test_parallel_stress_deeply_nested_types() {
+        let temp_dir = tempdir().unwrap();
+        let sequential_path = temp_dir.path().join("sequential.parquet");
+        let parallel_path = temp_dir.path().join("parallel.parquet");
+
+        use arrow::array::{FixedSizeListArray, MapBuilder};
+
+        // deeply nested schema: struct containing list, list of struct, nested lists, map
+        let inner_struct_fields: Fields = vec![
+            Field::new("x", DataType::Int32, false),
+            Field::new("y", DataType::Float64, true),
+        ]
+        .into();
+
+        // Struct<name, scores: List<Int32>>
+        let struct_with_list_fields: Fields = vec![
+            Field::new("name", DataType::Utf8, false),
+            Field::new(
+                "scores",
+                DataType::List(Arc::new(Field::new("item", DataType::Int32, true))),
+                false,
+            ),
+        ]
+        .into();
+
+        // List<List<Int32>>
+        let nested_list_inner = Field::new("item", DataType::Int32, true);
+        let nested_list_outer =
+            Field::new("item", DataType::List(Arc::new(nested_list_inner)), true);
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            // Struct<x, y>
+            Field::new(
+                "point",
+                DataType::Struct(inner_struct_fields.clone()),
+                false,
+            ),
+            // List<Struct<x, y>>
+            Field::new(
+                "points",
+                DataType::List(Arc::new(Field::new(
+                    "item",
+                    DataType::Struct(inner_struct_fields.clone()),
+                    true,
+                ))),
+                false,
+            ),
+            // Struct<name, List<Int32>>
+            Field::new(
+                "player",
+                DataType::Struct(struct_with_list_fields.clone()),
+                false,
+            ),
+            // List<List<Int32>>
+            Field::new("matrix", DataType::List(Arc::new(nested_list_outer)), false),
+            // FixedSizeList<Float64, 3>
+            Field::new(
+                "coords",
+                DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float64, false)), 3),
+                false,
+            ),
+            // Map<Utf8, Int32>
+            Field::new(
+                "attrs",
+                DataType::Map(
+                    Arc::new(Field::new(
+                        "entries",
+                        DataType::Struct(
+                            vec![
+                                Field::new("keys", DataType::Utf8, false),
+                                Field::new("values", DataType::Int32, true),
+                            ]
+                            .into(),
+                        ),
+                        false,
+                    )),
+                    false,
+                ),
+                false,
+            ),
+        ]));
+
+        let batches: Vec<RecordBatch> = (0..40)
+            .map(|batch_idx| {
+                let size = 50;
+                let ids: Vec<i32> = (batch_idx * size..(batch_idx + 1) * size).collect();
+
+                // point: Struct<x, y>
+                let x_values: Vec<i32> = (batch_idx * size..(batch_idx + 1) * size)
+                    .map(|i| i * 2)
+                    .collect();
+                let y_values: Vec<Option<f64>> = (batch_idx * size..(batch_idx + 1) * size)
+                    .map(|i| {
+                        if i % 5 == 0 {
+                            None
+                        } else {
+                            Some(i as f64 * 1.5)
+                        }
+                    })
+                    .collect();
+                let point_array = StructArray::from(vec![
+                    (
+                        Arc::new(Field::new("x", DataType::Int32, false)),
+                        Arc::new(Int32Array::from(x_values)) as Arc<dyn Array>,
+                    ),
+                    (
+                        Arc::new(Field::new("y", DataType::Float64, true)),
+                        Arc::new(Float64Array::from(y_values)) as Arc<dyn Array>,
+                    ),
+                ]);
+
+                // points: List<Struct<x, y>>
+                let x_builder = Int32Builder::new();
+                let y_builder = arrow::array::Float64Builder::new();
+                let struct_builder = StructBuilder::new(
+                    inner_struct_fields.clone(),
+                    vec![Box::new(x_builder), Box::new(y_builder)],
+                );
+                let mut points_list_builder = ListBuilder::new(struct_builder);
+                for i in batch_idx * size..(batch_idx + 1) * size {
+                    let num_points = (i % 3 + 1) as usize;
+                    for j in 0..num_points {
+                        points_list_builder
+                            .values()
+                            .field_builder::<Int32Builder>(0)
+                            .unwrap()
+                            .append_value(i * 10 + j as i32);
+                        points_list_builder
+                            .values()
+                            .field_builder::<arrow::array::Float64Builder>(1)
+                            .unwrap()
+                            .append_option(if j % 2 == 0 {
+                                Some((i * 10 + j as i32) as f64)
+                            } else {
+                                None
+                            });
+                        points_list_builder.values().append(true);
+                    }
+                    points_list_builder.append(true);
+                }
+                let points_array = points_list_builder.finish();
+
+                // player: Struct<name, List<Int32>>
+                let name_builder = StringBuilder::new();
+                let scores_builder = ListBuilder::new(Int32Builder::new());
+                let mut player_builder = StructBuilder::new(
+                    struct_with_list_fields.clone(),
+                    vec![Box::new(name_builder), Box::new(scores_builder)],
+                );
+                for i in batch_idx * size..(batch_idx + 1) * size {
+                    player_builder
+                        .field_builder::<StringBuilder>(0)
+                        .unwrap()
+                        .append_value(format!("player_{}", i));
+                    let scores_list = player_builder
+                        .field_builder::<ListBuilder<Int32Builder>>(1)
+                        .unwrap();
+                    let num_scores = (i % 4 + 1) as usize;
+                    for j in 0..num_scores {
+                        if j % 3 == 0 {
+                            scores_list.values().append_null();
+                        } else {
+                            scores_list.values().append_value(i * 100 + j as i32);
+                        }
+                    }
+                    scores_list.append(true);
+                    player_builder.append(true);
+                }
+                let player_array = player_builder.finish();
+
+                // matrix: List<List<Int32>>
+                let inner_builder = ListBuilder::new(Int32Builder::new());
+                let mut matrix_builder = ListBuilder::new(inner_builder);
+                for i in batch_idx * size..(batch_idx + 1) * size {
+                    let num_rows = (i % 3 + 1) as usize;
+                    for row in 0..num_rows {
+                        let num_cols = (i % 2 + 1) as usize;
+                        for col in 0..num_cols {
+                            matrix_builder
+                                .values()
+                                .values()
+                                .append_value(i * 100 + row as i32 * 10 + col as i32);
+                        }
+                        matrix_builder.values().append(true);
+                    }
+                    matrix_builder.append(true);
+                }
+                let matrix_array = matrix_builder.finish();
+
+                // coords: FixedSizeList<Float64, 3>
+                let coords: Vec<f64> = (batch_idx * size..(batch_idx + 1) * size)
+                    .flat_map(|i| vec![i as f64, i as f64 * 2.0, i as f64 * 3.0])
+                    .collect();
+                let coords_field = Arc::new(Field::new("item", DataType::Float64, false));
+                let coords_array = FixedSizeListArray::new(
+                    coords_field,
+                    3,
+                    Arc::new(Float64Array::from(coords)),
+                    None,
+                );
+
+                // attrs: Map<Utf8, Int32>
+                let mut map_builder =
+                    MapBuilder::new(None, StringBuilder::new(), Int32Builder::new());
+                for i in batch_idx * size..(batch_idx + 1) * size {
+                    let num_attrs = (i % 3 + 1) as usize;
+                    for j in 0..num_attrs {
+                        map_builder.keys().append_value(format!("attr_{}", j));
+                        if j % 2 == 0 {
+                            map_builder.values().append_value(i * 10 + j as i32);
+                        } else {
+                            map_builder.values().append_null();
+                        }
+                    }
+                    map_builder.append(true).unwrap();
+                }
+                let map_array = map_builder.finish();
+
+                RecordBatch::try_new(
+                    Arc::clone(&schema),
+                    vec![
+                        Arc::new(Int32Array::from(ids)),
+                        Arc::new(point_array),
+                        Arc::new(points_array),
+                        Arc::new(player_array),
+                        Arc::new(matrix_array),
+                        Arc::new(coords_array),
+                        Arc::new(map_array),
+                    ],
+                )
+                .unwrap()
+            })
+            .collect();
+
+        // small row group size to create many row groups with complex nesting
+        let props = WriterProperties::builder()
+            .set_max_row_group_size(60)
+            .build();
+        let file = File::create(&sequential_path).unwrap();
+        let mut sequential_writer =
+            ArrowWriter::try_new(file, Arc::clone(&schema), Some(props)).unwrap();
+        for batch in &batches {
+            sequential_writer.write(batch).unwrap();
+        }
+        sequential_writer.close().unwrap();
+
+        let props = WriterProperties::builder().build();
+        let mut parallel_writer =
+            ParquetWriter::try_new(&parallel_path, &schema, props, 60, None).unwrap();
+        for batch in &batches {
+            parallel_writer.write(batch).unwrap();
+        }
+        parallel_writer.close().unwrap();
+
+        let sequential_data = concat_batches(&read_parquet_to_batches(&sequential_path));
+        let parallel_data = concat_batches(&read_parquet_to_batches(&parallel_path));
+
+        assert!(
+            batches_equal(&sequential_data, &parallel_data),
+            "deeply nested types should produce identical data under parallel execution"
+        );
     }
 }
