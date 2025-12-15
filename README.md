@@ -20,19 +20,16 @@ Like its namesake fabric -- light, flowing, and effortlessly elegant -- this too
 
 ## 📦 Installation
 
-### From Source
+### From Source locally
 
 ```bash
 cargo install --path .
 ```
 
-### Binary
-
-> [!NOTE]
-> Soooooon....
+### From GitHub
 
 ```bash
-cargo binstall silk-chiffon
+cargo install --git https://github.com/acuitymd/silk-chiffon
 ```
 
 ### Releases
