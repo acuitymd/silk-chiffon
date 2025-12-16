@@ -32,6 +32,8 @@ pub struct ParquetSinkOptions {
     bloom_filters: BloomFilterConfig,
     statistics: ParquetStatistics,
     no_dictionary: bool,
+    column_dictionary: Vec<String>,
+    column_no_dictionary: Vec<String>,
     writer_version: ParquetWriterVersion,
     encoding: Option<ParquetEncoding>,
     column_encodings: Vec<ColumnEncodingConfig>,
@@ -56,6 +58,8 @@ impl ParquetSinkOptions {
             bloom_filters: BloomFilterConfig::default(),
             statistics: ParquetStatistics::default(),
             no_dictionary: false,
+            column_dictionary: Vec::new(),
+            column_no_dictionary: Vec::new(),
             writer_version: ParquetWriterVersion::default(),
             encoding: None,
             column_encodings: Vec::new(),
@@ -101,6 +105,16 @@ impl ParquetSinkOptions {
 
     pub fn with_no_dictionary(mut self, no_dictionary: bool) -> Self {
         self.no_dictionary = no_dictionary;
+        self
+    }
+
+    pub fn with_column_dictionary(mut self, column_dictionary: Vec<String>) -> Self {
+        self.column_dictionary = column_dictionary;
+        self
+    }
+
+    pub fn with_column_no_dictionary(mut self, column_no_dictionary: Vec<String>) -> Self {
+        self.column_no_dictionary = column_no_dictionary;
         self
     }
 
@@ -153,6 +167,12 @@ impl ParquetSink {
             .set_statistics_enabled(options.statistics.into())
             .set_dictionary_enabled(!options.no_dictionary);
 
+        writer_builder = Self::apply_column_dictionary(
+            writer_builder,
+            &options.column_dictionary,
+            &options.column_no_dictionary,
+        );
+
         writer_builder =
             Self::apply_encodings(writer_builder, &options.encoding, &options.column_encodings);
 
@@ -185,6 +205,24 @@ impl ParquetSink {
         };
 
         Ok(sink)
+    }
+
+    fn apply_column_dictionary(
+        mut builder: WriterPropertiesBuilder,
+        column_dictionary: &[String],
+        column_no_dictionary: &[String],
+    ) -> WriterPropertiesBuilder {
+        for col_name in column_dictionary {
+            let col_path = ColumnPath::from(col_name.as_str());
+            builder = builder.set_column_dictionary_enabled(col_path, true);
+        }
+
+        for col_name in column_no_dictionary {
+            let col_path = ColumnPath::from(col_name.as_str());
+            builder = builder.set_column_dictionary_enabled(col_path, false);
+        }
+
+        builder
     }
 
     fn apply_encodings(

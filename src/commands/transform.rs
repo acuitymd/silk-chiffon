@@ -47,6 +47,8 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         parquet_statistics,
         parquet_writer_version,
         parquet_no_dictionary,
+        parquet_column_dictionary,
+        parquet_column_no_dictionary,
         parquet_encoding,
         parquet_column_encoding,
         parquet_sorted_metadata,
@@ -200,6 +202,8 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         parquet_statistics,
         parquet_writer_version,
         parquet_no_dictionary,
+        parquet_column_dictionary,
+        parquet_column_no_dictionary,
         parquet_encoding,
         parquet_column_encoding,
         bloom_filter,
@@ -338,6 +342,8 @@ fn create_sink_factory(
     parquet_statistics: Option<ParquetStatistics>,
     parquet_writer_version: Option<ParquetWriterVersion>,
     parquet_no_dictionary: bool,
+    parquet_column_dictionary: Vec<String>,
+    parquet_column_no_dictionary: Vec<String>,
     parquet_encoding: Option<ParquetEncoding>,
     parquet_column_encoding: Vec<ColumnEncodingConfig>,
     parquet_bloom_filter: BloomFilterConfig,
@@ -380,6 +386,8 @@ fn create_sink_factory(
                     options = options.with_no_dictionary(true);
                 }
                 options = options
+                    .with_column_dictionary(parquet_column_dictionary.clone())
+                    .with_column_no_dictionary(parquet_column_no_dictionary.clone())
                     .with_encoding(parquet_encoding)
                     .with_column_encodings(parquet_column_encoding.clone())
                     .with_bloom_filters(parquet_bloom_filter.clone());

@@ -792,31 +792,63 @@ pub struct TransformCommand {
     #[arg(long, value_enum)]
     pub parquet_writer_version: Option<ParquetWriterVersion>,
 
-    /// Disable dictionary encoding for Parquet columns.
-    #[arg(long)]
+    /// Disable dictionary encoding globally for all Parquet columns.
+    ///
+    /// Dictionary encoding builds a dictionary of unique values and stores references to it,
+    /// which is very effective for low-cardinality columns (few unique values). When disabled,
+    /// columns use their data page encoding directly.
+    ///
+    /// Default: dictionary encoding is enabled.
+    ///
+    /// Use --parquet-column-dictionary or --parquet-column-no-dictionary to override
+    /// this setting for specific columns.
+    #[arg(long, verbatim_doc_comment)]
     pub parquet_no_dictionary: bool,
 
-    /// Encoding for Parquet column data pages.
+    /// Enable dictionary encoding for specific columns. Can be specified multiple times.
     ///
-    /// If dictionary encoding is disabled (via --parquet-no-dictionary), this is the primary
-    /// encoding for all columns. If dictionary encoding is enabled (the default), this is the
-    /// fallback encoding when dictionary encoding falls back (e.g., dictionary size exceeded).
+    /// Overrides --parquet-no-dictionary for the named columns, enabling dictionary encoding
+    /// even when it's globally disabled.
     ///
-    /// Options: plain, rle, delta-binary-packed, delta-length-byte-array, delta-byte-array, byte-stream-split
-    #[arg(long, value_enum)]
+    /// Useful when most columns have high cardinality (dictionary disabled globally) but
+    /// a few columns have low cardinality and would benefit from dictionary encoding.
+    #[arg(long, value_name = "COLUMN", verbatim_doc_comment)]
+    pub parquet_column_dictionary: Vec<String>,
+
+    /// Disable dictionary encoding for specific columns. Can be specified multiple times.
+    ///
+    /// Overrides the default (dictionary enabled) for the named columns.
+    ///
+    /// Useful for high-cardinality columns like UUIDs or timestamps where dictionary
+    /// encoding adds overhead without compression benefit.
+    #[arg(long, value_name = "COLUMN", verbatim_doc_comment)]
+    pub parquet_column_no_dictionary: Vec<String>,
+
+    /// Data page encoding for Parquet columns.
+    ///
+    /// This encoding is used for column data pages. Its role depends on dictionary encoding:
+    /// - Dictionary enabled (default): this is the fallback encoding, used when the dictionary
+    ///   becomes too large or is inefficient for the data.
+    /// - Dictionary disabled: this is the primary encoding for all data.
+    ///
+    /// If not specified, the writer automatically selects an encoding based on column type
+    /// and writer version. With Parquet v2: integers use delta-binary-packed, strings use
+    /// delta-byte-array, booleans use rle. With Parquet v1: everything uses plain.
+    ///
+    /// Options: plain, rle, delta-binary-packed, delta-length-byte-array, delta-byte-array,
+    /// byte-stream-split
+    #[arg(long, value_enum, verbatim_doc_comment)]
     pub parquet_encoding: Option<ParquetEncoding>,
 
-    /// Set encoding for specific columns. Can be specified multiple times.
-    /// Overrides --parquet-encoding for the named column.
+    /// Set data page encoding for specific columns. Can be specified multiple times.
     ///
-    /// If dictionary encoding is disabled for this column, this is the primary encoding.
-    /// If dictionary encoding is enabled (the default), this is the fallback encoding
-    /// when dictionary encoding falls back (e.g., dictionary size exceeded).
+    /// Overrides --parquet-encoding for the named column. See --parquet-encoding for
+    /// how this interacts with dictionary encoding.
     ///
     /// Format: COLUMN=ENCODING
     ///
-    /// Encoding options: plain, rle, delta-binary-packed, delta-length-byte-array,
-    /// delta-byte-array, byte-stream-split
+    /// Options: plain, rle, delta-binary-packed, delta-length-byte-array, delta-byte-array,
+    /// byte-stream-split
     ///
     /// Examples:
     ///   --parquet-column-encoding id=delta-binary-packed
