@@ -2,7 +2,7 @@ use crate::{
     ArrowCompression, ArrowIPCFormat, BloomFilterConfig, ColumnEncodingConfig, DataFormat,
     ListOutputsFormat, ParquetCompression, ParquetEncoding, ParquetStatistics,
     ParquetWriterVersion, SortSpec, TransformCommand,
-    io_strategies::{output_strategy::SinkFactory, path_template::PathTemplate},
+    io_strategies::{OutputFileInfo, output_strategy::SinkFactory, path_template::PathTemplate},
     operations::{query::QueryOperation, sort::SortOperation},
     pipeline::Pipeline,
     sinks::{
@@ -19,6 +19,8 @@ use crate::{
 use anyhow::{Result, anyhow};
 use arrow::datatypes::SchemaRef;
 use glob::glob;
+use owo_colors::OwoColorize;
+use tabled::{builder::Builder, settings::Style};
 
 pub async fn run(args: TransformCommand) -> Result<()> {
     let TransformCommand {
@@ -253,15 +255,48 @@ pub async fn run(args: TransformCommand) -> Result<()> {
     Ok(())
 }
 
-fn print_output_files(files: &[String], format: ListOutputsFormat) -> Result<()> {
+fn print_output_files(files: &[OutputFileInfo], format: ListOutputsFormat) -> Result<()> {
     match format {
         ListOutputsFormat::None => {}
         ListOutputsFormat::Text => {
-            let mut sorted_files = files.to_vec();
-            sorted_files.sort();
-            for file in sorted_files {
-                println!("{}", file);
+            if files.is_empty() {
+                return Ok(());
             }
+
+            let mut builder = Builder::default();
+
+            let mut header: Vec<String> = files
+                .first()
+                .map(|f| {
+                    f.partition_values
+                        .iter()
+                        .map(|pv| to_title_case(&pv.column))
+                        .collect()
+                })
+                .unwrap_or_default();
+            header.push("Path".to_string());
+            header.push("Row Count".to_string());
+
+            let colored_header: Vec<String> = header.iter().map(|h| h.bold().to_string()).collect();
+            builder.push_record(colored_header);
+
+            // sort by path for consistent output
+            let mut sorted_files = files.to_vec();
+            sorted_files.sort_by(|a, b| a.path.cmp(&b.path));
+
+            for file in &sorted_files {
+                let mut row: Vec<String> = file
+                    .partition_values
+                    .iter()
+                    .map(|pv| format_json_value(&pv.value).green().to_string())
+                    .collect();
+                row.push(file.path.clone());
+                row.push(file.row_count.to_string().cyan().to_string());
+                builder.push_record(row);
+            }
+
+            let table = builder.build().with(Style::rounded()).to_string();
+            println!("{}", table);
         }
         ListOutputsFormat::Json => {
             let json = serde_json::to_string_pretty(files)?;
@@ -269,6 +304,29 @@ fn print_output_files(files: &[String], format: ListOutputsFormat) -> Result<()>
         }
     }
     Ok(())
+}
+
+fn format_json_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "null".to_string(),
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        _ => value.to_string(),
+    }
+}
+
+fn to_title_case(s: &str) -> String {
+    s.split('_')
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(first) => first.to_uppercase().chain(chars).collect(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn detect_format(path: &str, explicit_format: Option<DataFormat>) -> Result<DataFormat> {

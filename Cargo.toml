@@ -31,8 +31,11 @@ parquet = { version = "^57.0.0", features = [
 ] }
 percent-encoding = "^2.3.1"
 minijinja = "^2.12.0"
+owo-colors = "4"
+tabled = { version = "0.18", features = ["ansi"] }
 tempfile = "^3.23.0"
 tokio = { version = "^1.48.0", features = ["full"] }
+serde = { version = "^1.0", features = ["derive"] }
 serde_json = "^1.0.145"
 async-trait = "^0.1.89"
 strum_macros = "^0.27.2"
