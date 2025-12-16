@@ -8,6 +8,7 @@ use futures::StreamExt;
 use crate::{
     ListOutputsFormat,
     io_strategies::{
+        output_file_info::{OutputFileInfo, partition_values_to_json},
         partitioner::{PartitionValues, Partitioner, partition_values_equal},
         path_template::PathTemplate,
     },
@@ -40,12 +41,15 @@ pub enum OutputStrategy {
 
 impl OutputStrategy {
     /// May only be called once. Each subsequent call will overwrite the previous output.
-    pub async fn write(&mut self, df: DataFrame) -> Result<Vec<String>> {
+    pub async fn write(&mut self, df: DataFrame) -> Result<Vec<OutputFileInfo>> {
         self.write_stream(df.execute_stream().await?).await
     }
 
     /// May only be called once. Each subsequent call will overwrite the previous output.
-    pub async fn write_stream(&mut self, stream: SendableRecordBatchStream) -> Result<Vec<String>> {
+    pub async fn write_stream(
+        &mut self,
+        stream: SendableRecordBatchStream,
+    ) -> Result<Vec<OutputFileInfo>> {
         match self {
             OutputStrategy::Single {
                 path,
@@ -85,20 +89,27 @@ impl OutputStrategy {
                 }
 
                 let mut sink = sink_factory(path.clone(), Arc::clone(&schema))?;
+                let mut row_count = 0u64;
 
                 if let Some(indices) = projected_column_indices {
                     let mut stream = Box::pin(stream);
                     while let Some(result) = stream.next().await {
                         let batch = result?;
+                        row_count += batch.num_rows() as u64;
                         let projected_batch = batch.project(&indices)?;
                         sink.write_batch(projected_batch).await?;
                     }
                     sink.finish().await?;
                 } else {
-                    sink.write_stream(stream).await?;
+                    let result = sink.write_stream(stream).await?;
+                    row_count = result.rows_written;
                 }
 
-                Ok(vec![path.clone()])
+                Ok(vec![OutputFileInfo {
+                    path: path.clone(),
+                    row_count,
+                    partition_values: vec![],
+                }])
             }
             OutputStrategy::Partitioned {
                 sink_factory,
@@ -110,6 +121,7 @@ impl OutputStrategy {
                 list_outputs: _,
             } => {
                 let partitioner = Partitioner::new(columns.clone());
+                let column_order = columns.clone();
                 let schema = stream.schema();
                 let projected_column_indices: Option<Vec<usize>> = if !exclude_columns.is_empty() {
                     Some(
@@ -123,10 +135,13 @@ impl OutputStrategy {
                 let mut partitioned_stream = partitioner.partition_stream(stream);
                 let mut current_sink: Option<Box<dyn DataSink>> = None;
                 let mut most_recent_partition_values: Option<PartitionValues> = None;
-                let mut created_files: Vec<String> = Vec::new();
+                let mut created_files: Vec<OutputFileInfo> = Vec::new();
+                let mut current_path: Option<String> = None;
+                let mut current_row_count: u64 = 0;
 
                 while let Some(result) = partitioned_stream.next().await {
                     let (partition_values, mut batch) = result?;
+                    let batch_rows = batch.num_rows() as u64;
                     if let Some(ref projected_column_indices) = projected_column_indices {
                         batch = batch.project(projected_column_indices)?;
                     }
@@ -142,7 +157,19 @@ impl OutputStrategy {
                             .ok_or_else(|| anyhow!("current_sink is None"))?
                             .finish()
                             .await?;
+
+                        if let (Some(path), Some(pv)) =
+                            (current_path.take(), most_recent_partition_values.as_ref())
+                        {
+                            created_files.push(OutputFileInfo {
+                                path,
+                                row_count: current_row_count,
+                                partition_values: partition_values_to_json(pv, &column_order),
+                            });
+                        }
+
                         current_sink = None;
+                        current_row_count = 0;
                     }
 
                     if current_sink.is_none() {
@@ -168,8 +195,10 @@ impl OutputStrategy {
                             output_path.clone(),
                             Arc::clone(&batch.schema()),
                         )?);
-                        created_files.push(output_path);
+                        current_path = Some(output_path);
                     }
+
+                    current_row_count += batch_rows;
                     current_sink
                         .as_mut()
                         .ok_or_else(|| anyhow!("current_sink is None"))?
@@ -184,6 +213,16 @@ impl OutputStrategy {
                         .ok_or_else(|| anyhow!("current_sink is None"))?
                         .finish()
                         .await?;
+
+                    if let (Some(path), Some(pv)) =
+                        (current_path.take(), most_recent_partition_values.as_ref())
+                    {
+                        created_files.push(OutputFileInfo {
+                            path,
+                            row_count: current_row_count,
+                            partition_values: partition_values_to_json(pv, &column_order),
+                        });
+                    }
                 }
 
                 Ok(created_files)
