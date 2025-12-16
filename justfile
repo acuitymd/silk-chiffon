@@ -18,6 +18,12 @@ benchmark:
 build:
     cargo build --release
 
+build-native:
+    RUSTFLAGS="-C link-arg=-fuse-ld=lld -C target-cpu=native" cargo build --profile native
+
+build-profiling:
+    cargo build --profile profiling
+
 test *args:
     RUST_BACKTRACE=1 cargo nextest run --all-features --locked {{args}}
 

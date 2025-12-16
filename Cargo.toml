@@ -33,18 +33,27 @@ percent-encoding = "^2.3.1"
 minijinja = "^2.12.0"
 tempfile = "^3.23.0"
 tokio = { version = "^1.48.0", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
 serde_json = "^1.0.145"
 async-trait = "^0.1.89"
 strum_macros = "^0.27.2"
 uuid = { version = "^1.18.1", features = ["v4"] }
+# output formatting for inspect command
+tabled = "0.18"
+humansize = "2.1"
+num-format = "0.4"
+owo-colors = "4"
 
 # Vortex support (Arrow 56 - compatible with our Arrow 57)
 vortex = { version = "0.56.0", features = ["tokio", "files"] }
+vortex-array = "0.56.0"
 vortex-session = "0.56.0"
 async-stream = "0.3"
 arrow-array = "56"
 arrow-ipc = "56"
 arrow-schema = "56"
+tokio-util = { version = "0.7", features = ["compat"] }
+chrono = "0.4.42"
 
 [features]
 default = []
@@ -62,6 +71,15 @@ harness = false
 lto = true
 codegen-units = 1
 panic = "abort"
+
+[profile.profiling]
+inherits = "release"
+debug = true
+
+# NOTE: native profile requires RUSTFLAGS="-C target-cpu=native"
+# use `just build-native` which sets this automatically
+[profile.native]
+inherits = "release"
 
 [lints.clippy]
 case_sensitive_file_extension_comparisons = "warn"

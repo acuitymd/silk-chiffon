@@ -1,4 +1,5 @@
 pub mod commands;
+pub mod inspection;
 pub mod io_strategies;
 pub mod operations;
 pub mod pipeline;
@@ -9,7 +10,7 @@ pub mod utils;
 use crate::utils::collections::{uniq, uniq_by};
 use anyhow::{Result, anyhow};
 use arrow::ipc::CompressionType;
-use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum, builder::ValueHint};
 use clap_complete::Shell;
 use datafusion::config::Dialect;
 use parquet::{
@@ -18,6 +19,7 @@ use parquet::{
 };
 use std::{
     fmt::{self, Formatter},
+    path::PathBuf,
     str::FromStr,
 };
 use strum_macros::Display;
@@ -48,6 +50,20 @@ pub enum Commands {
     ///   silk-chiffon transform --from-many '*.arrow' --to-many "{{year}}/{{month}}.parquet" --by year,month
     #[command(verbatim_doc_comment)]
     Transform(TransformCommand),
+
+    /// Inspect file metadata and structure.
+    ///
+    /// Examples:
+    ///   # Identify format
+    ///   silk-chiffon inspect identify data.parquet
+    ///
+    ///   # Inspect Parquet file
+    ///   silk-chiffon inspect parquet data.parquet --stats --row-groups
+    ///
+    ///   # Inspect Arrow file
+    ///   silk-chiffon inspect arrow data.arrow --schema --batches
+    #[command(verbatim_doc_comment)]
+    Inspect(InspectCommand),
 
     /// Generate shell completions for your shell.
     ///
@@ -866,6 +882,110 @@ pub struct TransformCommand {
     /// Vortex record batch size.
     #[arg(long)]
     pub vortex_record_batch_size: Option<usize>,
+}
+
+#[derive(Args, Debug)]
+pub struct InspectCommand {
+    #[command(subcommand)]
+    pub command: InspectSubcommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum InspectSubcommand {
+    /// Detect file format
+    Identify(InspectIdentifyArgs),
+    /// Inspect a Parquet file
+    Parquet(InspectParquetArgs),
+    /// Inspect an Arrow IPC file
+    Arrow(InspectArrowArgs),
+    /// Inspect a Vortex file
+    Vortex(InspectVortexArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct InspectIdentifyArgs {
+    /// Path to the file to identify
+    #[arg(value_hint = ValueHint::FilePath)]
+    pub file: PathBuf,
+    /// Output format (auto-detects based on TTY if not specified)
+    #[arg(long, short = 'f', value_enum, default_value = "auto")]
+    pub format: OutputFormat,
+}
+
+#[derive(Args, Debug)]
+pub struct InspectParquetArgs {
+    /// Path to the Parquet file
+    #[arg(value_hint = ValueHint::FilePath)]
+    pub file: PathBuf,
+    /// Show full schema details
+    #[arg(long)]
+    pub schema: bool,
+    /// Show column statistics and encoding details
+    #[arg(long)]
+    pub stats: bool,
+    /// Show per-row-group details
+    #[arg(long)]
+    pub row_groups: bool,
+    /// Show file-level key-value metadata
+    #[arg(long)]
+    pub metadata: bool,
+    /// Output format (auto-detects based on TTY if not specified)
+    #[arg(long, short = 'f', value_enum, default_value = "auto")]
+    pub format: OutputFormat,
+}
+
+#[derive(Args, Debug)]
+pub struct InspectArrowArgs {
+    /// Path to the Arrow IPC file
+    #[arg(value_hint = ValueHint::FilePath)]
+    pub file: PathBuf,
+    /// Show full schema details
+    #[arg(long)]
+    pub schema: bool,
+    /// Show per-record-batch details
+    #[arg(long)]
+    pub batches: bool,
+    /// Show custom metadata (file format only)
+    #[arg(long)]
+    pub metadata: bool,
+    /// Output format (auto-detects based on TTY if not specified)
+    #[arg(long, short = 'f', value_enum, default_value = "auto")]
+    pub format: OutputFormat,
+    /// Count total rows (slow for stream format - requires reading entire file)
+    #[arg(long, verbatim_doc_comment)]
+    pub row_count: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct InspectVortexArgs {
+    /// Path to the Vortex file
+    #[arg(value_hint = ValueHint::FilePath)]
+    pub file: PathBuf,
+    /// Show full schema details
+    #[arg(long)]
+    pub schema: bool,
+    /// Show per-column statistics
+    #[arg(long)]
+    pub stats: bool,
+    /// Show layout structure
+    #[arg(long)]
+    pub layout: bool,
+    /// Output format (auto-detects based on TTY if not specified)
+    #[arg(long, short = 'f', value_enum, default_value = "auto")]
+    pub format: OutputFormat,
+}
+
+/// Output format for inspect commands
+#[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[value(rename_all = "lowercase")]
+pub enum OutputFormat {
+    /// Auto-detect: JSON if stdout is not a TTY, otherwise text
+    #[default]
+    Auto,
+    /// Human-readable text output
+    Text,
+    /// JSON output
+    Json,
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug)]

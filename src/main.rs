@@ -14,6 +14,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Transform(args) => commands::transform::run(args).await?,
+        Commands::Inspect(args) => commands::inspect::run(args.command).await?,
         Commands::Completions { .. } => unreachable!(),
     };
     Ok(())
