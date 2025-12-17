@@ -1,32 +1,18 @@
 //! Inspect command for examining file metadata and structure.
 
 use std::fs::File;
-use std::io::{self, IsTerminal, Read, Seek, SeekFrom, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 
 use anyhow::{Result, anyhow};
 
 use crate::{
     InspectArrowArgs, InspectIdentifyArgs, InspectParquetArgs, InspectSubcommand,
-    InspectVortexArgs, OutputFormat,
+    InspectVortexArgs,
     inspection::{
         arrow::ArrowInspector, detect_format, inspectable::Inspectable, parquet::ParquetInspector,
         vortex::VortexInspector,
     },
 };
-
-/// Resolve Auto format based on TTY detection
-fn resolve_format(format: OutputFormat) -> OutputFormat {
-    match format {
-        OutputFormat::Auto => {
-            if io::stdout().is_terminal() {
-                OutputFormat::Text
-            } else {
-                OutputFormat::Json
-            }
-        }
-        other => other,
-    }
-}
 
 const ARROW_MAGIC: &[u8] = b"ARROW1";
 
@@ -42,9 +28,10 @@ pub async fn run(command: InspectSubcommand) -> Result<()> {
 fn run_identify(args: &InspectIdentifyArgs) -> Result<()> {
     let format = detect_format(&args.file)?;
 
-    match resolve_format(args.format) {
-        OutputFormat::Json => println!("{}", serde_json::to_string(&format.to_json())?),
-        _ => println!("{}", format),
+    if args.format.resolves_to_json() {
+        println!("{}", serde_json::to_string(&format.to_json())?);
+    } else {
+        println!("{}", format);
     }
 
     Ok(())
@@ -54,13 +41,12 @@ fn run_parquet(args: &InspectParquetArgs) -> Result<()> {
     let inspector = ParquetInspector::open(&args.file)
         .map_err(|e| anyhow!("Failed to open Parquet file: {}", e))?;
 
-    if matches!(resolve_format(args.format), OutputFormat::Json) {
-        let json = inspector.to_json();
-        println!("{}", serde_json::to_string(&json)?);
+    let mut out = io::stdout();
+
+    if args.format.resolves_to_json() {
+        writeln!(out, "{}", serde_json::to_string(&inspector.to_json())?)?;
         return Ok(());
     }
-
-    let mut out = io::stdout();
 
     inspector.render_default(&mut out)?;
 
@@ -110,13 +96,12 @@ fn run_arrow(args: &InspectArrowArgs) -> Result<()> {
             .map_err(|e| anyhow!("Failed to open Arrow stream: {}", e))?
     };
 
-    if matches!(resolve_format(args.format), OutputFormat::Json) {
-        let json = inspector.to_json();
-        println!("{}", serde_json::to_string(&json)?);
+    let mut out = io::stdout();
+
+    if args.format.resolves_to_json() {
+        writeln!(out, "{}", serde_json::to_string(&inspector.to_json())?)?;
         return Ok(());
     }
-
-    let mut out = io::stdout();
 
     inspector.render_default(&mut out)?;
 
@@ -140,13 +125,12 @@ fn run_vortex(args: &InspectVortexArgs) -> Result<()> {
     let inspector = VortexInspector::open_file(&args.file)
         .map_err(|e| anyhow!("Failed to open Vortex file: {}", e))?;
 
-    if matches!(resolve_format(args.format), OutputFormat::Json) {
-        let json = inspector.to_json();
-        println!("{}", serde_json::to_string(&json)?);
+    let mut out = io::stdout();
+
+    if args.format.resolves_to_json() {
+        writeln!(out, "{}", serde_json::to_string(&inspector.to_json())?)?;
         return Ok(());
     }
-
-    let mut out = io::stdout();
 
     inspector.render_default(&mut out)?;
 

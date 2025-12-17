@@ -19,6 +19,7 @@ use parquet::{
 };
 use std::{
     fmt::{self, Formatter},
+    io::{self, IsTerminal},
     path::PathBuf,
     str::FromStr,
 };
@@ -986,6 +987,24 @@ pub enum OutputFormat {
     Text,
     /// JSON output
     Json,
+}
+
+impl OutputFormat {
+    pub fn resolves_to_json(&self) -> bool {
+        match self {
+            OutputFormat::Auto => io::stdout().is_terminal(),
+            OutputFormat::Text => false,
+            OutputFormat::Json => true,
+        }
+    }
+
+    pub fn resolves_to_text(&self) -> bool {
+        match self {
+            OutputFormat::Auto => !io::stdout().is_terminal(),
+            OutputFormat::Text => true,
+            OutputFormat::Json => false,
+        }
+    }
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug)]
