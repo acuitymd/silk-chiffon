@@ -14,12 +14,27 @@ use crate::{
     inspection::magic::magic_bytes_match_start, utils::arrow_versioning::convert_schema_56_to_57,
 };
 
+use tabled::Tabled;
+
 use super::{
     inspectable::{Inspectable, format_bytes, format_number, render_schema_fields, schema_to_json},
-    style::{dim, header, label, value},
+    style::{dim, header, label, rounded_table, value},
 };
 
 const VORTEX_MAGIC: &[u8] = b"VTXF";
+
+/// Row for segment table display.
+#[derive(Tabled)]
+struct SegmentRow {
+    #[tabled(rename = "#")]
+    index: usize,
+    #[tabled(rename = "Offset")]
+    offset: u64,
+    #[tabled(rename = "Length")]
+    length: u32,
+    #[tabled(rename = "Align")]
+    alignment: usize,
+}
 
 pub struct VortexInspector {
     schema: SchemaRef,
@@ -119,7 +134,6 @@ impl VortexInspector {
             header("Layout Segments"),
             value(self.segments.len())
         )?;
-        writeln!(out)?;
 
         if self.segments.is_empty() {
             writeln!(out, "  {}", dim("(no segments)"))?;
@@ -129,45 +143,24 @@ impl VortexInspector {
         let total_size: u64 = self.segments.iter().map(|s| u64::from(s.length)).sum();
         writeln!(
             out,
-            "  {}: {}",
+            "\n{}: {}\n",
             label("Total data size"),
             value(format_bytes(total_size))
         )?;
-        writeln!(out)?;
 
-        // find max widths for alignment
-        let max_offset = self.segments.last().map(|s| s.offset).unwrap_or(0);
-        let max_length = self.segments.iter().map(|s| s.length).max().unwrap_or(0);
+        let rows: Vec<SegmentRow> = self
+            .segments
+            .iter()
+            .enumerate()
+            .map(|(i, seg)| SegmentRow {
+                index: i,
+                offset: seg.offset,
+                length: seg.length,
+                alignment: *seg.alignment,
+            })
+            .collect();
 
-        let offset_width = max_offset.to_string().len().max(6);
-        let length_width = max_length.to_string().len().max(6);
-        let idx_width = self.segments.len().to_string().len().max(3);
-
-        writeln!(
-            out,
-            "  {:>idx_w$}  {:>offset_w$}  {:>length_w$}  {}",
-            dim("#"),
-            dim("Offset"),
-            dim("Length"),
-            dim("Align"),
-            idx_w = idx_width,
-            offset_w = offset_width,
-            length_w = length_width,
-        )?;
-
-        for (i, seg) in self.segments.iter().enumerate() {
-            writeln!(
-                out,
-                "  {:>idx_w$}  {:>offset_w$}  {:>length_w$}  {}",
-                value(i),
-                value(seg.offset),
-                value(seg.length),
-                value(*seg.alignment),
-                idx_w = idx_width,
-                offset_w = offset_width,
-                length_w = length_width,
-            )?;
-        }
+        writeln!(out, "{}", rounded_table(rows))?;
 
         Ok(())
     }
@@ -268,13 +261,28 @@ impl Inspectable for VortexInspector {
 
         let total_size: u64 = self.segments.iter().map(|s| u64::from(s.length)).sum();
 
+        let segments_json: Vec<Value> = self
+            .segments
+            .iter()
+            .enumerate()
+            .map(|(i, seg)| {
+                json!({
+                    "index": i,
+                    "offset": seg.offset,
+                    "length": seg.length,
+                    "alignment": *seg.alignment,
+                })
+            })
+            .collect();
+
         json!({
             "format": "vortex",
             "variant": "file",
             "file": self.file_path,
             "rows": self.num_rows,
-            "segments": self.segments.len(),
-            "size": total_size,
+            "num_segments": self.segments.len(),
+            "total_size": total_size,
+            "segments": segments_json,
             "schema": schema_to_json(&self.schema),
             "statistics": stats_json,
         })

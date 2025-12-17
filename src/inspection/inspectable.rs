@@ -180,3 +180,55 @@ pub fn schema_to_json(schema: &SchemaRef) -> Vec<SchemaField> {
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_truncate_for_display_short_string() {
+        let short = "hello world";
+        assert_eq!(truncate_for_display(short), short);
+    }
+
+    #[test]
+    fn test_truncate_for_display_exactly_max_length() {
+        let exactly_100 = "a".repeat(MAX_METADATA_DISPLAY_CHARS);
+        assert_eq!(truncate_for_display(&exactly_100), exactly_100);
+    }
+
+    #[test]
+    fn test_truncate_for_display_over_max_length() {
+        let long = "a".repeat(150);
+        let result = truncate_for_display(&long);
+        assert!(result.contains("..."));
+        assert!(result.contains("150 chars total"));
+    }
+
+    #[test]
+    fn test_truncate_for_display_unicode() {
+        // 150 unicode chars (emoji are typically multi-byte but count as 1 char)
+        let emojis = "🎉".repeat(150);
+        let result = truncate_for_display(&emojis);
+        assert!(result.contains("..."));
+        assert!(result.contains("150 chars total"));
+        // should truncate by char count, not byte count
+        assert!(result.starts_with(&"🎉".repeat(100)));
+    }
+
+    #[test]
+    fn test_format_bytes() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(1024), "1 KiB");
+        assert_eq!(format_bytes(1024 * 1024), "1 MiB");
+        // verify fractional bytes display correctly
+        assert_eq!(format_bytes(1536), "1.5 KiB");
+    }
+
+    #[test]
+    fn test_format_number() {
+        assert_eq!(format_number(0), "0");
+        assert_eq!(format_number(1000), "1,000");
+        assert_eq!(format_number(1_000_000), "1,000,000");
+    }
+}
