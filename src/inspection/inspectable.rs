@@ -49,6 +49,12 @@ pub trait Inspectable: Send + Sync {
 
     /// Serialize to JSON
     fn to_json(&self) -> Value;
+
+    /// Render to JSON
+    fn render_to_json(&self, out: &mut dyn Write) -> Result<()> {
+        writeln!(out, "{}", serde_json::to_string(&self.to_json())?)?;
+        Ok(())
+    }
 }
 
 /// Format a byte size for human-readable output.

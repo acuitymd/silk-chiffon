@@ -7,5 +7,6 @@ pub mod parquet;
 pub mod style;
 pub mod vortex;
 
+pub mod magic;
 pub use identify::{DetectedFormat, detect_format};
 pub use inspectable::Inspectable;

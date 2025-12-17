@@ -1,11 +1,6 @@
 //! Arrow IPC file inspection.
 
-use std::{
-    collections::HashMap,
-    fs::File,
-    io::{Read, Seek, SeekFrom, Write},
-    path::Path,
-};
+use std::{collections::HashMap, fs::File, io::Write, path::Path};
 
 use anyhow::Result;
 use arrow::datatypes::SchemaRef;
@@ -19,8 +14,6 @@ use super::{
     },
     style::{dim, header, label, value},
 };
-
-const ARROW_MAGIC: &[u8] = b"ARROW1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -202,26 +195,12 @@ impl ArrowInspector {
 
 impl Inspectable for ArrowInspector {
     fn try_open(path: &Path) -> Result<Option<Self>> {
-        let mut file = match File::open(path) {
-            Ok(f) => f,
-            Err(_) => return Ok(None),
-        };
-
-        let mut magic = [0u8; 6];
-        if file.read_exact(&mut magic).is_ok()
-            && magic == ARROW_MAGIC
-            && file.seek(SeekFrom::End(-6)).is_ok()
-        {
-            let mut footer_magic = [0u8; 6];
-            if file.read_exact(&mut footer_magic).is_ok() && footer_magic == ARROW_MAGIC {
-                return Self::open_file(path).map(Some);
-            }
-        }
-
-        // stream format has no magic; try to parse header only
-        match Self::open_stream(path, false) {
-            Ok(inspector) => Ok(Some(inspector)),
-            Err(_) => Ok(None),
+        match FileReader::try_new(File::open(path)?, None) {
+            Ok(_) => Self::open_file(path).map(Some),
+            Err(_) => match StreamReader::try_new(File::open(path)?, None) {
+                Ok(_) => Self::open_stream(path, false).map(Some),
+                Err(_) => Ok(None),
+            },
         }
     }
 
@@ -298,5 +277,95 @@ impl Inspectable for ArrowInspector {
             "schema": schema_to_json(&self.schema),
             "metadata": self.custom_metadata,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    use arrow::array::{Int32Array, RecordBatch, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::ipc::writer::{FileWriter, StreamWriter};
+
+    fn simple_schema() -> SchemaRef {
+        Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("name", DataType::Utf8, false),
+        ]))
+    }
+
+    fn create_batch(schema: &SchemaRef) -> RecordBatch {
+        RecordBatch::try_new(
+            Arc::clone(schema),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 2, 3])),
+                Arc::new(StringArray::from(vec!["a", "b", "c"])),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_try_open_arrow_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("test.arrow");
+
+        let schema = simple_schema();
+        let batch = create_batch(&schema);
+
+        let file = File::create(&path).unwrap();
+        let mut writer = FileWriter::try_new(file, &schema).unwrap();
+        writer.write(&batch).unwrap();
+        writer.finish().unwrap();
+
+        let inspector = ArrowInspector::try_open(&path).unwrap();
+        assert!(inspector.is_some());
+
+        let inspector = inspector.unwrap();
+        assert_eq!(inspector.variant(), ArrowVariant::File);
+        assert_eq!(inspector.row_count(), Some(3));
+    }
+
+    #[test]
+    fn test_try_open_arrow_stream() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("test.arrows");
+
+        let schema = simple_schema();
+        let batch = create_batch(&schema);
+
+        let file = File::create(&path).unwrap();
+        let mut writer = StreamWriter::try_new(file, &schema).unwrap();
+        writer.write(&batch).unwrap();
+        writer.finish().unwrap();
+
+        let inspector = ArrowInspector::try_open(&path).unwrap();
+        assert!(inspector.is_some());
+
+        let inspector = inspector.unwrap();
+        assert_eq!(inspector.variant(), ArrowVariant::Stream);
+        // stream format doesn't read rows by default
+        assert!(inspector.row_count().is_none());
+    }
+
+    #[test]
+    fn test_try_open_non_arrow_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("test.txt");
+        std::fs::write(&path, "not an arrow file").unwrap();
+
+        let inspector = ArrowInspector::try_open(&path).unwrap();
+        assert!(inspector.is_none());
+    }
+
+    #[test]
+    fn test_try_open_nonexistent_file() {
+        let path = Path::new("/nonexistent/path/file.arrow");
+        // arrow try_open propagates OS errors for file access issues
+        let result = ArrowInspector::try_open(path);
+        assert!(result.is_err());
     }
 }

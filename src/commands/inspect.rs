@@ -1,7 +1,6 @@
 //! Inspect command for examining file metadata and structure.
 
-use std::fs::File;
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, Write};
 
 use anyhow::{Result, anyhow};
 
@@ -13,8 +12,6 @@ use crate::{
         vortex::VortexInspector,
     },
 };
-
-const ARROW_MAGIC: &[u8] = b"ARROW1";
 
 pub async fn run(command: InspectSubcommand) -> Result<()> {
     match &command {
@@ -44,7 +41,7 @@ fn run_parquet(args: &InspectParquetArgs) -> Result<()> {
     let mut out = io::stdout();
 
     if args.format.resolves_to_json() {
-        writeln!(out, "{}", serde_json::to_string(&inspector.to_json())?)?;
+        inspector.render_to_json(&mut out)?;
         return Ok(());
     }
 
@@ -71,30 +68,8 @@ fn run_parquet(args: &InspectParquetArgs) -> Result<()> {
 }
 
 fn run_arrow(args: &InspectArrowArgs) -> Result<()> {
-    let mut file = File::open(&args.file).map_err(|e| anyhow!("Failed to open file: {}", e))?;
-
-    let is_file_format = {
-        let mut magic = [0u8; 6];
-        if file.read_exact(&mut magic).is_ok() && magic == ARROW_MAGIC {
-            if file.seek(SeekFrom::End(-6)).is_ok() {
-                let mut footer_magic = [0u8; 6];
-                file.read_exact(&mut footer_magic).is_ok() && footer_magic == ARROW_MAGIC
-            } else {
-                false
-            }
-        } else {
-            false
-        }
-    };
-
-    let inspector = if is_file_format {
-        ArrowInspector::open_file(&args.file)
-            .map_err(|e| anyhow!("Failed to open Arrow file: {}", e))?
-    } else {
-        let count_rows = args.row_count || args.batches;
-        ArrowInspector::open_stream(&args.file, count_rows)
-            .map_err(|e| anyhow!("Failed to open Arrow stream: {}", e))?
-    };
+    let inspector = ArrowInspector::try_open(&args.file)?
+        .ok_or_else(|| anyhow!("Failed to open Arrow file: {}", &args.file.display()))?;
 
     let mut out = io::stdout();
 

@@ -1,14 +1,8 @@
 //! Vortex file inspection.
 
-use std::{
-    collections::HashMap,
-    fs::File,
-    io::{Read, Write},
-    path::Path,
-    sync::Arc,
-};
+use std::{collections::HashMap, fs::File, io::Write, path::Path, sync::Arc};
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use arrow::datatypes::SchemaRef;
 use serde_json::{Value, json};
 use vortex::VortexSessionDefault;
@@ -16,7 +10,9 @@ use vortex::file::{OpenOptionsSessionExt, SegmentSpec};
 use vortex_array::stats::StatsSet;
 use vortex_session::VortexSession;
 
-use crate::utils::arrow_versioning::convert_schema_56_to_57;
+use crate::{
+    inspection::magic::magic_bytes_match_start, utils::arrow_versioning::convert_schema_56_to_57,
+};
 
 use super::{
     inspectable::{Inspectable, format_bytes, format_number, render_schema_fields, schema_to_json},
@@ -181,19 +177,14 @@ impl Inspectable for VortexInspector {
     fn try_open(path: &Path) -> Result<Option<Self>> {
         let mut file = match File::open(path) {
             Ok(f) => f,
-            Err(_) => return Ok(None),
+            Err(_) => return Err(anyhow!("Failed to open file")),
         };
 
-        let mut magic = [0u8; 4];
-        if file.read_exact(&mut magic).is_err() {
+        if !magic_bytes_match_start(&mut file, VORTEX_MAGIC)? {
             return Ok(None);
         }
 
-        if magic == VORTEX_MAGIC {
-            return Self::open_file(path).map(Some);
-        }
-
-        Ok(None)
+        Self::open_file(path).map(Some)
     }
 
     fn format_name(&self) -> &str {
@@ -295,5 +286,93 @@ impl Inspectable for VortexInspector {
             "schema": schema_to_json(&self.schema),
             "statistics": stats_json,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    use arrow::array::{Int32Array, RecordBatch, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+
+    use crate::sinks::data_sink::DataSink;
+    use crate::sinks::vortex::{VortexSink, VortexSinkOptions};
+
+    fn simple_schema() -> SchemaRef {
+        Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("name", DataType::Utf8, false),
+        ]))
+    }
+
+    fn create_batch(schema: &SchemaRef) -> RecordBatch {
+        RecordBatch::try_new(
+            Arc::clone(schema),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 2, 3])),
+                Arc::new(StringArray::from(vec!["a", "b", "c"])),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn write_vortex_file(path: &Path, schema: &SchemaRef, batch: RecordBatch) {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let mut sink =
+                VortexSink::create(path.to_path_buf(), schema, VortexSinkOptions::new()).unwrap();
+            sink.write_batch(batch).await.unwrap();
+            sink.finish().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_try_open_vortex_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("test.vortex");
+
+        let schema = simple_schema();
+        let batch = create_batch(&schema);
+        write_vortex_file(&path, &schema, batch);
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let inspector = rt
+            .block_on(async { VortexInspector::try_open(&path) })
+            .unwrap();
+        assert!(inspector.is_some());
+
+        let inspector = inspector.unwrap();
+        assert_eq!(inspector.row_count(), Some(3));
+        assert_eq!(inspector.format_name(), "Vortex (file)");
+    }
+
+    #[test]
+    fn test_try_open_non_vortex_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("test.txt");
+        std::fs::write(&path, "not a vortex file").unwrap();
+
+        let inspector = VortexInspector::try_open(&path).unwrap();
+        assert!(inspector.is_none());
+    }
+
+    #[test]
+    fn test_try_open_wrong_magic_bytes() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("test.vortex");
+        // wrong magic bytes
+        std::fs::write(&path, b"PAR1garbage").unwrap();
+
+        let inspector = VortexInspector::try_open(&path).unwrap();
+        assert!(inspector.is_none());
+    }
+
+    #[test]
+    fn test_try_open_nonexistent_file() {
+        let path = Path::new("/nonexistent/path/file.vortex");
+        let result = VortexInspector::try_open(path);
+        assert!(result.is_err());
     }
 }

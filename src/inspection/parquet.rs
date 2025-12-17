@@ -7,7 +7,7 @@ use std::{
     path::Path,
 };
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use arrow::datatypes::SchemaRef;
 use parquet::{
     arrow::parquet_to_arrow_schema,
@@ -21,6 +21,8 @@ use parquet::{
 };
 use serde::Serialize;
 use serde_json::{Value, json};
+
+use crate::inspection::magic::{magic_bytes_match_end, magic_bytes_match_start};
 
 use super::{
     inspectable::{
@@ -614,27 +616,14 @@ impl Inspectable for ParquetInspector {
     fn try_open(path: &Path) -> Result<Option<Self>> {
         let mut file = match File::open(path) {
             Ok(f) => f,
-            Err(_) => return Ok(None),
+            Err(_) => return Err(anyhow!("Failed to open file")),
         };
 
-        use std::io::{Read, Seek, SeekFrom};
-
-        let mut magic = [0u8; 4];
-        if file.read_exact(&mut magic).is_err() {
-            return Ok(None);
-        }
-        if magic != PARQUET_MAGIC {
+        if !magic_bytes_match_start(&mut file, PARQUET_MAGIC)? {
             return Ok(None);
         }
 
-        if file.seek(SeekFrom::End(-4)).is_err() {
-            return Ok(None);
-        }
-        let mut footer_magic = [0u8; 4];
-        if file.read_exact(&mut footer_magic).is_err() {
-            return Ok(None);
-        }
-        if footer_magic != PARQUET_MAGIC {
+        if !magic_bytes_match_end(&mut file, PARQUET_MAGIC)? {
             return Ok(None);
         }
 
@@ -790,5 +779,83 @@ impl Inspectable for ParquetInspector {
             "row_groups": row_groups_json,
             "metadata": self.custom_metadata,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    use arrow::array::{Int32Array, RecordBatch, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use parquet::arrow::ArrowWriter;
+
+    fn simple_schema() -> SchemaRef {
+        Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("name", DataType::Utf8, false),
+        ]))
+    }
+
+    fn create_batch(schema: &SchemaRef) -> RecordBatch {
+        RecordBatch::try_new(
+            Arc::clone(schema),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 2, 3])),
+                Arc::new(StringArray::from(vec!["a", "b", "c"])),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_try_open_parquet_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("test.parquet");
+
+        let schema = simple_schema();
+        let batch = create_batch(&schema);
+
+        let file = File::create(&path).unwrap();
+        let mut writer = ArrowWriter::try_new(file, Arc::clone(&schema), None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+
+        let inspector = ParquetInspector::try_open(&path).unwrap();
+        assert!(inspector.is_some());
+
+        let inspector = inspector.unwrap();
+        assert_eq!(inspector.row_count(), Some(3));
+        assert_eq!(inspector.format_name(), "Parquet");
+    }
+
+    #[test]
+    fn test_try_open_non_parquet_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("test.txt");
+        std::fs::write(&path, "not a parquet file").unwrap();
+
+        let inspector = ParquetInspector::try_open(&path).unwrap();
+        assert!(inspector.is_none());
+    }
+
+    #[test]
+    fn test_try_open_partial_magic_bytes() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("test.parquet");
+        // only start magic, no end magic
+        std::fs::write(&path, b"PAR1garbage").unwrap();
+
+        let inspector = ParquetInspector::try_open(&path).unwrap();
+        assert!(inspector.is_none());
+    }
+
+    #[test]
+    fn test_try_open_nonexistent_file() {
+        let path = Path::new("/nonexistent/path/file.parquet");
+        let result = ParquetInspector::try_open(path);
+        assert!(result.is_err());
     }
 }
