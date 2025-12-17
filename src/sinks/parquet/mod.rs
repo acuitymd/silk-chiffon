@@ -13,7 +13,10 @@ use parquet::{
 use std::{collections::HashMap, path::PathBuf, sync::Mutex};
 
 use anyhow::{Result, anyhow};
-use arrow::{array::RecordBatch, datatypes::SchemaRef};
+use arrow::{
+    array::RecordBatch,
+    datatypes::{DataType, SchemaRef},
+};
 use async_trait::async_trait;
 use datafusion::execution::SendableRecordBatchStream;
 
@@ -232,14 +235,15 @@ impl ParquetSink {
         column_encodings: &[ColumnEncodingConfig],
     ) -> Result<()> {
         for col_encoding in column_encodings {
-            let field = schema.field_with_name(&col_encoding.name).map_err(|_| {
-                anyhow!(
-                    "column '{}' specified in --parquet-column-encoding not found in schema",
-                    col_encoding.name
-                )
-            })?;
+            let data_type =
+                Self::resolve_column_type(schema, &col_encoding.name).ok_or_else(|| {
+                    anyhow!(
+                        "column '{}' specified in --parquet-column-encoding not found in schema",
+                        col_encoding.name
+                    )
+                })?;
 
-            if let Some(error) = col_encoding.encoding.validate_for_type(field.data_type()) {
+            if let Some(error) = col_encoding.encoding.validate_for_type(&data_type) {
                 return Err(anyhow!(
                     "invalid encoding for column '{}': {}",
                     col_encoding.name,
@@ -248,6 +252,31 @@ impl ParquetSink {
             }
         }
         Ok(())
+    }
+
+    /// Resolve a column path (potentially nested like "outer.inner") to its data type.
+    fn resolve_column_type(schema: &SchemaRef, column_path: &str) -> Option<DataType> {
+        let parts: Vec<&str> = column_path.split('.').collect();
+        let mut current_type: Option<&DataType> = None;
+
+        for (i, part) in parts.iter().enumerate() {
+            if i == 0 {
+                // first part: look up in schema
+                let field = schema.field_with_name(part).ok()?;
+                current_type = Some(field.data_type());
+            } else {
+                // subsequent parts: navigate into struct
+                match current_type? {
+                    DataType::Struct(fields) => {
+                        let field = fields.iter().find(|f| f.name() == part)?;
+                        current_type = Some(field.data_type());
+                    }
+                    _ => return None, // not a struct, can't navigate further
+                }
+            }
+        }
+
+        current_type.cloned()
     }
 
     fn apply_encodings(
@@ -1137,6 +1166,8 @@ mod tests {
 
     mod encoding_tests {
         use super::*;
+        use std::sync::Arc;
+
         use crate::{ColumnEncodingConfig, ParquetEncoding};
 
         #[tokio::test]
@@ -1227,6 +1258,94 @@ mod tests {
 
             let batches = verify::read_parquet_file(&output_path).unwrap();
             verify::assert_id_name_batch_data_matches(&batches[0], &[1, 2, 3], &["a", "b", "c"]);
+        }
+
+        #[tokio::test]
+        async fn test_sink_with_nested_column_encoding() {
+            use arrow::array::{Int32Array, StructArray};
+            use arrow::datatypes::Field;
+
+            let temp_dir = tempdir().unwrap();
+            let output_path = temp_dir.path().join("output.parquet");
+
+            // create schema with nested struct: { outer: { inner: i32 } }
+            let inner_field = Field::new("inner", arrow::datatypes::DataType::Int32, false);
+            let outer_field = Field::new(
+                "outer",
+                arrow::datatypes::DataType::Struct(vec![inner_field.clone()].into()),
+                false,
+            );
+            let schema = Arc::new(arrow::datatypes::Schema::new(vec![outer_field]));
+
+            // create batch with nested data
+            let inner_array = Int32Array::from(vec![1, 2, 3]);
+            let outer_array =
+                StructArray::from(vec![(Arc::new(inner_field), Arc::new(inner_array) as _)]);
+            let batch =
+                RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(outer_array)]).unwrap();
+
+            // use nested column path for encoding
+            let mut sink = ParquetSink::create(
+                output_path.clone(),
+                &schema,
+                &ParquetSinkOptions::new().with_column_encodings(vec![ColumnEncodingConfig {
+                    name: "outer.inner".to_string(),
+                    encoding: ParquetEncoding::DeltaBinaryPacked,
+                }]),
+            )
+            .unwrap();
+
+            sink.write_batch(batch).await.unwrap();
+            let result = sink.finish().await.unwrap();
+
+            assert_eq!(result.rows_written, 3);
+            assert!(output_path.exists());
+        }
+
+        #[test]
+        fn test_resolve_column_type_top_level() {
+            let schema = test_data::simple_schema();
+            let data_type = ParquetSink::resolve_column_type(&schema, "id");
+            assert_eq!(data_type, Some(arrow::datatypes::DataType::Int32));
+        }
+
+        #[test]
+        fn test_resolve_column_type_nested() {
+            use arrow::datatypes::Field;
+
+            let inner_field = Field::new("inner", arrow::datatypes::DataType::Int64, false);
+            let outer_field = Field::new(
+                "outer",
+                arrow::datatypes::DataType::Struct(vec![inner_field].into()),
+                false,
+            );
+            let schema = Arc::new(arrow::datatypes::Schema::new(vec![outer_field]));
+
+            let data_type = ParquetSink::resolve_column_type(&schema, "outer.inner");
+            assert_eq!(data_type, Some(arrow::datatypes::DataType::Int64));
+        }
+
+        #[test]
+        fn test_resolve_column_type_not_found() {
+            let schema = test_data::simple_schema();
+            let data_type = ParquetSink::resolve_column_type(&schema, "nonexistent");
+            assert_eq!(data_type, None);
+        }
+
+        #[test]
+        fn test_resolve_column_type_nested_not_found() {
+            use arrow::datatypes::Field;
+
+            let inner_field = Field::new("inner", arrow::datatypes::DataType::Int64, false);
+            let outer_field = Field::new(
+                "outer",
+                arrow::datatypes::DataType::Struct(vec![inner_field].into()),
+                false,
+            );
+            let schema = Arc::new(arrow::datatypes::Schema::new(vec![outer_field]));
+
+            let data_type = ParquetSink::resolve_column_type(&schema, "outer.nonexistent");
+            assert_eq!(data_type, None);
         }
     }
 }
