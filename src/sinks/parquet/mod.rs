@@ -173,6 +173,8 @@ impl ParquetSink {
             &options.column_no_dictionary,
         );
 
+        Self::validate_column_encodings(schema, &options.column_encodings)?;
+
         writer_builder =
             Self::apply_encodings(writer_builder, &options.encoding, &options.column_encodings);
 
@@ -223,6 +225,29 @@ impl ParquetSink {
         }
 
         builder
+    }
+
+    fn validate_column_encodings(
+        schema: &SchemaRef,
+        column_encodings: &[ColumnEncodingConfig],
+    ) -> Result<()> {
+        for col_encoding in column_encodings {
+            let field = schema.field_with_name(&col_encoding.name).map_err(|_| {
+                anyhow!(
+                    "column '{}' specified in --parquet-column-encoding not found in schema",
+                    col_encoding.name
+                )
+            })?;
+
+            if let Some(error) = col_encoding.encoding.validate_for_type(field.data_type()) {
+                return Err(anyhow!(
+                    "invalid encoding for column '{}': {}",
+                    col_encoding.name,
+                    error
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn apply_encodings(

@@ -235,6 +235,104 @@ impl ParquetEncoding {
                 | ParquetEncoding::ByteStreamSplit
         )
     }
+
+    /// Validates that this encoding is compatible with the given Arrow data type.
+    /// Returns an error message if incompatible, None if compatible.
+    pub fn validate_for_type(&self, data_type: &arrow::datatypes::DataType) -> Option<String> {
+        use arrow::datatypes::DataType;
+
+        match self {
+            ParquetEncoding::Plain => None, // works for all types
+
+            ParquetEncoding::Rle => {
+                // RLE only works for boolean
+                if matches!(data_type, DataType::Boolean) {
+                    None
+                } else {
+                    Some(format!(
+                        "RLE encoding only supports Boolean, got {}",
+                        data_type
+                    ))
+                }
+            }
+
+            ParquetEncoding::DeltaBinaryPacked => {
+                // only for integer types
+                if matches!(
+                    data_type,
+                    DataType::Int8
+                        | DataType::Int16
+                        | DataType::Int32
+                        | DataType::Int64
+                        | DataType::UInt8
+                        | DataType::UInt16
+                        | DataType::UInt32
+                        | DataType::UInt64
+                        | DataType::Date32
+                        | DataType::Date64
+                        | DataType::Time32(_)
+                        | DataType::Time64(_)
+                        | DataType::Timestamp(_, _)
+                        | DataType::Duration(_)
+                ) {
+                    None
+                } else {
+                    Some(format!(
+                        "DELTA_BINARY_PACKED encoding only supports integer types, got {}",
+                        data_type
+                    ))
+                }
+            }
+
+            ParquetEncoding::DeltaLengthByteArray | ParquetEncoding::DeltaByteArray => {
+                // only for byte array types
+                if matches!(
+                    data_type,
+                    DataType::Utf8
+                        | DataType::LargeUtf8
+                        | DataType::Binary
+                        | DataType::LargeBinary
+                        | DataType::Utf8View
+                        | DataType::BinaryView
+                ) {
+                    None
+                } else {
+                    Some(format!(
+                        "{} encoding only supports byte array types (Utf8, Binary, etc.), got {}",
+                        self, data_type
+                    ))
+                }
+            }
+
+            ParquetEncoding::ByteStreamSplit => {
+                // for fixed-width types: floats and integers
+                if matches!(
+                    data_type,
+                    DataType::Float16
+                        | DataType::Float32
+                        | DataType::Float64
+                        | DataType::Int8
+                        | DataType::Int16
+                        | DataType::Int32
+                        | DataType::Int64
+                        | DataType::UInt8
+                        | DataType::UInt16
+                        | DataType::UInt32
+                        | DataType::UInt64
+                        | DataType::FixedSizeBinary(_)
+                        | DataType::Decimal128(_, _)
+                        | DataType::Decimal256(_, _)
+                ) {
+                    None
+                } else {
+                    Some(format!(
+                        "BYTE_STREAM_SPLIT encoding only supports fixed-width types (floats, integers, decimals), got {}",
+                        data_type
+                    ))
+                }
+            }
+        }
+    }
 }
 
 impl From<ParquetEncoding> for Encoding {
