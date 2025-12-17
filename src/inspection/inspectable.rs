@@ -145,7 +145,9 @@ pub fn render_schema_fields_detailed(schema: &SchemaRef, out: &mut dyn Write) ->
         writeln!(out, "    {}: {}", label("Type"), value(field.data_type()))?;
 
         let meta = field.metadata();
-        if !meta.is_empty() {
+        if meta.is_empty() {
+            writeln!(out, "    {}: {}", label("Metadata"), dim("(none)"))?;
+        } else {
             writeln!(out, "    {}:", label("Metadata"))?;
             for (k, v) in meta {
                 writeln!(out, "      {}: {}", dim(k), v)?;

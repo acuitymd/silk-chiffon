@@ -57,6 +57,7 @@ impl ArrowInspector {
             bail!("not an Arrow IPC file");
         }
     }
+
     pub fn open_file(path: &Path, count_rows: bool) -> Result<Self> {
         let file = File::open(path)?;
         let reader = FileReader::try_new(file, None)?;
