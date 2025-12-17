@@ -181,7 +181,6 @@ fn format_bytes_as_string_or_hex(bytes: &[u8]) -> String {
     {
         return format!("\"{}\"", s);
     }
-    // hex format
     let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
     format!("0x{}", hex)
 }
@@ -315,7 +314,6 @@ impl ParquetInspector {
                 inspector.total_compressed_size += compressed_size;
                 inspector.total_uncompressed_size += uncompressed_size;
 
-                // aggregate per-column stats
                 col_compressed[col_idx] += compressed_size;
                 col_uncompressed[col_idx] += uncompressed_size;
 
@@ -336,7 +334,6 @@ impl ParquetInspector {
                 // column_path().to_string() wraps names in quotes, use parts instead
                 let name = col_meta.column_path().parts().join(".");
 
-                // store name on first row group
                 if rg_idx == 0 {
                     col_names[col_idx] = name.clone();
                 }
@@ -345,7 +342,6 @@ impl ParquetInspector {
                     .statistics()
                     .map(|s| ColumnStatistics::from_parquet(s, logical_type));
 
-                // aggregate null counts
                 if let Some(ref s) = stats
                     && let Some(nc) = s.null_count
                 {
@@ -375,7 +371,6 @@ impl ParquetInspector {
             });
         }
 
-        // build file-level column stats
         inspector.file_column_stats = (0..num_columns)
             .map(|i| FileColumnStats {
                 name: col_names[i].clone(),
@@ -389,7 +384,6 @@ impl ParquetInspector {
     }
 
     pub fn render_stats(&self, out: &mut dyn Write) -> Result<()> {
-        // file-level summary (aggregated across all row groups)
         writeln!(
             out,
             "\n{} {}:",
@@ -492,7 +486,6 @@ impl ParquetInspector {
         )?;
         writeln!(out)?;
 
-        // if detailed encodings requested, open file and get reader for page-level info
         let reader = if detailed_encodings {
             let file = File::open(&self.file_path)?;
             Some(SerializedFileReader::new(file)?)
@@ -543,7 +536,6 @@ impl ParquetInspector {
             }
 
             if include_stats || detailed_encodings {
-                // get page reader for this row group if detailed encodings requested
                 let rg_reader = if let Some(ref r) = reader {
                     r.get_row_group(rg.index).ok()
                 } else {
@@ -559,7 +551,6 @@ impl ParquetInspector {
                         dim(format!("({})", col.compression))
                     )?;
 
-                    // show encodings - detailed if requested, otherwise high-level list
                     if detailed_encodings
                         && let Some(ref rg_r) = rg_reader
                         && let Some(pe) = read_page_encodings(rg_r.as_ref(), col_idx)
@@ -737,7 +728,6 @@ impl Inspectable for ParquetInspector {
     }
 
     fn to_json(&self) -> Value {
-        // file-level aggregated stats per column
         let file_columns: Vec<Value> = self
             .file_column_stats
             .iter()
@@ -755,7 +745,6 @@ impl Inspectable for ParquetInspector {
             })
             .collect();
 
-        // detailed per-row-group info
         let row_groups_json: Vec<Value> = self
             .row_groups
             .iter()
@@ -764,7 +753,6 @@ impl Inspectable for ParquetInspector {
                     .columns
                     .iter()
                     .map(|col| {
-                        // build stats object, only including distinct_count if present
                         let stats_json = col.statistics.as_ref().map(|s| {
                             let mut stats = serde_json::Map::new();
                             if let Some(min) = &s.min {

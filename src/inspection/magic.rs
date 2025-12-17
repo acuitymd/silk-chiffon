@@ -15,8 +15,6 @@ pub fn magic_bytes_match_start(file: &mut File, expected: &[u8]) -> Result<bool>
 
     file.seek(SeekFrom::Start(0))?;
     file.read_exact(&mut buf)?;
-
-    // return to original position
     file.seek(SeekFrom::Start(start_pos))?;
 
     Ok(buf == expected)
@@ -38,8 +36,6 @@ pub fn magic_bytes_match_end(file: &mut File, expected: &[u8]) -> Result<bool> {
 
     file.seek(SeekFrom::End(-expected_len))?;
     file.read_exact(&mut buf)?;
-
-    // return to original position
     file.seek(SeekFrom::Start(start_pos))?;
 
     Ok(buf == expected)
