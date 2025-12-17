@@ -1,6 +1,8 @@
 //! Vortex file inspection.
 
-use std::{collections::HashMap, fs::File, io::Write, path::Path, sync::Arc};
+use std::{collections::HashMap, fs::File, io::Write, sync::Arc};
+
+use camino::{Utf8Path, Utf8PathBuf};
 
 use anyhow::Result;
 use arrow::datatypes::SchemaRef;
@@ -39,24 +41,20 @@ struct SegmentRow {
 pub struct VortexInspector {
     schema: SchemaRef,
     num_rows: u64,
-    file_path: String,
+    file_path: Utf8PathBuf,
     file_stats: Option<Arc<[StatsSet]>>,
     segments: Arc<[SegmentSpec]>,
     field_names: Vec<String>,
 }
 
 impl VortexInspector {
-    pub fn open_file(path: &Path) -> Result<Self> {
-        let path_str = path
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("Invalid path"))?;
-
+    pub fn open_file(path: &Utf8Path) -> Result<Self> {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 let session = VortexSession::default();
                 let vortex_file = session
                     .open_options()
-                    .open(path_str)
+                    .open(path.as_str())
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to open Vortex file: {}", e))?;
 
@@ -80,7 +78,7 @@ impl VortexInspector {
                 Ok(Self {
                     schema,
                     num_rows,
-                    file_path: path.display().to_string(),
+                    file_path: path.to_owned(),
                     file_stats,
                     segments,
                     field_names,
@@ -167,7 +165,7 @@ impl VortexInspector {
 }
 
 impl Inspectable for VortexInspector {
-    fn is_format(path: &Path) -> Result<bool> {
+    fn is_format(path: &Utf8Path) -> Result<bool> {
         let mut file = File::open(path)?;
         magic_bytes_match_start(&mut file, VORTEX_MAGIC)
     }
@@ -292,6 +290,7 @@ impl Inspectable for VortexInspector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
     use tempfile::TempDir;
 
     use arrow::array::{Int32Array, RecordBatch, StringArray};
@@ -331,27 +330,29 @@ mod tests {
     #[test]
     fn test_is_format_vortex_file() {
         let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("test.vortex");
+        let std_path = temp_dir.path().join("test.vortex");
+        let path = Utf8Path::from_path(&std_path).unwrap();
 
         let schema = simple_schema();
         let batch = create_batch(&schema);
-        write_vortex_file(&path, &schema, batch);
+        write_vortex_file(&std_path, &schema, batch);
 
-        assert!(VortexInspector::is_format(&path).unwrap());
+        assert!(VortexInspector::is_format(path).unwrap());
     }
 
     #[test]
     fn test_open_vortex_file() {
         let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("test.vortex");
+        let std_path = temp_dir.path().join("test.vortex");
+        let path = Utf8Path::from_path(&std_path).unwrap();
 
         let schema = simple_schema();
         let batch = create_batch(&schema);
-        write_vortex_file(&path, &schema, batch);
+        write_vortex_file(&std_path, &schema, batch);
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let inspector = rt
-            .block_on(async { VortexInspector::open_file(&path) })
+            .block_on(async { VortexInspector::open_file(path) })
             .unwrap();
         assert_eq!(inspector.row_count(), Some(3));
         assert_eq!(inspector.format_name(), "Vortex (file)");
@@ -360,25 +361,27 @@ mod tests {
     #[test]
     fn test_is_format_non_vortex_file() {
         let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("test.txt");
-        std::fs::write(&path, "not a vortex file").unwrap();
+        let std_path = temp_dir.path().join("test.txt");
+        let path = Utf8Path::from_path(&std_path).unwrap();
+        std::fs::write(path, "not a vortex file").unwrap();
 
-        assert!(!VortexInspector::is_format(&path).unwrap());
+        assert!(!VortexInspector::is_format(path).unwrap());
     }
 
     #[test]
     fn test_is_format_wrong_magic_bytes() {
         let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("test.vortex");
+        let std_path = temp_dir.path().join("test.vortex");
+        let path = Utf8Path::from_path(&std_path).unwrap();
         // wrong magic bytes
-        std::fs::write(&path, b"PAR1garbage").unwrap();
+        std::fs::write(path, b"PAR1garbage").unwrap();
 
-        assert!(!VortexInspector::is_format(&path).unwrap());
+        assert!(!VortexInspector::is_format(path).unwrap());
     }
 
     #[test]
     fn test_is_format_nonexistent_file() {
-        let path = Path::new("/nonexistent/path/file.vortex");
+        let path = Utf8Path::new("/nonexistent/path/file.vortex");
         let result = VortexInspector::is_format(path);
         assert!(result.is_err());
     }

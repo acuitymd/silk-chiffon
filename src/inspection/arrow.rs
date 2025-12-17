@@ -1,6 +1,8 @@
 //! Arrow IPC file inspection.
 
-use std::{collections::HashMap, fs::File, io::Write, path::Path};
+use std::{collections::HashMap, fs::File, io::Write};
+
+use camino::{Utf8Path, Utf8PathBuf};
 
 use anyhow::{Result, bail};
 use arrow::datatypes::SchemaRef;
@@ -38,7 +40,7 @@ pub struct ArrowInspector {
     num_batches: Option<usize>,
     batch_info: Option<Vec<BatchInfo>>,
     custom_metadata: HashMap<String, String>,
-    file_path: String,
+    file_path: Utf8PathBuf,
 }
 
 #[derive(Debug, Serialize)]
@@ -48,7 +50,7 @@ pub struct BatchInfo {
 }
 
 impl ArrowInspector {
-    pub fn open(path: &Path, count_rows: bool) -> Result<Self> {
+    pub fn open(path: &Utf8Path, count_rows: bool) -> Result<Self> {
         if Self::is_file_format_at(path)? {
             Self::open_file(path, count_rows)
         } else if Self::is_stream_format_at(path)? {
@@ -58,7 +60,7 @@ impl ArrowInspector {
         }
     }
 
-    pub fn open_file(path: &Path, count_rows: bool) -> Result<Self> {
+    pub fn open_file(path: &Utf8Path, count_rows: bool) -> Result<Self> {
         let file = File::open(path)?;
         let reader = FileReader::try_new(file, None)?;
         let schema = reader.schema();
@@ -90,7 +92,7 @@ impl ArrowInspector {
                 num_batches: Some(batch_info.len()),
                 batch_info: Some(batch_info),
                 custom_metadata,
-                file_path: path.display().to_string(),
+                file_path: path.to_owned(),
             })
         } else {
             Ok(Self {
@@ -100,12 +102,12 @@ impl ArrowInspector {
                 num_batches: None,
                 batch_info: None,
                 custom_metadata,
-                file_path: path.display().to_string(),
+                file_path: path.to_owned(),
             })
         }
     }
 
-    pub fn open_stream(path: &Path, count_rows: bool) -> Result<Self> {
+    pub fn open_stream(path: &Utf8Path, count_rows: bool) -> Result<Self> {
         let file = File::open(path)?;
         let reader = StreamReader::try_new(file, None)?;
         let schema = reader.schema();
@@ -137,7 +139,7 @@ impl ArrowInspector {
                 num_batches: Some(batch_info.len()),
                 batch_info: Some(batch_info),
                 custom_metadata,
-                file_path: path.display().to_string(),
+                file_path: path.to_owned(),
             })
         } else {
             Ok(Self {
@@ -147,7 +149,7 @@ impl ArrowInspector {
                 num_batches: None,
                 batch_info: None,
                 custom_metadata,
-                file_path: path.display().to_string(),
+                file_path: path.to_owned(),
             })
         }
     }
@@ -216,7 +218,7 @@ impl ArrowInspector {
 
     /// Detect which Arrow IPC variant this file is.
     /// Errors if not an Arrow file or on I/O issues.
-    pub fn detect_variant(path: &Path) -> Result<ArrowVariant> {
+    pub fn detect_variant(path: &Utf8Path) -> Result<ArrowVariant> {
         if Self::is_file_format_at(path)? {
             return Ok(ArrowVariant::File);
         }
@@ -228,7 +230,7 @@ impl ArrowInspector {
         bail!("not an Arrow IPC file")
     }
 
-    fn is_file_format_at(path: &Path) -> Result<bool> {
+    fn is_file_format_at(path: &Utf8Path) -> Result<bool> {
         Ok(Self::is_file_format(&File::open(path)?))
     }
 
@@ -236,7 +238,7 @@ impl ArrowInspector {
         FileReader::try_new(file, None).is_ok()
     }
 
-    fn is_stream_format_at(path: &Path) -> Result<bool> {
+    fn is_stream_format_at(path: &Utf8Path) -> Result<bool> {
         Ok(Self::is_stream_format(&File::open(path)?))
     }
 
@@ -246,7 +248,7 @@ impl ArrowInspector {
 }
 
 impl Inspectable for ArrowInspector {
-    fn is_format(path: &Path) -> Result<bool> {
+    fn is_format(path: &Utf8Path) -> Result<bool> {
         Ok(Self::is_file_format_at(path)? || Self::is_stream_format_at(path)?)
     }
 
@@ -357,83 +359,88 @@ mod tests {
     #[test]
     fn test_is_format_arrow_file() {
         let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("test.arrow");
+        let std_path = temp_dir.path().join("test.arrow");
+        let path = Utf8Path::from_path(&std_path).unwrap();
 
         let schema = simple_schema();
         let batch = create_batch(&schema);
 
-        let file = File::create(&path).unwrap();
+        let file = File::create(path).unwrap();
         let mut writer = FileWriter::try_new(file, &schema).unwrap();
         writer.write(&batch).unwrap();
         writer.finish().unwrap();
 
-        assert!(ArrowInspector::is_format(&path).unwrap());
+        assert!(ArrowInspector::is_format(path).unwrap());
     }
 
     #[test]
     fn test_is_format_arrow_stream() {
         let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("test.arrows");
+        let std_path = temp_dir.path().join("test.arrows");
+        let path = Utf8Path::from_path(&std_path).unwrap();
 
         let schema = simple_schema();
         let batch = create_batch(&schema);
 
-        let file = File::create(&path).unwrap();
+        let file = File::create(path).unwrap();
         let mut writer = StreamWriter::try_new(file, &schema).unwrap();
         writer.write(&batch).unwrap();
         writer.finish().unwrap();
 
-        assert!(ArrowInspector::is_format(&path).unwrap());
+        assert!(ArrowInspector::is_format(path).unwrap());
     }
 
     #[test]
     fn test_detect_variant_file() {
         let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("test.arrow");
+        let std_path = temp_dir.path().join("test.arrow");
+        let path = Utf8Path::from_path(&std_path).unwrap();
 
         let schema = simple_schema();
         let batch = create_batch(&schema);
 
-        let file = File::create(&path).unwrap();
+        let file = File::create(path).unwrap();
         let mut writer = FileWriter::try_new(file, &schema).unwrap();
         writer.write(&batch).unwrap();
         writer.finish().unwrap();
 
-        let variant = ArrowInspector::detect_variant(&path).unwrap();
+        let variant = ArrowInspector::detect_variant(path).unwrap();
         assert_eq!(variant, ArrowVariant::File);
     }
 
     #[test]
     fn test_detect_variant_stream() {
         let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("test.arrows");
+        let std_path = temp_dir.path().join("test.arrows");
+        let path = Utf8Path::from_path(&std_path).unwrap();
 
         let schema = simple_schema();
         let batch = create_batch(&schema);
 
-        let file = File::create(&path).unwrap();
+        let file = File::create(path).unwrap();
         let mut writer = StreamWriter::try_new(file, &schema).unwrap();
         writer.write(&batch).unwrap();
         writer.finish().unwrap();
 
-        let variant = ArrowInspector::detect_variant(&path).unwrap();
+        let variant = ArrowInspector::detect_variant(path).unwrap();
         assert_eq!(variant, ArrowVariant::Stream);
     }
 
     #[test]
     fn test_open_file_with_row_count() {
         let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("test.arrow");
+        let std_path = temp_dir.path().join("test.arrow");
+        let path = Utf8Path::from_path(&std_path).unwrap();
 
         let schema = simple_schema();
         let batch = create_batch(&schema);
 
-        let file = File::create(&path).unwrap();
+        let file = File::create(path).unwrap();
         let mut writer = FileWriter::try_new(file, &schema).unwrap();
         writer.write(&batch).unwrap();
         writer.finish().unwrap();
 
-        let inspector = ArrowInspector::open_file(&path, true).unwrap();
+        let inspector = ArrowInspector::open_file(path, true).unwrap();
         assert_eq!(inspector.variant(), ArrowVariant::File);
         assert_eq!(inspector.row_count(), Some(3));
     }
@@ -441,17 +448,18 @@ mod tests {
     #[test]
     fn test_open_stream_with_row_count() {
         let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("test.arrows");
+        let std_path = temp_dir.path().join("test.arrows");
+        let path = Utf8Path::from_path(&std_path).unwrap();
 
         let schema = simple_schema();
         let batch = create_batch(&schema);
 
-        let file = File::create(&path).unwrap();
+        let file = File::create(path).unwrap();
         let mut writer = StreamWriter::try_new(file, &schema).unwrap();
         writer.write(&batch).unwrap();
         writer.finish().unwrap();
 
-        let inspector = ArrowInspector::open_stream(&path, true).unwrap();
+        let inspector = ArrowInspector::open_stream(path, true).unwrap();
         assert_eq!(inspector.variant(), ArrowVariant::Stream);
         assert_eq!(inspector.row_count(), Some(3));
     }
@@ -459,25 +467,27 @@ mod tests {
     #[test]
     fn test_is_format_non_arrow_file() {
         let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("test.txt");
-        std::fs::write(&path, "not an arrow file").unwrap();
+        let std_path = temp_dir.path().join("test.txt");
+        let path = Utf8Path::from_path(&std_path).unwrap();
+        std::fs::write(path, "not an arrow file").unwrap();
 
-        assert!(!ArrowInspector::is_format(&path).unwrap());
+        assert!(!ArrowInspector::is_format(path).unwrap());
     }
 
     #[test]
     fn test_detect_variant_non_arrow_errors() {
         let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("test.txt");
-        std::fs::write(&path, "not an arrow file").unwrap();
+        let std_path = temp_dir.path().join("test.txt");
+        let path = Utf8Path::from_path(&std_path).unwrap();
+        std::fs::write(path, "not an arrow file").unwrap();
 
-        let result = ArrowInspector::detect_variant(&path);
+        let result = ArrowInspector::detect_variant(path);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_is_format_nonexistent_file() {
-        let path = Path::new("/nonexistent/path/file.arrow");
+        let path = Utf8Path::new("/nonexistent/path/file.arrow");
         let result = ArrowInspector::is_format(path);
         assert!(result.is_err());
     }

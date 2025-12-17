@@ -10,6 +10,7 @@ pub mod utils;
 use crate::utils::collections::{uniq, uniq_by};
 use anyhow::{Result, anyhow};
 use arrow::ipc::CompressionType;
+use camino::Utf8PathBuf;
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum, builder::ValueHint};
 use clap_complete::Shell;
 use datafusion::config::Dialect;
@@ -20,7 +21,6 @@ use parquet::{
 use std::{
     fmt::{self, Formatter},
     io::{self, IsTerminal},
-    path::PathBuf,
     str::FromStr,
 };
 use strum_macros::Display;
@@ -1005,7 +1005,7 @@ pub enum InspectSubcommand {
 pub struct InspectIdentifyArgs {
     /// Path to the file to identify
     #[arg(value_hint = ValueHint::FilePath)]
-    pub file: PathBuf,
+    pub file: Utf8PathBuf,
     /// Output format (auto-detects based on TTY if not specified)
     #[arg(long, short = 'f', value_enum, default_value = "auto")]
     pub format: OutputFormat,
@@ -1015,7 +1015,7 @@ pub struct InspectIdentifyArgs {
 pub struct InspectParquetArgs {
     /// Path to the Parquet file
     #[arg(value_hint = ValueHint::FilePath)]
-    pub file: PathBuf,
+    pub file: Utf8PathBuf,
     /// Show full schema details
     #[arg(long)]
     pub schema: bool,
@@ -1040,7 +1040,7 @@ pub struct InspectParquetArgs {
 pub struct InspectArrowArgs {
     /// Path to the Arrow IPC file
     #[arg(value_hint = ValueHint::FilePath)]
-    pub file: PathBuf,
+    pub file: Utf8PathBuf,
     /// Show full schema details
     #[arg(long)]
     pub schema: bool,
@@ -1062,7 +1062,7 @@ pub struct InspectArrowArgs {
 pub struct InspectVortexArgs {
     /// Path to the Vortex file
     #[arg(value_hint = ValueHint::FilePath)]
-    pub file: PathBuf,
+    pub file: Utf8PathBuf,
     /// Show full schema details
     #[arg(long)]
     pub schema: bool,

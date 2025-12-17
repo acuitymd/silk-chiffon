@@ -1,6 +1,6 @@
 //! Format detection for data files.
 
-use std::path::Path;
+use camino::Utf8Path;
 
 use anyhow::Result;
 use serde::Serialize;
@@ -54,7 +54,7 @@ impl DetectedFormat {
 /// 1. Parquet (PAR1 magic at start and end)
 /// 2. Arrow IPC (tries opening as file then stream)
 /// 3. Vortex (VTXF magic at start)
-pub fn detect_format(path: &Path) -> Result<DetectedFormat> {
+pub fn detect_format(path: &Utf8Path) -> Result<DetectedFormat> {
     if ParquetInspector::is_format(path)? {
         return Ok(DetectedFormat::Parquet);
     }

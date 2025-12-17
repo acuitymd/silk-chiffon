@@ -4,8 +4,9 @@ use std::{
     collections::{HashMap, HashSet},
     fs::File,
     io::Write,
-    path::{Path, PathBuf},
 };
+
+use camino::{Utf8Path, Utf8PathBuf};
 
 use anyhow::Result;
 use arrow::datatypes::SchemaRef;
@@ -44,7 +45,7 @@ pub struct ParquetInspector {
     has_dictionary: bool,
     has_bloom_filters: bool,
     custom_metadata: HashMap<String, String>,
-    file_path: PathBuf,
+    file_path: Utf8PathBuf,
     /// aggregated per-column stats across all row groups
     file_column_stats: Vec<FileColumnStats>,
 }
@@ -248,7 +249,7 @@ fn read_page_encodings(rg_reader: &dyn RowGroupReader, col_idx: usize) -> Option
 }
 
 impl ParquetInspector {
-    pub fn open(path: &Path) -> Result<Self> {
+    pub fn open(path: &Utf8Path) -> Result<Self> {
         let file = File::open(path)?;
         let reader = SerializedFileReader::new(file)?;
         let metadata = reader.metadata();
@@ -272,7 +273,7 @@ impl ParquetInspector {
             has_dictionary: false,
             has_bloom_filters: false,
             custom_metadata: HashMap::new(),
-            file_path: path.to_path_buf(),
+            file_path: path.to_owned(),
             file_column_stats: Vec::new(),
         };
 
@@ -642,7 +643,7 @@ fn format_compression(c: Compression) -> &'static str {
 }
 
 impl Inspectable for ParquetInspector {
-    fn is_format(path: &Path) -> Result<bool> {
+    fn is_format(path: &Utf8Path) -> Result<bool> {
         let mut file = File::open(path)?;
 
         if !magic_bytes_match_start(&mut file, PARQUET_MAGIC)? {
@@ -677,12 +678,7 @@ impl Inspectable for ParquetInspector {
     }
 
     fn render_default(&self, out: &mut dyn Write) -> Result<()> {
-        writeln!(
-            out,
-            "{} {}",
-            header(self.file_path.display()),
-            dim("(Parquet)")
-        )?;
+        writeln!(out, "{} {}", header(&self.file_path), dim("(Parquet)"))?;
         writeln!(out)?;
         writeln!(
             out,
@@ -804,7 +800,7 @@ impl Inspectable for ParquetInspector {
 
         json!({
             "format": "parquet",
-            "file": self.file_path.display().to_string(),
+            "file": &self.file_path,
             "rows": self.num_rows,
             "num_row_groups": self.row_groups.len(),
             "compressed_size": self.total_compressed_size,
@@ -851,33 +847,35 @@ mod tests {
     #[test]
     fn test_is_format_parquet_file() {
         let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("test.parquet");
+        let std_path = temp_dir.path().join("test.parquet");
+        let path = Utf8Path::from_path(&std_path).unwrap();
 
         let schema = simple_schema();
         let batch = create_batch(&schema);
 
-        let file = File::create(&path).unwrap();
+        let file = File::create(path).unwrap();
         let mut writer = ArrowWriter::try_new(file, Arc::clone(&schema), None).unwrap();
         writer.write(&batch).unwrap();
         writer.close().unwrap();
 
-        assert!(ParquetInspector::is_format(&path).unwrap());
+        assert!(ParquetInspector::is_format(path).unwrap());
     }
 
     #[test]
     fn test_open_parquet_file() {
         let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("test.parquet");
+        let std_path = temp_dir.path().join("test.parquet");
+        let path = Utf8Path::from_path(&std_path).unwrap();
 
         let schema = simple_schema();
         let batch = create_batch(&schema);
 
-        let file = File::create(&path).unwrap();
+        let file = File::create(path).unwrap();
         let mut writer = ArrowWriter::try_new(file, Arc::clone(&schema), None).unwrap();
         writer.write(&batch).unwrap();
         writer.close().unwrap();
 
-        let inspector = ParquetInspector::open(&path).unwrap();
+        let inspector = ParquetInspector::open(path).unwrap();
         assert_eq!(inspector.row_count(), Some(3));
         assert_eq!(inspector.format_name(), "Parquet");
     }
@@ -885,25 +883,27 @@ mod tests {
     #[test]
     fn test_is_format_non_parquet_file() {
         let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("test.txt");
-        std::fs::write(&path, "not a parquet file").unwrap();
+        let std_path = temp_dir.path().join("test.txt");
+        let path = Utf8Path::from_path(&std_path).unwrap();
+        std::fs::write(path, "not a parquet file").unwrap();
 
-        assert!(!ParquetInspector::is_format(&path).unwrap());
+        assert!(!ParquetInspector::is_format(path).unwrap());
     }
 
     #[test]
     fn test_is_format_partial_magic_bytes() {
         let temp_dir = TempDir::new().unwrap();
-        let path = temp_dir.path().join("test.parquet");
+        let std_path = temp_dir.path().join("test.parquet");
+        let path = Utf8Path::from_path(&std_path).unwrap();
         // only start magic, no end magic
-        std::fs::write(&path, b"PAR1garbage").unwrap();
+        std::fs::write(path, b"PAR1garbage").unwrap();
 
-        assert!(!ParquetInspector::is_format(&path).unwrap());
+        assert!(!ParquetInspector::is_format(path).unwrap());
     }
 
     #[test]
     fn test_is_format_nonexistent_file() {
-        let path = Path::new("/nonexistent/path/file.parquet");
+        let path = Utf8Path::new("/nonexistent/path/file.parquet");
         let result = ParquetInspector::is_format(path);
         assert!(result.is_err());
     }

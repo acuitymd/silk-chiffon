@@ -1,6 +1,8 @@
 //! Common trait and utilities for file inspection.
 
-use std::{collections::HashMap, io::Write, path::Path};
+use std::{collections::HashMap, io::Write};
+
+use camino::Utf8Path;
 
 use anyhow::Result;
 use arrow::datatypes::SchemaRef;
@@ -15,7 +17,7 @@ use super::style::{dim, header, label, rounded_table, value};
 /// Common trait for inspecting data files.
 pub trait Inspectable: Send + Sync {
     /// Check if the file is this format. Only errors on I/O issues.
-    fn is_format(path: &Path) -> Result<bool>
+    fn is_format(path: &Utf8Path) -> Result<bool>
     where
         Self: Sized;
 

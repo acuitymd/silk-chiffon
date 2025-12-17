@@ -53,6 +53,7 @@ arrow-ipc = "56"
 arrow-schema = "56"
 tokio-util = { version = "0.7", features = ["compat"] }
 chrono = "0.4.42"
+camino = { version = "1.2.2", features = ["serde1"] }
 
 [features]
 default = []
