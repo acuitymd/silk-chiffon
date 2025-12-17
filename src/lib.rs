@@ -924,6 +924,9 @@ pub struct InspectParquetArgs {
     /// Show column statistics and encoding details
     #[arg(long)]
     pub stats: bool,
+    /// Show detailed encoding breakdown (dictionary vs data pages)
+    #[arg(long)]
+    pub encodings: bool,
     /// Show per-row-group details
     #[arg(long)]
     pub row_groups: bool,

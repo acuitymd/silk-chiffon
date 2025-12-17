@@ -50,11 +50,10 @@ impl DetectedFormat {
 
 /// Detect the format of a data file.
 ///
-/// Tries each format in order of most specific magic bytes to least:
-/// 1. Parquet (PAR1 magic)
-/// 2. Arrow file (ARROW1 magic)
-/// 3. Vortex file (VTXF magic)
-/// 4. Arrow stream (try opening)
+/// Tries each format in order:
+/// 1. Parquet (PAR1 magic at start and end)
+/// 2. Arrow IPC (tries opening as file then stream)
+/// 3. Vortex (VTXF magic at start)
 pub fn detect_format(path: &Path) -> Result<DetectedFormat> {
     if ParquetInspector::is_format(path)? {
         return Ok(DetectedFormat::Parquet);

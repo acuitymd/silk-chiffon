@@ -82,8 +82,9 @@ pub struct ColumnInfo {
     pub compressed_size: u64,
     pub uncompressed_size: u64,
     pub has_bloom_filter: bool,
+    /// high-level encoding list from column chunk metadata (free)
+    pub encodings: Vec<String>,
     pub statistics: Option<ColumnStatistics>,
-    pub page_encodings: Option<PageEncodings>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -283,13 +284,6 @@ impl ParquetInspector {
             }
         }
 
-        // get page reader for first row group to extract page-level encoding info
-        let first_rg_reader = if metadata.num_row_groups() > 0 {
-            reader.get_row_group(0).ok()
-        } else {
-            None
-        };
-
         // track per-column aggregates across row groups
         let num_columns = if metadata.num_row_groups() > 0 {
             metadata.row_group(0).num_columns()
@@ -325,17 +319,14 @@ impl ParquetInspector {
                 col_compressed[col_idx] += compressed_size;
                 col_uncompressed[col_idx] += uncompressed_size;
 
-                // only read page encodings for first row group (expensive for large files)
-                let page_encodings = if rg_idx == 0 {
-                    first_rg_reader
-                        .as_ref()
-                        .and_then(|rg| read_page_encodings(rg.as_ref(), col_idx))
-                } else {
-                    None
-                };
+                // get encodings from column chunk metadata (free, no page reading)
+                let encodings: Vec<String> =
+                    col_meta.encodings().map(|e| format!("{e:?}")).collect();
 
-                if let Some(ref pe) = page_encodings
-                    && pe.dictionary.is_some()
+                // detect dictionary usage from encodings
+                if encodings
+                    .iter()
+                    .any(|e| e.contains("DICTIONARY") || e == "PLAIN_DICTIONARY")
                 {
                     inspector.has_dictionary = true;
                 }
@@ -367,8 +358,8 @@ impl ParquetInspector {
                     compressed_size,
                     uncompressed_size,
                     has_bloom_filter: has_bloom,
+                    encodings,
                     statistics: stats,
-                    page_encodings,
                 });
             }
 
@@ -451,24 +442,13 @@ impl ParquetInspector {
                     value(&col.compression)
                 )?;
 
-                if let Some(pe) = &col.page_encodings {
-                    if let Some(dict) = &pe.dictionary {
-                        writeln!(
-                            out,
-                            "    {}: {} {}",
-                            label("Dictionary"),
-                            value(dict),
-                            dim("(values)")
-                        )?;
-                    }
-                    if !pe.data.is_empty() {
-                        writeln!(
-                            out,
-                            "    {}: {}",
-                            label("Data pages"),
-                            value(pe.data.join(", "))
-                        )?;
-                    }
+                if !col.encodings.is_empty() {
+                    writeln!(
+                        out,
+                        "    {}: {}",
+                        label("Encodings"),
+                        value(col.encodings.join(", "))
+                    )?;
                 }
 
                 if col.has_bloom_filter {
@@ -498,7 +478,12 @@ impl ParquetInspector {
         Ok(())
     }
 
-    pub fn render_row_groups(&self, out: &mut dyn Write, include_stats: bool) -> Result<()> {
+    pub fn render_row_groups(
+        &self,
+        out: &mut dyn Write,
+        include_stats: bool,
+        detailed_encodings: bool,
+    ) -> Result<()> {
         writeln!(
             out,
             "\n{} ({}):",
@@ -506,6 +491,14 @@ impl ParquetInspector {
             value(self.row_groups.len())
         )?;
         writeln!(out)?;
+
+        // if detailed encodings requested, open file and get reader for page-level info
+        let reader = if detailed_encodings {
+            let file = File::open(&self.file_path)?;
+            Some(SerializedFileReader::new(file)?)
+        } else {
+            None
+        };
 
         for rg in &self.row_groups {
             writeln!(out, "  {} {}", header("Row Group"), value(rg.index))?;
@@ -549,16 +542,55 @@ impl ParquetInspector {
                 )?;
             }
 
-            if include_stats {
+            if include_stats || detailed_encodings {
+                // get page reader for this row group if detailed encodings requested
+                let rg_reader = if let Some(ref r) = reader {
+                    r.get_row_group(rg.index).ok()
+                } else {
+                    None
+                };
+
                 writeln!(out)?;
-                for col in &rg.columns {
+                for (col_idx, col) in rg.columns.iter().enumerate() {
                     writeln!(
                         out,
                         "      {} {}",
                         header(&col.name),
                         dim(format!("({})", col.compression))
                     )?;
-                    if let Some(stats) = &col.statistics {
+
+                    // show encodings - detailed if requested, otherwise high-level list
+                    if detailed_encodings
+                        && let Some(ref rg_r) = rg_reader
+                        && let Some(pe) = read_page_encodings(rg_r.as_ref(), col_idx)
+                    {
+                        if let Some(dict) = &pe.dictionary {
+                            writeln!(
+                                out,
+                                "        {}: {} {}",
+                                label("Dictionary"),
+                                value(dict),
+                                dim("(values)")
+                            )?;
+                        }
+                        if !pe.data.is_empty() {
+                            writeln!(
+                                out,
+                                "        {}: {}",
+                                label("Data pages"),
+                                value(pe.data.join(", "))
+                            )?;
+                        }
+                    } else if !col.encodings.is_empty() {
+                        writeln!(
+                            out,
+                            "        {}: {}",
+                            label("Encodings"),
+                            value(col.encodings.join(", "))
+                        )?;
+                    }
+
+                    if include_stats && let Some(stats) = &col.statistics {
                         if let Some(min) = &stats.min {
                             writeln!(out, "        {}: {}", label("Min"), value(min))?;
                         }
@@ -732,22 +764,32 @@ impl Inspectable for ParquetInspector {
                     .columns
                     .iter()
                     .map(|col| {
+                        // build stats object, only including distinct_count if present
+                        let stats_json = col.statistics.as_ref().map(|s| {
+                            let mut stats = serde_json::Map::new();
+                            if let Some(min) = &s.min {
+                                stats.insert("min".to_string(), json!(min));
+                            }
+                            if let Some(max) = &s.max {
+                                stats.insert("max".to_string(), json!(max));
+                            }
+                            if let Some(null_count) = s.null_count {
+                                stats.insert("null_count".to_string(), json!(null_count));
+                            }
+                            if let Some(distinct_count) = s.distinct_count {
+                                stats.insert("distinct_count".to_string(), json!(distinct_count));
+                            }
+                            Value::Object(stats)
+                        });
+
                         json!({
                             "name": col.name,
                             "compression": col.compression,
                             "compressed_size": col.compressed_size,
                             "uncompressed_size": col.uncompressed_size,
                             "has_bloom_filter": col.has_bloom_filter,
-                            "statistics": col.statistics.as_ref().map(|s| json!({
-                                "min": s.min,
-                                "max": s.max,
-                                "null_count": s.null_count,
-                                "distinct_count": s.distinct_count,
-                            })),
-                            "encodings": col.page_encodings.as_ref().map(|pe| json!({
-                                "dictionary": pe.dictionary,
-                                "data": pe.data,
-                            })),
+                            "encodings": col.encodings,
+                            "statistics": stats_json,
                         })
                     })
                     .collect();

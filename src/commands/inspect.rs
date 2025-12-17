@@ -56,7 +56,7 @@ fn run_parquet(args: &InspectParquetArgs) -> Result<()> {
     }
 
     if args.row_groups {
-        inspector.render_row_groups(&mut out, args.stats)?;
+        inspector.render_row_groups(&mut out, args.stats, args.encodings)?;
     }
 
     if args.metadata {
