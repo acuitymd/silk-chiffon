@@ -56,16 +56,17 @@ impl DetectedFormat {
 /// 3. Vortex file (VTXF magic)
 /// 4. Arrow stream (try opening)
 pub fn detect_format(path: &Path) -> Result<DetectedFormat> {
-    if ParquetInspector::try_open(path)?.is_some() {
+    if ParquetInspector::is_format(path)? {
         return Ok(DetectedFormat::Parquet);
     }
 
-    if let Some(inspector) = ArrowInspector::try_open(path)? {
-        let variant = inspector.variant().to_string();
-        return Ok(DetectedFormat::Arrow { variant });
+    if let Ok(variant) = ArrowInspector::detect_variant(path) {
+        return Ok(DetectedFormat::Arrow {
+            variant: variant.to_string(),
+        });
     }
 
-    if VortexInspector::try_open(path)?.is_some() {
+    if VortexInspector::is_format(path)? {
         return Ok(DetectedFormat::Vortex);
     }
 

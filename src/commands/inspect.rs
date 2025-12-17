@@ -68,8 +68,8 @@ fn run_parquet(args: &InspectParquetArgs) -> Result<()> {
 }
 
 fn run_arrow(args: &InspectArrowArgs) -> Result<()> {
-    let inspector = ArrowInspector::try_open(&args.file)?
-        .ok_or_else(|| anyhow!("Failed to open Arrow file: {}", &args.file.display()))?;
+    let inspector = ArrowInspector::open(&args.file, args.row_count)
+        .map_err(|e| anyhow!("Failed to open Arrow file: {}", e))?;
 
     let mut out = io::stdout();
 

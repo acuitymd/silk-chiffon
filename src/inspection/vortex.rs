@@ -2,7 +2,7 @@
 
 use std::{collections::HashMap, fs::File, io::Write, path::Path, sync::Arc};
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use arrow::datatypes::SchemaRef;
 use serde_json::{Value, json};
 use vortex::VortexSessionDefault;
@@ -174,17 +174,9 @@ impl VortexInspector {
 }
 
 impl Inspectable for VortexInspector {
-    fn try_open(path: &Path) -> Result<Option<Self>> {
-        let mut file = match File::open(path) {
-            Ok(f) => f,
-            Err(_) => return Err(anyhow!("Failed to open file")),
-        };
-
-        if !magic_bytes_match_start(&mut file, VORTEX_MAGIC)? {
-            return Ok(None);
-        }
-
-        Self::open_file(path).map(Some)
+    fn is_format(path: &Path) -> Result<bool> {
+        let mut file = File::open(path)?;
+        magic_bytes_match_start(&mut file, VORTEX_MAGIC)
     }
 
     fn format_name(&self) -> &str {
@@ -329,7 +321,19 @@ mod tests {
     }
 
     #[test]
-    fn test_try_open_vortex_file() {
+    fn test_is_format_vortex_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("test.vortex");
+
+        let schema = simple_schema();
+        let batch = create_batch(&schema);
+        write_vortex_file(&path, &schema, batch);
+
+        assert!(VortexInspector::is_format(&path).unwrap());
+    }
+
+    #[test]
+    fn test_open_vortex_file() {
         let temp_dir = TempDir::new().unwrap();
         let path = temp_dir.path().join("test.vortex");
 
@@ -339,40 +343,35 @@ mod tests {
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let inspector = rt
-            .block_on(async { VortexInspector::try_open(&path) })
+            .block_on(async { VortexInspector::open_file(&path) })
             .unwrap();
-        assert!(inspector.is_some());
-
-        let inspector = inspector.unwrap();
         assert_eq!(inspector.row_count(), Some(3));
         assert_eq!(inspector.format_name(), "Vortex (file)");
     }
 
     #[test]
-    fn test_try_open_non_vortex_file() {
+    fn test_is_format_non_vortex_file() {
         let temp_dir = TempDir::new().unwrap();
         let path = temp_dir.path().join("test.txt");
         std::fs::write(&path, "not a vortex file").unwrap();
 
-        let inspector = VortexInspector::try_open(&path).unwrap();
-        assert!(inspector.is_none());
+        assert!(!VortexInspector::is_format(&path).unwrap());
     }
 
     #[test]
-    fn test_try_open_wrong_magic_bytes() {
+    fn test_is_format_wrong_magic_bytes() {
         let temp_dir = TempDir::new().unwrap();
         let path = temp_dir.path().join("test.vortex");
         // wrong magic bytes
         std::fs::write(&path, b"PAR1garbage").unwrap();
 
-        let inspector = VortexInspector::try_open(&path).unwrap();
-        assert!(inspector.is_none());
+        assert!(!VortexInspector::is_format(&path).unwrap());
     }
 
     #[test]
-    fn test_try_open_nonexistent_file() {
+    fn test_is_format_nonexistent_file() {
         let path = Path::new("/nonexistent/path/file.vortex");
-        let result = VortexInspector::try_open(path);
+        let result = VortexInspector::is_format(path);
         assert!(result.is_err());
     }
 }

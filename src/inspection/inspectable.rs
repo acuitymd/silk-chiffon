@@ -14,8 +14,8 @@ use super::style::{dim, header, label, rounded_table, value};
 
 /// Common trait for inspecting data files.
 pub trait Inspectable: Send + Sync {
-    /// Try to open the file as this format. Returns None if not this format.
-    fn try_open(path: &Path) -> Result<Option<Self>>
+    /// Check if the file is this format. Only errors on I/O issues.
+    fn is_format(path: &Path) -> Result<bool>
     where
         Self: Sized;
 

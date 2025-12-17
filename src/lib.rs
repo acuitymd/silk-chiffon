@@ -952,8 +952,8 @@ pub struct InspectArrowArgs {
     /// Output format (auto-detects based on TTY if not specified)
     #[arg(long, short = 'f', value_enum, default_value = "auto")]
     pub format: OutputFormat,
-    /// Count total rows (slow for stream format - requires reading entire file)
-    #[arg(long, verbatim_doc_comment)]
+    /// Count total rows (slow! requires reading entire file)
+    #[arg(long)]
     pub row_count: bool,
 }
 
