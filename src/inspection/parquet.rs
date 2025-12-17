@@ -4,7 +4,7 @@ use std::{
     collections::{HashMap, HashSet},
     fs::File,
     io::Write,
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use anyhow::Result;
@@ -27,6 +27,7 @@ use crate::inspection::magic::{magic_bytes_match_end, magic_bytes_match_start};
 use super::{
     inspectable::{
         Inspectable, format_bytes, format_number, render_metadata_map, render_schema_fields,
+        schema_to_json,
     },
     style::{dim, header, label, value},
 };
@@ -43,7 +44,7 @@ pub struct ParquetInspector {
     has_dictionary: bool,
     has_bloom_filters: bool,
     custom_metadata: HashMap<String, String>,
-    file_path: String,
+    file_path: PathBuf,
     /// aggregated per-column stats across all row groups
     file_column_stats: Vec<FileColumnStats>,
 }
@@ -271,7 +272,7 @@ impl ParquetInspector {
             has_dictionary: false,
             has_bloom_filters: false,
             custom_metadata: HashMap::new(),
-            file_path: path.display().to_string(),
+            file_path: path.to_path_buf(),
             file_column_stats: Vec::new(),
         };
 
@@ -289,7 +290,8 @@ impl ParquetInspector {
         } else {
             0
         };
-        let mut col_null_counts: Vec<Option<u64>> = vec![None; num_columns];
+        // start with Some(0) - becomes None if ANY row group lacks null count stats
+        let mut col_null_counts: Vec<Option<u64>> = vec![Some(0); num_columns];
         let mut col_compressed: Vec<u64> = vec![0; num_columns];
         let mut col_uncompressed: Vec<u64> = vec![0; num_columns];
         let mut col_names: Vec<String> = vec![String::new(); num_columns];
@@ -342,10 +344,14 @@ impl ParquetInspector {
                     .statistics()
                     .map(|s| ColumnStatistics::from_parquet(s, logical_type));
 
-                if let Some(ref s) = stats
-                    && let Some(nc) = s.null_count
-                {
-                    col_null_counts[col_idx] = Some(col_null_counts[col_idx].unwrap_or(0) + nc);
+                // only produce a total if ALL row groups have null count stats
+                match (
+                    col_null_counts[col_idx],
+                    stats.as_ref().and_then(|s| s.null_count),
+                ) {
+                    (Some(sum), Some(nc)) => col_null_counts[col_idx] = Some(sum + nc),
+                    (_, None) => col_null_counts[col_idx] = None,
+                    (None, _) => {} // already invalidated
                 }
 
                 columns.push(ColumnInfo {
@@ -671,7 +677,12 @@ impl Inspectable for ParquetInspector {
     }
 
     fn render_default(&self, out: &mut dyn Write) -> Result<()> {
-        writeln!(out, "{} {}", header(&self.file_path), dim("(Parquet)"))?;
+        writeln!(
+            out,
+            "{} {}",
+            header(self.file_path.display()),
+            dim("(Parquet)")
+        )?;
         writeln!(out)?;
         writeln!(
             out,
@@ -728,16 +739,15 @@ impl Inspectable for ParquetInspector {
     }
 
     fn to_json(&self) -> Value {
+        // file_column_stats are Parquet leaf columns which don't map 1:1 to Arrow
+        // schema fields for nested types, so we just output the stats without
+        // trying to correlate with schema field metadata
         let file_columns: Vec<Value> = self
             .file_column_stats
             .iter()
-            .enumerate()
-            .map(|(i, fcs)| {
-                let field = self.schema.field(i);
+            .map(|fcs| {
                 json!({
                     "name": fcs.name,
-                    "data_type": format!("{}", field.data_type()),
-                    "nullable": field.is_nullable(),
                     "total_null_count": fcs.total_null_count,
                     "total_compressed_size": fcs.total_compressed_size,
                     "total_uncompressed_size": fcs.total_uncompressed_size,
@@ -794,7 +804,7 @@ impl Inspectable for ParquetInspector {
 
         json!({
             "format": "parquet",
-            "file": self.file_path,
+            "file": self.file_path.display().to_string(),
             "rows": self.num_rows,
             "num_row_groups": self.row_groups.len(),
             "compressed_size": self.total_compressed_size,
@@ -802,6 +812,7 @@ impl Inspectable for ParquetInspector {
             "compression": self.compression_summary(),
             "has_dictionary": self.has_dictionary,
             "has_bloom_filters": self.has_bloom_filters,
+            "schema": schema_to_json(&self.schema),
             "columns": file_columns,
             "row_groups": row_groups_json,
             "metadata": self.custom_metadata,

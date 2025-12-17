@@ -704,15 +704,20 @@ mod parity_tests {
         assert!(json["uncompressed_size"].as_u64().is_some());
         assert!(json["compression"].as_str().is_some());
 
-        // schema should have same column count
-        let schema_arr = json["columns"].as_array().unwrap();
-        assert_eq!(schema_arr.len(), 2);
+        // schema has field metadata (data_type, nullable)
+        let schema_fields = json["schema"].as_array().unwrap();
+        assert_eq!(schema_fields.len(), 2);
+        for field in schema_fields {
+            assert!(field["name"].as_str().is_some());
+            assert!(field["data_type"].as_str().is_some());
+            assert!(field["nullable"].as_bool().is_some());
+        }
 
-        // verify column fields
-        for col in schema_arr {
+        // columns has per-column stats
+        let columns = json["columns"].as_array().unwrap();
+        assert_eq!(columns.len(), 2);
+        for col in columns {
             assert!(col["name"].as_str().is_some());
-            assert!(col["data_type"].as_str().is_some());
-            assert!(col["nullable"].as_bool().is_some());
         }
     }
 
