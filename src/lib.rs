@@ -1,4 +1,5 @@
 pub mod commands;
+pub mod inspection;
 pub mod io_strategies;
 pub mod operations;
 pub mod pipeline;
@@ -9,7 +10,8 @@ pub mod utils;
 use crate::utils::collections::{uniq, uniq_by};
 use anyhow::{Result, anyhow};
 use arrow::ipc::CompressionType;
-use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
+use camino::Utf8PathBuf;
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum, builder::ValueHint};
 use clap_complete::Shell;
 use datafusion::config::Dialect;
 use parquet::{
@@ -18,6 +20,7 @@ use parquet::{
 };
 use std::{
     fmt::{self, Formatter},
+    io::{self, IsTerminal},
     str::FromStr,
 };
 use strum_macros::Display;
@@ -48,6 +51,20 @@ pub enum Commands {
     ///   silk-chiffon transform --from-many '*.arrow' --to-many "{{year}}/{{month}}.parquet" --by year,month
     #[command(verbatim_doc_comment)]
     Transform(TransformCommand),
+
+    /// Inspect file metadata and structure.
+    ///
+    /// Examples:
+    ///   # Identify format
+    ///   silk-chiffon inspect identify data.parquet
+    ///
+    ///   # Inspect Parquet file
+    ///   silk-chiffon inspect parquet data.parquet --stats --row-groups
+    ///
+    ///   # Inspect Arrow file
+    ///   silk-chiffon inspect arrow data.arrow --schema --batches
+    #[command(verbatim_doc_comment)]
+    Inspect(InspectCommand),
 
     /// Generate shell completions for your shell.
     ///
@@ -217,6 +234,104 @@ impl ParquetEncoding {
                 | ParquetEncoding::DeltaByteArray
                 | ParquetEncoding::ByteStreamSplit
         )
+    }
+
+    /// Validates that this encoding is compatible with the given Arrow data type.
+    /// Returns an error message if incompatible, None if compatible.
+    pub fn validate_for_type(&self, data_type: &arrow::datatypes::DataType) -> Option<String> {
+        use arrow::datatypes::DataType;
+
+        match self {
+            ParquetEncoding::Plain => None, // works for all types
+
+            ParquetEncoding::Rle => {
+                // RLE only works for boolean
+                if matches!(data_type, DataType::Boolean) {
+                    None
+                } else {
+                    Some(format!(
+                        "RLE encoding only supports Boolean, got {}",
+                        data_type
+                    ))
+                }
+            }
+
+            ParquetEncoding::DeltaBinaryPacked => {
+                // only for integer types
+                if matches!(
+                    data_type,
+                    DataType::Int8
+                        | DataType::Int16
+                        | DataType::Int32
+                        | DataType::Int64
+                        | DataType::UInt8
+                        | DataType::UInt16
+                        | DataType::UInt32
+                        | DataType::UInt64
+                        | DataType::Date32
+                        | DataType::Date64
+                        | DataType::Time32(_)
+                        | DataType::Time64(_)
+                        | DataType::Timestamp(_, _)
+                        | DataType::Duration(_)
+                ) {
+                    None
+                } else {
+                    Some(format!(
+                        "DELTA_BINARY_PACKED encoding only supports integer types, got {}",
+                        data_type
+                    ))
+                }
+            }
+
+            ParquetEncoding::DeltaLengthByteArray | ParquetEncoding::DeltaByteArray => {
+                // only for byte array types
+                if matches!(
+                    data_type,
+                    DataType::Utf8
+                        | DataType::LargeUtf8
+                        | DataType::Binary
+                        | DataType::LargeBinary
+                        | DataType::Utf8View
+                        | DataType::BinaryView
+                ) {
+                    None
+                } else {
+                    Some(format!(
+                        "{} encoding only supports byte array types (Utf8, Binary, etc.), got {}",
+                        self, data_type
+                    ))
+                }
+            }
+
+            ParquetEncoding::ByteStreamSplit => {
+                // for fixed-width types: floats and integers
+                if matches!(
+                    data_type,
+                    DataType::Float16
+                        | DataType::Float32
+                        | DataType::Float64
+                        | DataType::Int8
+                        | DataType::Int16
+                        | DataType::Int32
+                        | DataType::Int64
+                        | DataType::UInt8
+                        | DataType::UInt16
+                        | DataType::UInt32
+                        | DataType::UInt64
+                        | DataType::FixedSizeBinary(_)
+                        | DataType::Decimal128(_, _)
+                        | DataType::Decimal256(_, _)
+                ) {
+                    None
+                } else {
+                    Some(format!(
+                        "BYTE_STREAM_SPLIT encoding only supports fixed-width types (floats, integers, decimals), got {}",
+                        data_type
+                    ))
+                }
+            }
+        }
     }
 }
 
@@ -866,6 +981,131 @@ pub struct TransformCommand {
     /// Vortex record batch size.
     #[arg(long)]
     pub vortex_record_batch_size: Option<usize>,
+}
+
+#[derive(Args, Debug)]
+pub struct InspectCommand {
+    #[command(subcommand)]
+    pub command: InspectSubcommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum InspectSubcommand {
+    /// Detect file format
+    Identify(InspectIdentifyArgs),
+    /// Inspect a Parquet file
+    Parquet(InspectParquetArgs),
+    /// Inspect an Arrow IPC file
+    Arrow(InspectArrowArgs),
+    /// Inspect a Vortex file
+    Vortex(InspectVortexArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct InspectIdentifyArgs {
+    /// Path to the file to identify
+    #[arg(value_hint = ValueHint::FilePath)]
+    pub file: Utf8PathBuf,
+    /// Output format (auto-detects based on TTY if not specified)
+    #[arg(long, short = 'f', value_enum, default_value = "auto")]
+    pub format: OutputFormat,
+}
+
+#[derive(Args, Debug)]
+pub struct InspectParquetArgs {
+    /// Path to the Parquet file
+    #[arg(value_hint = ValueHint::FilePath)]
+    pub file: Utf8PathBuf,
+    /// Show full schema details
+    #[arg(long)]
+    pub schema: bool,
+    /// Show column statistics and encoding details
+    #[arg(long)]
+    pub stats: bool,
+    /// Show detailed encoding breakdown (dictionary vs data pages)
+    #[arg(long)]
+    pub encodings: bool,
+    /// Show per-row-group details
+    #[arg(long)]
+    pub row_groups: bool,
+    /// Show file-level key-value metadata
+    #[arg(long)]
+    pub metadata: bool,
+    /// Output format (auto-detects based on TTY if not specified)
+    #[arg(long, short = 'f', value_enum, default_value = "auto")]
+    pub format: OutputFormat,
+}
+
+#[derive(Args, Debug)]
+pub struct InspectArrowArgs {
+    /// Path to the Arrow IPC file
+    #[arg(value_hint = ValueHint::FilePath)]
+    pub file: Utf8PathBuf,
+    /// Show full schema details
+    #[arg(long)]
+    pub schema: bool,
+    /// Show per-record-batch details
+    #[arg(long)]
+    pub batches: bool,
+    /// Show custom metadata (file format only)
+    #[arg(long)]
+    pub metadata: bool,
+    /// Output format (auto-detects based on TTY if not specified)
+    #[arg(long, short = 'f', value_enum, default_value = "auto")]
+    pub format: OutputFormat,
+    /// Count total rows (slow! requires reading entire file)
+    #[arg(long)]
+    pub row_count: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct InspectVortexArgs {
+    /// Path to the Vortex file
+    #[arg(value_hint = ValueHint::FilePath)]
+    pub file: Utf8PathBuf,
+    /// Show full schema details
+    #[arg(long)]
+    pub schema: bool,
+    /// Show per-column statistics
+    #[arg(long)]
+    pub stats: bool,
+    /// Show layout structure
+    #[arg(long)]
+    pub layout: bool,
+    /// Output format (auto-detects based on TTY if not specified)
+    #[arg(long, short = 'f', value_enum, default_value = "auto")]
+    pub format: OutputFormat,
+}
+
+/// Output format for inspect commands
+#[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[value(rename_all = "lowercase")]
+pub enum OutputFormat {
+    /// Auto-detect: JSON if stdout is not a TTY, otherwise text
+    #[default]
+    Auto,
+    /// Human-readable text output
+    Text,
+    /// JSON output
+    Json,
+}
+
+impl OutputFormat {
+    pub fn resolves_to_json(&self) -> bool {
+        match self {
+            OutputFormat::Auto => !io::stdout().is_terminal(),
+            OutputFormat::Text => false,
+            OutputFormat::Json => true,
+        }
+    }
+
+    pub fn resolves_to_text(&self) -> bool {
+        match self {
+            OutputFormat::Auto => io::stdout().is_terminal(),
+            OutputFormat::Text => true,
+            OutputFormat::Json => false,
+        }
+    }
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug)]
