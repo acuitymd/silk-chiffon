@@ -338,7 +338,8 @@ impl ParquetInspector {
                     inspector.has_dictionary = true;
                 }
 
-                let logical_type = col_meta.column_descr().logical_type();
+                let logical_type = col_meta.column_descr().logical_type_ref();
+
                 // column_path().to_string() wraps names in quotes, use parts instead
                 let name = col_meta.column_path().parts().join(".");
 
@@ -349,7 +350,7 @@ impl ParquetInspector {
 
                 let stats = col_meta
                     .statistics()
-                    .map(|s| ColumnStatistics::from_parquet(s, logical_type.as_ref()));
+                    .map(|s| ColumnStatistics::from_parquet(s, logical_type));
 
                 // aggregate null counts
                 if let Some(ref s) = stats

@@ -613,7 +613,21 @@ fn test_list_outputs_json() {
     assert!(output.status.success());
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let _: Vec<String> = serde_json::from_str(&stdout).unwrap();
+    let files: Vec<serde_json::Value> = serde_json::from_str(&stdout).unwrap();
+
+    // should have 2 output files (one for "a", one for "b")
+    assert_eq!(files.len(), 2);
+
+    // each file should have path, row_count, and partition_values
+    for file in &files {
+        assert!(file.get("path").is_some());
+        assert!(file.get("row_count").is_some());
+        assert!(file.get("partition_values").is_some());
+
+        let partition_values = file.get("partition_values").unwrap().as_array().unwrap();
+        assert_eq!(partition_values.len(), 1);
+        assert_eq!(partition_values[0].get("column").unwrap(), "name");
+    }
 }
 
 #[test]

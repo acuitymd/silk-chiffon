@@ -4,6 +4,7 @@ use datafusion::prelude::{SessionConfig, SessionContext};
 use crate::{
     ListOutputsFormat, QueryDialect,
     io_strategies::{
+        OutputFileInfo,
         input_strategy::InputStrategy,
         output_strategy::{OutputStrategy, SinkFactory},
         path_template::PathTemplate,
@@ -105,7 +106,7 @@ impl Pipeline {
         self
     }
 
-    pub async fn execute(&mut self) -> Result<Vec<String>> {
+    pub async fn execute(&mut self) -> Result<Vec<OutputFileInfo>> {
         let mut ctx = self.build_session_context();
         self.execute_with_session_context(&mut ctx).await
     }
@@ -113,7 +114,7 @@ impl Pipeline {
     pub async fn execute_with_session_context(
         &mut self,
         ctx: &mut SessionContext,
-    ) -> Result<Vec<String>> {
+    ) -> Result<Vec<OutputFileInfo>> {
         let input_strategy = self
             .input_strategy
             .as_ref()
