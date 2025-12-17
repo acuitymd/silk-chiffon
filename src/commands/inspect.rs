@@ -74,7 +74,7 @@ fn run_arrow(args: &InspectArrowArgs) -> Result<()> {
     let mut out = io::stdout();
 
     if args.format.resolves_to_json() {
-        writeln!(out, "{}", serde_json::to_string(&inspector.to_json())?)?;
+        inspector.render_to_json(&mut out)?;
         return Ok(());
     }
 
@@ -103,7 +103,7 @@ fn run_vortex(args: &InspectVortexArgs) -> Result<()> {
     let mut out = io::stdout();
 
     if args.format.resolves_to_json() {
-        writeln!(out, "{}", serde_json::to_string(&inspector.to_json())?)?;
+        inspector.render_to_json(&mut out)?;
         return Ok(());
     }
 
