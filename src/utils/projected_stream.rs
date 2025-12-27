@@ -3,6 +3,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use anyhow::Result;
 use arrow::{
     array::RecordBatch,
     datatypes::{Schema, SchemaRef},
@@ -12,8 +13,6 @@ use datafusion::{
     error::DataFusionError,
     physical_plan::{RecordBatchStream, SendableRecordBatchStream},
 };
-
-use anyhow::Result;
 
 pub struct ProjectedStream {
     input: SendableRecordBatchStream,
