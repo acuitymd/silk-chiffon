@@ -273,6 +273,13 @@ impl StreamParquetWriter {
         Ok(())
     }
 
+    pub fn blocking_write(&mut self, batch: RecordBatch) -> Result<()> {
+        tokio::task::block_in_place(|| {
+            let current_runtime = tokio::runtime::Handle::current();
+            current_runtime.block_on(self.write(batch))
+        })
+    }
+
     pub async fn close(&mut self) -> Result<u64> {
         self.coalescer.finish_buffered_batch()?;
 
@@ -297,6 +304,13 @@ impl StreamParquetWriter {
         }
     }
 
+    pub fn blocking_close(&mut self) -> Result<u64> {
+        tokio::task::block_in_place(|| {
+            let current_runtime = tokio::runtime::Handle::current();
+            current_runtime.block_on(self.close())
+        })
+    }
+
     /// Cancel the writer, stopping any pending work.
     ///
     /// In-flight row groups that have already started encoding will complete,
@@ -305,7 +319,7 @@ impl StreamParquetWriter {
     ///
     /// Note: On error, the caller is responsible for cleaning up any partial
     /// output file.
-    pub async fn cancel(mut self) -> Result<u64> {
+    pub async fn cancel(&mut self) -> Result<u64> {
         self.cancel_token.cancel();
         self.batch_sender.take();
 
@@ -315,6 +329,13 @@ impl StreamParquetWriter {
                 .map_err(|e| anyhow!("writer task panicked: {e}"))?,
             None => Err(anyhow!("writer already closed")),
         }
+    }
+
+    pub fn blocking_cancel(&mut self) -> Result<u64> {
+        tokio::task::block_in_place(|| {
+            let current_runtime = tokio::runtime::Handle::current();
+            current_runtime.block_on(self.cancel())
+        })
     }
 }
 
