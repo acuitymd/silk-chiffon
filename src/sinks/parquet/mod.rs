@@ -1,8 +1,7 @@
-mod writer;
+mod stream_writer;
 
-pub use writer::ParquetWriter;
+pub use stream_writer::StreamParquetWriter;
 
-use futures::stream::StreamExt;
 use parquet::{
     file::{
         metadata::SortingColumn,
@@ -10,12 +9,12 @@ use parquet::{
     },
     schema::types::ColumnPath,
 };
-use std::{collections::HashMap, path::PathBuf, sync::Mutex};
+use std::{collections::HashMap, path::PathBuf};
+use tokio::sync::Mutex;
 
 use anyhow::{Result, anyhow};
 use arrow::{array::RecordBatch, datatypes::SchemaRef};
 use async_trait::async_trait;
-use datafusion::execution::SendableRecordBatchStream;
 
 use crate::{
     BloomFilterConfig, ColumnEncodingConfig, ParquetCompression, ParquetEncoding,
@@ -149,9 +148,9 @@ impl ParquetSinkOptions {
     }
 }
 
-pub struct ParquetSinkInner {
+struct ParquetSinkInner {
     path: PathBuf,
-    writer: Option<ParquetWriter>,
+    writer: Option<StreamParquetWriter>,
 }
 
 pub struct ParquetSink {
@@ -187,24 +186,28 @@ impl ParquetSink {
 
         let props = writer_builder.build();
 
-        let writer = ParquetWriter::try_new(
+        let concurrency = options.max_parallelism.unwrap_or_else(Self::num_cpus);
+
+        let writer = StreamParquetWriter::new(
             &path,
             schema,
             props,
             options.max_row_group_size,
-            options.max_parallelism,
-        )?;
+            concurrency,
+        );
 
-        let inner = ParquetSinkInner {
-            path,
-            writer: Some(writer),
-        };
+        Ok(Self {
+            inner: Mutex::new(ParquetSinkInner {
+                path,
+                writer: Some(writer),
+            }),
+        })
+    }
 
-        let sink = Self {
-            inner: Mutex::new(inner),
-        };
-
-        Ok(sink)
+    fn num_cpus() -> usize {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
     }
 
     fn apply_column_dictionary(
@@ -323,41 +326,26 @@ impl ParquetSink {
 
 #[async_trait]
 impl DataSink for ParquetSink {
-    async fn write_stream(&mut self, mut stream: SendableRecordBatchStream) -> Result<SinkResult> {
-        while let Some(batch) = stream.next().await {
-            let batch = batch?;
-            self.write_batch(batch).await?;
-        }
-
-        self.finish().await
+    async fn write_batch(&mut self, batch: RecordBatch) -> Result<()> {
+        self.inner
+            .lock()
+            .await
+            .writer
+            .as_mut()
+            .ok_or_else(|| anyhow!("Writer already closed"))?
+            .write(batch)
+            .await
     }
 
-    async fn write_batch(&mut self, batch: RecordBatch) -> Result<()> {
-        let mut inner = self
-            .inner
-            .lock()
-            .map_err(|e| anyhow!("Failed to lock inner: {}", e))?;
+    async fn finish(&mut self) -> Result<SinkResult> {
+        let mut inner = self.inner.lock().await;
 
         let writer = inner
             .writer
             .as_mut()
             .ok_or_else(|| anyhow!("Writer already closed"))?;
-        writer.write(&batch)?;
 
-        Ok(())
-    }
-
-    async fn finish(&mut self) -> Result<SinkResult> {
-        let mut inner = self
-            .inner
-            .lock()
-            .map_err(|e| anyhow!("Failed to lock inner: {}", e))?;
-
-        let writer = inner
-            .writer
-            .take()
-            .ok_or_else(|| anyhow!("Writer already closed"))?;
-        let rows_written = writer.close()?;
+        let rows_written = writer.close().await?;
 
         Ok(SinkResult {
             files_written: vec![inner.path.clone()],

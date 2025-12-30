@@ -1,6 +1,6 @@
 use std::{
     fs::File,
-    sync::{Arc, Mutex},
+    sync::{Arc, OnceLock},
 };
 
 use anyhow::{Result, anyhow};
@@ -18,14 +18,14 @@ use crate::sources::data_source::DataSource;
 #[derive(Debug)]
 pub struct ParquetDataSource {
     path: String,
-    schema: Mutex<Option<SchemaRef>>,
+    schema: OnceLock<Result<SchemaRef>>,
 }
 
 impl ParquetDataSource {
     pub fn new(path: String) -> Self {
         Self {
             path,
-            schema: Mutex::new(None),
+            schema: OnceLock::new(),
         }
     }
 }
@@ -37,17 +37,15 @@ impl DataSource for ParquetDataSource {
     }
 
     fn schema(&self) -> Result<SchemaRef> {
-        let mut guard = self
-            .schema
-            .lock()
-            .map_err(|e| anyhow!("Failed to lock schema: {}", e))?;
-        if let Some(ref schema) = *guard {
-            return Ok(Arc::clone(schema));
-        }
-        let file = File::open(&self.path)?;
-        let reader = ParquetRecordBatchReaderBuilder::try_new(file)?;
-        *guard = Some(Arc::clone(reader.schema()));
-        Ok(Arc::clone(reader.schema()))
+        self.schema
+            .get_or_init(|| {
+                let file = File::open(&self.path)?;
+                let reader = ParquetRecordBatchReaderBuilder::try_new(file)?;
+                Ok(Arc::clone(reader.schema()))
+            })
+            .as_ref()
+            .map(Arc::clone)
+            .map_err(|e| anyhow!("Failed to get schema: {}", e))
     }
 
     async fn as_table_provider(&self, ctx: &mut SessionContext) -> Result<Arc<dyn TableProvider>> {

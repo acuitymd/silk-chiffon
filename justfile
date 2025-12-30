@@ -25,6 +25,7 @@ type-check:
     cargo check --all-features
 
 alias type := type-check
+alias check := type-check
 
 fmt-check:
     cargo fmt --check

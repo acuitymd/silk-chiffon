@@ -1,13 +1,7 @@
 use futures::stream::StreamExt;
-use std::{
-    collections::HashMap,
-    fs::File,
-    io::BufWriter,
-    path::PathBuf,
-    sync::{Arc, Mutex},
-};
+use std::{collections::HashMap, fs::File, io::BufWriter, path::PathBuf, sync::Arc};
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use arrow::{
     array::{RecordBatch, RecordBatchWriter},
     compute::BatchCoalescer,
@@ -17,6 +11,7 @@ use arrow::{
 };
 use async_trait::async_trait;
 use datafusion::execution::SendableRecordBatchStream;
+use tokio::sync::Mutex;
 
 use crate::{
     ArrowCompression, ArrowIPCFormat,
@@ -137,10 +132,8 @@ impl DataSink for ArrowSink {
     }
 
     async fn write_batch(&mut self, batch: RecordBatch) -> Result<()> {
-        let mut inner = self
-            .inner
-            .lock()
-            .map_err(|e| anyhow!("Failed to lock inner: {}", e))?;
+        let mut inner = self.inner.lock().await;
+
         inner.coalescer.push_batch(batch)?;
 
         while let Some(completed_batch) = inner.coalescer.next_completed_batch() {
@@ -152,10 +145,7 @@ impl DataSink for ArrowSink {
     }
 
     async fn finish(&mut self) -> Result<SinkResult> {
-        let mut inner = self
-            .inner
-            .lock()
-            .map_err(|e| anyhow!("Failed to lock inner: {}", e))?;
+        let mut inner = self.inner.lock().await;
         inner.coalescer.finish_buffered_batch()?;
 
         if let Some(final_batch) = inner.coalescer.next_completed_batch() {

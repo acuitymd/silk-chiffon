@@ -1,14 +1,14 @@
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use arrow::array::RecordBatch;
 use arrow::compute::BatchCoalescer;
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use futures::stream;
-use tokio::fs::File;
 use tokio::sync::mpsc;
+use tokio::{fs::File, sync::Mutex};
 use vortex::arrow::FromArrowArray;
 use vortex::dtype::DType;
 use vortex::dtype::arrow::FromArrowType;
@@ -52,6 +52,39 @@ struct VortexSinkInner {
     sender: Option<mpsc::Sender<ArrayRef>>,
 }
 
+impl VortexSinkInner {
+    async fn flush_completed_batches(&mut self) -> Result<()> {
+        while let Some(completed_batch) = self.coalescer.next_completed_batch() {
+            let batch_v56 = convert_record_batch_57_to_56(&completed_batch)?;
+            let vortex_array = ArrayRef::from_arrow(batch_v56, false);
+
+            self.sender
+                .as_ref()
+                .ok_or_else(|| anyhow!("Sender already closed"))?
+                .send(vortex_array)
+                .await?;
+
+            self.rows_written += completed_batch.num_rows() as u64;
+        }
+
+        Ok(())
+    }
+
+    fn finish_buffered_batch(&mut self) -> Result<()> {
+        self.coalescer
+            .finish_buffered_batch()
+            .map_err(|e| anyhow!("Failed to finish buffered batch: {e}"))
+    }
+
+    fn drop_sender(&mut self) -> Result<()> {
+        self.sender
+            .take()
+            .ok_or_else(|| anyhow!("Sender already dropped"))?;
+
+        Ok(())
+    }
+}
+
 pub struct VortexSink {
     path: PathBuf,
     inner: Mutex<VortexSinkInner>,
@@ -59,42 +92,6 @@ pub struct VortexSink {
 }
 
 impl VortexSink {
-    async fn flush_completed_batches(&mut self) -> Result<()> {
-        while let Some(completed_batch) = {
-            let mut inner = self
-                .inner
-                .lock()
-                .map_err(|e| anyhow::anyhow!("Failed to lock inner: {}", e))?;
-            inner.coalescer.next_completed_batch()
-        } {
-            let batch_v56 = convert_record_batch_57_to_56(&completed_batch)?;
-            let vortex_array = ArrayRef::from_arrow(batch_v56, false);
-
-            let sender_clone = {
-                let inner = self
-                    .inner
-                    .lock()
-                    .map_err(|e| anyhow::anyhow!("Failed to lock inner: {}", e))?;
-                inner.sender.clone()
-            };
-
-            if let Some(sender) = sender_clone {
-                sender
-                    .send(vortex_array)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to send batch to writer: {}", e))?;
-            }
-
-            let mut inner = self
-                .inner
-                .lock()
-                .map_err(|e| anyhow::anyhow!("Failed to lock inner: {}", e))?;
-            inner.rows_written += completed_batch.num_rows() as u64;
-        }
-
-        Ok(())
-    }
-
     pub fn create(path: PathBuf, schema: &SchemaRef, options: VortexSinkOptions) -> Result<Self> {
         let coalescer = BatchCoalescer::new(Arc::clone(schema), options.record_batch_size);
         let (sender, receiver) = mpsc::channel(16);
@@ -159,54 +156,37 @@ impl VortexSink {
 #[async_trait]
 impl DataSink for VortexSink {
     async fn write_batch(&mut self, batch: RecordBatch) -> Result<()> {
-        {
-            let mut inner = self
-                .inner
-                .lock()
-                .map_err(|e| anyhow::anyhow!("Failed to lock inner: {}", e))?;
-            inner.coalescer.push_batch(batch)?;
-        }
-
-        self.flush_completed_batches().await?;
+        let mut inner = self.inner.lock().await;
+        inner.coalescer.push_batch(batch)?;
+        inner.flush_completed_batches().await?;
 
         Ok(())
     }
 
     async fn finish(&mut self) -> Result<SinkResult> {
-        {
-            let mut inner = self
-                .inner
-                .lock()
-                .map_err(|e| anyhow::anyhow!("Failed to lock inner: {}", e))?;
-            inner.coalescer.finish_buffered_batch()?;
-        }
+        let mut inner = self.inner.lock().await;
+        inner.finish_buffered_batch()?;
+        inner.flush_completed_batches().await?;
 
-        self.flush_completed_batches().await?;
+        // make it impossible to write to the channel again, dropping the sender
+        // which will also cause the writer task to finish.
+        // IMPORTANT: rows_written must be updated when the batch is pushed, not when it's written
+        //            in order for this to be correct
+        inner.drop_sender()?;
 
-        let rows_written = {
-            let mut inner = self
-                .inner
-                .lock()
-                .map_err(|e| anyhow::anyhow!("Failed to lock inner: {}", e))?;
-            // make it impossible to write to the channel again, dropping the sender
-            // which will also cause the writer task to finish.
-            // IMPORTANT: rows_written must be updated when the batch is pushed, not when it's written
-            //            in order for this to be correct
-            inner.sender.take();
-            inner.rows_written
-        };
-
-        // wait for the writer task to finish. the previous block will have dropped the sender,
-        // which will cause the writer task to finish. so we just need to wait for it to finish
-        // writing its last batches.
-        if let Some(task) = self.writer_task.take() {
-            task.await
-                .map_err(|e| anyhow::anyhow!("Writer task panicked: {}", e))??;
-        }
+        // wait for the writer task to finish. the sender was dropped above,
+        // which will cause the writer task to finish. so we just need to wait
+        // for it to finish writing its last batches.
+        self.writer_task
+            .take()
+            .ok_or_else(|| anyhow!("Writer task already finished"))?
+            .await
+            .map_err(|e| anyhow!("Error joining writer task: {e}"))?
+            .map_err(|e| anyhow!("Writer task errored: {e}"))?;
 
         Ok(SinkResult {
             files_written: vec![self.path.clone()],
-            rows_written,
+            rows_written: inner.rows_written,
         })
     }
 }

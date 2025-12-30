@@ -10,8 +10,9 @@ use std::hint::black_box;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
-use silk_chiffon::sinks::parquet::ParquetWriter;
+use silk_chiffon::sinks::parquet::StreamParquetWriter;
 use tempfile::tempdir;
+use tokio::runtime::Runtime;
 
 #[derive(Clone, Copy)]
 struct Config {
@@ -36,29 +37,9 @@ const CONFIGS: &[Config] = &[
         row_group_size: 1_000_000,
     },
     Config {
-        cols: 2,
-        rows: 1_000_000,
-        row_group_size: 3_000_000,
-    },
-    Config {
-        cols: 2,
-        rows: 1_000_000,
-        row_group_size: 8_000_000,
-    },
-    Config {
         cols: 5,
         rows: 1_000_000,
         row_group_size: 1_000_000,
-    },
-    Config {
-        cols: 5,
-        rows: 1_000_000,
-        row_group_size: 3_000_000,
-    },
-    Config {
-        cols: 5,
-        rows: 1_000_000,
-        row_group_size: 8_000_000,
     },
     Config {
         cols: 9,
@@ -66,29 +47,9 @@ const CONFIGS: &[Config] = &[
         row_group_size: 1_000_000,
     },
     Config {
-        cols: 9,
-        rows: 1_000_000,
-        row_group_size: 3_000_000,
-    },
-    Config {
-        cols: 9,
-        rows: 1_000_000,
-        row_group_size: 8_000_000,
-    },
-    Config {
         cols: 17,
         rows: 1_000_000,
         row_group_size: 1_000_000,
-    },
-    Config {
-        cols: 17,
-        rows: 1_000_000,
-        row_group_size: 3_000_000,
-    },
-    Config {
-        cols: 17,
-        rows: 1_000_000,
-        row_group_size: 8_000_000,
     },
     // 10M total rows
     Config {
@@ -97,29 +58,9 @@ const CONFIGS: &[Config] = &[
         row_group_size: 1_000_000,
     },
     Config {
-        cols: 2,
-        rows: 10_000_000,
-        row_group_size: 3_000_000,
-    },
-    Config {
-        cols: 2,
-        rows: 10_000_000,
-        row_group_size: 8_000_000,
-    },
-    Config {
         cols: 5,
         rows: 10_000_000,
         row_group_size: 1_000_000,
-    },
-    Config {
-        cols: 5,
-        rows: 10_000_000,
-        row_group_size: 3_000_000,
-    },
-    Config {
-        cols: 5,
-        rows: 10_000_000,
-        row_group_size: 8_000_000,
     },
     Config {
         cols: 9,
@@ -127,29 +68,9 @@ const CONFIGS: &[Config] = &[
         row_group_size: 1_000_000,
     },
     Config {
-        cols: 9,
-        rows: 10_000_000,
-        row_group_size: 3_000_000,
-    },
-    Config {
-        cols: 9,
-        rows: 10_000_000,
-        row_group_size: 8_000_000,
-    },
-    Config {
         cols: 17,
         rows: 10_000_000,
         row_group_size: 1_000_000,
-    },
-    Config {
-        cols: 17,
-        rows: 10_000_000,
-        row_group_size: 3_000_000,
-    },
-    Config {
-        cols: 17,
-        rows: 10_000_000,
-        row_group_size: 8_000_000,
     },
     // 100M total rows
     Config {
@@ -158,29 +79,9 @@ const CONFIGS: &[Config] = &[
         row_group_size: 1_000_000,
     },
     Config {
-        cols: 2,
-        rows: 100_000_000,
-        row_group_size: 3_000_000,
-    },
-    Config {
-        cols: 2,
-        rows: 100_000_000,
-        row_group_size: 8_000_000,
-    },
-    Config {
         cols: 5,
         rows: 100_000_000,
         row_group_size: 1_000_000,
-    },
-    Config {
-        cols: 5,
-        rows: 100_000_000,
-        row_group_size: 3_000_000,
-    },
-    Config {
-        cols: 5,
-        rows: 100_000_000,
-        row_group_size: 8_000_000,
     },
     Config {
         cols: 9,
@@ -188,33 +89,14 @@ const CONFIGS: &[Config] = &[
         row_group_size: 1_000_000,
     },
     Config {
-        cols: 9,
-        rows: 100_000_000,
-        row_group_size: 3_000_000,
-    },
-    Config {
-        cols: 9,
-        rows: 100_000_000,
-        row_group_size: 8_000_000,
-    },
-    Config {
         cols: 17,
         rows: 100_000_000,
         row_group_size: 1_000_000,
-    },
-    Config {
-        cols: 17,
-        rows: 100_000_000,
-        row_group_size: 3_000_000,
-    },
-    Config {
-        cols: 17,
-        rows: 100_000_000,
-        row_group_size: 8_000_000,
     },
 ];
 
-const INPUT_BATCH_SIZE: usize = 500_000;
+/// Realistic batch size from DataSource (DataFusion default)
+const INPUT_BATCH_SIZE: usize = 8192;
 
 fn create_schema(num_columns: usize) -> Arc<Schema> {
     let mut fields = Vec::with_capacity(num_columns);
@@ -282,31 +164,51 @@ fn create_batch(schema: &Arc<Schema>, num_rows: usize) -> RecordBatch {
     RecordBatch::try_new(Arc::clone(schema), columns).unwrap()
 }
 
-fn split_into_batches(
-    schema: &Arc<Schema>,
-    total_rows: usize,
+/// Template batch that can be cloned and sliced for benchmarks
+struct BatchTemplate {
+    batch: RecordBatch,
     batch_size: usize,
-) -> Vec<RecordBatch> {
-    let num_batches = total_rows.div_ceil(batch_size);
-    let mut batches = Vec::with_capacity(num_batches);
-
-    let mut remaining = total_rows;
-    while remaining > 0 {
-        let this_batch_size = remaining.min(batch_size);
-        batches.push(create_batch(schema, this_batch_size));
-        remaining -= this_batch_size;
-    }
-
-    batches
 }
 
-#[allow(clippy::cast_possible_truncation)]
-fn estimate_batch_size(batch: &RecordBatch) -> u64 {
-    batch
-        .columns()
-        .iter()
-        .map(|col| col.get_array_memory_size() as u64)
-        .sum()
+impl BatchTemplate {
+    fn new(schema: &Arc<Schema>, batch_size: usize) -> Self {
+        Self {
+            batch: create_batch(schema, batch_size),
+            batch_size,
+        }
+    }
+
+    fn estimated_row_size(&self) -> u64 {
+        self.batch
+            .columns()
+            .iter()
+            .map(|col| col.get_array_memory_size() as u64)
+            .sum::<u64>()
+            / self.batch_size as u64
+    }
+}
+
+/// Iterator that yields cloned batches up to total_rows
+struct BatchIterator<'a> {
+    template: &'a BatchTemplate,
+    remaining: usize,
+}
+
+impl<'a> Iterator for BatchIterator<'a> {
+    type Item = RecordBatch;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        let take = self.remaining.min(self.template.batch_size);
+        self.remaining -= take;
+        if take == self.template.batch_size {
+            Some(self.template.batch.clone())
+        } else {
+            Some(self.template.batch.slice(0, take))
+        }
+    }
 }
 
 fn bench_sequential(c: &mut Criterion) {
@@ -314,14 +216,14 @@ fn bench_sequential(c: &mut Criterion) {
 
     for config in CONFIGS {
         let schema = create_schema(config.cols);
-        let batches = split_into_batches(&schema, config.rows, INPUT_BATCH_SIZE);
-        let size: u64 = batches.iter().map(estimate_batch_size).sum();
+        let template = BatchTemplate::new(&schema, INPUT_BATCH_SIZE);
+        let size = template.estimated_row_size() * config.rows as u64;
 
         group.throughput(Throughput::Bytes(size));
         group.bench_with_input(
             BenchmarkId::from_parameter(config),
-            &batches,
-            |b, batches| {
+            &(&schema, &template, config),
+            |b, (schema, template, config)| {
                 b.iter(|| {
                     let temp_dir = tempdir().unwrap();
                     let path = temp_dir.path().join("test.parquet");
@@ -331,9 +233,12 @@ fn bench_sequential(c: &mut Criterion) {
                         .build();
 
                     let mut writer =
-                        ArrowWriter::try_new(file, Arc::clone(&schema), Some(props)).unwrap();
-                    for batch in black_box(batches) {
-                        writer.write(batch).unwrap();
+                        ArrowWriter::try_new(file, Arc::clone(schema), Some(props)).unwrap();
+                    for batch in black_box(BatchIterator {
+                        template,
+                        remaining: config.rows,
+                    }) {
+                        writer.write(&batch).unwrap();
                     }
                     writer.close().unwrap();
                 });
@@ -344,31 +249,47 @@ fn bench_sequential(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_parallel(c: &mut Criterion) {
-    let mut group = c.benchmark_group("parallel");
+fn bench_stream_parallel(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+    let mut group = c.benchmark_group("stream_parallel");
 
     for config in CONFIGS {
         let schema = create_schema(config.cols);
-        let batches = split_into_batches(&schema, config.rows, INPUT_BATCH_SIZE);
-        let size: u64 = batches.iter().map(estimate_batch_size).sum();
+        let template = BatchTemplate::new(&schema, INPUT_BATCH_SIZE);
+        let size = template.estimated_row_size() * config.rows as u64;
+
+        let cpu_parallelism = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        let concurrency = (cpu_parallelism / config.cols + 1).max(4);
 
         group.throughput(Throughput::Bytes(size));
         group.bench_with_input(
             BenchmarkId::from_parameter(config),
-            &batches,
-            |b, batches| {
+            &(&schema, &template, config, concurrency),
+            |b, (schema, template, config, concurrency)| {
                 b.iter(|| {
-                    let temp_dir = tempdir().unwrap();
-                    let path = temp_dir.path().join("test.parquet");
-                    let props = WriterProperties::builder().build();
+                    rt.block_on(async {
+                        let temp_dir = tempdir().unwrap();
+                        let path = temp_dir.path().join("test.parquet");
+                        let props = WriterProperties::builder().build();
 
-                    let mut writer =
-                        ParquetWriter::try_new(&path, &schema, props, config.row_group_size, None)
-                            .unwrap();
-                    for batch in black_box(batches) {
-                        writer.write(batch).unwrap();
-                    }
-                    writer.close().unwrap();
+                        let mut writer = StreamParquetWriter::new(
+                            &path,
+                            schema,
+                            props,
+                            config.row_group_size,
+                            *concurrency,
+                        );
+
+                        for batch in black_box(BatchIterator {
+                            template,
+                            remaining: config.rows,
+                        }) {
+                            writer.write(batch).await.unwrap();
+                        }
+                        writer.close().await.unwrap();
+                    });
                 });
             },
         );
@@ -377,5 +298,5 @@ fn bench_parallel(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_sequential, bench_parallel);
+criterion_group!(benches, bench_sequential, bench_stream_parallel);
 criterion_main!(benches);
