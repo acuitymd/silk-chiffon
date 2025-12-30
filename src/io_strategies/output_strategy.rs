@@ -108,6 +108,13 @@ impl OutputStrategy {
                 let partitioner = Partitioner::new(columns.clone());
                 let column_order = columns.clone();
                 let schema = stream.schema();
+
+                for col_name in exclude_columns.iter() {
+                    schema
+                        .column_with_name(col_name)
+                        .ok_or_else(|| anyhow!("Column '{col_name}' not found in schema"))?;
+                }
+
                 let projected_column_indices: Option<Vec<usize>> = if !exclude_columns.is_empty() {
                     Some(
                         (0..schema.fields().len())

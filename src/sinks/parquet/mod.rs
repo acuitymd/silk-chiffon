@@ -394,9 +394,10 @@ impl DataSink for ParquetSink {
     async fn finish(&mut self) -> Result<SinkResult> {
         let mut inner = self.inner.lock().await;
 
-        let writer = inner
+        // Take the writer so that nothing else can write to it
+        let mut writer = inner
             .writer
-            .as_mut()
+            .take()
             .ok_or_else(|| anyhow!("Writer already closed"))?;
 
         let rows_written = writer.close().await?;
