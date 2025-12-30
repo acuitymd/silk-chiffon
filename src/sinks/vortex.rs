@@ -60,7 +60,7 @@ impl VortexSinkInner {
 
             self.sender
                 .as_ref()
-                .ok_or_else(|| anyhow!("Sender already closed"))?
+                .ok_or_else(|| anyhow!("sender already closed"))?
                 .send(vortex_array)
                 .await?;
 
@@ -73,15 +73,11 @@ impl VortexSinkInner {
     fn finish_buffered_batch(&mut self) -> Result<()> {
         self.coalescer
             .finish_buffered_batch()
-            .map_err(|e| anyhow!("Failed to finish buffered batch: {e}"))
+            .map_err(|e| anyhow!("failed to finish buffered batch: {e}"))
     }
 
-    fn drop_sender(&mut self) -> Result<()> {
-        self.sender
-            .take()
-            .ok_or_else(|| anyhow!("Sender already dropped"))?;
-
-        Ok(())
+    fn drop_sender(&mut self) {
+        self.sender.take();
     }
 }
 
@@ -147,7 +143,7 @@ impl VortexSink {
             .write_options()
             .write(file, array_stream)
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to write Vortex file: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("failed to write vortex file: {}", e))?;
 
         Ok(())
     }
@@ -172,17 +168,17 @@ impl DataSink for VortexSink {
         // which will also cause the writer task to finish.
         // IMPORTANT: rows_written must be updated when the batch is pushed, not when it's written
         //            in order for this to be correct
-        inner.drop_sender()?;
+        inner.drop_sender();
 
         // wait for the writer task to finish. the sender was dropped above,
         // which will cause the writer task to finish. so we just need to wait
         // for it to finish writing its last batches.
         self.writer_task
             .take()
-            .ok_or_else(|| anyhow!("Writer task already finished"))?
+            .ok_or_else(|| anyhow!("writer task already finished"))?
             .await
-            .map_err(|e| anyhow!("Error joining writer task: {e}"))?
-            .map_err(|e| anyhow!("Writer task errored: {e}"))?;
+            .map_err(|e| anyhow!("error joining writer task: {e}"))?
+            .map_err(|e| anyhow!("writer task errored: {e}"))?;
 
         Ok(SinkResult {
             files_written: vec![self.path.clone()],

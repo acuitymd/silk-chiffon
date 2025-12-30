@@ -75,6 +75,9 @@ pub fn recommended_concurrency(num_columns: usize) -> usize {
     let cpu_parallelism = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
+    if num_columns == 0 {
+        return cpu_parallelism;
+    }
     (cpu_parallelism / num_columns + 1).max(4)
 }
 
@@ -967,5 +970,508 @@ mod tests {
         // third list: [] (empty)
         let third_list = list_col.value(2);
         assert_eq!(third_list.len(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_stream_writer_map_type() {
+        use arrow::array::{Int32Builder, MapBuilder, StringBuilder};
+
+        let temp_dir = tempdir().unwrap();
+        let path = temp_dir.path().join("test.parquet");
+
+        // build the map array first, then derive schema from it
+        let mut builder = MapBuilder::new(None, StringBuilder::new(), Int32Builder::new());
+        builder.keys().append_value("a");
+        builder.values().append_value(1);
+        builder.keys().append_value("b");
+        builder.values().append_value(2);
+        builder.append(true).unwrap(); // {"a": 1, "b": 2}
+        builder.keys().append_value("c");
+        builder.values().append_value(3);
+        builder.append(true).unwrap(); // {"c": 3}
+        let map_array = builder.finish();
+
+        // derive schema from the actual array to ensure field names match
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "map_col",
+            map_array.data_type().clone(),
+            true,
+        )]));
+
+        let batch = RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(map_array)]).unwrap();
+
+        let props = WriterProperties::builder().build();
+        let mut writer = StreamParquetWriter::new(&path, &schema, props, 100, 4);
+        writer.write(batch).await.unwrap();
+        let rows = writer.close().await.unwrap();
+        assert_eq!(rows, 2);
+
+        // verify round-trip
+        let file = File::open(&path).unwrap();
+        let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+            .unwrap()
+            .build()
+            .unwrap();
+        let batches: Vec<_> = reader.map(|r| r.unwrap()).collect();
+        assert_eq!(batches[0].num_rows(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_stream_writer_nested_list() {
+        use arrow::array::{Int32Builder, ListBuilder};
+
+        let temp_dir = tempdir().unwrap();
+        let path = temp_dir.path().join("test.parquet");
+
+        // List<List<Int32>>
+        let inner_list_field = Field::new("item", DataType::Int32, true);
+        let outer_list_field = Field::new_list(
+            "nested_list",
+            Field::new_list("item", inner_list_field, true),
+            true,
+        );
+        let schema = Arc::new(Schema::new(vec![outer_list_field]));
+
+        let mut builder = ListBuilder::new(ListBuilder::new(Int32Builder::new()));
+        // first outer list: [[1, 2], [3]]
+        builder.values().values().append_value(1);
+        builder.values().values().append_value(2);
+        builder.values().append(true);
+        builder.values().values().append_value(3);
+        builder.values().append(true);
+        builder.append(true);
+        // second outer list: [[4]]
+        builder.values().values().append_value(4);
+        builder.values().append(true);
+        builder.append(true);
+        let nested_list = builder.finish();
+
+        let batch = RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(nested_list)]).unwrap();
+
+        let props = WriterProperties::builder().build();
+        let mut writer = StreamParquetWriter::new(&path, &schema, props, 100, 4);
+        writer.write(batch).await.unwrap();
+        let rows = writer.close().await.unwrap();
+        assert_eq!(rows, 2);
+
+        // verify round-trip
+        let file = File::open(&path).unwrap();
+        let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+            .unwrap()
+            .build()
+            .unwrap();
+        let batches: Vec<_> = reader.map(|r| r.unwrap()).collect();
+        assert_eq!(batches[0].num_rows(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_stream_writer_list_of_struct() {
+        use arrow::array::{Int32Builder, ListBuilder, StringBuilder, StructBuilder};
+
+        let temp_dir = tempdir().unwrap();
+        let path = temp_dir.path().join("test.parquet");
+
+        let struct_fields = vec![
+            Field::new("name", DataType::Utf8, false),
+            Field::new("value", DataType::Int32, false),
+        ];
+        let list_field = Field::new_list(
+            "items",
+            Field::new_struct("item", struct_fields.clone(), true),
+            true,
+        );
+        let schema = Arc::new(Schema::new(vec![list_field]));
+
+        let struct_builder = StructBuilder::new(
+            struct_fields,
+            vec![
+                Box::new(StringBuilder::new()),
+                Box::new(Int32Builder::new()),
+            ],
+        );
+        let mut builder = ListBuilder::new(struct_builder);
+
+        // first list: [{name: "a", value: 1}, {name: "b", value: 2}]
+        builder
+            .values()
+            .field_builder::<StringBuilder>(0)
+            .unwrap()
+            .append_value("a");
+        builder
+            .values()
+            .field_builder::<Int32Builder>(1)
+            .unwrap()
+            .append_value(1);
+        builder.values().append(true);
+        builder
+            .values()
+            .field_builder::<StringBuilder>(0)
+            .unwrap()
+            .append_value("b");
+        builder
+            .values()
+            .field_builder::<Int32Builder>(1)
+            .unwrap()
+            .append_value(2);
+        builder.values().append(true);
+        builder.append(true);
+
+        // second list: [{name: "c", value: 3}]
+        builder
+            .values()
+            .field_builder::<StringBuilder>(0)
+            .unwrap()
+            .append_value("c");
+        builder
+            .values()
+            .field_builder::<Int32Builder>(1)
+            .unwrap()
+            .append_value(3);
+        builder.values().append(true);
+        builder.append(true);
+
+        let list_array = builder.finish();
+
+        let batch = RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(list_array)]).unwrap();
+
+        let props = WriterProperties::builder().build();
+        let mut writer = StreamParquetWriter::new(&path, &schema, props, 100, 4);
+        writer.write(batch).await.unwrap();
+        let rows = writer.close().await.unwrap();
+        assert_eq!(rows, 2);
+
+        // verify round-trip
+        let file = File::open(&path).unwrap();
+        let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+            .unwrap()
+            .build()
+            .unwrap();
+        let batches: Vec<_> = reader.map(|r| r.unwrap()).collect();
+        assert_eq!(batches[0].num_rows(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_stream_writer_struct_containing_list() {
+        use arrow::array::{Int32Builder, ListBuilder, StructBuilder};
+
+        let temp_dir = tempdir().unwrap();
+        let path = temp_dir.path().join("test.parquet");
+
+        let list_field = Field::new_list("items", Field::new("item", DataType::Int32, true), true);
+        let struct_field = Field::new_struct("container", vec![list_field.clone()], false);
+        let schema = Arc::new(Schema::new(vec![struct_field]));
+
+        let list_builder = ListBuilder::new(Int32Builder::new());
+        let mut struct_builder = StructBuilder::new(vec![list_field], vec![Box::new(list_builder)]);
+
+        // first struct: {items: [1, 2]}
+        struct_builder
+            .field_builder::<ListBuilder<Int32Builder>>(0)
+            .unwrap()
+            .values()
+            .append_value(1);
+        struct_builder
+            .field_builder::<ListBuilder<Int32Builder>>(0)
+            .unwrap()
+            .values()
+            .append_value(2);
+        struct_builder
+            .field_builder::<ListBuilder<Int32Builder>>(0)
+            .unwrap()
+            .append(true);
+        struct_builder.append(true);
+
+        // second struct: {items: [3, 4, 5]}
+        struct_builder
+            .field_builder::<ListBuilder<Int32Builder>>(0)
+            .unwrap()
+            .values()
+            .append_value(3);
+        struct_builder
+            .field_builder::<ListBuilder<Int32Builder>>(0)
+            .unwrap()
+            .values()
+            .append_value(4);
+        struct_builder
+            .field_builder::<ListBuilder<Int32Builder>>(0)
+            .unwrap()
+            .values()
+            .append_value(5);
+        struct_builder
+            .field_builder::<ListBuilder<Int32Builder>>(0)
+            .unwrap()
+            .append(true);
+        struct_builder.append(true);
+
+        let struct_array = struct_builder.finish();
+
+        let batch =
+            RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(struct_array)]).unwrap();
+
+        let props = WriterProperties::builder().build();
+        let mut writer = StreamParquetWriter::new(&path, &schema, props, 100, 4);
+        writer.write(batch).await.unwrap();
+        let rows = writer.close().await.unwrap();
+        assert_eq!(rows, 2);
+
+        // verify round-trip
+        let file = File::open(&path).unwrap();
+        let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+            .unwrap()
+            .build()
+            .unwrap();
+        let batches: Vec<_> = reader.map(|r| r.unwrap()).collect();
+        assert_eq!(batches[0].num_rows(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_stream_writer_all_timestamp_variants() {
+        use arrow::array::{
+            TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray,
+        };
+
+        let temp_dir = tempdir().unwrap();
+        let path = temp_dir.path().join("test.parquet");
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("ts_s", DataType::Timestamp(TimeUnit::Second, None), false),
+            Field::new(
+                "ts_ms",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new(
+                "ts_us",
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                false,
+            ),
+            Field::new(
+                "ts_ns",
+                DataType::Timestamp(TimeUnit::Nanosecond, None),
+                false,
+            ),
+            Field::new(
+                "ts_utc",
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                false,
+            ),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(TimestampSecondArray::from(vec![
+                    1_600_000_000i64,
+                    1_600_000_001,
+                ])),
+                Arc::new(TimestampMillisecondArray::from(vec![
+                    1_600_000_000_000i64,
+                    1_600_000_000_001,
+                ])),
+                Arc::new(TimestampMicrosecondArray::from(vec![
+                    1_600_000_000_000_000i64,
+                    1_600_000_000_000_001,
+                ])),
+                Arc::new(TimestampNanosecondArray::from(vec![
+                    1_600_000_000_000_000_000i64,
+                    1_600_000_000_000_000_001,
+                ])),
+                Arc::new(
+                    TimestampMicrosecondArray::from(vec![
+                        1_600_000_000_000_000i64,
+                        1_600_000_000_000_001,
+                    ])
+                    .with_timezone("UTC"),
+                ),
+            ],
+        )
+        .unwrap();
+
+        let props = WriterProperties::builder().build();
+        let mut writer = StreamParquetWriter::new(&path, &schema, props, 100, 4);
+        writer.write(batch).await.unwrap();
+        let rows = writer.close().await.unwrap();
+        assert_eq!(rows, 2);
+
+        // verify round-trip
+        let file = File::open(&path).unwrap();
+        let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+            .unwrap()
+            .build()
+            .unwrap();
+        let batches: Vec<_> = reader.map(|r| r.unwrap()).collect();
+        let batch = &batches[0];
+        assert_eq!(batch.num_rows(), 2);
+        assert_eq!(batch.num_columns(), 5);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_stream_writer_duration_types() {
+        use arrow::array::{
+            DurationMicrosecondArray, DurationMillisecondArray, DurationNanosecondArray,
+            DurationSecondArray,
+        };
+
+        let temp_dir = tempdir().unwrap();
+        let path = temp_dir.path().join("test.parquet");
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("dur_s", DataType::Duration(TimeUnit::Second), false),
+            Field::new("dur_ms", DataType::Duration(TimeUnit::Millisecond), false),
+            Field::new("dur_us", DataType::Duration(TimeUnit::Microsecond), false),
+            Field::new("dur_ns", DataType::Duration(TimeUnit::Nanosecond), false),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(DurationSecondArray::from(vec![100i64, 200])),
+                Arc::new(DurationMillisecondArray::from(vec![100_000i64, 200_000])),
+                Arc::new(DurationMicrosecondArray::from(vec![
+                    100_000_000i64,
+                    200_000_000,
+                ])),
+                Arc::new(DurationNanosecondArray::from(vec![
+                    100_000_000_000i64,
+                    200_000_000_000,
+                ])),
+            ],
+        )
+        .unwrap();
+
+        let props = WriterProperties::builder().build();
+        let mut writer = StreamParquetWriter::new(&path, &schema, props, 100, 4);
+        writer.write(batch).await.unwrap();
+        let rows = writer.close().await.unwrap();
+        assert_eq!(rows, 2);
+
+        // verify round-trip
+        let file = File::open(&path).unwrap();
+        let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+            .unwrap()
+            .build()
+            .unwrap();
+        let batches: Vec<_> = reader.map(|r| r.unwrap()).collect();
+        assert_eq!(batches[0].num_rows(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_stream_writer_time_types() {
+        use arrow::array::{
+            Time32MillisecondArray, Time32SecondArray, Time64MicrosecondArray,
+            Time64NanosecondArray,
+        };
+
+        let temp_dir = tempdir().unwrap();
+        let path = temp_dir.path().join("test.parquet");
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("time32_s", DataType::Time32(TimeUnit::Second), false),
+            Field::new("time32_ms", DataType::Time32(TimeUnit::Millisecond), false),
+            Field::new("time64_us", DataType::Time64(TimeUnit::Microsecond), false),
+            Field::new("time64_ns", DataType::Time64(TimeUnit::Nanosecond), false),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Time32SecondArray::from(vec![3600, 7200])), // 1h, 2h
+                Arc::new(Time32MillisecondArray::from(vec![3_600_000, 7_200_000])),
+                Arc::new(Time64MicrosecondArray::from(vec![
+                    3_600_000_000i64,
+                    7_200_000_000,
+                ])),
+                Arc::new(Time64NanosecondArray::from(vec![
+                    3_600_000_000_000i64,
+                    7_200_000_000_000,
+                ])),
+            ],
+        )
+        .unwrap();
+
+        let props = WriterProperties::builder().build();
+        let mut writer = StreamParquetWriter::new(&path, &schema, props, 100, 4);
+        writer.write(batch).await.unwrap();
+        let rows = writer.close().await.unwrap();
+        assert_eq!(rows, 2);
+
+        // verify round-trip
+        let file = File::open(&path).unwrap();
+        let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+            .unwrap()
+            .build()
+            .unwrap();
+        let batches: Vec<_> = reader.map(|r| r.unwrap()).collect();
+        let batch = &batches[0];
+        assert_eq!(batch.num_rows(), 2);
+
+        // verify time values round-trip correctly
+        let time32_s = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Time32SecondArray>()
+            .unwrap();
+        assert_eq!(time32_s.value(0), 3600);
+        assert_eq!(time32_s.value(1), 7200);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_stream_writer_fixed_size_list() {
+        use arrow::array::{FixedSizeListArray, FixedSizeListBuilder, Int32Builder};
+
+        let temp_dir = tempdir().unwrap();
+        let path = temp_dir.path().join("test.parquet");
+
+        let list_field = Field::new(
+            "fixed_list",
+            DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Int32, true)), 3),
+            false,
+        );
+        let schema = Arc::new(Schema::new(vec![list_field]));
+
+        let mut builder = FixedSizeListBuilder::new(Int32Builder::new(), 3);
+        builder.values().append_value(1);
+        builder.values().append_value(2);
+        builder.values().append_value(3);
+        builder.append(true);
+        builder.values().append_value(4);
+        builder.values().append_value(5);
+        builder.values().append_value(6);
+        builder.append(true);
+        let fixed_list = builder.finish();
+
+        let batch = RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(fixed_list)]).unwrap();
+
+        let props = WriterProperties::builder().build();
+        let mut writer = StreamParquetWriter::new(&path, &schema, props, 100, 4);
+        writer.write(batch).await.unwrap();
+        let rows = writer.close().await.unwrap();
+        assert_eq!(rows, 2);
+
+        // verify round-trip
+        let file = File::open(&path).unwrap();
+        let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+            .unwrap()
+            .build()
+            .unwrap();
+        let batches: Vec<_> = reader.map(|r| r.unwrap()).collect();
+        let batch = &batches[0];
+        assert_eq!(batch.num_rows(), 2);
+
+        // verify fixed size list values
+        let list_col = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<FixedSizeListArray>()
+            .unwrap();
+        assert_eq!(list_col.value_length(), 3);
+
+        let first_list = list_col.value(0);
+        let first_values = first_list.as_any().downcast_ref::<Int32Array>().unwrap();
+        assert_eq!(first_values.values(), &[1, 2, 3]);
+
+        let second_list = list_col.value(1);
+        let second_values = second_list.as_any().downcast_ref::<Int32Array>().unwrap();
+        assert_eq!(second_values.values(), &[4, 5, 6]);
     }
 }

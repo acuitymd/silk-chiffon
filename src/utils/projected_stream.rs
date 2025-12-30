@@ -1,3 +1,12 @@
+//! Stream adapter for column projection on record batch streams.
+//!
+//! This module provides utilities for projecting (selecting) specific columns from a
+//! `SendableRecordBatchStream`. Use this when you need lightweight column filtering
+//! without the overhead of a full DataFusion query plan.
+//!
+//! For complex projections involving expressions, filtering, or aggregation, prefer
+//! DataFusion's projection capabilities instead.
+
 use futures::stream::Stream;
 use std::pin::Pin;
 use std::sync::Arc;
