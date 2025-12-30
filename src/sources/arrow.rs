@@ -1,7 +1,7 @@
+use std::fs::File;
 use std::sync::Arc;
-use std::{fs::File, sync::OnceLock};
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use arrow::datatypes::SchemaRef;
 use arrow::ipc::reader::{FileReader, StreamReader};
 use async_trait::async_trait;
@@ -15,15 +15,11 @@ use crate::sources::data_source::DataSource;
 #[derive(Debug)]
 pub struct ArrowDataSource {
     path: String,
-    schema: OnceLock<Result<SchemaRef>>,
 }
 
 impl ArrowDataSource {
     pub fn new(path: String) -> Self {
-        Self {
-            path,
-            schema: OnceLock::new(),
-        }
+        Self { path }
     }
 }
 
@@ -34,21 +30,15 @@ impl DataSource for ArrowDataSource {
     }
 
     fn schema(&self) -> Result<SchemaRef> {
-        self.schema
-            .get_or_init(|| {
-                if let Ok(reader) = FileReader::try_new(File::open(&self.path)?, None) {
-                    return Ok(reader.schema());
-                }
+        if let Ok(reader) = FileReader::try_new(File::open(&self.path)?, None) {
+            return Ok(reader.schema());
+        }
 
-                if let Ok(reader) = StreamReader::try_new(File::open(&self.path)?, None) {
-                    return Ok(reader.schema());
-                }
+        if let Ok(reader) = StreamReader::try_new(File::open(&self.path)?, None) {
+            return Ok(reader.schema());
+        }
 
-                anyhow::bail!("Could not read Arrow file: {}", &self.path)
-            })
-            .as_ref()
-            .map(Arc::clone)
-            .map_err(|e| anyhow!("Failed to get schema: {}", e))
+        anyhow::bail!("Could not read Arrow file: {}", &self.path)
     }
 
     async fn as_table_provider(&self, ctx: &mut SessionContext) -> Result<Arc<dyn TableProvider>> {

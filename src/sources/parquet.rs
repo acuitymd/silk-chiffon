@@ -1,9 +1,6 @@
-use std::{
-    fs::File,
-    sync::{Arc, OnceLock},
-};
+use std::{fs::File, sync::Arc};
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use datafusion::{
@@ -18,15 +15,11 @@ use crate::sources::data_source::DataSource;
 #[derive(Debug)]
 pub struct ParquetDataSource {
     path: String,
-    schema: OnceLock<Result<SchemaRef>>,
 }
 
 impl ParquetDataSource {
     pub fn new(path: String) -> Self {
-        Self {
-            path,
-            schema: OnceLock::new(),
-        }
+        Self { path }
     }
 }
 
@@ -37,15 +30,9 @@ impl DataSource for ParquetDataSource {
     }
 
     fn schema(&self) -> Result<SchemaRef> {
-        self.schema
-            .get_or_init(|| {
-                let file = File::open(&self.path)?;
-                let reader = ParquetRecordBatchReaderBuilder::try_new(file)?;
-                Ok(Arc::clone(reader.schema()))
-            })
-            .as_ref()
-            .map(Arc::clone)
-            .map_err(|e| anyhow!("Failed to get schema: {}", e))
+        let file = File::open(&self.path)?;
+        let reader = ParquetRecordBatchReaderBuilder::try_new(file)?;
+        Ok(Arc::clone(reader.schema()))
     }
 
     async fn as_table_provider(&self, ctx: &mut SessionContext) -> Result<Arc<dyn TableProvider>> {
