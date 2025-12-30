@@ -255,13 +255,19 @@ impl StreamParquetWriter {
             .as_ref()
             .ok_or_else(|| anyhow!("writer already closed"))?;
 
+        // detect early failure before blocking on send
+        // this isn't perfect but it's better than nothing
+        if self.writer_handle.as_ref().is_some_and(|h| h.is_finished()) {
+            return Err(anyhow!("writer task failed"));
+        }
+
         self.coalescer.push_batch(batch)?;
 
         while let Some(completed) = self.coalescer.next_completed_batch() {
             sender
                 .send(completed)
                 .await
-                .map_err(|_| anyhow!("writer task failed - call close() for details"))?;
+                .map_err(|_| anyhow!("writer task failed"))?;
         }
 
         Ok(())
@@ -272,10 +278,14 @@ impl StreamParquetWriter {
 
         if let Some(sender) = self.batch_sender.take() {
             while let Some(completed) = self.coalescer.next_completed_batch() {
-                sender
-                    .send(completed)
-                    .await
-                    .map_err(|_| anyhow!("writer task failed - call close() for details"))?;
+                // if the writer task finished early, it failed, so don't send any more batches
+                // and break out of the loop. the error will be retrieved below.
+                if self.writer_handle.as_ref().is_some_and(|h| h.is_finished()) {
+                    break;
+                }
+                if sender.send(completed).await.is_err() {
+                    break;
+                }
             }
         }
 
@@ -312,6 +322,11 @@ impl Drop for StreamParquetWriter {
     fn drop(&mut self) {
         self.cancel_token.cancel();
         self.batch_sender.take();
+
+        // if the writer task is still running, abort it
+        if let Some(handle) = self.writer_handle.take() {
+            handle.abort();
+        }
     }
 }
 
