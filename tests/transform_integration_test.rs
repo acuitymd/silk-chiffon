@@ -2898,3 +2898,413 @@ async fn test_transform_partition_with_query_and_sort() {
     eu_scores_vec.sort();
     assert_eq!(eu_scores_vec, vec![200, 300]);
 }
+
+/// round-trip test: arrow -> parquet -> arrow, verify data is identical
+#[tokio::test]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
+async fn test_parquet_roundtrip_data_fidelity() {
+    use arrow::array::{
+        BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int64Array,
+        LargeStringArray, StringViewArray, TimestampMicrosecondArray, UInt32Array,
+    };
+    use arrow::datatypes::{DataType, Field, TimeUnit};
+
+    let temp_dir = TempDir::new().unwrap();
+    let input_arrow = temp_dir.path().join("input.arrow");
+    let intermediate_parquet = temp_dir.path().join("intermediate.parquet");
+    let output_arrow = temp_dir.path().join("output.arrow");
+
+    // create a schema with various data types to test round-trip fidelity
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int32, false),
+        Field::new("int8_col", DataType::Int8, false),
+        Field::new("int16_col", DataType::Int16, false),
+        Field::new("int64_col", DataType::Int64, false),
+        Field::new("uint32_col", DataType::UInt32, false),
+        Field::new("float32_col", DataType::Float32, false),
+        Field::new("float64_col", DataType::Float64, false),
+        Field::new("bool_col", DataType::Boolean, false),
+        Field::new("string_col", DataType::Utf8, false),
+        Field::new("nullable_int", DataType::Int32, true),
+        Field::new("nullable_string", DataType::Utf8, true),
+        Field::new(
+            "timestamp_col",
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            false,
+        ),
+    ]));
+
+    // generate a larger dataset (10k rows) split into multiple batches
+    let num_rows: i32 = 10_000;
+    let input_batch_size: i32 = 1_000; // 10 input batches
+    let parquet_row_group_size: usize = 2_000; // 5 row groups
+    let output_batch_size: usize = 1_500; // ~7 output batches
+
+    // helper to create a batch for a range of rows
+    let make_batch = |start: i32, end: i32| -> RecordBatch {
+        let ids: Vec<i32> = (start..end).collect();
+        let int8_vals: Vec<i8> = (start..end).map(|i| (i % 128) as i8).collect();
+        let int16_vals: Vec<i16> = (start..end).map(|i| (i % 32768) as i16).collect();
+        let int64_vals: Vec<i64> = (start..end).map(|i| i64::from(i) * 1_000_000).collect();
+        let uint32_vals: Vec<u32> = (start..end).map(|i| i as u32 * 2).collect();
+        let float32_vals: Vec<f32> = (start..end).map(|i| i as f32 * 0.5).collect();
+        let float64_vals: Vec<f64> = (start..end).map(|i| f64::from(i) * 1.5).collect();
+        let bool_vals: Vec<bool> = (start..end).map(|i| i % 2 == 0).collect();
+        let string_vals: Vec<String> = (start..end).map(|i| format!("row_{i}")).collect();
+        let nullable_int_vals: Vec<Option<i32>> = (start..end)
+            .map(|i| if i % 3 == 0 { None } else { Some(i) })
+            .collect();
+        let nullable_string_vals: Vec<Option<String>> = (start..end)
+            .map(|i| {
+                if i % 5 == 0 {
+                    None
+                } else {
+                    Some(format!("nullable_{i}"))
+                }
+            })
+            .collect();
+        let timestamp_vals: Vec<i64> = (start..end).map(|i| i64::from(i) * 1_000_000).collect();
+
+        RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int32Array::from(ids)),
+                Arc::new(Int8Array::from(int8_vals)),
+                Arc::new(Int16Array::from(int16_vals)),
+                Arc::new(Int64Array::from(int64_vals)),
+                Arc::new(UInt32Array::from(uint32_vals)),
+                Arc::new(Float32Array::from(float32_vals)),
+                Arc::new(Float64Array::from(float64_vals)),
+                Arc::new(BooleanArray::from(bool_vals)),
+                Arc::new(StringArray::from(
+                    string_vals.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                )),
+                Arc::new(Int32Array::from(nullable_int_vals)),
+                Arc::new(StringArray::from(
+                    nullable_string_vals
+                        .iter()
+                        .map(|s| s.as_deref())
+                        .collect::<Vec<_>>(),
+                )),
+                Arc::new(TimestampMicrosecondArray::from(timestamp_vals)),
+            ],
+        )
+        .unwrap()
+    };
+
+    // create multiple input batches
+    let input_batches_to_write: Vec<RecordBatch> = (0..num_rows)
+        .step_by(input_batch_size as usize)
+        .map(|start| make_batch(start, (start + input_batch_size).min(num_rows)))
+        .collect();
+
+    assert_eq!(
+        input_batches_to_write.len(),
+        10,
+        "should have 10 input batches"
+    );
+
+    // write the input arrow file with multiple batches
+    test_helpers::write_arrow_file(&input_arrow, &schema, input_batches_to_write);
+
+    // step 1: convert arrow to parquet with multiple row groups
+    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+        from: Some(input_arrow.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: Some(intermediate_parquet.to_string_lossy().to_string()),
+        to_many: None,
+        by: None,
+        exclude_columns: vec![],
+        list_outputs: None,
+        create_dirs: true,
+        overwrite: false,
+        query: None,
+        dialect: QueryDialect::default(),
+        sort_by: None,
+        input_format: None,
+        output_format: Some(DataFormat::Parquet),
+        arrow_compression: None,
+        arrow_format: None,
+        arrow_record_batch_size: None,
+        parquet_compression: Some(ParquetCompression::Zstd),
+        parquet_bloom_all: None,
+        parquet_bloom_column: vec![],
+        parquet_row_group_size: Some(parquet_row_group_size),
+        parquet_parallelism: None,
+        parquet_statistics: None,
+        parquet_writer_version: None,
+        parquet_no_dictionary: false,
+        parquet_column_dictionary: vec![],
+        parquet_column_no_dictionary: vec![],
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
+        parquet_sorted_metadata: false,
+        vortex_record_batch_size: None,
+    })
+    .await
+    .unwrap();
+
+    assert!(intermediate_parquet.exists());
+
+    // verify parquet has multiple row groups
+    let parquet_file = std::fs::File::open(&intermediate_parquet).unwrap();
+    let parquet_reader =
+        parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(parquet_file)
+            .unwrap();
+    let num_row_groups = parquet_reader.metadata().num_row_groups();
+    assert!(
+        num_row_groups >= 5,
+        "should have at least 5 row groups, got {num_row_groups}"
+    );
+
+    // step 2: convert parquet back to arrow with specified batch size
+    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+        from: Some(intermediate_parquet.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: Some(output_arrow.to_string_lossy().to_string()),
+        to_many: None,
+        by: None,
+        exclude_columns: vec![],
+        list_outputs: None,
+        create_dirs: true,
+        overwrite: false,
+        query: None,
+        dialect: QueryDialect::default(),
+        sort_by: None,
+        input_format: Some(DataFormat::Parquet),
+        output_format: Some(DataFormat::Arrow),
+        arrow_compression: None,
+        arrow_format: None,
+        arrow_record_batch_size: Some(output_batch_size),
+        parquet_compression: None,
+        parquet_bloom_all: None,
+        parquet_bloom_column: vec![],
+        parquet_row_group_size: None,
+        parquet_parallelism: None,
+        parquet_statistics: None,
+        parquet_writer_version: None,
+        parquet_no_dictionary: false,
+        parquet_column_dictionary: vec![],
+        parquet_column_no_dictionary: vec![],
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
+        parquet_sorted_metadata: false,
+        vortex_record_batch_size: None,
+    })
+    .await
+    .unwrap();
+
+    assert!(output_arrow.exists());
+
+    // step 3: read both files and compare directly
+    let input_batches = test_helpers::read_arrow_file(&input_arrow);
+    let output_batches = test_helpers::read_arrow_file(&output_arrow);
+
+    // verify we have multiple batches in both files
+    assert!(
+        input_batches.len() >= 10,
+        "input should have at least 10 batches, got {}",
+        input_batches.len()
+    );
+    assert!(
+        output_batches.len() >= 6,
+        "output should have at least 6 batches, got {}",
+        output_batches.len()
+    );
+
+    // verify row counts match
+    let input_rows: usize = input_batches.iter().map(|b| b.num_rows()).sum();
+    let output_rows: usize = output_batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(input_rows, output_rows, "row counts should match");
+    assert_eq!(input_rows, num_rows as usize);
+
+    // helper to extract string values handling different arrow string types
+    fn extract_strings(batches: &[RecordBatch], col_name: &str) -> Vec<Option<String>> {
+        let mut result = Vec::new();
+        for batch in batches {
+            let col = batch.column_by_name(col_name).unwrap();
+            if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
+                for i in 0..arr.len() {
+                    if arr.is_null(i) {
+                        result.push(None);
+                    } else {
+                        result.push(Some(arr.value(i).to_string()));
+                    }
+                }
+            } else if let Some(arr) = col.as_any().downcast_ref::<LargeStringArray>() {
+                for i in 0..arr.len() {
+                    if arr.is_null(i) {
+                        result.push(None);
+                    } else {
+                        result.push(Some(arr.value(i).to_string()));
+                    }
+                }
+            } else if let Some(arr) = col.as_any().downcast_ref::<StringViewArray>() {
+                for i in 0..arr.len() {
+                    if arr.is_null(i) {
+                        result.push(None);
+                    } else {
+                        result.push(Some(arr.value(i).to_string()));
+                    }
+                }
+            } else {
+                panic!("{} unexpected type: {:?}", col_name, col.data_type());
+            }
+        }
+        result
+    }
+
+    // extract values from input file
+    let mut input_ids = Vec::new();
+    let mut input_int8s = Vec::new();
+    let mut input_int16s = Vec::new();
+    let mut input_int64s = Vec::new();
+    let mut input_uint32s = Vec::new();
+    let mut input_float32s = Vec::new();
+    let mut input_float64s = Vec::new();
+    let mut input_bools = Vec::new();
+    let mut input_nullable_ints = Vec::new();
+    let mut input_timestamps = Vec::new();
+
+    for batch in &input_batches {
+        let col = batch.column_by_name("id").unwrap();
+        let arr = col.as_any().downcast_ref::<Int32Array>().unwrap();
+        input_ids.extend(arr.iter());
+
+        let col = batch.column_by_name("int8_col").unwrap();
+        let arr = col.as_any().downcast_ref::<Int8Array>().unwrap();
+        input_int8s.extend(arr.iter());
+
+        let col = batch.column_by_name("int16_col").unwrap();
+        let arr = col.as_any().downcast_ref::<Int16Array>().unwrap();
+        input_int16s.extend(arr.iter());
+
+        let col = batch.column_by_name("int64_col").unwrap();
+        let arr = col.as_any().downcast_ref::<Int64Array>().unwrap();
+        input_int64s.extend(arr.iter());
+
+        let col = batch.column_by_name("uint32_col").unwrap();
+        let arr = col.as_any().downcast_ref::<UInt32Array>().unwrap();
+        input_uint32s.extend(arr.iter());
+
+        let col = batch.column_by_name("float32_col").unwrap();
+        let arr = col.as_any().downcast_ref::<Float32Array>().unwrap();
+        input_float32s.extend(arr.iter());
+
+        let col = batch.column_by_name("float64_col").unwrap();
+        let arr = col.as_any().downcast_ref::<Float64Array>().unwrap();
+        input_float64s.extend(arr.iter());
+
+        let col = batch.column_by_name("bool_col").unwrap();
+        let arr = col.as_any().downcast_ref::<BooleanArray>().unwrap();
+        input_bools.extend(arr.iter());
+
+        let col = batch.column_by_name("nullable_int").unwrap();
+        let arr = col.as_any().downcast_ref::<Int32Array>().unwrap();
+        input_nullable_ints.extend(arr.iter());
+
+        let col = batch.column_by_name("timestamp_col").unwrap();
+        let arr = col
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .unwrap();
+        input_timestamps.extend(arr.iter());
+    }
+
+    let input_strings = extract_strings(&input_batches, "string_col");
+    let input_nullable_strings = extract_strings(&input_batches, "nullable_string");
+
+    // extract values from output file
+    let mut output_ids = Vec::new();
+    let mut output_int8s = Vec::new();
+    let mut output_int16s = Vec::new();
+    let mut output_int64s = Vec::new();
+    let mut output_uint32s = Vec::new();
+    let mut output_float32s = Vec::new();
+    let mut output_float64s = Vec::new();
+    let mut output_bools = Vec::new();
+    let mut output_nullable_ints = Vec::new();
+    let mut output_timestamps = Vec::new();
+
+    for batch in &output_batches {
+        let col = batch.column_by_name("id").unwrap();
+        let arr = col.as_any().downcast_ref::<Int32Array>().unwrap();
+        output_ids.extend(arr.iter());
+
+        let col = batch.column_by_name("int8_col").unwrap();
+        let arr = col.as_any().downcast_ref::<Int8Array>().unwrap();
+        output_int8s.extend(arr.iter());
+
+        let col = batch.column_by_name("int16_col").unwrap();
+        let arr = col.as_any().downcast_ref::<Int16Array>().unwrap();
+        output_int16s.extend(arr.iter());
+
+        let col = batch.column_by_name("int64_col").unwrap();
+        let arr = col.as_any().downcast_ref::<Int64Array>().unwrap();
+        output_int64s.extend(arr.iter());
+
+        let col = batch.column_by_name("uint32_col").unwrap();
+        let arr = col.as_any().downcast_ref::<UInt32Array>().unwrap();
+        output_uint32s.extend(arr.iter());
+
+        let col = batch.column_by_name("float32_col").unwrap();
+        let arr = col.as_any().downcast_ref::<Float32Array>().unwrap();
+        output_float32s.extend(arr.iter());
+
+        let col = batch.column_by_name("float64_col").unwrap();
+        let arr = col.as_any().downcast_ref::<Float64Array>().unwrap();
+        output_float64s.extend(arr.iter());
+
+        let col = batch.column_by_name("bool_col").unwrap();
+        let arr = col.as_any().downcast_ref::<BooleanArray>().unwrap();
+        output_bools.extend(arr.iter());
+
+        let col = batch.column_by_name("nullable_int").unwrap();
+        let arr = col.as_any().downcast_ref::<Int32Array>().unwrap();
+        output_nullable_ints.extend(arr.iter());
+
+        let col = batch.column_by_name("timestamp_col").unwrap();
+        let arr = col
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .unwrap();
+        output_timestamps.extend(arr.iter());
+    }
+
+    let output_strings = extract_strings(&output_batches, "string_col");
+    let output_nullable_strings = extract_strings(&output_batches, "nullable_string");
+
+    // compare input vs output directly
+    assert_eq!(input_ids, output_ids, "id values should match");
+    assert_eq!(input_int8s, output_int8s, "int8 values should match");
+    assert_eq!(input_int16s, output_int16s, "int16 values should match");
+    assert_eq!(input_int64s, output_int64s, "int64 values should match");
+    assert_eq!(input_uint32s, output_uint32s, "uint32 values should match");
+    assert_eq!(
+        input_float32s, output_float32s,
+        "float32 values should match"
+    );
+    assert_eq!(
+        input_float64s, output_float64s,
+        "float64 values should match"
+    );
+    assert_eq!(input_bools, output_bools, "bool values should match");
+    assert_eq!(input_strings, output_strings, "string values should match");
+    assert_eq!(
+        input_nullable_ints, output_nullable_ints,
+        "nullable int values should match"
+    );
+    assert_eq!(
+        input_nullable_strings, output_nullable_strings,
+        "nullable string values should match"
+    );
+    assert_eq!(
+        input_timestamps, output_timestamps,
+        "timestamp values should match"
+    );
+}

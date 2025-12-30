@@ -1,2 +1,7 @@
-[build]
+# xcode 15 comes with ld-prime, which beats lld on macos
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+
+[target.aarch64-unknown-linux-gnu]
 rustflags = ["-C", "link-arg=-fuse-ld=lld"]

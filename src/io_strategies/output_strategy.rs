@@ -13,7 +13,10 @@ use crate::{
         path_template::PathTemplate,
     },
     sinks::data_sink::DataSink,
-    utils::filesystem::ensure_parent_dir_exists,
+    utils::{
+        filesystem::ensure_parent_dir_exists,
+        projected_stream::project_stream_with_excluded_column_names,
+    },
 };
 
 pub type TableName = String;
@@ -71,43 +74,25 @@ impl OutputStrategy {
                         .context(format!("Failed to create parent directory for '{}'", path))?;
                 }
 
-                let mut schema = stream.schema();
-
-                let projected_column_indices: Option<Vec<usize>> = if !exclude_columns.is_empty() {
-                    Some(
-                        (0..schema.fields().len())
-                            .filter(|i| !exclude_columns.contains(schema.field(*i).name()))
-                            .collect(),
-                    )
+                let stream = if exclude_columns.is_empty() {
+                    stream
                 } else {
-                    None
+                    project_stream_with_excluded_column_names(
+                        stream,
+                        &exclude_columns
+                            .iter()
+                            .map(|c| c.as_str())
+                            .collect::<Vec<&str>>(),
+                    )?
                 };
 
-                if let Some(ref indices) = projected_column_indices {
-                    let projected_schema = Arc::new(schema.project(indices)?);
-                    schema = projected_schema;
-                }
+                let mut sink = sink_factory(path.clone(), Arc::clone(&stream.schema()))?;
 
-                let mut sink = sink_factory(path.clone(), Arc::clone(&schema))?;
-                let mut row_count = 0u64;
-
-                if let Some(indices) = projected_column_indices {
-                    let mut stream = Box::pin(stream);
-                    while let Some(result) = stream.next().await {
-                        let batch = result?;
-                        row_count += batch.num_rows() as u64;
-                        let projected_batch = batch.project(&indices)?;
-                        sink.write_batch(projected_batch).await?;
-                    }
-                    sink.finish().await?;
-                } else {
-                    let result = sink.write_stream(stream).await?;
-                    row_count = result.rows_written;
-                }
+                let result = sink.write_stream(stream).await?;
 
                 Ok(vec![OutputFileInfo {
                     path: path.clone(),
-                    row_count,
+                    row_count: result.rows_written,
                     partition_values: vec![],
                 }])
             }
@@ -123,6 +108,13 @@ impl OutputStrategy {
                 let partitioner = Partitioner::new(columns.clone());
                 let column_order = columns.clone();
                 let schema = stream.schema();
+
+                for col_name in exclude_columns.iter() {
+                    schema
+                        .column_with_name(col_name)
+                        .ok_or_else(|| anyhow!("Column '{col_name}' not found in schema"))?;
+                }
+
                 let projected_column_indices: Option<Vec<usize>> = if !exclude_columns.is_empty() {
                     Some(
                         (0..schema.fields().len())

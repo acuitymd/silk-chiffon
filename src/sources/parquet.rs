@@ -1,9 +1,6 @@
-use std::{
-    fs::File,
-    sync::{Arc, Mutex},
-};
+use std::{fs::File, sync::Arc};
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use datafusion::{
@@ -18,15 +15,11 @@ use crate::sources::data_source::DataSource;
 #[derive(Debug)]
 pub struct ParquetDataSource {
     path: String,
-    schema: Mutex<Option<SchemaRef>>,
 }
 
 impl ParquetDataSource {
     pub fn new(path: String) -> Self {
-        Self {
-            path,
-            schema: Mutex::new(None),
-        }
+        Self { path }
     }
 }
 
@@ -37,16 +30,8 @@ impl DataSource for ParquetDataSource {
     }
 
     fn schema(&self) -> Result<SchemaRef> {
-        let mut guard = self
-            .schema
-            .lock()
-            .map_err(|e| anyhow!("Failed to lock schema: {}", e))?;
-        if let Some(ref schema) = *guard {
-            return Ok(Arc::clone(schema));
-        }
         let file = File::open(&self.path)?;
         let reader = ParquetRecordBatchReaderBuilder::try_new(file)?;
-        *guard = Some(Arc::clone(reader.schema()));
         Ok(Arc::clone(reader.schema()))
     }
 
