@@ -19,6 +19,8 @@ anyhow = "^1.0.100"
 async-stream = "0.3"
 async-trait = "^0.1.89"
 arrow = { version = "^57.0.0", features = ["default", "ipc_compression"] }
+camino = { version = "1.2.2", features = ["serde1"] }
+chrono = "0.4.42"
 clap = { version = "^4.5.53", features = ["default", "derive"] }
 clap_complete = "^4.5"
 datafusion = { git = "https://github.com/apache/datafusion.git", rev = "1cc9bcd52e5901f9085864c032c5f51a1932a075" }
@@ -49,9 +51,12 @@ tokio-par-util = "0.2.0"
 tokio-stream = "0.1.17"
 tokio-util = "0.7.17"
 uuid = { version = "^1.18.1", features = ["v4"] }
+humansize = "2.1"
+num-format = "0.4"
 
 # Vortex support (Arrow 56 - compatible with our Arrow 57)
 vortex = { version = "0.56.0", features = ["tokio", "files"] }
+vortex-array = "0.56.0"
 vortex-session = "0.56.0"
 arrow-array = "56"
 arrow-ipc = "56"
@@ -80,6 +85,15 @@ debug = true
 
 [profile.dev.package."*"]
 opt-level = 2 # optimize deps, not your code
+
+[profile.profiling]
+inherits = "release"
+debug = true
+
+# NOTE: native profile requires RUSTFLAGS="-C target-cpu=native"
+# use `just build-native` which sets this automatically
+[profile.native]
+inherits = "release"
 
 [lints.clippy]
 case_sensitive_file_extension_comparisons = "warn"
