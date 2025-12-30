@@ -15,10 +15,12 @@ use arrow::{array::RecordBatch, compute::BatchCoalescer, datatypes::SchemaRef};
 use futures::{StreamExt, TryStreamExt};
 use parquet::{
     arrow::{
-        ArrowWriter,
-        arrow_writer::{ArrowColumnChunk, ArrowLeafColumn, compute_leaves},
+        ArrowSchemaConverter,
+        arrow_writer::{
+            ArrowColumnChunk, ArrowLeafColumn, ArrowRowGroupWriterFactory, compute_leaves,
+        },
     },
-    file::properties::WriterProperties,
+    file::{properties::WriterProperties, writer::SerializedFileWriter},
 };
 use tokio::sync::mpsc;
 use tokio_par_util::StreamParExt;
@@ -30,14 +32,11 @@ const WRITER_BUFFER_SIZE: usize = 32 * 1024 * 1024;
 /// Encode a single row group with columns processed in parallel.
 async fn encode_row_group(
     schema: SchemaRef,
-    props: WriterProperties,
     row_group_index: usize,
+    row_group_factory: Arc<ArrowRowGroupWriterFactory>,
     batch: RecordBatch,
 ) -> Result<EncodedRowGroup> {
     let num_rows = batch.num_rows();
-    let buffer = Vec::new();
-    let arrow_writer = ArrowWriter::try_new(buffer, Arc::clone(&schema), Some(props.clone()))?;
-    let (_, row_group_factory) = arrow_writer.into_serialized_writer()?;
     let column_writers = row_group_factory.create_column_writers(row_group_index)?;
 
     let num_leaf_columns = column_writers.len();
@@ -111,9 +110,19 @@ impl StreamParquetWriter {
             .await
             .map_err(|e| anyhow!("file create panicked: {e}"))??;
 
-            let arrow_writer =
-                ArrowWriter::try_new(file, Arc::clone(&schema), Some(props.clone()))?;
-            let (file_writer, _) = arrow_writer.into_serialized_writer()?;
+            let props = Arc::new(props);
+            let parquet_schema = ArrowSchemaConverter::new()
+                .with_coerce_types(props.coerce_types())
+                .convert(&schema)?;
+            let file_writer = SerializedFileWriter::new(
+                file,
+                parquet_schema.root_schema_ptr(),
+                Arc::clone(&props),
+            )?;
+            let row_group_factory = Arc::new(ArrowRowGroupWriterFactory::new(
+                &file_writer,
+                Arc::clone(&schema),
+            ));
             let file_writer = Arc::new(Mutex::new(Some(file_writer)));
 
             let cancel_on_err = task_token.clone();
@@ -122,8 +131,8 @@ impl StreamParquetWriter {
                 .enumerate()
                 .map(|(idx, batch)| {
                     let schema = Arc::clone(&schema);
-                    let props = props.clone();
-                    async move { encode_row_group(schema, props, idx, batch).await }
+                    let row_group_factory = Arc::clone(&row_group_factory);
+                    async move { encode_row_group(schema, idx, row_group_factory, batch).await }
                 })
                 .parallel_buffered_with_token(concurrency, task_token.clone())
                 .and_then(|encoded| {
