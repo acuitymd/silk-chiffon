@@ -10,7 +10,7 @@ use std::hint::black_box;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
-use silk_chiffon::sinks::parquet::StreamParquetWriter;
+use silk_chiffon::sinks::parquet::{StreamParquetWriter, recommended_concurrency};
 use tempfile::tempdir;
 use tokio::runtime::Runtime;
 
@@ -258,10 +258,7 @@ fn bench_stream_parallel(c: &mut Criterion) {
         let template = BatchTemplate::new(&schema, INPUT_BATCH_SIZE);
         let size = template.estimated_row_size() * config.rows as u64;
 
-        let cpu_parallelism = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4);
-        let concurrency = (cpu_parallelism / config.cols + 1).max(4);
+        let concurrency = recommended_concurrency(config.cols);
 
         group.throughput(Throughput::Bytes(size));
         group.bench_with_input(

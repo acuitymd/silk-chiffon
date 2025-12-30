@@ -1,6 +1,6 @@
 mod stream_writer;
 
-pub use stream_writer::StreamParquetWriter;
+pub use stream_writer::{StreamParquetWriter, recommended_concurrency};
 
 use parquet::{
     file::{

@@ -51,10 +51,6 @@ impl ProjectedStream {
             schema,
         })
     }
-
-    pub fn indices(&self) -> &[usize] {
-        &self.indices
-    }
 }
 
 impl Stream for ProjectedStream {
