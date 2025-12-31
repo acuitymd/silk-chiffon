@@ -795,6 +795,10 @@ pub struct TransformCommand {
     #[arg(long, short = 'l', value_enum, requires = "to_many")]
     pub list_outputs: Option<ListOutputsFormat>,
 
+    /// Write output file listing to a file instead of stdout.
+    #[arg(long, requires = "list_outputs")]
+    pub list_outputs_file: Option<Utf8PathBuf>,
+
     /// Create directories as needed.
     #[arg(long, default_value_t = true)]
     pub create_dirs: bool,

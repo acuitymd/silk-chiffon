@@ -1,5 +1,6 @@
 use anyhow::Result;
 use arrow::array::{Array, Int32Array, Int64Array, StringArray};
+use camino::Utf8PathBuf;
 use silk_chiffon::{
     AllColumnsBloomFilterConfig, ArrowCompression, ArrowIPCFormat, ColumnSpecificBloomFilterConfig,
     DataFormat, ListOutputsFormat, ParquetCompression, ParquetStatistics, ParquetWriterVersion,
@@ -92,6 +93,7 @@ mod test_helpers {
 
 use arrow::array::RecordBatch;
 use arrow::datatypes::{DataType, Field, Schema};
+use std::path::Path;
 use std::sync::Arc;
 
 #[tokio::test]
@@ -112,6 +114,7 @@ async fn test_transform_arrow_to_arrow_basic() {
         by: None,
         exclude_columns: vec![],
         list_outputs: None,
+        list_outputs_file: None,
         create_dirs: true,
         overwrite: false,
         query: None,
@@ -163,6 +166,7 @@ async fn test_transform_arrow_to_parquet() {
         by: None,
         exclude_columns: vec![],
         list_outputs: None,
+        list_outputs_file: None,
         create_dirs: true,
         overwrite: false,
         query: None,
@@ -215,6 +219,7 @@ async fn test_transform_parquet_to_arrow() {
         by: None,
         exclude_columns: vec![],
         list_outputs: None,
+        list_outputs_file: None,
         create_dirs: true,
         overwrite: false,
         query: None,
@@ -266,6 +271,7 @@ async fn test_transform_parquet_to_parquet() {
         by: None,
         exclude_columns: vec![],
         list_outputs: None,
+        list_outputs_file: None,
         create_dirs: true,
         overwrite: false,
         query: None,
@@ -324,6 +330,7 @@ async fn test_transform_from_many_basic() {
         by: None,
         exclude_columns: vec![],
         list_outputs: None,
+        list_outputs_file: None,
         create_dirs: true,
         overwrite: false,
         query: None,
@@ -383,6 +390,7 @@ async fn test_transform_from_many_with_glob() {
         by: None,
         exclude_columns: vec![],
         list_outputs: None,
+        list_outputs_file: None,
         create_dirs: true,
         overwrite: false,
         query: None,
@@ -435,6 +443,7 @@ async fn test_transform_to_many_partitioned() {
         by: Some("name".to_string()),
         exclude_columns: vec![],
         list_outputs: None,
+        list_outputs_file: None,
         create_dirs: false,
         overwrite: false,
         query: None,
@@ -494,6 +503,7 @@ async fn test_transform_with_query() {
         by: None,
         exclude_columns: vec![],
         list_outputs: None,
+        list_outputs_file: None,
         create_dirs: true,
         overwrite: false,
         query: Some("SELECT * FROM data WHERE id > 1".to_string()),
@@ -545,6 +555,7 @@ async fn test_transform_with_sorting() {
         by: None,
         exclude_columns: vec![],
         list_outputs: None,
+        list_outputs_file: None,
         create_dirs: true,
         overwrite: false,
         query: None,
@@ -608,6 +619,7 @@ async fn test_transform_with_arrow_compression() {
         by: None,
         exclude_columns: vec![],
         list_outputs: None,
+        list_outputs_file: None,
         create_dirs: true,
         overwrite: false,
         query: None,
@@ -663,6 +675,7 @@ async fn test_transform_with_parquet_bloom_filters() {
         by: None,
         exclude_columns: vec![],
         list_outputs: None,
+        list_outputs_file: None,
         create_dirs: true,
         overwrite: false,
         query: None,
@@ -721,6 +734,7 @@ async fn test_transform_with_sorted_metadata() {
         by: None,
         exclude_columns: vec![],
         list_outputs: None,
+        list_outputs_file: None,
         create_dirs: true,
         overwrite: false,
         query: None,
@@ -781,6 +795,7 @@ async fn test_transform_partition_with_create_dirs() {
         by: Some("name".to_string()),
         exclude_columns: vec![],
         list_outputs: None,
+        list_outputs_file: None,
         create_dirs: true,
         overwrite: false,
         query: None,
@@ -835,6 +850,7 @@ async fn test_transform_partition_with_overwrite() {
         by: Some("name".to_string()),
         exclude_columns: vec![],
         list_outputs: None,
+        list_outputs_file: None,
         create_dirs: false,
         overwrite: false,
         query: None,
@@ -873,6 +889,7 @@ async fn test_transform_partition_with_overwrite() {
         by: Some("name".to_string()),
         exclude_columns: vec![],
         list_outputs: None,
+        list_outputs_file: None,
         create_dirs: false,
         overwrite: true,
         query: None,
@@ -917,6 +934,7 @@ async fn test_transform_from_many_empty_glob() {
         by: None,
         exclude_columns: vec![],
         list_outputs: None,
+        list_outputs_file: None,
         create_dirs: true,
         overwrite: false,
         query: None,
@@ -972,6 +990,7 @@ async fn test_transform_partition_exclude_columns() {
         by: Some("name".to_string()),
         exclude_columns: vec!["name".to_string()],
         list_outputs: None,
+        list_outputs_file: None,
         create_dirs: false,
         overwrite: false,
         query: None,
@@ -1026,6 +1045,7 @@ async fn test_transform_with_projection_query() {
         by: None,
         exclude_columns: vec![],
         list_outputs: None,
+        list_outputs_file: None,
         create_dirs: true,
         overwrite: false,
         query: Some("SELECT id FROM data".to_string()),
@@ -1078,6 +1098,7 @@ async fn test_transform_with_aggregation_query() {
         by: None,
         exclude_columns: vec![],
         list_outputs: None,
+        list_outputs_file: None,
         create_dirs: true,
         overwrite: false,
         query: Some("SELECT COUNT(*) as count FROM data".to_string()),
@@ -1135,6 +1156,7 @@ async fn test_transform_query_and_sort_combined() {
         by: None,
         exclude_columns: vec![],
         list_outputs: None,
+        list_outputs_file: None,
         create_dirs: true,
         overwrite: false,
         query: Some("SELECT * FROM data WHERE id > 1".to_string()),
@@ -1210,6 +1232,7 @@ async fn test_transform_multi_column_sort() {
         by: None,
         exclude_columns: vec![],
         list_outputs: None,
+        list_outputs_file: None,
         create_dirs: true,
         overwrite: false,
         query: None,
@@ -1290,6 +1313,7 @@ async fn test_transform_sort_descending() {
         by: None,
         exclude_columns: vec![],
         list_outputs: None,
+        list_outputs_file: None,
         create_dirs: true,
         overwrite: false,
         query: None,
@@ -1364,6 +1388,7 @@ async fn test_transform_parquet_compression_gzip() {
         by: None,
         exclude_columns: vec![],
         list_outputs: None,
+        list_outputs_file: None,
         create_dirs: true,
         overwrite: false,
         query: None,
@@ -1416,6 +1441,7 @@ async fn test_transform_parquet_compression_lz4() {
         by: None,
         exclude_columns: vec![],
         list_outputs: None,
+        list_outputs_file: None,
         create_dirs: true,
         overwrite: false,
         query: None,
@@ -1468,6 +1494,7 @@ async fn test_transform_parquet_bloom_all() {
         by: None,
         exclude_columns: vec![],
         list_outputs: None,
+        list_outputs_file: None,
         create_dirs: true,
         overwrite: false,
         query: None,
@@ -1522,6 +1549,7 @@ async fn test_transform_parquet_statistics() {
         by: None,
         exclude_columns: vec![],
         list_outputs: None,
+        list_outputs_file: None,
         create_dirs: true,
         overwrite: false,
         query: None,
@@ -1573,6 +1601,7 @@ async fn test_transform_parquet_writer_version() {
         by: None,
         exclude_columns: vec![],
         list_outputs: None,
+        list_outputs_file: None,
         create_dirs: true,
         overwrite: false,
         query: None,
@@ -1624,6 +1653,7 @@ async fn test_transform_parquet_no_dictionary() {
         by: None,
         exclude_columns: vec![],
         list_outputs: None,
+        list_outputs_file: None,
         create_dirs: true,
         overwrite: false,
         query: None,
@@ -1676,6 +1706,7 @@ async fn test_transform_parquet_column_no_dictionary() {
         by: None,
         exclude_columns: vec![],
         list_outputs: None,
+        list_outputs_file: None,
         create_dirs: true,
         overwrite: false,
         query: None,
@@ -1728,6 +1759,7 @@ async fn test_transform_parquet_column_dictionary() {
         by: None,
         exclude_columns: vec![],
         list_outputs: None,
+        list_outputs_file: None,
         create_dirs: true,
         overwrite: false,
         query: None,
@@ -1779,6 +1811,7 @@ async fn test_transform_arrow_format_stream() {
         by: None,
         exclude_columns: vec![],
         list_outputs: None,
+        list_outputs_file: None,
         create_dirs: true,
         overwrite: false,
         query: None,
@@ -1830,6 +1863,7 @@ async fn test_transform_arrow_record_batch_size() {
         by: None,
         exclude_columns: vec![],
         list_outputs: None,
+        list_outputs_file: None,
         create_dirs: true,
         overwrite: false,
         query: None,
@@ -1881,6 +1915,7 @@ async fn test_transform_parquet_row_group_size() {
         by: None,
         exclude_columns: vec![],
         list_outputs: None,
+        list_outputs_file: None,
         create_dirs: true,
         overwrite: false,
         query: None,
@@ -1933,6 +1968,7 @@ async fn test_transform_partition_to_parquet() {
         by: Some("name".to_string()),
         exclude_columns: vec![],
         list_outputs: None,
+        list_outputs_file: None,
         create_dirs: false,
         overwrite: false,
         query: None,
@@ -2006,6 +2042,7 @@ async fn test_transform_multi_column_partition() {
         by: Some("year,month".to_string()),
         exclude_columns: vec![],
         list_outputs: None,
+        list_outputs_file: None,
         create_dirs: true,
         overwrite: false,
         query: None,
@@ -2068,6 +2105,7 @@ async fn test_transform_from_many_to_partitioned() {
         by: Some("name".to_string()),
         exclude_columns: vec![],
         list_outputs: None,
+        list_outputs_file: None,
         create_dirs: false,
         overwrite: true,
         query: None,
@@ -2146,6 +2184,7 @@ async fn test_transform_invalid_query() {
         by: None,
         exclude_columns: vec![],
         list_outputs: None,
+        list_outputs_file: None,
         create_dirs: true,
         overwrite: false,
         query: Some("SELECT nonexistent FROM data".to_string()),
@@ -2193,6 +2232,7 @@ async fn test_transform_empty_file() {
         by: None,
         exclude_columns: vec![],
         list_outputs: None,
+        list_outputs_file: None,
         create_dirs: true,
         overwrite: false,
         query: None,
@@ -2244,6 +2284,7 @@ async fn test_transform_bloom_filter_with_custom_ndv() {
         by: None,
         exclude_columns: vec![],
         list_outputs: None,
+        list_outputs_file: None,
         create_dirs: true,
         overwrite: false,
         query: None,
@@ -2298,6 +2339,7 @@ async fn test_transform_bloom_filter_column_specific_with_ndv() {
         by: None,
         exclude_columns: vec![],
         list_outputs: None,
+        list_outputs_file: None,
         create_dirs: true,
         overwrite: false,
         query: None,
@@ -2363,6 +2405,7 @@ async fn test_transform_mixed_parquet_and_arrow_inputs() {
         by: None,
         exclude_columns: vec![],
         list_outputs: None,
+        list_outputs_file: None,
         create_dirs: true,
         overwrite: false,
         query: None,
@@ -2415,6 +2458,7 @@ async fn test_transform_partition_list_outputs_text() {
         by: Some("name".to_string()),
         exclude_columns: vec![],
         list_outputs: Some(ListOutputsFormat::Text),
+        list_outputs_file: None,
         create_dirs: false,
         overwrite: false,
         query: None,
@@ -2469,6 +2513,7 @@ async fn test_transform_partition_list_outputs_json() {
         by: Some("name".to_string()),
         exclude_columns: vec![],
         list_outputs: Some(ListOutputsFormat::Json),
+        list_outputs_file: None,
         create_dirs: false,
         overwrite: false,
         query: None,
@@ -2522,6 +2567,7 @@ async fn test_transform_explicit_input_format_arrow_to_parquet() {
         by: None,
         exclude_columns: vec![],
         list_outputs: None,
+        list_outputs_file: None,
         create_dirs: true,
         overwrite: false,
         query: None,
@@ -2573,6 +2619,7 @@ async fn test_transform_explicit_output_format_parquet() {
         by: None,
         exclude_columns: vec![],
         list_outputs: None,
+        list_outputs_file: None,
         create_dirs: true,
         overwrite: false,
         query: None,
@@ -2624,6 +2671,7 @@ async fn test_transform_arrow_compression_lz4() {
         by: None,
         exclude_columns: vec![],
         list_outputs: None,
+        list_outputs_file: None,
         create_dirs: true,
         overwrite: false,
         query: None,
@@ -2689,6 +2737,7 @@ async fn test_transform_query_with_partition() {
         by: Some("category".to_string()),
         exclude_columns: vec![],
         list_outputs: None,
+        list_outputs_file: None,
         create_dirs: false,
         overwrite: true,
         query: Some("SELECT * FROM data WHERE value > 15".to_string()),
@@ -2760,6 +2809,7 @@ async fn test_transform_query_with_different_dialect() {
         by: None,
         exclude_columns: vec![],
         list_outputs: None,
+        list_outputs_file: None,
         create_dirs: true,
         overwrite: false,
         query: Some("SELECT * FROM data WHERE id >= 2".to_string()),
@@ -2827,6 +2877,7 @@ async fn test_transform_partition_with_query_and_sort() {
         by: Some("region".to_string()),
         exclude_columns: vec![],
         list_outputs: None,
+        list_outputs_file: None,
         create_dirs: false,
         overwrite: false,
         query: Some("SELECT * FROM data WHERE score > 100".to_string()),
@@ -3021,6 +3072,7 @@ async fn test_parquet_roundtrip_data_fidelity() {
         by: None,
         exclude_columns: vec![],
         list_outputs: None,
+        list_outputs_file: None,
         create_dirs: true,
         overwrite: false,
         query: None,
@@ -3071,6 +3123,7 @@ async fn test_parquet_roundtrip_data_fidelity() {
         by: None,
         exclude_columns: vec![],
         list_outputs: None,
+        list_outputs_file: None,
         create_dirs: true,
         overwrite: false,
         query: None,
@@ -3307,4 +3360,1035 @@ async fn test_parquet_roundtrip_data_fidelity() {
         input_timestamps, output_timestamps,
         "timestamp values should match"
     );
+}
+
+/// One-off helper to verify all rows in a batch have the expected partition values.
+/// This is entirely specific to the test data and not generalized at all.
+fn verify_int32_partition_values(
+    batches: &[RecordBatch],
+    expected_year: i32,
+    expected_month: i32,
+    file_path: &str,
+) {
+    for batch in batches {
+        let year_col = batch.column_by_name("year").unwrap();
+        let month_col = batch.column_by_name("month").unwrap();
+        let years = year_col.as_any().downcast_ref::<Int32Array>().unwrap();
+        let months = month_col.as_any().downcast_ref::<Int32Array>().unwrap();
+
+        for i in 0..batch.num_rows() {
+            assert_eq!(
+                years.value(i),
+                expected_year,
+                "Row {} in {} has wrong year: expected {}, got {}",
+                i,
+                file_path,
+                expected_year,
+                years.value(i)
+            );
+            assert_eq!(
+                months.value(i),
+                expected_month,
+                "Row {} in {} has wrong month: expected {}, got {}",
+                i,
+                file_path,
+                expected_month,
+                months.value(i)
+            );
+        }
+    }
+}
+
+fn verify_string_partition_values(
+    batches: &[RecordBatch],
+    expected_region: &str,
+    expected_year: i32,
+    file_path: &str,
+) {
+    for batch in batches {
+        let region_col = batch.column_by_name("region").unwrap();
+        let year_col = batch.column_by_name("year").unwrap();
+        let regions = region_col.as_any().downcast_ref::<StringArray>().unwrap();
+        let years = year_col.as_any().downcast_ref::<Int32Array>().unwrap();
+        for i in 0..batch.num_rows() {
+            assert_eq!(
+                regions.value(i),
+                expected_region,
+                "Row {} in {} has wrong region: expected {}, got {}",
+                i,
+                file_path,
+                expected_region,
+                regions.value(i)
+            );
+            assert_eq!(
+                years.value(i),
+                expected_year,
+                "Row {} in {} has wrong year: expected {}, got {}",
+                i,
+                file_path,
+                expected_year,
+                years.value(i)
+            );
+        }
+    }
+}
+
+fn count_rows(batches: &[RecordBatch]) -> usize {
+    batches.iter().map(|b| b.num_rows()).sum()
+}
+
+#[tokio::test]
+async fn test_multi_column_partition_verifies_data_arrow() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+
+    // IMPORTANT:
+    // We are creating UNSORTED data here. Why, you might ask?
+    // Because the partitioner depends on the data being sorted
+    // in order to function correctly and so we are testing that
+    // transform correctly sorts the data BEFORE partitioning it.
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("year", DataType::Int32, false),
+        Field::new("month", DataType::Int32, false),
+        Field::new("id", DataType::Int32, false),
+    ]));
+
+    // again, data is intentionally not sorted by (year, month)
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            // year: mixed order
+            Arc::new(Int32Array::from(vec![
+                2024, 2023, 2024, 2023, 2024, 2023, 2024, 2023,
+            ])),
+            // month: mixed order
+            Arc::new(Int32Array::from(vec![1, 2, 2, 1, 1, 2, 2, 1])),
+            // id: unique per row for verification
+            Arc::new(Int32Array::from(vec![1, 2, 3, 4, 5, 6, 7, 8])),
+        ],
+    )
+    .unwrap();
+    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+
+    let template = temp_dir.path().join("year={{year}}/month={{month}}.arrow");
+
+    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: None,
+        to_many: Some(template.to_string_lossy().to_string()),
+        by: Some("year,month".to_string()),
+        exclude_columns: vec![],
+        list_outputs: None,
+        list_outputs_file: None,
+        create_dirs: true,
+        overwrite: false,
+        query: None,
+        dialect: QueryDialect::default(),
+        sort_by: None,
+        input_format: None,
+        output_format: Some(DataFormat::Arrow), // be explicit to ensure we are testing the correct format
+        arrow_compression: None,
+        arrow_format: None,
+        arrow_record_batch_size: None,
+        parquet_compression: None,
+        parquet_bloom_all: None,
+        parquet_bloom_column: vec![],
+        parquet_row_group_size: None,
+        parquet_parallelism: None,
+        parquet_statistics: None,
+        parquet_writer_version: None,
+        parquet_no_dictionary: false,
+        parquet_column_dictionary: vec![],
+        parquet_column_no_dictionary: vec![],
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
+        parquet_sorted_metadata: false,
+        vortex_record_batch_size: None,
+    })
+    .await
+    .unwrap();
+
+    let file_2023_1 = temp_dir.path().join("year=2023/month=1.arrow");
+    let file_2023_2 = temp_dir.path().join("year=2023/month=2.arrow");
+    let file_2024_1 = temp_dir.path().join("year=2024/month=1.arrow");
+    let file_2024_2 = temp_dir.path().join("year=2024/month=2.arrow");
+
+    assert!(file_2023_1.exists(), "2023/1 partition file should exist");
+    assert!(file_2023_2.exists(), "2023/2 partition file should exist");
+    assert!(file_2024_1.exists(), "2024/1 partition file should exist");
+    assert!(file_2024_2.exists(), "2024/2 partition file should exist");
+
+    let batches_2023_1 = test_helpers::read_arrow_file(&file_2023_1);
+    let batches_2023_2 = test_helpers::read_arrow_file(&file_2023_2);
+    let batches_2024_1 = test_helpers::read_arrow_file(&file_2024_1);
+    let batches_2024_2 = test_helpers::read_arrow_file(&file_2024_2);
+
+    verify_int32_partition_values(&batches_2023_1, 2023, 1, "2023/1");
+    verify_int32_partition_values(&batches_2023_2, 2023, 2, "2023/2");
+    verify_int32_partition_values(&batches_2024_1, 2024, 1, "2024/1");
+    verify_int32_partition_values(&batches_2024_2, 2024, 2, "2024/2");
+
+    // ids 4 and 8
+    assert_eq!(count_rows(&batches_2023_1), 2, "2023/1 should have 2 rows");
+    // ids 2 and 6
+    assert_eq!(count_rows(&batches_2023_2), 2, "2023/2 should have 2 rows");
+    // ids 1 and 5
+    assert_eq!(count_rows(&batches_2024_1), 2, "2024/1 should have 2 rows");
+    // ids 3 and 7
+    assert_eq!(count_rows(&batches_2024_2), 2, "2024/2 should have 2 rows");
+
+    assert_eq!(
+        count_rows(&batches_2023_1)
+            + count_rows(&batches_2023_2)
+            + count_rows(&batches_2024_1)
+            + count_rows(&batches_2024_2),
+        8,
+        "total rows should match input"
+    );
+}
+
+#[tokio::test]
+async fn test_multi_column_partition_verifies_data_parquet() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("year", DataType::Int32, false),
+        Field::new("month", DataType::Int32, false),
+        Field::new("id", DataType::Int32, false),
+    ]));
+
+    // unsorted data
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(Int32Array::from(vec![
+                2024, 2023, 2024, 2023, 2024, 2023, 2024, 2023,
+            ])),
+            Arc::new(Int32Array::from(vec![1, 2, 2, 1, 1, 2, 2, 1])),
+            Arc::new(Int32Array::from(vec![1, 2, 3, 4, 5, 6, 7, 8])),
+        ],
+    )
+    .unwrap();
+    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+
+    let template = temp_dir
+        .path()
+        .join("year={{year}}/month={{month}}.parquet");
+
+    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: None,
+        to_many: Some(template.to_string_lossy().to_string()),
+        by: Some("year,month".to_string()),
+        exclude_columns: vec![],
+        list_outputs: None,
+        list_outputs_file: None,
+        create_dirs: true,
+        overwrite: false,
+        query: None,
+        dialect: QueryDialect::default(),
+        sort_by: None,
+        input_format: None,
+        output_format: Some(DataFormat::Parquet),
+        arrow_compression: None,
+        arrow_format: None,
+        arrow_record_batch_size: None,
+        parquet_compression: None,
+        parquet_bloom_all: None,
+        parquet_bloom_column: vec![],
+        parquet_row_group_size: None,
+        parquet_parallelism: None,
+        parquet_statistics: None,
+        parquet_writer_version: None,
+        parquet_no_dictionary: false,
+        parquet_column_dictionary: vec![],
+        parquet_column_no_dictionary: vec![],
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
+        parquet_sorted_metadata: false,
+        vortex_record_batch_size: None,
+    })
+    .await
+    .unwrap();
+
+    let file_2023_1 = temp_dir.path().join("year=2023/month=1.parquet");
+    let file_2023_2 = temp_dir.path().join("year=2023/month=2.parquet");
+    let file_2024_1 = temp_dir.path().join("year=2024/month=1.parquet");
+    let file_2024_2 = temp_dir.path().join("year=2024/month=2.parquet");
+
+    assert!(file_2023_1.exists());
+    assert!(file_2023_2.exists());
+    assert!(file_2024_1.exists());
+    assert!(file_2024_2.exists());
+
+    let batches_2023_1 = test_helpers::read_parquet_file(&file_2023_1);
+    let batches_2023_2 = test_helpers::read_parquet_file(&file_2023_2);
+    let batches_2024_1 = test_helpers::read_parquet_file(&file_2024_1);
+    let batches_2024_2 = test_helpers::read_parquet_file(&file_2024_2);
+
+    verify_int32_partition_values(&batches_2023_1, 2023, 1, "2023/1");
+    verify_int32_partition_values(&batches_2023_2, 2023, 2, "2023/2");
+    verify_int32_partition_values(&batches_2024_1, 2024, 1, "2024/1");
+    verify_int32_partition_values(&batches_2024_2, 2024, 2, "2024/2");
+
+    assert_eq!(count_rows(&batches_2023_1), 2);
+    assert_eq!(count_rows(&batches_2023_2), 2);
+    assert_eq!(count_rows(&batches_2024_1), 2);
+    assert_eq!(count_rows(&batches_2024_2), 2);
+}
+
+#[tokio::test]
+async fn test_multi_column_partition_three_columns_arrow() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("year", DataType::Int32, false),
+        Field::new("month", DataType::Int32, false),
+        Field::new("day", DataType::Int32, false),
+        Field::new("id", DataType::Int32, false),
+    ]));
+
+    // unsorted by (year, month, day)
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(Int32Array::from(vec![2024, 2023, 2024, 2023])),
+            Arc::new(Int32Array::from(vec![1, 1, 1, 1])),
+            Arc::new(Int32Array::from(vec![15, 10, 10, 15])),
+            Arc::new(Int32Array::from(vec![1, 2, 3, 4])),
+        ],
+    )
+    .unwrap();
+    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+
+    let template = temp_dir
+        .path()
+        .join("year={{year}}/month={{month}}/day={{day}}.arrow");
+
+    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: None,
+        to_many: Some(template.to_string_lossy().to_string()),
+        by: Some("year,month,day".to_string()),
+        exclude_columns: vec![],
+        list_outputs: None,
+        list_outputs_file: None,
+        create_dirs: true,
+        overwrite: false,
+        query: None,
+        dialect: QueryDialect::default(),
+        sort_by: None,
+        input_format: None,
+        output_format: Some(DataFormat::Arrow),
+        arrow_compression: None,
+        arrow_format: None,
+        arrow_record_batch_size: None,
+        parquet_compression: None,
+        parquet_bloom_all: None,
+        parquet_bloom_column: vec![],
+        parquet_row_group_size: None,
+        parquet_parallelism: None,
+        parquet_statistics: None,
+        parquet_writer_version: None,
+        parquet_no_dictionary: false,
+        parquet_column_dictionary: vec![],
+        parquet_column_no_dictionary: vec![],
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
+        parquet_sorted_metadata: false,
+        vortex_record_batch_size: None,
+    })
+    .await
+    .unwrap();
+
+    let file_2023_1_10 = temp_dir.path().join("year=2023/month=1/day=10.arrow");
+    let file_2023_1_15 = temp_dir.path().join("year=2023/month=1/day=15.arrow");
+    let file_2024_1_10 = temp_dir.path().join("year=2024/month=1/day=10.arrow");
+    let file_2024_1_15 = temp_dir.path().join("year=2024/month=1/day=15.arrow");
+
+    assert!(file_2023_1_10.exists(), "2023/1/10 should exist");
+    assert!(file_2023_1_15.exists(), "2023/1/15 should exist");
+    assert!(file_2024_1_10.exists(), "2024/1/10 should exist");
+    assert!(file_2024_1_15.exists(), "2024/1/15 should exist");
+
+    let batches = test_helpers::read_arrow_file(&file_2023_1_10);
+    assert_eq!(count_rows(&batches), 1);
+    let batches = test_helpers::read_arrow_file(&file_2023_1_15);
+    assert_eq!(count_rows(&batches), 1);
+    let batches = test_helpers::read_arrow_file(&file_2024_1_10);
+    assert_eq!(count_rows(&batches), 1);
+    let batches = test_helpers::read_arrow_file(&file_2024_1_15);
+    assert_eq!(count_rows(&batches), 1);
+}
+
+#[tokio::test]
+async fn test_multi_column_partition_three_columns_parquet() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("year", DataType::Int32, false),
+        Field::new("month", DataType::Int32, false),
+        Field::new("day", DataType::Int32, false),
+        Field::new("id", DataType::Int32, false),
+    ]));
+
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(Int32Array::from(vec![2024, 2023, 2024, 2023])),
+            Arc::new(Int32Array::from(vec![1, 1, 1, 1])),
+            Arc::new(Int32Array::from(vec![15, 10, 10, 15])),
+            Arc::new(Int32Array::from(vec![1, 2, 3, 4])),
+        ],
+    )
+    .unwrap();
+    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+
+    let template = temp_dir
+        .path()
+        .join("year={{year}}/month={{month}}/day={{day}}.parquet");
+
+    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: None,
+        to_many: Some(template.to_string_lossy().to_string()),
+        by: Some("year,month,day".to_string()),
+        exclude_columns: vec![],
+        list_outputs: None,
+        list_outputs_file: None,
+        create_dirs: true,
+        overwrite: false,
+        query: None,
+        dialect: QueryDialect::default(),
+        sort_by: None,
+        input_format: None,
+        output_format: Some(DataFormat::Parquet),
+        arrow_compression: None,
+        arrow_format: None,
+        arrow_record_batch_size: None,
+        parquet_compression: None,
+        parquet_bloom_all: None,
+        parquet_bloom_column: vec![],
+        parquet_row_group_size: None,
+        parquet_parallelism: None,
+        parquet_statistics: None,
+        parquet_writer_version: None,
+        parquet_no_dictionary: false,
+        parquet_column_dictionary: vec![],
+        parquet_column_no_dictionary: vec![],
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
+        parquet_sorted_metadata: false,
+        vortex_record_batch_size: None,
+    })
+    .await
+    .unwrap();
+
+    let file_2023_1_10 = temp_dir.path().join("year=2023/month=1/day=10.parquet");
+    let file_2023_1_15 = temp_dir.path().join("year=2023/month=1/day=15.parquet");
+    let file_2024_1_10 = temp_dir.path().join("year=2024/month=1/day=10.parquet");
+    let file_2024_1_15 = temp_dir.path().join("year=2024/month=1/day=15.parquet");
+
+    assert!(file_2023_1_10.exists(), "2023/1/10 should exist");
+    assert!(file_2023_1_15.exists(), "2023/1/15 should exist");
+    assert!(file_2024_1_10.exists(), "2024/1/10 should exist");
+    assert!(file_2024_1_15.exists(), "2024/1/15 should exist");
+
+    let batches = test_helpers::read_parquet_file(&file_2023_1_10);
+    assert_eq!(count_rows(&batches), 1);
+    let batches = test_helpers::read_parquet_file(&file_2023_1_15);
+    assert_eq!(count_rows(&batches), 1);
+    let batches = test_helpers::read_parquet_file(&file_2024_1_10);
+    assert_eq!(count_rows(&batches), 1);
+    let batches = test_helpers::read_parquet_file(&file_2024_1_15);
+    assert_eq!(count_rows(&batches), 1);
+}
+
+#[tokio::test]
+async fn test_multi_column_partition_mixed_types() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("region", DataType::Utf8, false),
+        Field::new("year", DataType::Int32, false),
+        Field::new("id", DataType::Int32, false),
+    ]));
+
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(StringArray::from(vec![
+                "us-west", "eu-west", "us-west", "eu-west", "us-west", "eu-west",
+            ])),
+            Arc::new(Int32Array::from(vec![2024, 2023, 2023, 2024, 2024, 2023])),
+            Arc::new(Int32Array::from(vec![1, 2, 3, 4, 5, 6])),
+        ],
+    )
+    .unwrap();
+    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+
+    let template = temp_dir
+        .path()
+        .join("region={{region}}/year={{year}}.arrow");
+
+    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: None,
+        to_many: Some(template.to_string_lossy().to_string()),
+        by: Some("region,year".to_string()),
+        exclude_columns: vec![],
+        list_outputs: None,
+        list_outputs_file: None,
+        create_dirs: true,
+        overwrite: false,
+        query: None,
+        dialect: QueryDialect::default(),
+        sort_by: None,
+        input_format: None,
+        output_format: Some(DataFormat::Arrow),
+        arrow_compression: None,
+        arrow_format: None,
+        arrow_record_batch_size: None,
+        parquet_compression: None,
+        parquet_bloom_all: None,
+        parquet_bloom_column: vec![],
+        parquet_row_group_size: None,
+        parquet_parallelism: None,
+        parquet_statistics: None,
+        parquet_writer_version: None,
+        parquet_no_dictionary: false,
+        parquet_column_dictionary: vec![],
+        parquet_column_no_dictionary: vec![],
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
+        parquet_sorted_metadata: false,
+        vortex_record_batch_size: None,
+    })
+    .await
+    .unwrap();
+
+    let file_eu_2023 = temp_dir.path().join("region=eu-west/year=2023.arrow");
+    let file_eu_2024 = temp_dir.path().join("region=eu-west/year=2024.arrow");
+    let file_us_2023 = temp_dir.path().join("region=us-west/year=2023.arrow");
+    let file_us_2024 = temp_dir.path().join("region=us-west/year=2024.arrow");
+
+    assert!(file_eu_2023.exists(), "eu-west/2023 should exist");
+    assert!(file_eu_2024.exists(), "eu-west/2024 should exist");
+    assert!(file_us_2023.exists(), "us-west/2023 should exist");
+    assert!(file_us_2024.exists(), "us-west/2024 should exist");
+
+    // ids 2, 6
+    assert_eq!(count_rows(&test_helpers::read_arrow_file(&file_eu_2023)), 2);
+    // id 4
+    assert_eq!(count_rows(&test_helpers::read_arrow_file(&file_eu_2024)), 1);
+    // id 3
+    assert_eq!(count_rows(&test_helpers::read_arrow_file(&file_us_2023)), 1);
+    // ids 1, 5
+    assert_eq!(count_rows(&test_helpers::read_arrow_file(&file_us_2024)), 2);
+
+    let file_eu_2023_batches = test_helpers::read_arrow_file(&file_eu_2023);
+    let file_eu_2024_batches = test_helpers::read_arrow_file(&file_eu_2024);
+    let file_us_2023_batches = test_helpers::read_arrow_file(&file_us_2023);
+    let file_us_2024_batches = test_helpers::read_arrow_file(&file_us_2024);
+
+    verify_string_partition_values(&file_eu_2023_batches, "eu-west", 2023, "eu-west/2023");
+    verify_string_partition_values(&file_eu_2024_batches, "eu-west", 2024, "eu-west/2024");
+    verify_string_partition_values(&file_us_2023_batches, "us-west", 2023, "us-west/2023");
+    verify_string_partition_values(&file_us_2024_batches, "us-west", 2024, "us-west/2024");
+}
+
+#[tokio::test]
+async fn test_multi_column_partition_parquet_with_exclude() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("year", DataType::Int32, false),
+        Field::new("month", DataType::Int32, false),
+        Field::new("id", DataType::Int32, false),
+    ]));
+
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(Int32Array::from(vec![2023, 2024])),
+            Arc::new(Int32Array::from(vec![1, 1])),
+            Arc::new(Int32Array::from(vec![100, 200])),
+        ],
+    )
+    .unwrap();
+    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+
+    let template = temp_dir
+        .path()
+        .join("year={{year}}/month={{month}}.parquet");
+
+    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: None,
+        to_many: Some(template.to_string_lossy().to_string()),
+        by: Some("year,month".to_string()),
+        exclude_columns: vec!["year".to_string(), "month".to_string()],
+        list_outputs: None,
+        list_outputs_file: None,
+        create_dirs: true,
+        overwrite: false,
+        query: None,
+        dialect: QueryDialect::default(),
+        sort_by: None,
+        input_format: None,
+        output_format: Some(DataFormat::Parquet),
+        arrow_compression: None,
+        arrow_format: None,
+        arrow_record_batch_size: None,
+        parquet_compression: None,
+        parquet_bloom_all: None,
+        parquet_bloom_column: vec![],
+        parquet_row_group_size: None,
+        parquet_parallelism: None,
+        parquet_statistics: None,
+        parquet_writer_version: None,
+        parquet_no_dictionary: false,
+        parquet_column_dictionary: vec![],
+        parquet_column_no_dictionary: vec![],
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
+        parquet_sorted_metadata: false,
+        vortex_record_batch_size: None,
+    })
+    .await
+    .unwrap();
+
+    let file_2023 = temp_dir.path().join("year=2023/month=1.parquet");
+    let file_2024 = temp_dir.path().join("year=2024/month=1.parquet");
+
+    assert!(file_2023.exists());
+    assert!(file_2024.exists());
+
+    // verify partition columns are excluded from file
+    let batches = test_helpers::read_parquet_file(&file_2023);
+    assert_eq!(batches[0].num_columns(), 1, "only one column should remain");
+    assert_eq!(
+        batches[0].schema().field(0).name(),
+        "id",
+        "only 'id' column should remain"
+    );
+}
+
+#[tokio::test]
+async fn test_multi_column_partition_arrow_with_exclude() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("year", DataType::Int32, false),
+        Field::new("month", DataType::Int32, false),
+        Field::new("id", DataType::Int32, false),
+    ]));
+
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(Int32Array::from(vec![2023, 2024])),
+            Arc::new(Int32Array::from(vec![1, 1])),
+            Arc::new(Int32Array::from(vec![100, 200])),
+        ],
+    )
+    .unwrap();
+    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+
+    let template = temp_dir.path().join("year={{year}}/month={{month}}.arrow");
+
+    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: None,
+        to_many: Some(template.to_string_lossy().to_string()),
+        by: Some("year,month".to_string()),
+        exclude_columns: vec!["year".to_string(), "month".to_string()],
+        list_outputs: None,
+        list_outputs_file: None,
+        create_dirs: true,
+        overwrite: false,
+        query: None,
+        dialect: QueryDialect::default(),
+        sort_by: None,
+        input_format: None,
+        output_format: Some(DataFormat::Arrow),
+        arrow_compression: None,
+        arrow_format: None,
+        arrow_record_batch_size: None,
+        parquet_compression: None,
+        parquet_bloom_all: None,
+        parquet_bloom_column: vec![],
+        parquet_row_group_size: None,
+        parquet_parallelism: None,
+        parquet_statistics: None,
+        parquet_writer_version: None,
+        parquet_no_dictionary: false,
+        parquet_column_dictionary: vec![],
+        parquet_column_no_dictionary: vec![],
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
+        parquet_sorted_metadata: false,
+        vortex_record_batch_size: None,
+    })
+    .await
+    .unwrap();
+
+    let file_2023 = temp_dir.path().join("year=2023/month=1.arrow");
+    let file_2024 = temp_dir.path().join("year=2024/month=1.arrow");
+
+    assert!(file_2023.exists());
+    assert!(file_2024.exists());
+
+    let batches = test_helpers::read_arrow_file(&file_2023);
+    assert_eq!(batches[0].num_columns(), 1, "only one column should remain");
+    assert_eq!(
+        batches[0].schema().field(0).name(),
+        "id",
+        "only 'id' column should remain"
+    );
+}
+
+#[tokio::test]
+async fn test_multi_column_partition_verifies_output_paths_arrow() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let list_output = temp_dir.path().join("outputs.json");
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("year", DataType::Int32, false),
+        Field::new("month", DataType::Int32, false),
+        Field::new("id", DataType::Int32, false),
+    ]));
+
+    // unsorted data to ensure sorting happens
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(Int32Array::from(vec![2024, 2023, 2024, 2023])),
+            Arc::new(Int32Array::from(vec![12, 6, 6, 12])),
+            Arc::new(Int32Array::from(vec![1, 2, 3, 4])),
+        ],
+    )
+    .unwrap();
+    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+
+    let template = temp_dir
+        .path()
+        .join("data/year={{year}}/month={{month}}/data.arrow");
+
+    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: None,
+        to_many: Some(template.to_string_lossy().to_string()),
+        by: Some("year,month".to_string()),
+        exclude_columns: vec![],
+        list_outputs: Some(ListOutputsFormat::Json),
+        list_outputs_file: Some(Utf8PathBuf::from_path_buf(list_output.clone()).unwrap()),
+        create_dirs: true,
+        overwrite: false,
+        query: None,
+        dialect: QueryDialect::default(),
+        sort_by: None,
+        input_format: None,
+        output_format: Some(DataFormat::Arrow),
+        arrow_compression: None,
+        arrow_format: None,
+        arrow_record_batch_size: None,
+        parquet_compression: None,
+        parquet_bloom_all: None,
+        parquet_bloom_column: vec![],
+        parquet_row_group_size: None,
+        parquet_parallelism: None,
+        parquet_statistics: None,
+        parquet_writer_version: None,
+        parquet_no_dictionary: false,
+        parquet_column_dictionary: vec![],
+        parquet_column_no_dictionary: vec![],
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
+        parquet_sorted_metadata: false,
+        vortex_record_batch_size: None,
+    })
+    .await
+    .unwrap();
+
+    let outputs_json = std::fs::read_to_string(&list_output).unwrap();
+    let outputs: serde_json::Value = serde_json::from_str(&outputs_json).unwrap();
+    let files = outputs.as_array().unwrap();
+    assert_eq!(files.len(), 4, "should have 4 partition files");
+
+    for file in files {
+        let path = file["path"].as_str().unwrap();
+        let partition_values = file["partition_values"].as_array().unwrap();
+
+        assert_eq!(partition_values.len(), 2);
+        assert_eq!(partition_values[0]["column"], "year");
+        assert_eq!(partition_values[1]["column"], "month");
+
+        let year = partition_values[0]["value"].as_i64().unwrap();
+        let month = partition_values[1]["value"].as_i64().unwrap();
+
+        assert!(
+            path.contains(&format!("year={}", year)),
+            "path '{}' should contain year={}",
+            path,
+            year
+        );
+        assert!(
+            path.contains(&format!("month={}", month)),
+            "path '{}' should contain month={}",
+            path,
+            month
+        );
+
+        assert!(
+            std::path::Path::new(path).exists(),
+            "file should exist: {}",
+            path
+        );
+
+        let batches = test_helpers::read_arrow_file(Path::new(path));
+        let expected_year = i32::try_from(year).unwrap();
+        let expected_month = i32::try_from(month).unwrap();
+        for batch in &batches {
+            let years = batch
+                .column_by_name("year")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap();
+            let months = batch
+                .column_by_name("month")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap();
+
+            for i in 0..batch.num_rows() {
+                assert_eq!(
+                    years.value(i),
+                    expected_year,
+                    "file {} row {} should have year={}",
+                    path,
+                    i,
+                    year
+                );
+                assert_eq!(
+                    months.value(i),
+                    expected_month,
+                    "file {} row {} should have month={}",
+                    path,
+                    i,
+                    month
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_multi_column_partition_verifies_output_paths_parquet() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let list_output = temp_dir.path().join("outputs.json");
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("region", DataType::Utf8, false),
+        Field::new("year", DataType::Int32, false),
+        Field::new("id", DataType::Int32, false),
+    ]));
+
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(StringArray::from(vec![
+                "us-east", "eu-west", "us-east", "eu-west",
+            ])),
+            Arc::new(Int32Array::from(vec![2024, 2024, 2023, 2023])),
+            Arc::new(Int32Array::from(vec![1, 2, 3, 4])),
+        ],
+    )
+    .unwrap();
+    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+
+    let template = temp_dir
+        .path()
+        .join("output/region={{region}}/year={{year}}.parquet");
+
+    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: None,
+        to_many: Some(template.to_string_lossy().to_string()),
+        by: Some("region,year".to_string()),
+        exclude_columns: vec![],
+        list_outputs: Some(ListOutputsFormat::Json),
+        list_outputs_file: Some(Utf8PathBuf::from_path_buf(list_output.clone()).unwrap()),
+        create_dirs: true,
+        overwrite: false,
+        query: None,
+        dialect: QueryDialect::default(),
+        sort_by: None,
+        input_format: None,
+        output_format: Some(DataFormat::Parquet),
+        arrow_compression: None,
+        arrow_format: None,
+        arrow_record_batch_size: None,
+        parquet_compression: None,
+        parquet_bloom_all: None,
+        parquet_bloom_column: vec![],
+        parquet_row_group_size: None,
+        parquet_parallelism: None,
+        parquet_statistics: None,
+        parquet_writer_version: None,
+        parquet_no_dictionary: false,
+        parquet_column_dictionary: vec![],
+        parquet_column_no_dictionary: vec![],
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
+        parquet_sorted_metadata: false,
+        vortex_record_batch_size: None,
+    })
+    .await
+    .unwrap();
+
+    let outputs_json = std::fs::read_to_string(&list_output).unwrap();
+    let outputs: serde_json::Value = serde_json::from_str(&outputs_json).unwrap();
+    let files = outputs.as_array().unwrap();
+    assert_eq!(files.len(), 4, "should have 4 partition files");
+
+    for file in files {
+        let path = file["path"].as_str().unwrap();
+        let partition_values = file["partition_values"].as_array().unwrap();
+
+        assert_eq!(partition_values.len(), 2);
+        assert_eq!(partition_values[0]["column"], "region");
+        assert_eq!(partition_values[1]["column"], "year");
+
+        let region = partition_values[0]["value"].as_str().unwrap();
+        let year = partition_values[1]["value"].as_i64().unwrap();
+
+        assert!(
+            path.contains(&format!("region={}", region)),
+            "path '{}' should contain region={}",
+            path,
+            region
+        );
+        assert!(
+            path.contains(&format!("year={}", year)),
+            "path '{}' should contain year={}",
+            path,
+            year
+        );
+
+        assert!(
+            std::path::Path::new(path).exists(),
+            "file should exist: {}",
+            path
+        );
+
+        let batches = test_helpers::read_parquet_file(Path::new(path));
+        let expected_year = i32::try_from(year).unwrap();
+        for batch in &batches {
+            let regions = batch
+                .column_by_name("region")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let years = batch
+                .column_by_name("year")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap();
+
+            for i in 0..batch.num_rows() {
+                assert_eq!(
+                    regions.value(i),
+                    region,
+                    "file {} row {} should have region={}",
+                    path,
+                    i,
+                    region
+                );
+                assert_eq!(
+                    years.value(i),
+                    expected_year,
+                    "file {} row {} should have year={}",
+                    path,
+                    i,
+                    year
+                );
+            }
+        }
+    }
+
+    // verify all 4 expected paths exist with correct partition values
+    let expected_paths = [
+        ("output/region=eu-west/year=2023.parquet", "eu-west", 2023),
+        ("output/region=eu-west/year=2024.parquet", "eu-west", 2024),
+        ("output/region=us-east/year=2023.parquet", "us-east", 2023),
+        ("output/region=us-east/year=2024.parquet", "us-east", 2024),
+    ];
+
+    for (rel_path, expected_region, expected_year) in expected_paths {
+        let full_path = temp_dir.path().join(rel_path);
+        assert!(
+            full_path.exists(),
+            "partition file {} should exist",
+            rel_path
+        );
+
+        // verify file contents match the path
+        let batches = test_helpers::read_parquet_file(&full_path);
+        for batch in &batches {
+            let regions = batch
+                .column_by_name("region")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let years = batch
+                .column_by_name("year")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap();
+
+            for i in 0..batch.num_rows() {
+                assert_eq!(
+                    regions.value(i),
+                    expected_region,
+                    "file {} row {} should have region={}",
+                    rel_path,
+                    i,
+                    expected_region
+                );
+                assert_eq!(
+                    years.value(i),
+                    expected_year,
+                    "file {} row {} should have year={}",
+                    rel_path,
+                    i,
+                    expected_year
+                );
+            }
+        }
+    }
 }
