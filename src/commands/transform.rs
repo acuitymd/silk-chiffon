@@ -18,6 +18,7 @@ use crate::{
 };
 use anyhow::{Result, anyhow};
 use arrow::datatypes::SchemaRef;
+use camino::Utf8Path;
 use glob::glob;
 use owo_colors::OwoColorize;
 use tabled::{builder::Builder, settings::Style};
@@ -31,6 +32,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         by,
         exclude_columns,
         list_outputs,
+        list_outputs_file,
         create_dirs,
         overwrite,
         query,
@@ -249,15 +251,19 @@ pub async fn run(args: TransformCommand) -> Result<()> {
     let files = pipeline.execute().await?;
 
     if let Some(format) = list_outputs_format {
-        print_output_files(&files, format)?;
+        print_output_files(&files, format, list_outputs_file.as_deref())?;
     }
 
     Ok(())
 }
 
-fn print_output_files(files: &[OutputFileInfo], format: ListOutputsFormat) -> Result<()> {
-    match format {
-        ListOutputsFormat::None => {}
+fn print_output_files(
+    files: &[OutputFileInfo],
+    format: ListOutputsFormat,
+    output_path: Option<&Utf8Path>,
+) -> Result<()> {
+    let output = match format {
+        ListOutputsFormat::None => return Ok(()),
         ListOutputsFormat::Text => {
             if files.is_empty() {
                 return Ok(());
@@ -277,8 +283,14 @@ fn print_output_files(files: &[OutputFileInfo], format: ListOutputsFormat) -> Re
             header.push("Path".to_string());
             header.push("Row Count".to_string());
 
-            let colored_header: Vec<String> = header.iter().map(|h| h.bold().to_string()).collect();
-            builder.push_record(colored_header);
+            if output_path.is_none() {
+                // writing to stdout, so use colors
+                let colored_header: Vec<String> =
+                    header.iter().map(|h| h.bold().to_string()).collect();
+                builder.push_record(colored_header);
+            } else {
+                builder.push_record(header);
+            }
 
             // sort by path for consistent output
             let mut sorted_files = files.to_vec();
@@ -288,21 +300,38 @@ fn print_output_files(files: &[OutputFileInfo], format: ListOutputsFormat) -> Re
                 let mut row: Vec<String> = file
                     .partition_values
                     .iter()
-                    .map(|pv| format_json_value(&pv.value).green().to_string())
+                    .map(|pv| {
+                        let val = format_json_value(&pv.value);
+                        if output_path.is_none() {
+                            // again, writing to stdout, so use colors
+                            val.green().to_string()
+                        } else {
+                            val
+                        }
+                    })
                     .collect();
                 row.push(file.path.clone());
-                row.push(file.row_count.to_string().cyan().to_string());
+                let row_count = file.row_count.to_string();
+                if output_path.is_none() {
+                    // once again, writing to stdout, so use colors
+                    row.push(row_count.cyan().to_string());
+                } else {
+                    row.push(row_count);
+                }
                 builder.push_record(row);
             }
 
-            let table = builder.build().with(Style::rounded()).to_string();
-            println!("{}", table);
+            builder.build().with(Style::rounded()).to_string()
         }
-        ListOutputsFormat::Json => {
-            let json = serde_json::to_string_pretty(files)?;
-            println!("{}", json);
-        }
+        ListOutputsFormat::Json => serde_json::to_string_pretty(files)?,
+    };
+
+    if let Some(path) = output_path {
+        std::fs::write(path, output)?;
+    } else {
+        println!("{}", output);
     }
+
     Ok(())
 }
 

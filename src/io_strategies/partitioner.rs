@@ -341,6 +341,69 @@ mod tests {
         assert_eq!(results[0].1.num_rows(), 2); // 2024-01
         assert_eq!(results[1].1.num_rows(), 1); // 2024-02
         assert_eq!(results[2].1.num_rows(), 2); // 2025-01
+
+        // verify BOTH partition columns are present and have correct values
+        // partition 0: (2024, 1)
+        assert!(
+            results[0].0.contains_key("year"),
+            "partition 0 missing 'year' key"
+        );
+        assert!(
+            results[0].0.contains_key("month"),
+            "partition 0 missing 'month' key"
+        );
+        let year0 = results[0]
+            .0
+            .get("year")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        let month0 = results[0]
+            .0
+            .get("month")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        assert_eq!(year0.value(0), 2024);
+        assert_eq!(month0.value(0), 1);
+
+        // partition 1: (2024, 2)
+        let year1 = results[1]
+            .0
+            .get("year")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        let month1 = results[1]
+            .0
+            .get("month")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        assert_eq!(year1.value(0), 2024);
+        assert_eq!(month1.value(0), 2);
+
+        // partition 2: (2025, 1)
+        let year2 = results[2]
+            .0
+            .get("year")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        let month2 = results[2]
+            .0
+            .get("month")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        assert_eq!(year2.value(0), 2025);
+        assert_eq!(month2.value(0), 1);
     }
 
     #[tokio::test]
