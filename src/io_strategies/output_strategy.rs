@@ -861,4 +861,259 @@ mod tests {
             "sink should be finished at end of stream"
         );
     }
+
+    #[tokio::test]
+    async fn test_low_cardinality_single_partition() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("category", DataType::Int32, false),
+            Field::new("value", DataType::Int32, false),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 1, 1])),
+                Arc::new(Int32Array::from(vec![10, 20, 30])),
+            ],
+        )
+        .unwrap();
+
+        let stream = create_test_stream(vec![batch]);
+
+        let batches_written = Arc::new(Mutex::new(Vec::new()));
+        let finished = Arc::new(Mutex::new(false));
+        let batches_clone = Arc::clone(&batches_written);
+        let finished_clone = Arc::clone(&finished);
+
+        let sink_factory: SinkFactory = Box::new(move |name, _schema| {
+            Ok(Box::new(MockSink {
+                name,
+                batches: Arc::clone(&batches_clone),
+                finished: Arc::clone(&finished_clone),
+            }))
+        });
+
+        let mut strategy = OutputStrategy::PartitionedLowCardinality {
+            columns: vec!["category".to_string()],
+            template: Box::new(PathTemplate::new("output/{{category}}.parquet".to_string())),
+            sink_factory,
+            exclude_columns: vec![],
+            create_dirs: false,
+            overwrite: false,
+            list_outputs: ListOutputsFormat::None,
+        };
+
+        strategy.write_stream(stream).await.unwrap();
+
+        let batches = batches_written.lock().unwrap();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].num_rows(), 3);
+        assert!(*finished.lock().unwrap(), "sink should be finished");
+    }
+
+    #[tokio::test]
+    async fn test_low_cardinality_interleaved_partitions() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("category", DataType::Utf8, false),
+            Field::new("value", DataType::Int32, false),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(StringArray::from(vec!["a", "b", "a", "b", "c", "a"])),
+                Arc::new(Int32Array::from(vec![1, 2, 3, 4, 5, 6])),
+            ],
+        )
+        .unwrap();
+
+        let stream = create_test_stream(vec![batch]);
+
+        let batches_written = Arc::new(Mutex::new(Vec::new()));
+        let finished_count = Arc::new(Mutex::new(0usize));
+
+        let batches_clone = Arc::clone(&batches_written);
+        let finished_count_clone = Arc::clone(&finished_count);
+
+        let sink_factory: SinkFactory = Box::new(move |name, _schema| {
+            let batches = Arc::clone(&batches_clone);
+            let finished_count = Arc::clone(&finished_count_clone);
+
+            Ok(Box::new(MockSinkWithCallback {
+                name,
+                batches,
+                on_finish: Box::new(move || {
+                    *finished_count.lock().unwrap() += 1;
+                }),
+            }))
+        });
+
+        let mut strategy = OutputStrategy::PartitionedLowCardinality {
+            columns: vec!["category".to_string()],
+            template: Box::new(PathTemplate::new("output/{{category}}.parquet".to_string())),
+            sink_factory,
+            exclude_columns: vec![],
+            create_dirs: false,
+            overwrite: false,
+            list_outputs: ListOutputsFormat::None,
+        };
+
+        strategy.write_stream(stream).await.unwrap();
+
+        let total_rows: usize = batches_written
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|b| b.num_rows())
+            .sum();
+        assert_eq!(total_rows, 6, "all 6 rows should be written");
+
+        assert_eq!(
+            *finished_count.lock().unwrap(),
+            3,
+            "all 3 sinks should be finished"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_low_cardinality_exclude_columns() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("category", DataType::Int32, false),
+            Field::new("value", DataType::Int32, false),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 2, 1, 2])),
+                Arc::new(Int32Array::from(vec![10, 20, 30, 40])),
+            ],
+        )
+        .unwrap();
+
+        let stream = create_test_stream(vec![batch]);
+
+        let batches_written = Arc::new(Mutex::new(Vec::new()));
+        let batches_clone = Arc::clone(&batches_written);
+
+        let sink_factory: SinkFactory = Box::new(move |name, _schema| {
+            Ok(Box::new(MockSink {
+                name,
+                batches: Arc::clone(&batches_clone),
+                finished: Arc::new(Mutex::new(false)),
+            }))
+        });
+
+        let mut strategy = OutputStrategy::PartitionedLowCardinality {
+            columns: vec!["category".to_string()],
+            template: Box::new(PathTemplate::new("output/{{category}}.parquet".to_string())),
+            sink_factory,
+            exclude_columns: vec!["category".to_string()],
+            create_dirs: false,
+            overwrite: false,
+            list_outputs: ListOutputsFormat::None,
+        };
+
+        strategy.write_stream(stream).await.unwrap();
+
+        let batches = batches_written.lock().unwrap();
+        for batch in batches.iter() {
+            assert_eq!(batch.num_columns(), 1);
+            assert_eq!(batch.schema().field(0).name(), "value");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_low_cardinality_multiple_batches() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("category", DataType::Utf8, false),
+            Field::new("value", DataType::Int32, false),
+        ]));
+
+        let batch1 = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(StringArray::from(vec!["x", "y", "x"])),
+                Arc::new(Int32Array::from(vec![1, 2, 3])),
+            ],
+        )
+        .unwrap();
+
+        let batch2 = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(StringArray::from(vec!["y", "x", "y"])),
+                Arc::new(Int32Array::from(vec![4, 5, 6])),
+            ],
+        )
+        .unwrap();
+
+        let stream = create_test_stream(vec![batch1, batch2]);
+
+        let sink_create_count = Arc::new(Mutex::new(0usize));
+        let sink_create_count_clone = Arc::clone(&sink_create_count);
+
+        let batches_written = Arc::new(Mutex::new(Vec::new()));
+        let batches_clone = Arc::clone(&batches_written);
+
+        let sink_factory: SinkFactory = Box::new(move |name, _schema| {
+            *sink_create_count_clone.lock().unwrap() += 1;
+            Ok(Box::new(MockSink {
+                name,
+                batches: Arc::clone(&batches_clone),
+                finished: Arc::new(Mutex::new(false)),
+            }))
+        });
+
+        let mut strategy = OutputStrategy::PartitionedLowCardinality {
+            columns: vec!["category".to_string()],
+            template: Box::new(PathTemplate::new("output/{{category}}.parquet".to_string())),
+            sink_factory,
+            exclude_columns: vec![],
+            create_dirs: false,
+            overwrite: false,
+            list_outputs: ListOutputsFormat::None,
+        };
+
+        strategy.write_stream(stream).await.unwrap();
+
+        assert_eq!(
+            *sink_create_count.lock().unwrap(),
+            2,
+            "should create exactly 2 sinks (x and y)"
+        );
+
+        let total_rows: usize = batches_written
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|b| b.num_rows())
+            .sum();
+        assert_eq!(total_rows, 6, "all 6 rows should be written");
+    }
+
+    struct MockSinkWithCallback {
+        name: String,
+        batches: Arc<Mutex<Vec<RecordBatch>>>,
+        on_finish: Box<dyn Fn() + Send + Sync>,
+    }
+
+    #[async_trait::async_trait]
+    impl DataSink for MockSinkWithCallback {
+        async fn write_batch(&mut self, batch: RecordBatch) -> Result<()> {
+            self.batches
+                .lock()
+                .map_err(|e| anyhow!("Failed to lock batches: {}", e))?
+                .push(batch);
+            Ok(())
+        }
+
+        async fn finish(&mut self) -> Result<SinkResult> {
+            (self.on_finish)();
+            Ok(SinkResult {
+                files_written: vec![self.name.clone().into()],
+                rows_written: 0,
+            })
+        }
+    }
 }
