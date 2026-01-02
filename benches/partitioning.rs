@@ -2,10 +2,15 @@
 //!
 //! High-cardinality: DataFusion sorts the entire stream, then writes to one file at a time.
 //! Low-cardinality: Keeps file handles open per partition, no sorting required.
+//!
+//! Input patterns tested:
+//! - Interleaved: worst case - rows cycle through partitions (p0, p1, p2, p0, p1, ...)
+//! - Sorted: best case - all rows for each partition are contiguous
+//! - Clustered: realistic case - rows come in clusters of ~1000 before switching partitions
 
 use std::sync::Arc;
 
-use arrow::array::{Int32Array, Int64Array, StringArray};
+use arrow::array::{Date32Array, Int16Array, Int32Array};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
@@ -13,6 +18,13 @@ use silk_chiffon::TransformCommand;
 use silk_chiffon::commands::transform;
 use tempfile::TempDir;
 use tokio::runtime::Runtime;
+
+/// Pre-created test files for a benchmark run
+struct TestFixture {
+    _temp_dir: TempDir,
+    input_path: String,
+    output_template: String,
+}
 
 #[derive(Clone, Copy)]
 struct Config {
@@ -27,21 +39,8 @@ impl std::fmt::Display for Config {
     }
 }
 
-const CONFIGS: &[Config] = &[
-    // small dataset, few partitions
-    Config {
-        rows: 100_000,
-        partitions: 4,
-    },
-    Config {
-        rows: 100_000,
-        partitions: 10,
-    },
-    Config {
-        rows: 100_000,
-        partitions: 50,
-    },
-    // medium dataset
+/// Configs for stress-testing: vary partition count to find scaling limits
+const STRESS_CONFIGS: &[Config] = &[
     Config {
         rows: 1_000_000,
         partitions: 4,
@@ -54,7 +53,6 @@ const CONFIGS: &[Config] = &[
         rows: 1_000_000,
         partitions: 50,
     },
-    // larger dataset
     Config {
         rows: 10_000_000,
         partitions: 4,
@@ -69,37 +67,108 @@ const CONFIGS: &[Config] = &[
     },
 ];
 
+/// Realistic configs: 5 partitions (like region/status), varying data sizes
+const REALISTIC_CONFIGS: &[Config] = &[
+    Config {
+        rows: 100_000,
+        partitions: 5,
+    },
+    Config {
+        rows: 1_000_000,
+        partitions: 5,
+    },
+    Config {
+        rows: 10_000_000,
+        partitions: 5,
+    },
+];
+
 fn create_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
-        Field::new("id", DataType::Int64, false),
-        Field::new("partition_key", DataType::Utf8, false),
-        Field::new("value", DataType::Int32, false),
+        Field::new("field1", DataType::Int16, false),
+        Field::new("field2", DataType::Int16, false),
+        Field::new("field3", DataType::Int32, false),
+        Field::new("field4", DataType::Int32, false),
+        Field::new("field5", DataType::Int32, false),
+        Field::new("field6", DataType::Int32, false),
+        Field::new("field7", DataType::Int32, false),
+        Field::new("field8", DataType::Int32, false),
+        Field::new("field9", DataType::Date32, false),
+        Field::new("field10", DataType::Int32, false),
     ]))
 }
 
-/// Create interleaved data - worst case for high-cardinality partitioning.
+/// Build a batch from field1 values (partition keys) and fill other fields with deterministic data.
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+fn build_batch(schema: &SchemaRef, field1_values: Vec<i16>, num_rows: usize) -> RecordBatch {
+    let field2: Vec<i16> = (0..num_rows).map(|i| (i % 100) as i16).collect();
+    let field3: Vec<i32> = (0..num_rows).map(|i| (i * 7) as i32).collect();
+    let field4: Vec<i32> = (0..num_rows).map(|i| (i * 13) as i32).collect();
+    let field5: Vec<i32> = (0..num_rows).map(|i| (i * 17) as i32).collect();
+    let field6: Vec<i32> = (0..num_rows).map(|i| (i * 23) as i32).collect();
+    let field7: Vec<i32> = (0..num_rows).map(|i| (i * 29) as i32).collect();
+    let field8: Vec<i32> = (0..num_rows).map(|i| (i * 31) as i32).collect();
+    // days since unix epoch, spread across ~10 years
+    let field9: Vec<i32> = (0..num_rows).map(|i| 18000 + (i % 3650) as i32).collect();
+    let field10: Vec<i32> = (0..num_rows).map(|i| (i * 41) as i32).collect();
+
+    RecordBatch::try_new(
+        Arc::clone(schema),
+        vec![
+            Arc::new(Int16Array::from(field1_values)),
+            Arc::new(Int16Array::from(field2)),
+            Arc::new(Int32Array::from(field3)),
+            Arc::new(Int32Array::from(field4)),
+            Arc::new(Int32Array::from(field5)),
+            Arc::new(Int32Array::from(field6)),
+            Arc::new(Int32Array::from(field7)),
+            Arc::new(Int32Array::from(field8)),
+            Arc::new(Date32Array::from(field9)),
+            Arc::new(Int32Array::from(field10)),
+        ],
+    )
+    .unwrap()
+}
+
+/// Create interleaved data - worst case for low-cardinality partitioning.
 /// Rows cycle through partition values: p0, p1, p2, ..., pN, p0, p1, ...
+/// This creates maximum slice fragmentation.
 #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
 fn create_interleaved_batch(
     schema: &SchemaRef,
     num_rows: usize,
     num_partitions: usize,
 ) -> RecordBatch {
-    let ids: Vec<i64> = (0..num_rows).map(|i| i as i64).collect();
-    let partition_keys: Vec<String> = (0..num_rows)
-        .map(|i| format!("partition_{}", i % num_partitions))
-        .collect();
-    let values: Vec<i32> = (0..num_rows).map(|i| (i * 7) as i32).collect();
+    let field1: Vec<i16> = (0..num_rows).map(|i| (i % num_partitions) as i16).collect();
+    build_batch(schema, field1, num_rows)
+}
 
-    RecordBatch::try_new(
-        Arc::clone(schema),
-        vec![
-            Arc::new(Int64Array::from(ids)),
-            Arc::new(StringArray::from(partition_keys)),
-            Arc::new(Int32Array::from(values)),
-        ],
-    )
-    .unwrap()
+/// Create sorted data - best case for low-cardinality partitioning.
+/// All rows for partition 0, then all rows for partition 1, etc.
+/// Each partition gets contiguous slices with no fragmentation.
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+fn create_sorted_batch(schema: &SchemaRef, num_rows: usize, num_partitions: usize) -> RecordBatch {
+    let rows_per_partition = num_rows / num_partitions;
+    let field1: Vec<i16> = (0..num_rows)
+        .map(|i| (i / rows_per_partition.max(1)) as i16)
+        .collect();
+    build_batch(schema, field1, num_rows)
+}
+
+/// Create clustered data - realistic case.
+/// Rows come in clusters of ~1000 before switching to next partition.
+/// Simulates data with natural locality (e.g., logs from same region arriving together).
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+fn create_clustered_batch(
+    schema: &SchemaRef,
+    num_rows: usize,
+    num_partitions: usize,
+) -> RecordBatch {
+    const CLUSTER_SIZE: usize = 1000;
+    let field1: Vec<i16> = (0..num_rows)
+        .map(|i| ((i / CLUSTER_SIZE) % num_partitions) as i16)
+        .collect();
+    build_batch(schema, field1, num_rows)
 }
 
 fn write_arrow_file(path: &std::path::Path, schema: &SchemaRef, batches: Vec<RecordBatch>) {
@@ -153,43 +222,75 @@ fn default_transform_command() -> TransformCommand {
     }
 }
 
-fn bench_high_cardinality(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("partition_high_cardinality");
+type BatchCreator = fn(&SchemaRef, usize, usize) -> RecordBatch;
 
-    for config in CONFIGS {
-        let schema = create_schema();
-        // estimate ~30 bytes per row (8 + ~14 + 4 + overhead)
-        let size = (config.rows * 30) as u64;
+fn run_partition_benchmark(
+    c: &mut Criterion,
+    group_name: &str,
+    configs: &[Config],
+    low_cardinality: bool,
+    create_batch: BatchCreator,
+    sample_size: usize,
+) {
+    let rt = Runtime::new().unwrap();
+    let mut group = c.benchmark_group(group_name);
+    group.sample_size(sample_size);
+    let schema = create_schema();
+
+    // create all input files upfront (once per config)
+    const BATCH_SIZE: usize = 128_800;
+    let fixtures: Vec<_> = configs
+        .iter()
+        .map(|config| {
+            let temp_dir = TempDir::new().unwrap();
+            let input = temp_dir.path().join("input.arrow");
+            let full_batch = create_batch(&schema, config.rows, config.partitions);
+            // split into chunks of BATCH_SIZE
+            let batches: Vec<_> = (0..config.rows)
+                .step_by(BATCH_SIZE)
+                .map(|start| {
+                    let len = BATCH_SIZE.min(config.rows - start);
+                    full_batch.slice(start, len)
+                })
+                .collect();
+            write_arrow_file(&input, &schema, batches);
+            TestFixture {
+                input_path: input.to_string_lossy().to_string(),
+                output_template: temp_dir
+                    .path()
+                    .join("out/{{field1}}.parquet")
+                    .to_string_lossy()
+                    .to_string(),
+                _temp_dir: temp_dir,
+            }
+        })
+        .collect();
+
+    for (config, fixture) in configs.iter().zip(fixtures.iter()) {
+        // 36 bytes per row: 2*2 (int16) + 7*4 (int32) + 4 (date32) = 36
+        let size = (config.rows * 36) as u64;
 
         group.throughput(Throughput::Bytes(size));
         group.bench_with_input(
             BenchmarkId::from_parameter(config),
-            &(&schema, config),
-            |b, (schema, config)| {
+            &fixture,
+            |b, fixture| {
                 b.iter(|| {
+                    // clean output dir between iterations
+                    let out_dir = std::path::Path::new(&fixture.output_template)
+                        .parent()
+                        .unwrap();
+                    let _ = std::fs::remove_dir_all(out_dir);
+
+                    let cmd = TransformCommand {
+                        from: Some(fixture.input_path.clone()),
+                        to_many: Some(fixture.output_template.clone()),
+                        by: Some("field1".to_string()),
+                        low_cardinality_partition: low_cardinality,
+                        ..default_transform_command()
+                    };
+
                     rt.block_on(async {
-                        let temp_dir = TempDir::new().unwrap();
-                        let input = temp_dir.path().join("input.arrow");
-                        let output_template = temp_dir
-                            .path()
-                            .join("out/{{partition_key}}.parquet")
-                            .to_string_lossy()
-                            .to_string();
-
-                        // create input with interleaved partition values
-                        let batch =
-                            create_interleaved_batch(schema, config.rows, config.partitions);
-                        write_arrow_file(&input, schema, vec![batch]);
-
-                        let cmd = TransformCommand {
-                            from: Some(input.to_string_lossy().to_string()),
-                            to_many: Some(output_template),
-                            by: Some("partition_key".to_string()),
-                            low_cardinality_partition: false,
-                            ..default_transform_command()
-                        };
-
                         transform::run(cmd).await.unwrap();
                     });
                 });
@@ -200,50 +301,81 @@ fn bench_high_cardinality(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_low_cardinality(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("partition_low_cardinality");
-
-    for config in CONFIGS {
-        let schema = create_schema();
-        let size = (config.rows * 30) as u64;
-
-        group.throughput(Throughput::Bytes(size));
-        group.bench_with_input(
-            BenchmarkId::from_parameter(config),
-            &(&schema, config),
-            |b, (schema, config)| {
-                b.iter(|| {
-                    rt.block_on(async {
-                        let temp_dir = TempDir::new().unwrap();
-                        let input = temp_dir.path().join("input.arrow");
-                        let output_template = temp_dir
-                            .path()
-                            .join("out/{{partition_key}}.parquet")
-                            .to_string_lossy()
-                            .to_string();
-
-                        let batch =
-                            create_interleaved_batch(schema, config.rows, config.partitions);
-                        write_arrow_file(&input, schema, vec![batch]);
-
-                        let cmd = TransformCommand {
-                            from: Some(input.to_string_lossy().to_string()),
-                            to_many: Some(output_template),
-                            by: Some("partition_key".to_string()),
-                            low_cardinality_partition: true,
-                            ..default_transform_command()
-                        };
-
-                        transform::run(cmd).await.unwrap();
-                    });
-                });
-            },
-        );
-    }
-
-    group.finish();
+// stress tests: interleaved (worst) and sorted (best) with varying partition counts
+fn bench_high_card_interleaved(c: &mut Criterion) {
+    run_partition_benchmark(
+        c,
+        "high_card/interleaved",
+        STRESS_CONFIGS,
+        false,
+        create_interleaved_batch,
+        10,
+    );
 }
 
-criterion_group!(benches, bench_high_cardinality, bench_low_cardinality);
+fn bench_high_card_sorted(c: &mut Criterion) {
+    run_partition_benchmark(
+        c,
+        "high_card/sorted",
+        STRESS_CONFIGS,
+        false,
+        create_sorted_batch,
+        30,
+    );
+}
+
+fn bench_low_card_interleaved(c: &mut Criterion) {
+    run_partition_benchmark(
+        c,
+        "low_card/interleaved",
+        STRESS_CONFIGS,
+        true,
+        create_interleaved_batch,
+        10,
+    );
+}
+
+fn bench_low_card_sorted(c: &mut Criterion) {
+    run_partition_benchmark(
+        c,
+        "low_card/sorted",
+        STRESS_CONFIGS,
+        true,
+        create_sorted_batch,
+        30,
+    );
+}
+
+// realistic: 5 partitions, clustered data (like logs from different regions)
+fn bench_high_card_realistic(c: &mut Criterion) {
+    run_partition_benchmark(
+        c,
+        "high_card/realistic",
+        REALISTIC_CONFIGS,
+        false,
+        create_clustered_batch,
+        30,
+    );
+}
+
+fn bench_low_card_realistic(c: &mut Criterion) {
+    run_partition_benchmark(
+        c,
+        "low_card/realistic",
+        REALISTIC_CONFIGS,
+        true,
+        create_clustered_batch,
+        30,
+    );
+}
+
+criterion_group!(
+    benches,
+    bench_low_card_sorted,
+    bench_high_card_sorted,
+    bench_low_card_realistic,
+    bench_high_card_realistic,
+    bench_low_card_interleaved,
+    bench_high_card_interleaved,
+);
 criterion_main!(benches);
