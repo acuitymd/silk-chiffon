@@ -1,6 +1,6 @@
 mod stream_writer;
 
-pub use stream_writer::{StreamParquetWriter, recommended_concurrency};
+pub use stream_writer::{DEFAULT_BUFFER_SIZE, StreamParquetWriter, recommended_concurrency};
 
 use parquet::{
     file::{
@@ -28,6 +28,7 @@ use crate::{
 pub struct ParquetSinkOptions {
     record_batch_size: usize,
     max_row_group_size: usize,
+    buffer_size: usize,
     max_parallelism: Option<usize>,
     sort_spec: SortSpec,
     compression: ParquetCompression,
@@ -54,6 +55,7 @@ impl ParquetSinkOptions {
         Self {
             record_batch_size: 122_880,
             max_row_group_size: 1_048_576,
+            buffer_size: DEFAULT_BUFFER_SIZE,
             max_parallelism: None,
             sort_spec: SortSpec::default(),
             compression: ParquetCompression::default(),
@@ -77,6 +79,11 @@ impl ParquetSinkOptions {
 
     pub fn with_max_row_group_size(mut self, max_row_group_size: usize) -> Self {
         self.max_row_group_size = max_row_group_size;
+        self
+    }
+
+    pub fn with_buffer_size(mut self, buffer_size: usize) -> Self {
+        self.buffer_size = buffer_size;
         self
     }
 
@@ -198,6 +205,7 @@ impl ParquetSink {
             schema,
             props,
             options.max_row_group_size,
+            options.buffer_size,
             concurrency,
         );
 

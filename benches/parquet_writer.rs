@@ -10,7 +10,9 @@ use std::hint::black_box;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
-use silk_chiffon::sinks::parquet::{StreamParquetWriter, recommended_concurrency};
+use silk_chiffon::sinks::parquet::{
+    DEFAULT_BUFFER_SIZE, StreamParquetWriter, recommended_concurrency,
+};
 use tempfile::tempdir;
 use tokio::runtime::Runtime;
 
@@ -276,6 +278,7 @@ fn bench_stream_parallel(c: &mut Criterion) {
                             schema,
                             props,
                             config.row_group_size,
+                            DEFAULT_BUFFER_SIZE,
                             *concurrency,
                         );
 

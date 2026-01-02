@@ -1,5 +1,9 @@
 use anyhow::{Result, anyhow};
-use datafusion::prelude::{SessionConfig, SessionContext};
+use bytesize::ByteSize;
+use datafusion::{
+    execution::memory_pool::FairSpillPool,
+    prelude::{SessionConfig, SessionContext},
+};
 
 use crate::{
     ListOutputsFormat, QueryDialect,
@@ -17,6 +21,8 @@ use crate::{
 pub struct PipelineConfig {
     pub working_directory: Option<String>,
     pub query_dialect: QueryDialect,
+    pub memory_limit: Option<String>,
+    pub target_partitions: Option<usize>,
 }
 
 #[derive(Default)]
@@ -106,6 +112,16 @@ impl Pipeline {
         self
     }
 
+    pub fn with_memory_limit(mut self, memory_limit: Option<String>) -> Self {
+        self.config.memory_limit = memory_limit;
+        self
+    }
+
+    pub fn with_target_partitions(mut self, target_partitions: Option<usize>) -> Self {
+        self.config.target_partitions = target_partitions;
+        self
+    }
+
     pub async fn execute(&mut self) -> Result<Vec<OutputFileInfo>> {
         let mut ctx = self.build_session_context();
         self.execute_with_session_context(&mut ctx).await
@@ -156,6 +172,77 @@ impl Pipeline {
 
         cfg.options_mut().sql_parser.dialect = self.config.query_dialect.into();
 
+        if let Some(target_partitions) = self.config.target_partitions {
+            cfg = cfg.with_target_partitions(target_partitions);
+        }
+
+        if let Some(ref memory_limit) = self.config.memory_limit
+            && let Some(bytes) = parse_byte_size(memory_limit)
+        {
+            // use FairSpillPool which allows spilling to disk when memory is exceeded
+            let pool = FairSpillPool::new(bytes);
+            let runtime = datafusion::execution::runtime_env::RuntimeEnvBuilder::default()
+                .with_memory_pool(std::sync::Arc::new(pool))
+                .build()
+                .expect("failed to build runtime env");
+            return SessionContext::new_with_config_rt(cfg, std::sync::Arc::new(runtime));
+        }
+
         SessionContext::new_with_config(cfg)
+    }
+}
+
+/// Parse a human-readable byte size string (e.g., "512MB", "2GB", "1GiB") into bytes.
+#[allow(clippy::cast_possible_truncation)]
+pub fn parse_byte_size(s: &str) -> Option<usize> {
+    s.parse::<ByteSize>().ok().map(|bs| bs.as_u64() as usize)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_byte_size_decimal_units() {
+        // KB = 1000 bytes (decimal)
+        assert_eq!(parse_byte_size("1KB"), Some(1000));
+        assert_eq!(parse_byte_size("1MB"), Some(1_000_000));
+        assert_eq!(parse_byte_size("1GB"), Some(1_000_000_000));
+        assert_eq!(parse_byte_size("2GB"), Some(2_000_000_000));
+    }
+
+    #[test]
+    fn test_parse_byte_size_binary_units() {
+        // KiB = 1024 bytes (binary)
+        assert_eq!(parse_byte_size("1KiB"), Some(1024));
+        assert_eq!(parse_byte_size("1MiB"), Some(1024 * 1024));
+        assert_eq!(parse_byte_size("1GiB"), Some(1024 * 1024 * 1024));
+        assert_eq!(parse_byte_size("512MiB"), Some(512 * 1024 * 1024));
+    }
+
+    #[test]
+    fn test_parse_byte_size_bare_bytes() {
+        assert_eq!(parse_byte_size("1024"), Some(1024));
+        assert_eq!(parse_byte_size("33554432"), Some(33554432)); // 32MB default buffer
+    }
+
+    #[test]
+    fn test_parse_byte_size_with_spaces() {
+        assert_eq!(parse_byte_size("512 MB"), Some(512_000_000));
+        assert_eq!(parse_byte_size("1 GiB"), Some(1024 * 1024 * 1024));
+    }
+
+    #[test]
+    fn test_parse_byte_size_case_insensitive() {
+        assert_eq!(parse_byte_size("1mb"), Some(1_000_000));
+        assert_eq!(parse_byte_size("1Mb"), Some(1_000_000));
+        assert_eq!(parse_byte_size("1mib"), Some(1024 * 1024));
+    }
+
+    #[test]
+    fn test_parse_byte_size_invalid() {
+        assert_eq!(parse_byte_size("invalid"), None);
+        assert_eq!(parse_byte_size(""), None);
+        assert_eq!(parse_byte_size("MB"), None);
     }
 }

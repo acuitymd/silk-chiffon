@@ -4,7 +4,7 @@ use crate::{
     ParquetWriterVersion, SortSpec, TransformCommand,
     io_strategies::{OutputFileInfo, output_strategy::SinkFactory, path_template::PathTemplate},
     operations::{query::QueryOperation, sort::SortOperation},
-    pipeline::Pipeline,
+    pipeline::{Pipeline, parse_byte_size},
     sinks::{
         arrow::{ArrowSink, ArrowSinkOptions},
         data_sink::DataSink,
@@ -38,6 +38,8 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         query,
         dialect,
         sort_by,
+        memory_limit,
+        target_partitions,
         input_format,
         output_format,
         arrow_compression,
@@ -47,6 +49,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         parquet_bloom_all,
         parquet_bloom_column,
         parquet_row_group_size,
+        parquet_buffer_size,
         parquet_parallelism,
         parquet_statistics,
         parquet_writer_version,
@@ -73,7 +76,10 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         &parquet_column_encoding,
     )?;
 
-    let mut pipeline = Pipeline::new().with_query_dialect(dialect);
+    let mut pipeline = Pipeline::new()
+        .with_query_dialect(dialect)
+        .with_memory_limit(memory_limit)
+        .with_target_partitions(target_partitions);
 
     let (input_paths, should_glob) = if let Some(single_input) = from {
         (vec![single_input], false)
@@ -202,6 +208,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         arrow_record_batch_size,
         parquet_compression,
         parquet_row_group_size,
+        parquet_buffer_size,
         parquet_parallelism,
         parquet_statistics,
         parquet_writer_version,
@@ -425,6 +432,7 @@ fn create_sink_factory(
     arrow_record_batch_size: Option<usize>,
     parquet_compression: Option<ParquetCompression>,
     parquet_row_group_size: Option<usize>,
+    parquet_buffer_size: Option<String>,
     parquet_parallelism: Option<usize>,
     parquet_statistics: Option<ParquetStatistics>,
     parquet_writer_version: Option<ParquetWriterVersion>,
@@ -461,6 +469,11 @@ fn create_sink_factory(
                 }
                 if let Some(row_group_size) = parquet_row_group_size {
                     options = options.with_max_row_group_size(row_group_size);
+                }
+                if let Some(ref buffer_size) = parquet_buffer_size
+                    && let Some(bytes) = parse_byte_size(buffer_size)
+                {
+                    options = options.with_buffer_size(bytes);
                 }
                 options = options.with_max_parallelism(parquet_parallelism);
                 if let Some(stats) = parquet_statistics {

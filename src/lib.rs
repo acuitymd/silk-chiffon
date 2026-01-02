@@ -28,6 +28,15 @@ use strum_macros::Display;
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 pub struct Cli {
+    /// Maximum worker threads for the tokio async runtime.
+    ///
+    /// Controls the thread pool size for async operations including I/O and DataFusion
+    /// query execution. Both DataFusion and parquet encoding use tokio's thread pools
+    /// (async pool for queries, blocking pool for CPU-bound work like encoding).
+    /// Defaults to the number of CPU cores.
+    #[arg(long, short = 't', global = true)]
+    pub threads: Option<usize>,
+
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -762,16 +771,42 @@ impl BloomFilterConfig {
 
 #[derive(Args, Debug)]
 pub struct TransformCommand {
+    //
+    // ─── Input/Output ──────────────────────────────────────────────────────────────────
+    //
     /// Single input file path.
-    #[arg(long, conflicts_with_all = ["from_many"], required_unless_present = "from_many")]
+    #[arg(
+        long,
+        conflicts_with_all = ["from_many"],
+        required_unless_present = "from_many",
+        help_heading = "Input/Output"
+    )]
     pub from: Option<String>,
 
     /// Multiple input file paths (supports glob patterns). Can be specified multiple times.
-    #[arg(long, conflicts_with = "from", required_unless_present = "from")]
+    #[arg(
+        long,
+        conflicts_with = "from",
+        required_unless_present = "from",
+        help_heading = "Input/Output"
+    )]
     pub from_many: Vec<String>,
 
+    /// Override input format detection.
+    #[arg(long, value_enum, help_heading = "Input/Output")]
+    pub input_format: Option<DataFormat>,
+
+    /// Override output format detection.
+    #[arg(long, value_enum, help_heading = "Input/Output")]
+    pub output_format: Option<DataFormat>,
+
     /// Single output file path.
-    #[arg(long, conflicts_with_all = ["to_many", "by"], required_unless_present = "to_many")]
+    #[arg(
+        long,
+        conflicts_with_all = ["to_many", "by"],
+        required_unless_present = "to_many",
+        help_heading = "Input/Output"
+    )]
     pub to: Option<String>,
 
     /// Output path template for partitioning (e.g., "{{region}}.parquet"). Requires --by.
@@ -779,33 +814,27 @@ pub struct TransformCommand {
         long,
         conflicts_with = "to",
         requires = "by",
-        required_unless_present = "to"
+        required_unless_present = "to",
+        help_heading = "Input/Output"
     )]
     pub to_many: Option<String>,
 
-    /// Column(s) to partition by (comma-separated for multi-column partitioning).
-    #[arg(long, short, requires = "to_many")]
-    pub by: Option<String>,
+    //
+    // ─── Transformations ───────────────────────────────────────────────────────────────
+    //
+    /// The query dialect to use.
+    #[arg(
+        short,
+        long,
+        default_value_t,
+        value_enum,
+        help_heading = "Transformations"
+    )]
+    pub dialect: QueryDialect,
 
     /// Names of columns to exclude from the output.
-    #[arg(long, short = 'e')]
+    #[arg(long, short = 'e', help_heading = "Transformations")]
     pub exclude_columns: Vec<String>,
-
-    /// List the output files after creation (only with --to-many).
-    #[arg(long, short = 'l', value_enum, requires = "to_many")]
-    pub list_outputs: Option<ListOutputsFormat>,
-
-    /// Write output file listing to a file instead of stdout.
-    #[arg(long, requires = "list_outputs")]
-    pub list_outputs_file: Option<Utf8PathBuf>,
-
-    /// Create directories as needed.
-    #[arg(long, default_value_t = true)]
-    pub create_dirs: bool,
-
-    /// Overwrite existing files.
-    #[arg(long)]
-    pub overwrite: bool,
 
     /// SQL query to apply to the data. The input data is available as table 'data'.
     ///
@@ -814,43 +843,85 @@ pub struct TransformCommand {
     ///   --query "SELECT id, name, amount FROM data"
     ///   --query "SELECT region, SUM(amount) FROM data GROUP BY region"
     ///   --query "SELECT *, amount * 1.1 as adjusted FROM data"
-    #[arg(short, long, verbatim_doc_comment)]
+    #[arg(short, long, verbatim_doc_comment, help_heading = "Transformations")]
     pub query: Option<String>,
-
-    /// The query dialect to use.
-    #[arg(short, long, default_value_t, value_enum)]
-    pub dialect: QueryDialect,
 
     /// Sort the data by one or more columns before writing.
     ///
     /// Format: A comma-separated list like "col_a,col_b:desc,col_c".
-    #[arg(short, long)]
+    #[arg(short, long, help_heading = "Transformations")]
     pub sort_by: Option<SortSpec>,
 
-    /// Override input format detection.
-    #[arg(long, value_enum)]
-    pub input_format: Option<DataFormat>,
+    //
+    // ─── Execution ─────────────────────────────────────────────────────────────────────
+    //
+    /// Memory limit for query execution (e.g., "512MB", "2GB").
+    ///
+    /// Limits memory used by DataFusion for buffering operators (sort, group by,
+    /// aggregation). When exceeded, operators spill to disk. Only tracks large
+    /// allocations, not streaming data. Supports suffixes: B, KB, MB, GB, TB
+    /// (or KiB, MiB, GiB, TiB for binary). Default: unlimited.
+    #[arg(long, help_heading = "Execution")]
+    pub memory_limit: Option<String>,
 
-    /// Override output format detection.
-    #[arg(long, value_enum)]
-    pub output_format: Option<DataFormat>,
+    /// Number of partitions for query execution parallelism.
+    ///
+    /// Controls how DataFusion partitions data during queries (aggregations, joins, sorts).
+    /// Higher values increase parallelism but use more memory. These tasks run on the
+    /// tokio thread pool (--threads). Defaults to CPU cores.
+    #[arg(long, help_heading = "Execution")]
+    pub target_partitions: Option<usize>,
 
+    //
+    // ─── Partitioning ──────────────────────────────────────────────────────────────────
+    //
+    /// Column(s) to partition by (comma-separated for multi-column partitioning).
+    #[arg(long, short, requires = "to_many", help_heading = "Partitioning")]
+    pub by: Option<String>,
+
+    /// List the output files after creation (only with --to-many).
+    #[arg(
+        long,
+        short = 'l',
+        value_enum,
+        requires = "to_many",
+        help_heading = "Partitioning"
+    )]
+    pub list_outputs: Option<ListOutputsFormat>,
+
+    /// Write output file listing to a file instead of stdout.
+    #[arg(long, requires = "list_outputs", help_heading = "Partitioning")]
+    pub list_outputs_file: Option<Utf8PathBuf>,
+
+    //
+    // ─── Output Behavior ──────────────────────────────────────────────────────────────
+    //
+    /// Create directories as needed.
+    #[arg(long, default_value_t = true, help_heading = "Output Behavior")]
+    pub create_dirs: bool,
+
+    /// Overwrite existing files.
+    #[arg(long, help_heading = "Output Behavior")]
+    pub overwrite: bool,
+
+    //
+    // ─── Arrow Options ─────────────────────────────────────────────────────────────────
+    //
     /// Arrow IPC compression codec.
-    #[arg(long, value_enum)]
+    #[arg(long, value_enum, help_heading = "Arrow Options")]
     pub arrow_compression: Option<ArrowCompression>,
 
     /// Arrow IPC format (file or stream).
-    #[arg(long, value_enum)]
+    #[arg(long, value_enum, help_heading = "Arrow Options")]
     pub arrow_format: Option<ArrowIPCFormat>,
 
     /// Arrow record batch size.
-    #[arg(long)]
+    #[arg(long, help_heading = "Arrow Options")]
     pub arrow_record_batch_size: Option<usize>,
 
-    /// Parquet compression codec.
-    #[arg(long, value_enum)]
-    pub parquet_compression: Option<ParquetCompression>,
-
+    //
+    // ─── Parquet Options ───────────────────────────────────────────────────────────────
+    //
     /// Enable bloom filters for all columns with optional custom settings.
     ///
     /// Formats:
@@ -870,7 +941,8 @@ pub struct TransformCommand {
         conflicts_with = "parquet_bloom_column",
         num_args = 0..=1,
         default_missing_value = "",
-        verbatim_doc_comment
+        verbatim_doc_comment,
+        help_heading = "Parquet Options"
     )]
     pub parquet_bloom_all: Option<AllColumnsBloomFilterConfig>,
 
@@ -891,38 +963,18 @@ pub struct TransformCommand {
         long,
         value_name = "COLUMN[:fpp=VALUE][,ndv=VALUE]",
         conflicts_with = "parquet_bloom_all",
-        verbatim_doc_comment
+        verbatim_doc_comment,
+        help_heading = "Parquet Options"
     )]
     pub parquet_bloom_column: Vec<ColumnSpecificBloomFilterConfig>,
 
-    /// Maximum number of rows per Parquet row group.
-    #[arg(long)]
-    pub parquet_row_group_size: Option<usize>,
-
-    /// Maximum thread count for parallel Parquet encoding. Defaults to all CPUs.
-    #[arg(long)]
-    pub parquet_parallelism: Option<usize>,
-
-    /// Parquet column statistics level.
-    #[arg(long, value_enum)]
-    pub parquet_statistics: Option<ParquetStatistics>,
-
-    /// Parquet writer version.
-    #[arg(long, value_enum)]
-    pub parquet_writer_version: Option<ParquetWriterVersion>,
-
-    /// Disable dictionary encoding globally for all Parquet columns.
+    /// I/O buffer size for Parquet writing (e.g., "32MB", "64MB", "1GB").
     ///
-    /// Dictionary encoding builds a dictionary of unique values and stores references to it,
-    /// which is very effective for low-cardinality columns (few unique values). When disabled,
-    /// columns use their data page encoding directly.
-    ///
-    /// Default: dictionary encoding is enabled.
-    ///
-    /// Use --parquet-column-dictionary or --parquet-column-no-dictionary to override
-    /// this setting for specific columns.
-    #[arg(long, verbatim_doc_comment)]
-    pub parquet_no_dictionary: bool,
+    /// Controls the size of the buffer used when writing encoded data to disk.
+    /// Supports suffixes: B, KB, MB, GB, TB (or KiB, MiB, GiB, TiB for binary).
+    /// Default: 32MB.
+    #[arg(long, help_heading = "Parquet Options")]
+    pub parquet_buffer_size: Option<String>,
 
     /// Enable dictionary encoding for specific columns. Can be specified multiple times.
     ///
@@ -931,33 +983,13 @@ pub struct TransformCommand {
     ///
     /// Useful when most columns have high cardinality (dictionary disabled globally) but
     /// a few columns have low cardinality and would benefit from dictionary encoding.
-    #[arg(long, value_name = "COLUMN", verbatim_doc_comment)]
+    #[arg(
+        long,
+        value_name = "COLUMN",
+        verbatim_doc_comment,
+        help_heading = "Parquet Options"
+    )]
     pub parquet_column_dictionary: Vec<String>,
-
-    /// Disable dictionary encoding for specific columns. Can be specified multiple times.
-    ///
-    /// Overrides the default (dictionary enabled) for the named columns.
-    ///
-    /// Useful for high-cardinality columns like UUIDs or timestamps where dictionary
-    /// encoding adds overhead without compression benefit.
-    #[arg(long, value_name = "COLUMN", verbatim_doc_comment)]
-    pub parquet_column_no_dictionary: Vec<String>,
-
-    /// Data page encoding for Parquet columns.
-    ///
-    /// This encoding is used for column data pages. Its role depends on dictionary encoding:
-    /// - Dictionary enabled (default): this is the fallback encoding, used when the dictionary
-    ///   becomes too large or is inefficient for the data.
-    /// - Dictionary disabled: this is the primary encoding for all data.
-    ///
-    /// If not specified, the writer automatically selects an encoding based on column type
-    /// and writer version. With Parquet v2: integers use delta-binary-packed, strings use
-    /// delta-byte-array, booleans use rle. With Parquet v1: everything uses plain.
-    ///
-    /// Options: plain, rle, delta-binary-packed, delta-length-byte-array, delta-byte-array,
-    /// byte-stream-split
-    #[arg(long, value_enum, verbatim_doc_comment)]
-    pub parquet_encoding: Option<ParquetEncoding>,
 
     /// Set data page encoding for specific columns. Can be specified multiple times.
     ///
@@ -973,17 +1005,102 @@ pub struct TransformCommand {
     ///   --parquet-column-encoding id=delta-binary-packed
     ///   --parquet-column-encoding name=delta-byte-array
     ///   --parquet-column-encoding price=byte-stream-split
-    #[arg(long, value_name = "COLUMN=ENCODING", verbatim_doc_comment)]
+    #[arg(
+        long,
+        value_name = "COLUMN=ENCODING",
+        verbatim_doc_comment,
+        help_heading = "Parquet Options"
+    )]
     pub parquet_column_encoding: Vec<ColumnEncodingConfig>,
+
+    /// Disable dictionary encoding for specific columns. Can be specified multiple times.
+    ///
+    /// Overrides the default (dictionary enabled) for the named columns.
+    ///
+    /// Useful for high-cardinality columns like UUIDs or timestamps where dictionary
+    /// encoding adds overhead without compression benefit.
+    #[arg(
+        long,
+        value_name = "COLUMN",
+        verbatim_doc_comment,
+        help_heading = "Parquet Options"
+    )]
+    pub parquet_column_no_dictionary: Vec<String>,
+
+    /// Parquet compression codec.
+    #[arg(long, value_enum, help_heading = "Parquet Options")]
+    pub parquet_compression: Option<ParquetCompression>,
+
+    /// Data page encoding for Parquet columns.
+    ///
+    /// This encoding is used for column data pages. Its role depends on dictionary encoding:
+    /// - Dictionary enabled (default): this is the fallback encoding, used when the dictionary
+    ///   becomes too large or is inefficient for the data.
+    /// - Dictionary disabled: this is the primary encoding for all data.
+    ///
+    /// If not specified, the writer automatically selects an encoding based on column type
+    /// and writer version. With Parquet v2: integers use delta-binary-packed, strings use
+    /// delta-byte-array, booleans use rle. With Parquet v1: everything uses plain.
+    ///
+    /// Options: plain, rle, delta-binary-packed, delta-length-byte-array, delta-byte-array,
+    /// byte-stream-split
+    #[arg(
+        long,
+        value_enum,
+        verbatim_doc_comment,
+        help_heading = "Parquet Options"
+    )]
+    pub parquet_encoding: Option<ParquetEncoding>,
+
+    /// Disable dictionary encoding globally for all Parquet columns.
+    ///
+    /// Dictionary encoding builds a dictionary of unique values and stores references to it,
+    /// which is very effective for low-cardinality columns (few unique values). When disabled,
+    /// columns use their data page encoding directly.
+    ///
+    /// Default: dictionary encoding is enabled.
+    ///
+    /// Use --parquet-column-dictionary or --parquet-column-no-dictionary to override
+    /// this setting for specific columns.
+    #[arg(long, verbatim_doc_comment, help_heading = "Parquet Options")]
+    pub parquet_no_dictionary: bool,
+
+    /// Maximum row groups to encode in parallel.
+    ///
+    /// Controls how many row groups can be encoded concurrently. Column encoding within
+    /// each row group runs on tokio's blocking thread pool via spawn_blocking.
+    /// Defaults to the number of CPU cores.
+    #[arg(long, help_heading = "Parquet Options")]
+    pub parquet_parallelism: Option<usize>,
+
+    /// Maximum number of rows per Parquet row group.
+    #[arg(long, help_heading = "Parquet Options")]
+    pub parquet_row_group_size: Option<usize>,
 
     /// Embed metadata indicating that the file's data is sorted.
     ///
     /// Requires --sort-by to be set.
-    #[arg(long, default_value_t = false, requires = "sort_by")]
+    #[arg(
+        long,
+        default_value_t = false,
+        requires = "sort_by",
+        help_heading = "Parquet Options"
+    )]
     pub parquet_sorted_metadata: bool,
 
+    /// Parquet column statistics level.
+    #[arg(long, value_enum, help_heading = "Parquet Options")]
+    pub parquet_statistics: Option<ParquetStatistics>,
+
+    /// Parquet writer version.
+    #[arg(long, value_enum, help_heading = "Parquet Options")]
+    pub parquet_writer_version: Option<ParquetWriterVersion>,
+
+    //
+    // ─── Vortex Options ────────────────────────────────────────────────────────────────
+    //
     /// Vortex record batch size.
-    #[arg(long)]
+    #[arg(long, help_heading = "Vortex Options")]
     pub vortex_record_batch_size: Option<usize>,
 }
 
