@@ -902,8 +902,20 @@ pub struct TransformCommand {
     // ─── Partitioning ──────────────────────────────────────────────────────────────────
     //
     /// Column(s) to partition by (comma-separated for multi-column partitioning).
+    /// Partition output by column values. Only primitive types (integers, floats,
+    /// strings, dates, etc.) are supported. Complex types (arrays, structs, maps)
+    /// will error.
     #[arg(long, short, requires = "to_many", help_heading = "Partitioning")]
     pub by: Option<String>,
+
+    /// Use low-cardinality partitioning strategy (unsorted input).
+    ///
+    /// Instead of requiring sorted input, keeps a file handle open for each
+    /// partition value. Best for columns with few distinct values (e.g., region,
+    /// status, category). Each batch is sorted by partition columns to minimize
+    /// file handle switching.
+    #[arg(long, requires = "by", help_heading = "Partitioning")]
+    pub low_cardinality_partition: bool,
 
     /// List the output files after creation (only with --to-many).
     #[arg(

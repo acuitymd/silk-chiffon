@@ -2,14 +2,18 @@ use std::{
     collections::HashMap,
     ops::Range,
     pin::Pin,
+    sync::Arc,
     task::{Context, Poll},
 };
 
 use anyhow::{Result, anyhow};
 use arrow::array::{ArrayRef, RecordBatch};
-use arrow::compute::partition;
+use arrow::compute::{SortColumn, lexsort_to_indices, partition, take};
+use arrow::datatypes::{DataType, Schema};
 use datafusion::execution::SendableRecordBatchStream;
 use futures::stream::Stream;
+
+use crate::io_strategies::output_file_info::format_scalar_value;
 
 /// A HashMap of column names to single-row arrays representing a partition value for a column
 pub type PartitionValues = HashMap<String, ArrayRef>;
@@ -28,6 +32,93 @@ pub fn partition_values_equal(a: &PartitionValues, b: &PartitionValues) -> bool 
     })
 }
 
+/// Sort a batch by the specified columns (for minimizing partition slices).
+pub fn sort_batch_by_columns(batch: &RecordBatch, columns: &[String]) -> Result<RecordBatch> {
+    if columns.is_empty() {
+        return Ok(batch.clone());
+    }
+
+    let sort_columns: Vec<SortColumn> = columns
+        .iter()
+        .filter_map(|name| batch.column_by_name(name))
+        .map(|col| SortColumn {
+            values: Arc::clone(col),
+            options: None,
+        })
+        .collect();
+
+    if sort_columns.len() != columns.len() {
+        anyhow::bail!("not all partition columns found in batch");
+    }
+
+    let indices = lexsort_to_indices(&sort_columns, None)?;
+
+    let sorted_columns: Vec<ArrayRef> = batch
+        .columns()
+        .iter()
+        .map(|col| take(col.as_ref(), &indices, None).map(|a| a as ArrayRef))
+        .collect::<std::result::Result<_, _>>()?;
+
+    Ok(RecordBatch::try_new(batch.schema(), sorted_columns)?)
+}
+
+/// Create a hashable string key from partition values.
+pub fn partition_key(values: &PartitionValues, column_order: &[String]) -> String {
+    column_order
+        .iter()
+        .map(|col| format_scalar_value(values.get(col)))
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+/// Check if a data type is primitive (supported for partitioning).
+pub fn is_primitive_type(dt: &DataType) -> bool {
+    matches!(
+        dt,
+        DataType::Boolean
+            | DataType::Int8
+            | DataType::Int16
+            | DataType::Int32
+            | DataType::Int64
+            | DataType::UInt8
+            | DataType::UInt16
+            | DataType::UInt32
+            | DataType::UInt64
+            | DataType::Float16
+            | DataType::Float32
+            | DataType::Float64
+            | DataType::Utf8
+            | DataType::LargeUtf8
+            | DataType::Utf8View
+            | DataType::Date32
+            | DataType::Date64
+            | DataType::Time32(_)
+            | DataType::Time64(_)
+            | DataType::Timestamp(_, _)
+            | DataType::Duration(_)
+            | DataType::Decimal128(_, _)
+            | DataType::Decimal256(_, _)
+    )
+}
+
+/// Validate that all partition columns are primitive types.
+pub fn validate_partition_columns_primitive(schema: &Schema, columns: &[String]) -> Result<()> {
+    for col in columns {
+        let field = schema
+            .field_with_name(col)
+            .map_err(|_| anyhow!("partition column '{}' not found in schema", col))?;
+        if !is_primitive_type(field.data_type()) {
+            anyhow::bail!(
+                "partition column '{}' has non-primitive type {:?}; \
+                 only primitive types are supported for partitioning",
+                col,
+                field.data_type()
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Stream that partitions record batches by column values, yielding
 /// (partition_values, sliced_batch) tuples where partition_values contains
 /// single-row arrays for each partition column.
@@ -37,6 +128,7 @@ pub fn partition_values_equal(a: &PartitionValues, b: &PartitionValues) -> bool 
 pub struct PartitionedBatchStream {
     inner: SendableRecordBatchStream,
     columns: Vec<String>,
+    sort_before_partition: bool,
 
     current_batch: Option<RecordBatch>,
     current_ranges: Option<Vec<Range<usize>>>,
@@ -44,10 +136,15 @@ pub struct PartitionedBatchStream {
 }
 
 impl PartitionedBatchStream {
-    pub fn new(stream: SendableRecordBatchStream, columns: Vec<String>) -> Self {
+    pub fn new(
+        stream: SendableRecordBatchStream,
+        columns: Vec<String>,
+        sort_before_partition: bool,
+    ) -> Self {
         Self {
             inner: stream,
             columns,
+            sort_before_partition,
             current_batch: None,
             current_ranges: None,
             current_range_idx: 0,
@@ -107,6 +204,16 @@ impl Stream for PartitionedBatchStream {
             // poll for next batch from inner stream
             match Pin::new(&mut self.inner).poll_next(cx) {
                 Poll::Ready(Some(Ok(batch))) => {
+                    // optionally sort batch by partition columns first
+                    let batch = if self.sort_before_partition {
+                        match sort_batch_by_columns(&batch, &self.columns) {
+                            Ok(sorted) => sorted,
+                            Err(e) => return Poll::Ready(Some(Err(e))),
+                        }
+                    } else {
+                        batch
+                    };
+
                     // compute partition ranges using arrow::compute::partition
                     // super efficient way to get the partitions across a list of columns
                     let partition_columns: Vec<ArrayRef> = self
@@ -143,15 +250,26 @@ impl Stream for PartitionedBatchStream {
 
 pub struct Partitioner {
     columns: Vec<String>,
+    sort_before_partition: bool,
 }
 
 impl Partitioner {
     pub fn new(columns: Vec<String>) -> Self {
-        Self { columns }
+        Self {
+            columns,
+            sort_before_partition: false,
+        }
+    }
+
+    /// Enable sorting each batch by partition columns before partitioning.
+    /// Use this for low-cardinality partitioning where input is not pre-sorted.
+    pub fn with_per_batch_sorting(mut self) -> Self {
+        self.sort_before_partition = true;
+        self
     }
 
     pub fn partition_stream(&self, stream: SendableRecordBatchStream) -> PartitionedBatchStream {
-        PartitionedBatchStream::new(stream, self.columns.clone())
+        PartitionedBatchStream::new(stream, self.columns.clone(), self.sort_before_partition)
     }
 }
 
@@ -161,7 +279,7 @@ mod tests {
 
     use arrow::{
         array::{Array, Int32Array, RecordBatch, StringArray},
-        datatypes::{DataType, Field, Schema},
+        datatypes::{DataType, Field, Schema, TimeUnit},
     };
     use datafusion::physical_plan::{SendableRecordBatchStream, stream::RecordBatchStreamAdapter};
     use futures::{StreamExt, stream};
@@ -736,5 +854,289 @@ mod tests {
         let region_null = results[1].0.get("region").unwrap();
         let arr_null = region_null.as_any().downcast_ref::<StringArray>().unwrap();
         assert!(arr_null.is_null(0));
+    }
+
+    #[test]
+    fn test_sort_batch_by_columns_single_column() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("value", DataType::Utf8, false),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int32Array::from(vec![3, 1, 2])),
+                Arc::new(StringArray::from(vec!["c", "a", "b"])),
+            ],
+        )
+        .unwrap();
+
+        let sorted = sort_batch_by_columns(&batch, &["id".to_string()]).unwrap();
+
+        let id_col = sorted
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        assert_eq!(id_col.value(0), 1);
+        assert_eq!(id_col.value(1), 2);
+        assert_eq!(id_col.value(2), 3);
+
+        let val_col = sorted
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(val_col.value(0), "a");
+        assert_eq!(val_col.value(1), "b");
+        assert_eq!(val_col.value(2), "c");
+    }
+
+    #[test]
+    fn test_sort_batch_by_columns_multi_column() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("region", DataType::Utf8, false),
+            Field::new("id", DataType::Int32, false),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(StringArray::from(vec!["b", "a", "b", "a"])),
+                Arc::new(Int32Array::from(vec![2, 1, 1, 2])),
+            ],
+        )
+        .unwrap();
+
+        let sorted =
+            sort_batch_by_columns(&batch, &["region".to_string(), "id".to_string()]).unwrap();
+
+        let region_col = sorted
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let id_col = sorted
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+
+        // should be sorted by region first, then by id
+        assert_eq!(region_col.value(0), "a");
+        assert_eq!(id_col.value(0), 1);
+        assert_eq!(region_col.value(1), "a");
+        assert_eq!(id_col.value(1), 2);
+        assert_eq!(region_col.value(2), "b");
+        assert_eq!(id_col.value(2), 1);
+        assert_eq!(region_col.value(3), "b");
+        assert_eq!(id_col.value(3), 2);
+    }
+
+    #[test]
+    fn test_sort_batch_by_columns_empty_columns() {
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![Arc::new(Int32Array::from(vec![3, 1, 2]))],
+        )
+        .unwrap();
+
+        // empty columns should return batch unchanged
+        let result = sort_batch_by_columns(&batch, &[]).unwrap();
+        let id_col = result
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        assert_eq!(id_col.value(0), 3);
+        assert_eq!(id_col.value(1), 1);
+        assert_eq!(id_col.value(2), 2);
+    }
+
+    #[test]
+    fn test_partition_key_single_column() {
+        let mut values = HashMap::new();
+        values.insert(
+            "region".to_string(),
+            Arc::new(StringArray::from(vec!["us-west"])) as ArrayRef,
+        );
+
+        let key = partition_key(&values, &["region".to_string()]);
+        assert_eq!(key, "us-west");
+    }
+
+    #[test]
+    fn test_partition_key_multi_column() {
+        let mut values = HashMap::new();
+        values.insert(
+            "region".to_string(),
+            Arc::new(StringArray::from(vec!["us-west"])) as ArrayRef,
+        );
+        values.insert(
+            "year".to_string(),
+            Arc::new(Int32Array::from(vec![2024])) as ArrayRef,
+        );
+
+        // order matters
+        let key1 = partition_key(&values, &["region".to_string(), "year".to_string()]);
+        let key2 = partition_key(&values, &["year".to_string(), "region".to_string()]);
+        assert_eq!(key1, "us-west|2024");
+        assert_eq!(key2, "2024|us-west");
+    }
+
+    #[test]
+    fn test_partition_key_with_null() {
+        let mut values = HashMap::new();
+        values.insert(
+            "region".to_string(),
+            Arc::new(StringArray::from(vec![None as Option<&str>])) as ArrayRef,
+        );
+
+        let key = partition_key(&values, &["region".to_string()]);
+        assert_eq!(key, "null");
+    }
+
+    #[test]
+    fn test_is_primitive_type() {
+        // primitive types
+        assert!(is_primitive_type(&DataType::Boolean));
+        assert!(is_primitive_type(&DataType::Int32));
+        assert!(is_primitive_type(&DataType::Int64));
+        assert!(is_primitive_type(&DataType::Float64));
+        assert!(is_primitive_type(&DataType::Utf8));
+        assert!(is_primitive_type(&DataType::Date32));
+        assert!(is_primitive_type(&DataType::Timestamp(
+            TimeUnit::Millisecond,
+            None
+        )));
+
+        // complex types
+        assert!(!is_primitive_type(&DataType::List(Arc::new(Field::new(
+            "item",
+            DataType::Int32,
+            true
+        )))));
+        assert!(!is_primitive_type(&DataType::Struct(
+            vec![Field::new("a", DataType::Int32, true)].into()
+        )));
+    }
+
+    #[test]
+    fn test_validate_partition_columns_primitive_success() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("name", DataType::Utf8, false),
+        ]);
+
+        let result =
+            validate_partition_columns_primitive(&schema, &["id".to_string(), "name".to_string()]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_partition_columns_primitive_fails_for_list() {
+        let schema = Schema::new(vec![Field::new(
+            "tags",
+            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+            false,
+        )]);
+
+        let result = validate_partition_columns_primitive(&schema, &["tags".to_string()]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("non-primitive"));
+    }
+
+    #[test]
+    fn test_validate_partition_columns_primitive_missing_column() {
+        let schema = Schema::new(vec![Field::new("id", DataType::Int32, false)]);
+
+        let result = validate_partition_columns_primitive(&schema, &["missing".to_string()]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_partitioner_with_per_batch_sorting() {
+        // unsorted input: categories are interleaved
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("category", DataType::Utf8, false),
+            Field::new("value", DataType::Int32, false),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(StringArray::from(vec!["b", "a", "b", "a", "c"])),
+                Arc::new(Int32Array::from(vec![1, 2, 3, 4, 5])),
+            ],
+        )
+        .unwrap();
+
+        let stream = create_test_stream(vec![batch]);
+        let partitioner = Partitioner::new(vec!["category".to_string()]).with_per_batch_sorting();
+        let mut partitioned_stream = partitioner.partition_stream(stream);
+
+        let mut results = Vec::new();
+        while let Some(Ok((values, batch))) = partitioned_stream.next().await {
+            let cat = values
+                .get("category")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .value(0);
+            results.push((cat.to_string(), batch.num_rows()));
+        }
+
+        // with sorting, we should get contiguous partitions: a(2), b(2), c(1)
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0], ("a".to_string(), 2));
+        assert_eq!(results[1], ("b".to_string(), 2));
+        assert_eq!(results[2], ("c".to_string(), 1));
+    }
+
+    #[tokio::test]
+    async fn test_partitioner_without_sorting_interleaved() {
+        // unsorted input: categories are interleaved
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("category", DataType::Utf8, false),
+            Field::new("value", DataType::Int32, false),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(StringArray::from(vec!["b", "a", "b", "a", "c"])),
+                Arc::new(Int32Array::from(vec![1, 2, 3, 4, 5])),
+            ],
+        )
+        .unwrap();
+
+        let stream = create_test_stream(vec![batch]);
+        // without sorting
+        let partitioner = Partitioner::new(vec!["category".to_string()]);
+        let mut partitioned_stream = partitioner.partition_stream(stream);
+
+        let mut results = Vec::new();
+        while let Some(Ok((values, batch))) = partitioned_stream.next().await {
+            let cat = values
+                .get("category")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .value(0);
+            results.push((cat.to_string(), batch.num_rows()));
+        }
+
+        // without sorting, partitions are fragmented: b(1), a(1), b(1), a(1), c(1)
+        assert_eq!(results.len(), 5);
+        assert_eq!(results[0], ("b".to_string(), 1));
+        assert_eq!(results[1], ("a".to_string(), 1));
+        assert_eq!(results[2], ("b".to_string(), 1));
+        assert_eq!(results[3], ("a".to_string(), 1));
+        assert_eq!(results[4], ("c".to_string(), 1));
     }
 }

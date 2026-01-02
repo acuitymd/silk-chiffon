@@ -112,6 +112,7 @@ async fn test_transform_arrow_to_arrow_basic() {
         to: Some(output.to_string_lossy().to_string()),
         to_many: None,
         by: None,
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -167,6 +168,7 @@ async fn test_transform_arrow_to_parquet() {
         to: Some(output.to_string_lossy().to_string()),
         to_many: None,
         by: None,
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -223,6 +225,7 @@ async fn test_transform_parquet_to_arrow() {
         to: Some(output.to_string_lossy().to_string()),
         to_many: None,
         by: None,
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -278,6 +281,7 @@ async fn test_transform_parquet_to_parquet() {
         to: Some(output.to_string_lossy().to_string()),
         to_many: None,
         by: None,
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -340,6 +344,7 @@ async fn test_transform_from_many_basic() {
         to: Some(output.to_string_lossy().to_string()),
         to_many: None,
         by: None,
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -403,6 +408,7 @@ async fn test_transform_from_many_with_glob() {
         to: Some(output.to_string_lossy().to_string()),
         to_many: None,
         by: None,
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -459,6 +465,7 @@ async fn test_transform_to_many_partitioned() {
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("name".to_string()),
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -522,6 +529,7 @@ async fn test_transform_with_query() {
         to: Some(output.to_string_lossy().to_string()),
         to_many: None,
         by: None,
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -577,6 +585,7 @@ async fn test_transform_with_sorting() {
         to: Some(output.to_string_lossy().to_string()),
         to_many: None,
         by: None,
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -644,6 +653,7 @@ async fn test_transform_with_arrow_compression() {
         to: Some(output.to_string_lossy().to_string()),
         to_many: None,
         by: None,
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -703,6 +713,7 @@ async fn test_transform_with_parquet_bloom_filters() {
         to: Some(output.to_string_lossy().to_string()),
         to_many: None,
         by: None,
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -765,6 +776,7 @@ async fn test_transform_with_sorted_metadata() {
         to: Some(output.to_string_lossy().to_string()),
         to_many: None,
         by: None,
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -829,6 +841,7 @@ async fn test_transform_partition_with_create_dirs() {
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("name".to_string()),
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -887,6 +900,7 @@ async fn test_transform_partition_with_overwrite() {
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("name".to_string()),
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -929,6 +943,7 @@ async fn test_transform_partition_with_overwrite() {
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("name".to_string()),
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -977,6 +992,7 @@ async fn test_transform_from_many_empty_glob() {
         to: Some(output.to_string_lossy().to_string()),
         to_many: None,
         by: None,
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -1036,6 +1052,7 @@ async fn test_transform_partition_exclude_columns() {
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("name".to_string()),
+        low_cardinality_partition: false,
         exclude_columns: vec!["name".to_string()],
         list_outputs: None,
         list_outputs_file: None,
@@ -1094,6 +1111,7 @@ async fn test_transform_with_projection_query() {
         to: Some(output.to_string_lossy().to_string()),
         to_many: None,
         by: None,
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -1150,6 +1168,7 @@ async fn test_transform_with_aggregation_query() {
         to: Some(output.to_string_lossy().to_string()),
         to_many: None,
         by: None,
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -1211,6 +1230,7 @@ async fn test_transform_query_and_sort_combined() {
         to: Some(output.to_string_lossy().to_string()),
         to_many: None,
         by: None,
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -1290,6 +1310,7 @@ async fn test_transform_multi_column_sort() {
         to: Some(output.to_string_lossy().to_string()),
         to_many: None,
         by: None,
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -1374,6 +1395,7 @@ async fn test_transform_sort_descending() {
         to: Some(output.to_string_lossy().to_string()),
         to_many: None,
         by: None,
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -1452,6 +1474,7 @@ async fn test_transform_parquet_compression_gzip() {
         to: Some(output.to_string_lossy().to_string()),
         to_many: None,
         by: None,
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -1508,6 +1531,7 @@ async fn test_transform_parquet_compression_lz4() {
         to: Some(output.to_string_lossy().to_string()),
         to_many: None,
         by: None,
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -1564,6 +1588,7 @@ async fn test_transform_parquet_bloom_all() {
         to: Some(output.to_string_lossy().to_string()),
         to_many: None,
         by: None,
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -1622,6 +1647,7 @@ async fn test_transform_parquet_statistics() {
         to: Some(output.to_string_lossy().to_string()),
         to_many: None,
         by: None,
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -1677,6 +1703,7 @@ async fn test_transform_parquet_writer_version() {
         to: Some(output.to_string_lossy().to_string()),
         to_many: None,
         by: None,
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -1732,6 +1759,7 @@ async fn test_transform_parquet_no_dictionary() {
         to: Some(output.to_string_lossy().to_string()),
         to_many: None,
         by: None,
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -1788,6 +1816,7 @@ async fn test_transform_parquet_column_no_dictionary() {
         to: Some(output.to_string_lossy().to_string()),
         to_many: None,
         by: None,
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -1844,6 +1873,7 @@ async fn test_transform_parquet_column_dictionary() {
         to: Some(output.to_string_lossy().to_string()),
         to_many: None,
         by: None,
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -1899,6 +1929,7 @@ async fn test_transform_arrow_format_stream() {
         to: Some(output.to_string_lossy().to_string()),
         to_many: None,
         by: None,
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -1954,6 +1985,7 @@ async fn test_transform_arrow_record_batch_size() {
         to: Some(output.to_string_lossy().to_string()),
         to_many: None,
         by: None,
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -2009,6 +2041,7 @@ async fn test_transform_parquet_row_group_size() {
         to: Some(output.to_string_lossy().to_string()),
         to_many: None,
         by: None,
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -2065,6 +2098,7 @@ async fn test_transform_partition_to_parquet() {
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("name".to_string()),
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -2113,6 +2147,101 @@ async fn test_transform_partition_to_parquet() {
 }
 
 #[tokio::test]
+async fn test_transform_low_cardinality_partition() {
+    // test low-cardinality partitioning which doesn't require sorted input
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+
+    // create unsorted data - rows are interleaved by partition value
+    let schema = test_helpers::simple_schema();
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(Int32Array::from(vec![1, 2, 3, 4])),
+            Arc::new(StringArray::from(vec!["a", "b", "a", "b"])), // unsorted by name
+        ],
+    )
+    .unwrap();
+    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+
+    let template = temp_dir.path().join("{{name}}.parquet");
+
+    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: None,
+        to_many: Some(template.to_string_lossy().to_string()),
+        by: Some("name".to_string()),
+        low_cardinality_partition: true,
+        exclude_columns: vec![],
+        list_outputs: None,
+        list_outputs_file: None,
+        create_dirs: false,
+        overwrite: false,
+        query: None,
+        dialect: QueryDialect::default(),
+        sort_by: None,
+        memory_limit: None,
+        target_partitions: None,
+        input_format: None,
+        output_format: Some(DataFormat::Parquet),
+        arrow_compression: None,
+        arrow_format: None,
+        arrow_record_batch_size: None,
+        parquet_compression: None,
+        parquet_bloom_all: None,
+        parquet_bloom_column: vec![],
+        parquet_row_group_size: None,
+        parquet_buffer_size: None,
+        parquet_parallelism: None,
+        parquet_statistics: None,
+        parquet_writer_version: None,
+        parquet_no_dictionary: false,
+        parquet_column_dictionary: vec![],
+        parquet_column_no_dictionary: vec![],
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
+        parquet_sorted_metadata: false,
+        vortex_record_batch_size: None,
+    })
+    .await
+    .unwrap();
+
+    let output_a = temp_dir.path().join("a.parquet");
+    let output_b = temp_dir.path().join("b.parquet");
+
+    assert!(output_a.exists());
+    assert!(output_b.exists());
+
+    let batches_a = test_helpers::read_parquet_file(&output_a);
+    let batches_b = test_helpers::read_parquet_file(&output_b);
+
+    // each partition should have 2 rows
+    assert_eq!(batches_a.iter().map(|b| b.num_rows()).sum::<usize>(), 2);
+    assert_eq!(batches_b.iter().map(|b| b.num_rows()).sum::<usize>(), 2);
+
+    // verify the data is correct (ids 1,3 for "a" and ids 2,4 for "b")
+    let id_col_a = batches_a[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap();
+    let id_col_b = batches_b[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap();
+
+    let mut ids_a: Vec<i32> = (0..id_col_a.len()).map(|i| id_col_a.value(i)).collect();
+    let mut ids_b: Vec<i32> = (0..id_col_b.len()).map(|i| id_col_b.value(i)).collect();
+    ids_a.sort();
+    ids_b.sort();
+
+    assert_eq!(ids_a, vec![1, 3]);
+    assert_eq!(ids_b, vec![2, 4]);
+}
+
+#[tokio::test]
 async fn test_transform_multi_column_partition() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
@@ -2142,6 +2271,7 @@ async fn test_transform_multi_column_partition() {
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("year,month".to_string()),
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -2208,6 +2338,7 @@ async fn test_transform_from_many_to_partitioned() {
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("name".to_string()),
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -2290,6 +2421,7 @@ async fn test_transform_invalid_query() {
         to: Some(output.to_string_lossy().to_string()),
         to_many: None,
         by: None,
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -2341,6 +2473,7 @@ async fn test_transform_empty_file() {
         to: Some(output.to_string_lossy().to_string()),
         to_many: None,
         by: None,
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -2396,6 +2529,7 @@ async fn test_transform_bloom_filter_with_custom_ndv() {
         to: Some(output.to_string_lossy().to_string()),
         to_many: None,
         by: None,
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -2454,6 +2588,7 @@ async fn test_transform_bloom_filter_column_specific_with_ndv() {
         to: Some(output.to_string_lossy().to_string()),
         to_many: None,
         by: None,
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -2523,6 +2658,7 @@ async fn test_transform_mixed_parquet_and_arrow_inputs() {
         to: Some(output.to_string_lossy().to_string()),
         to_many: None,
         by: None,
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -2579,6 +2715,7 @@ async fn test_transform_partition_list_outputs_text() {
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("name".to_string()),
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: Some(ListOutputsFormat::Text),
         list_outputs_file: None,
@@ -2637,6 +2774,7 @@ async fn test_transform_partition_list_outputs_json() {
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("name".to_string()),
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: Some(ListOutputsFormat::Json),
         list_outputs_file: None,
@@ -2694,6 +2832,7 @@ async fn test_transform_explicit_input_format_arrow_to_parquet() {
         to: Some(output.to_string_lossy().to_string()),
         to_many: None,
         by: None,
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -2749,6 +2888,7 @@ async fn test_transform_explicit_output_format_parquet() {
         to: Some(output.to_string_lossy().to_string()),
         to_many: None,
         by: None,
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -2804,6 +2944,7 @@ async fn test_transform_arrow_compression_lz4() {
         to: Some(output.to_string_lossy().to_string()),
         to_many: None,
         by: None,
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -2873,6 +3014,7 @@ async fn test_transform_query_with_partition() {
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("category".to_string()),
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -2948,6 +3090,7 @@ async fn test_transform_query_with_different_dialect() {
         to: Some(output.to_string_lossy().to_string()),
         to_many: None,
         by: None,
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -3019,6 +3162,7 @@ async fn test_transform_partition_with_query_and_sort() {
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("region".to_string()),
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -3217,6 +3361,7 @@ async fn test_parquet_roundtrip_data_fidelity() {
         to: Some(intermediate_parquet.to_string_lossy().to_string()),
         to_many: None,
         by: None,
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -3271,6 +3416,7 @@ async fn test_parquet_roundtrip_data_fidelity() {
         to: Some(output_arrow.to_string_lossy().to_string()),
         to_many: None,
         by: None,
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -3632,6 +3778,7 @@ async fn test_multi_column_partition_verifies_data_arrow() {
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("year,month".to_string()),
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -3740,6 +3887,7 @@ async fn test_multi_column_partition_verifies_data_parquet() {
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("year,month".to_string()),
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -3835,6 +3983,7 @@ async fn test_multi_column_partition_three_columns_arrow() {
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("year,month,day".to_string()),
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -3923,6 +4072,7 @@ async fn test_multi_column_partition_three_columns_parquet() {
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("year,month,day".to_string()),
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -4011,6 +4161,7 @@ async fn test_multi_column_partition_mixed_types() {
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("region,year".to_string()),
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -4107,6 +4258,7 @@ async fn test_multi_column_partition_parquet_with_exclude() {
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("year,month".to_string()),
+        low_cardinality_partition: false,
         exclude_columns: vec!["year".to_string(), "month".to_string()],
         list_outputs: None,
         list_outputs_file: None,
@@ -4187,6 +4339,7 @@ async fn test_multi_column_partition_arrow_with_exclude() {
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("year,month".to_string()),
+        low_cardinality_partition: false,
         exclude_columns: vec!["year".to_string(), "month".to_string()],
         list_outputs: None,
         list_outputs_file: None,
@@ -4270,6 +4423,7 @@ async fn test_multi_column_partition_verifies_output_paths_arrow() {
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("year,month".to_string()),
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: Some(ListOutputsFormat::Json),
         list_outputs_file: Some(Utf8PathBuf::from_path_buf(list_output.clone()).unwrap()),
@@ -4413,6 +4567,7 @@ async fn test_multi_column_partition_verifies_output_paths_parquet() {
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("region,year".to_string()),
+        low_cardinality_partition: false,
         exclude_columns: vec![],
         list_outputs: Some(ListOutputsFormat::Json),
         list_outputs_file: Some(Utf8PathBuf::from_path_buf(list_output.clone()).unwrap()),
@@ -4571,4 +4726,186 @@ async fn test_multi_column_partition_verifies_output_paths_parquet() {
             }
         }
     }
+}
+
+#[tokio::test]
+async fn test_partition_strategies_produce_same_output() {
+    // both high-cardinality (with sort) and low-cardinality should produce identical results
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+
+    // create unsorted data - partition values are interleaved
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int32, false),
+        Field::new("category", DataType::Utf8, false),
+        Field::new("value", DataType::Int32, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(Int32Array::from(vec![1, 2, 3, 4, 5, 6])),
+            Arc::new(StringArray::from(vec!["x", "y", "x", "y", "z", "x"])),
+            Arc::new(Int32Array::from(vec![10, 20, 30, 40, 50, 60])),
+        ],
+    )
+    .unwrap();
+    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+
+    let high_card_dir = temp_dir.path().join("high_cardinality");
+    let low_card_dir = temp_dir.path().join("low_cardinality");
+    std::fs::create_dir_all(&high_card_dir).unwrap();
+    std::fs::create_dir_all(&low_card_dir).unwrap();
+
+    // run high-cardinality partitioning (requires sort)
+    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: None,
+        to_many: Some(
+            high_card_dir
+                .join("{{category}}.parquet")
+                .to_string_lossy()
+                .to_string(),
+        ),
+        by: Some("category".to_string()),
+        low_cardinality_partition: false,
+        exclude_columns: vec![],
+        list_outputs: None,
+        list_outputs_file: None,
+        create_dirs: false,
+        overwrite: false,
+        query: None,
+        dialect: QueryDialect::default(),
+        sort_by: None,
+        memory_limit: None,
+        target_partitions: None,
+        input_format: None,
+        output_format: Some(DataFormat::Parquet),
+        arrow_compression: None,
+        arrow_format: None,
+        arrow_record_batch_size: None,
+        parquet_compression: None,
+        parquet_bloom_all: None,
+        parquet_bloom_column: vec![],
+        parquet_row_group_size: None,
+        parquet_buffer_size: None,
+        parquet_parallelism: None,
+        parquet_statistics: None,
+        parquet_writer_version: None,
+        parquet_no_dictionary: false,
+        parquet_column_dictionary: vec![],
+        parquet_column_no_dictionary: vec![],
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
+        parquet_sorted_metadata: false,
+        vortex_record_batch_size: None,
+    })
+    .await
+    .unwrap();
+
+    // run low-cardinality partitioning (no global sort)
+    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+        from: Some(input.to_string_lossy().to_string()),
+        from_many: vec![],
+        to: None,
+        to_many: Some(
+            low_card_dir
+                .join("{{category}}.parquet")
+                .to_string_lossy()
+                .to_string(),
+        ),
+        by: Some("category".to_string()),
+        low_cardinality_partition: true,
+        exclude_columns: vec![],
+        list_outputs: None,
+        list_outputs_file: None,
+        create_dirs: false,
+        overwrite: false,
+        query: None,
+        dialect: QueryDialect::default(),
+        sort_by: None,
+        memory_limit: None,
+        target_partitions: None,
+        input_format: None,
+        output_format: Some(DataFormat::Parquet),
+        arrow_compression: None,
+        arrow_format: None,
+        arrow_record_batch_size: None,
+        parquet_compression: None,
+        parquet_bloom_all: None,
+        parquet_bloom_column: vec![],
+        parquet_row_group_size: None,
+        parquet_buffer_size: None,
+        parquet_parallelism: None,
+        parquet_statistics: None,
+        parquet_writer_version: None,
+        parquet_no_dictionary: false,
+        parquet_column_dictionary: vec![],
+        parquet_column_no_dictionary: vec![],
+        parquet_encoding: None,
+        parquet_column_encoding: vec![],
+        parquet_sorted_metadata: false,
+        vortex_record_batch_size: None,
+    })
+    .await
+    .unwrap();
+
+    // helper to extract sorted (id, value) pairs from a partition file
+    fn extract_data(dir: &std::path::Path, filename: &str) -> Vec<(i32, i32)> {
+        let path = dir.join(filename);
+        let batches = test_helpers::read_parquet_file(&path);
+        let mut data = Vec::new();
+        for batch in &batches {
+            let ids = batch
+                .column_by_name("id")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap();
+            let values = batch
+                .column_by_name("value")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap();
+            for i in 0..batch.num_rows() {
+                data.push((ids.value(i), values.value(i)));
+            }
+        }
+        data.sort();
+        data
+    }
+
+    // both strategies should create the same files
+    assert!(high_card_dir.join("x.parquet").exists());
+    assert!(high_card_dir.join("y.parquet").exists());
+    assert!(high_card_dir.join("z.parquet").exists());
+    assert!(low_card_dir.join("x.parquet").exists());
+    assert!(low_card_dir.join("y.parquet").exists());
+    assert!(low_card_dir.join("z.parquet").exists());
+
+    // data should be identical when sorted
+    assert_eq!(
+        extract_data(&high_card_dir, "x.parquet"),
+        extract_data(&low_card_dir, "x.parquet")
+    );
+    assert_eq!(
+        extract_data(&high_card_dir, "y.parquet"),
+        extract_data(&low_card_dir, "y.parquet")
+    );
+    assert_eq!(
+        extract_data(&high_card_dir, "z.parquet"),
+        extract_data(&low_card_dir, "z.parquet")
+    );
+
+    // verify expected content
+    assert_eq!(
+        extract_data(&high_card_dir, "x.parquet"),
+        vec![(1, 10), (3, 30), (6, 60)]
+    );
+    assert_eq!(
+        extract_data(&high_card_dir, "y.parquet"),
+        vec![(2, 20), (4, 40)]
+    );
+    assert_eq!(extract_data(&high_card_dir, "z.parquet"), vec![(5, 50)]);
 }

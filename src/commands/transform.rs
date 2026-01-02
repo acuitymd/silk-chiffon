@@ -30,6 +30,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         to,
         to_many,
         by,
+        low_cardinality_partition,
         exclude_columns,
         list_outputs,
         list_outputs_file,
@@ -175,21 +176,27 @@ pub async fn run(args: TransformCommand) -> Result<()> {
     // columns within each file since they are just a single value, so we remove them from
     // the user-specified sort order.
 
-    let partition_sort_spec = if let Some(ref by_cols) = by {
-        SortSpec::from(
-            by_cols
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .collect::<Vec<_>>(),
-        )
+    let partition_columns = if let Some(ref by_cols) = by {
+        by_cols
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .collect::<Vec<_>>()
     } else {
+        vec![]
+    };
+
+    // for high-cardinality partitioning, we need to sort by partition columns first
+    // for low-cardinality partitioning, each batch is sorted internally so no global sort needed
+    let partition_sort_spec = if low_cardinality_partition {
         SortSpec::default()
+    } else {
+        SortSpec::from(partition_columns.clone())
     };
 
     let user_sort_spec = sort_by.clone().unwrap_or(SortSpec::default());
 
     let user_sort_spec_without_partition_cols =
-        user_sort_spec.without_columns_named(&partition_sort_spec.column_names());
+        user_sort_spec.without_columns_named(&partition_columns);
 
     let parquet_sort_spec =
         if parquet_sorted_metadata && !user_sort_spec_without_partition_cols.is_empty() {
@@ -232,19 +239,28 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         );
     } else if let Some(template) = to_many {
         let path_template = PathTemplate::new(template);
-        // relying on the partition_sort_spec since it appropriately handles duplicate column names
-        // and is used to perform the sort operation that we will be partitioning on later
-        let partition_columns = partition_sort_spec.column_names();
 
-        pipeline = pipeline.with_output_strategy_with_partitioned_sink(
-            partition_columns,
-            path_template,
-            sink_factory,
-            exclude_columns.clone(),
-            create_dirs,
-            overwrite,
-            list_outputs.unwrap_or_default(),
-        );
+        if low_cardinality_partition {
+            pipeline = pipeline.with_output_strategy_with_low_cardinality_partitioned_sink(
+                partition_columns,
+                path_template,
+                sink_factory,
+                exclude_columns.clone(),
+                create_dirs,
+                overwrite,
+                list_outputs.unwrap_or_default(),
+            );
+        } else {
+            pipeline = pipeline.with_output_strategy_with_high_cardinality_partitioned_sink(
+                partition_columns,
+                path_template,
+                sink_factory,
+                exclude_columns.clone(),
+                create_dirs,
+                overwrite,
+                list_outputs.unwrap_or_default(),
+            );
+        }
     }
 
     if let Some(q) = query {

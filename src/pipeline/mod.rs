@@ -79,7 +79,7 @@ impl Pipeline {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn with_output_strategy_with_partitioned_sink(
+    pub fn with_output_strategy_with_high_cardinality_partitioned_sink(
         mut self,
         columns: Vec<String>,
         template: PathTemplate,
@@ -89,7 +89,31 @@ impl Pipeline {
         overwrite: bool,
         list_outputs: ListOutputsFormat,
     ) -> Self {
-        self.output_strategy = Some(OutputStrategy::Partitioned {
+        self.output_strategy = Some(OutputStrategy::PartitionedHighCardinality {
+            columns,
+            template: Box::new(template),
+            sink_factory,
+            exclude_columns,
+            create_dirs,
+            overwrite,
+            list_outputs,
+        });
+
+        self
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_output_strategy_with_low_cardinality_partitioned_sink(
+        mut self,
+        columns: Vec<String>,
+        template: PathTemplate,
+        sink_factory: SinkFactory,
+        exclude_columns: Vec<String>,
+        create_dirs: bool,
+        overwrite: bool,
+        list_outputs: ListOutputsFormat,
+    ) -> Self {
+        self.output_strategy = Some(OutputStrategy::PartitionedLowCardinality {
             columns,
             template: Box::new(template),
             sink_factory,
