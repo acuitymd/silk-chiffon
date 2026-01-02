@@ -247,7 +247,12 @@ impl OutputStrategy {
                 let projected_column_indices =
                     projection_indices_excluding(&schema, exclude_columns);
 
-                let partitioner = Partitioner::new(columns.clone()).with_per_batch_sorting();
+                let projected_schema = match &projected_column_indices {
+                    Some(indices) => Arc::new(schema.project(indices)?),
+                    None => schema,
+                };
+
+                let partitioner = Partitioner::new(columns.clone());
                 let mut partitioned_stream = partitioner.partition_stream(stream);
 
                 let mut open_sinks: HashMap<String, OpenSink> = HashMap::new();
@@ -261,7 +266,7 @@ impl OutputStrategy {
                         Entry::Vacant(e) => {
                             let path = template.resolve(&partition_values);
                             prepare_output_path(&path, *overwrite, *create_dirs).await?;
-                            let sink = sink_factory(path.clone(), Arc::clone(&batch.schema()))?;
+                            let sink = sink_factory(path.clone(), Arc::clone(&projected_schema))?;
                             e.insert(OpenSink::new(sink, path, partition_values.clone()))
                         }
                     };
