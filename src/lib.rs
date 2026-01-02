@@ -147,10 +147,12 @@ pub enum ListOutputsFormat {
 pub enum PartitionStrategy {
     /// Sort by partition columns first, then write one file at a time.
     /// Uses minimal file handles but requires sorting the entire dataset.
+    /// Best for high-cardinality partition columns, or when partition columns are highly fragmented.
     #[default]
     SortSingle,
     /// Keep a file handle open per partition, write rows directly.
     /// No sorting required, preserves input order within each partition.
+    /// Best for low-cardinality partition columns with low fragmentation.
     NosortMulti,
 }
 
@@ -923,9 +925,6 @@ pub struct TransformCommand {
     pub by: Option<String>,
 
     /// Partitioning strategy for writing output files.
-    ///
-    /// sort-single: Sort by partition columns first, write one file at a time.
-    /// nosort-multi: Keep file handles open per partition, no sorting required.
     #[arg(
         long,
         value_enum,
