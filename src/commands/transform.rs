@@ -76,12 +76,18 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         &parquet_column_encoding,
     )?;
 
-    // validate byte size options early to fail fast with clear error messages
+    // validate options early to fail fast with clear error messages
     if let Some(ref limit) = memory_limit {
         parse_byte_size(limit)?;
     }
     if let Some(ref size) = parquet_buffer_size {
         parse_byte_size(size)?;
+    }
+    if target_partitions == Some(0) {
+        anyhow::bail!("--target-partitions must be at least 1");
+    }
+    if parquet_parallelism == Some(0) {
+        anyhow::bail!("--parquet-parallelism must be at least 1");
     }
 
     let mut pipeline = Pipeline::new()
