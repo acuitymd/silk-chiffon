@@ -7,7 +7,7 @@ use std::{
 };
 
 use anyhow::{Result, anyhow};
-use arrow::array::{ArrayRef, RecordBatch};
+use arrow::array::{ArrayRef, RecordBatch, UInt32Array};
 use arrow::compute::{SortColumn, lexsort_to_indices, partition, take};
 use arrow::datatypes::{DataType, Schema};
 use datafusion::execution::SendableRecordBatchStream;
@@ -32,6 +32,22 @@ pub fn partition_values_equal(a: &PartitionValues, b: &PartitionValues) -> bool 
     })
 }
 
+/// Check if indices represent an identity permutation [0, 1, 2, ...].
+/// If so, the data is already sorted and we can skip the take() copy.
+#[allow(clippy::cast_possible_truncation)]
+fn is_identity_permutation(indices: &UInt32Array) -> bool {
+    let values = indices.values();
+    if values.is_empty() {
+        return true;
+    }
+    // fast path: check endpoints first
+    // safe: batches are capped well below u32::MAX rows
+    if values[0] != 0 || values[values.len() - 1] != (values.len() - 1) as u32 {
+        return false;
+    }
+    values.iter().enumerate().all(|(i, &v)| v == i as u32)
+}
+
 /// Sort a batch by the specified columns (for minimizing partition slices).
 pub fn sort_batch_by_columns(batch: &RecordBatch, columns: &[String]) -> Result<RecordBatch> {
     if columns.is_empty() {
@@ -52,6 +68,11 @@ pub fn sort_batch_by_columns(batch: &RecordBatch, columns: &[String]) -> Result<
     }
 
     let indices = lexsort_to_indices(&sort_columns, None)?;
+
+    // skip the copy if batch is already sorted
+    if is_identity_permutation(&indices) {
+        return Ok(batch.clone());
+    }
 
     let sorted_columns: Vec<ArrayRef> = batch
         .columns()
@@ -953,6 +974,36 @@ mod tests {
         assert_eq!(id_col.value(0), 3);
         assert_eq!(id_col.value(1), 1);
         assert_eq!(id_col.value(2), 2);
+    }
+
+    #[test]
+    fn test_sort_batch_by_columns_already_sorted() {
+        // when data is already sorted, we should skip the take() copy
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("value", DataType::Utf8, false),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 2, 3])),
+                Arc::new(StringArray::from(vec!["a", "b", "c"])),
+            ],
+        )
+        .unwrap();
+
+        let sorted = sort_batch_by_columns(&batch, &["id".to_string()]).unwrap();
+
+        // result should be identical
+        let id_col = sorted
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        assert_eq!(id_col.value(0), 1);
+        assert_eq!(id_col.value(1), 2);
+        assert_eq!(id_col.value(2), 3);
     }
 
     #[test]
