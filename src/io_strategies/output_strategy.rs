@@ -249,7 +249,7 @@ impl OutputStrategy {
 
                 let projected_schema = match &projected_column_indices {
                     Some(indices) => Arc::new(schema.project(indices)?),
-                    None => schema,
+                    None => Arc::clone(&schema),
                 };
 
                 let partitioner = Partitioner::new(columns.clone());

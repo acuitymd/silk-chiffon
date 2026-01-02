@@ -240,7 +240,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         let path_template = PathTemplate::new(template);
 
         if partition_strategy == PartitionStrategy::NosortMulti {
-            pipeline = pipeline.with_output_strategy_with_low_cardinality_partitioned_sink(
+            pipeline = pipeline.with_multi_writer_partitioned_sink(
                 partition_columns,
                 path_template,
                 sink_factory,
@@ -250,7 +250,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
                 list_outputs.unwrap_or_default(),
             );
         } else {
-            pipeline = pipeline.with_output_strategy_with_high_cardinality_partitioned_sink(
+            pipeline = pipeline.with_single_writer_partitioned_sink(
                 partition_columns,
                 path_template,
                 sink_factory,

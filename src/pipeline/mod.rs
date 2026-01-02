@@ -79,7 +79,7 @@ impl Pipeline {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn with_output_strategy_with_high_cardinality_partitioned_sink(
+    pub fn with_single_writer_partitioned_sink(
         mut self,
         columns: Vec<String>,
         template: PathTemplate,
@@ -103,7 +103,7 @@ impl Pipeline {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn with_output_strategy_with_low_cardinality_partitioned_sink(
+    pub fn with_multi_writer_partitioned_sink(
         mut self,
         columns: Vec<String>,
         template: PathTemplate,
