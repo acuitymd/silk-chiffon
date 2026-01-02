@@ -78,10 +78,16 @@ pub async fn run(args: TransformCommand) -> Result<()> {
 
     // validate options early to fail fast with clear error messages
     if let Some(ref limit) = memory_limit {
-        parse_byte_size(limit)?;
+        let bytes = parse_byte_size(limit)?;
+        if bytes == 0 {
+            anyhow::bail!("--memory-limit must be greater than 0");
+        }
     }
     if let Some(ref size) = parquet_buffer_size {
-        parse_byte_size(size)?;
+        let bytes = parse_byte_size(size)?;
+        if bytes == 0 {
+            anyhow::bail!("--parquet-buffer-size must be greater than 0");
+        }
     }
     if target_partitions == Some(0) {
         anyhow::bail!("--target-partitions must be at least 1");
