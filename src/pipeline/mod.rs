@@ -1,5 +1,9 @@
 use anyhow::{Result, anyhow};
-use datafusion::prelude::{SessionConfig, SessionContext};
+use bytesize::ByteSize;
+use datafusion::{
+    execution::memory_pool::FairSpillPool,
+    prelude::{SessionConfig, SessionContext},
+};
 
 use crate::{
     ListOutputsFormat, QueryDialect,
@@ -17,6 +21,8 @@ use crate::{
 pub struct PipelineConfig {
     pub working_directory: Option<String>,
     pub query_dialect: QueryDialect,
+    pub memory_limit: Option<usize>,
+    pub target_partitions: Option<usize>,
 }
 
 #[derive(Default)]
@@ -106,8 +112,18 @@ impl Pipeline {
         self
     }
 
+    pub fn with_memory_limit(mut self, memory_limit: Option<usize>) -> Self {
+        self.config.memory_limit = memory_limit;
+        self
+    }
+
+    pub fn with_target_partitions(mut self, target_partitions: Option<usize>) -> Self {
+        self.config.target_partitions = target_partitions;
+        self
+    }
+
     pub async fn execute(&mut self) -> Result<Vec<OutputFileInfo>> {
-        let mut ctx = self.build_session_context();
+        let mut ctx = self.build_session_context()?;
         self.execute_with_session_context(&mut ctx).await
     }
 
@@ -146,7 +162,7 @@ impl Pipeline {
         Ok(files)
     }
 
-    pub fn build_session_context(&self) -> SessionContext {
+    pub fn build_session_context(&self) -> Result<SessionContext> {
         let mut cfg = SessionConfig::new();
 
         // DuckDB doesn't like joining Datatype::Utf8View to Datatype::Utf8, so we disable
@@ -156,6 +172,84 @@ impl Pipeline {
 
         cfg.options_mut().sql_parser.dialect = self.config.query_dialect.into();
 
-        SessionContext::new_with_config(cfg)
+        if let Some(target_partitions) = self.config.target_partitions {
+            cfg = cfg.with_target_partitions(target_partitions);
+        }
+
+        if let Some(bytes) = self.config.memory_limit {
+            // use FairSpillPool which allows spilling to disk when memory is exceeded
+            let pool = FairSpillPool::new(bytes);
+            let runtime = datafusion::execution::runtime_env::RuntimeEnvBuilder::default()
+                .with_memory_pool(std::sync::Arc::new(pool))
+                .build()?;
+            return Ok(SessionContext::new_with_config_rt(
+                cfg,
+                std::sync::Arc::new(runtime),
+            ));
+        }
+
+        Ok(SessionContext::new_with_config(cfg))
+    }
+}
+
+/// Parse a human-readable byte size string (e.g., "512MB", "2GB", "1GiB") into bytes.
+#[allow(clippy::cast_possible_truncation)]
+pub fn parse_byte_size(s: &str) -> Result<usize> {
+    s.parse::<ByteSize>()
+        .map(|bs| bs.as_u64() as usize)
+        .map_err(|_| {
+            anyhow!(
+                "invalid byte size '{}': expected format like '512MB', '2GB', or '1GiB'",
+                s
+            )
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_byte_size_decimal_units() {
+        // KB = 1000 bytes (decimal)
+        assert_eq!(parse_byte_size("1KB").unwrap(), 1000);
+        assert_eq!(parse_byte_size("1MB").unwrap(), 1_000_000);
+        assert_eq!(parse_byte_size("1GB").unwrap(), 1_000_000_000);
+        assert_eq!(parse_byte_size("2GB").unwrap(), 2_000_000_000);
+    }
+
+    #[test]
+    fn test_parse_byte_size_binary_units() {
+        // KiB = 1024 bytes (binary)
+        assert_eq!(parse_byte_size("1KiB").unwrap(), 1024);
+        assert_eq!(parse_byte_size("1MiB").unwrap(), 1024 * 1024);
+        assert_eq!(parse_byte_size("1GiB").unwrap(), 1024 * 1024 * 1024);
+        assert_eq!(parse_byte_size("512MiB").unwrap(), 512 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_parse_byte_size_bare_bytes() {
+        assert_eq!(parse_byte_size("1024").unwrap(), 1024);
+        assert_eq!(parse_byte_size("33554432").unwrap(), 33554432); // 32MB default buffer
+    }
+
+    #[test]
+    fn test_parse_byte_size_with_spaces() {
+        assert_eq!(parse_byte_size("512 MB").unwrap(), 512_000_000);
+        assert_eq!(parse_byte_size("1 GiB").unwrap(), 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_parse_byte_size_case_insensitive() {
+        assert_eq!(parse_byte_size("1mb").unwrap(), 1_000_000);
+        assert_eq!(parse_byte_size("1Mb").unwrap(), 1_000_000);
+        assert_eq!(parse_byte_size("1mib").unwrap(), 1024 * 1024);
+    }
+
+    #[test]
+    fn test_parse_byte_size_invalid() {
+        assert!(parse_byte_size("invalid").is_err());
+        assert!(parse_byte_size("").is_err());
+        assert!(parse_byte_size("MB").is_err());
     }
 }

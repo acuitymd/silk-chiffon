@@ -61,7 +61,8 @@ use tokio_par_util::StreamParExt;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 
-const WRITER_BUFFER_SIZE: usize = 32 * 1024 * 1024;
+/// Default I/O buffer size for parquet writing (32MB).
+pub const DEFAULT_BUFFER_SIZE: usize = 32 * 1024 * 1024;
 
 /// Calculate recommended concurrency for parallel parquet writing.
 ///
@@ -135,7 +136,7 @@ struct EncodedRowGroup {
 /// # Usage
 ///
 /// ```ignore
-/// let mut writer = StreamParquetWriter::new(&path, &schema, props, row_group_size, concurrency);
+/// let mut writer = StreamParquetWriter::new(&path, &schema, props, row_group_size, buffer_size, concurrency);
 /// for batch in batches {
 ///     writer.write(batch).await?;
 /// }
@@ -164,6 +165,7 @@ impl StreamParquetWriter {
         schema: &SchemaRef,
         props: WriterProperties,
         max_row_group_size: usize,
+        buffer_size: usize,
         concurrency: usize,
     ) -> Self {
         let path = path.as_ref().to_path_buf();
@@ -176,10 +178,7 @@ impl StreamParquetWriter {
 
         let writer_handle = tokio::spawn(async move {
             let file = tokio::task::spawn_blocking(move || -> Result<_> {
-                Ok(BufWriter::with_capacity(
-                    WRITER_BUFFER_SIZE,
-                    File::create(&path)?,
-                ))
+                Ok(BufWriter::with_capacity(buffer_size, File::create(&path)?))
             })
             .await
             .map_err(|e| anyhow!("file create panicked: {e}"))??;
@@ -390,7 +389,8 @@ mod tests {
         let schema = simple_schema();
         let props = WriterProperties::builder().build();
 
-        let mut writer = StreamParquetWriter::new(&path, &schema, props, 100, 4);
+        let mut writer =
+            StreamParquetWriter::new(&path, &schema, props, 100, DEFAULT_BUFFER_SIZE, 4);
 
         for i in 0..3 {
             let ids: Vec<i32> = (i * 100..(i + 1) * 100).collect();
@@ -421,7 +421,8 @@ mod tests {
         let schema = simple_schema();
         let props = WriterProperties::builder().build();
 
-        let mut writer = StreamParquetWriter::new(&path, &schema, props, 100, 4);
+        let mut writer =
+            StreamParquetWriter::new(&path, &schema, props, 100, DEFAULT_BUFFER_SIZE, 4);
 
         for i in 0..10 {
             let ids: Vec<i32> = (i * 10..(i + 1) * 10).collect();
@@ -448,7 +449,7 @@ mod tests {
         let schema = simple_schema();
         let props = WriterProperties::builder().build();
 
-        let mut writer = StreamParquetWriter::new(&path, &schema, props, 1, 4);
+        let mut writer = StreamParquetWriter::new(&path, &schema, props, 1, DEFAULT_BUFFER_SIZE, 4);
 
         for i in 0..5 {
             let ids: Vec<i32> = vec![i];
@@ -489,7 +490,8 @@ mod tests {
         let schema = simple_schema();
         let props = WriterProperties::builder().build();
 
-        let mut writer = StreamParquetWriter::new(&path, &schema, props, 100, 4);
+        let mut writer =
+            StreamParquetWriter::new(&path, &schema, props, 100, DEFAULT_BUFFER_SIZE, 4);
 
         let rows = writer.close().await.unwrap();
         assert_eq!(rows, 0);
@@ -509,7 +511,8 @@ mod tests {
         let schema = simple_schema();
         let props = WriterProperties::builder().build();
 
-        let mut writer = StreamParquetWriter::new(&path, &schema, props, 100, 4);
+        let mut writer =
+            StreamParquetWriter::new(&path, &schema, props, 100, DEFAULT_BUFFER_SIZE, 4);
 
         // first close succeeds
         let rows = writer.close().await.unwrap();
@@ -557,7 +560,8 @@ mod tests {
         .unwrap();
 
         let props = WriterProperties::builder().build();
-        let mut writer = StreamParquetWriter::new(&path, &schema, props, 100, 4);
+        let mut writer =
+            StreamParquetWriter::new(&path, &schema, props, 100, DEFAULT_BUFFER_SIZE, 4);
         writer.write(batch).await.unwrap();
         let rows = writer.close().await.unwrap();
         assert_eq!(rows, 3);
@@ -630,7 +634,8 @@ mod tests {
         .unwrap();
 
         let props = WriterProperties::builder().build();
-        let mut writer = StreamParquetWriter::new(&path, &schema, props, 100, 4);
+        let mut writer =
+            StreamParquetWriter::new(&path, &schema, props, 100, DEFAULT_BUFFER_SIZE, 4);
         writer.write(batch).await.unwrap();
         let rows = writer.close().await.unwrap();
         assert_eq!(rows, 3);
@@ -691,7 +696,8 @@ mod tests {
         .unwrap();
 
         let props = WriterProperties::builder().build();
-        let mut writer = StreamParquetWriter::new(&path, &schema, props, 100, 4);
+        let mut writer =
+            StreamParquetWriter::new(&path, &schema, props, 100, DEFAULT_BUFFER_SIZE, 4);
         writer.write(batch).await.unwrap();
         let rows = writer.close().await.unwrap();
         assert_eq!(rows, 3);
@@ -755,7 +761,8 @@ mod tests {
         .unwrap();
 
         let props = WriterProperties::builder().build();
-        let mut writer = StreamParquetWriter::new(&path, &schema, props, 100, 4);
+        let mut writer =
+            StreamParquetWriter::new(&path, &schema, props, 100, DEFAULT_BUFFER_SIZE, 4);
         writer.write(batch).await.unwrap();
         let rows = writer.close().await.unwrap();
         assert_eq!(rows, 3);
@@ -814,7 +821,8 @@ mod tests {
             RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(struct_array)]).unwrap();
 
         let props = WriterProperties::builder().build();
-        let mut writer = StreamParquetWriter::new(&path, &schema, props, 100, 4);
+        let mut writer =
+            StreamParquetWriter::new(&path, &schema, props, 100, DEFAULT_BUFFER_SIZE, 4);
         writer.write(batch).await.unwrap();
         let rows = writer.close().await.unwrap();
         assert_eq!(rows, 3);
@@ -850,7 +858,8 @@ mod tests {
         let schema = simple_schema();
         let props = WriterProperties::builder().build();
 
-        let mut writer = StreamParquetWriter::new(&path, &schema, props, 50_000, 4);
+        let mut writer =
+            StreamParquetWriter::new(&path, &schema, props, 50_000, DEFAULT_BUFFER_SIZE, 4);
 
         // write 100k rows in chunks
         for i in 0..10 {
@@ -879,7 +888,8 @@ mod tests {
         let props = WriterProperties::builder().build();
 
         // small row group size to force many groups
-        let mut writer = StreamParquetWriter::new(&path, &schema, props, 10, 4);
+        let mut writer =
+            StreamParquetWriter::new(&path, &schema, props, 10, DEFAULT_BUFFER_SIZE, 4);
 
         for i in 0..100 {
             let ids: Vec<i32> = vec![i];
@@ -919,7 +929,8 @@ mod tests {
         .unwrap();
 
         let props = WriterProperties::builder().build();
-        let mut writer = StreamParquetWriter::new(&path, &schema, props, 100, 4);
+        let mut writer =
+            StreamParquetWriter::new(&path, &schema, props, 100, DEFAULT_BUFFER_SIZE, 4);
         writer.write(batch).await.unwrap();
         let rows = writer.close().await.unwrap();
         assert_eq!(rows, 3);
@@ -968,7 +979,8 @@ mod tests {
         let batch = RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(list_array)]).unwrap();
 
         let props = WriterProperties::builder().build();
-        let mut writer = StreamParquetWriter::new(&path, &schema, props, 100, 4);
+        let mut writer =
+            StreamParquetWriter::new(&path, &schema, props, 100, DEFAULT_BUFFER_SIZE, 4);
         writer.write(batch).await.unwrap();
         let rows = writer.close().await.unwrap();
         assert_eq!(rows, 3);
@@ -1037,7 +1049,8 @@ mod tests {
         let batch = RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(map_array)]).unwrap();
 
         let props = WriterProperties::builder().build();
-        let mut writer = StreamParquetWriter::new(&path, &schema, props, 100, 4);
+        let mut writer =
+            StreamParquetWriter::new(&path, &schema, props, 100, DEFAULT_BUFFER_SIZE, 4);
         writer.write(batch).await.unwrap();
         let rows = writer.close().await.unwrap();
         assert_eq!(rows, 2);
@@ -1085,7 +1098,8 @@ mod tests {
         let batch = RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(nested_list)]).unwrap();
 
         let props = WriterProperties::builder().build();
-        let mut writer = StreamParquetWriter::new(&path, &schema, props, 100, 4);
+        let mut writer =
+            StreamParquetWriter::new(&path, &schema, props, 100, DEFAULT_BUFFER_SIZE, 4);
         writer.write(batch).await.unwrap();
         let rows = writer.close().await.unwrap();
         assert_eq!(rows, 2);
@@ -1171,7 +1185,8 @@ mod tests {
         let batch = RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(list_array)]).unwrap();
 
         let props = WriterProperties::builder().build();
-        let mut writer = StreamParquetWriter::new(&path, &schema, props, 100, 4);
+        let mut writer =
+            StreamParquetWriter::new(&path, &schema, props, 100, DEFAULT_BUFFER_SIZE, 4);
         writer.write(batch).await.unwrap();
         let rows = writer.close().await.unwrap();
         assert_eq!(rows, 2);
@@ -1245,7 +1260,8 @@ mod tests {
             RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(struct_array)]).unwrap();
 
         let props = WriterProperties::builder().build();
-        let mut writer = StreamParquetWriter::new(&path, &schema, props, 100, 4);
+        let mut writer =
+            StreamParquetWriter::new(&path, &schema, props, 100, DEFAULT_BUFFER_SIZE, 4);
         writer.write(batch).await.unwrap();
         let rows = writer.close().await.unwrap();
         assert_eq!(rows, 2);
@@ -1324,7 +1340,8 @@ mod tests {
         .unwrap();
 
         let props = WriterProperties::builder().build();
-        let mut writer = StreamParquetWriter::new(&path, &schema, props, 100, 4);
+        let mut writer =
+            StreamParquetWriter::new(&path, &schema, props, 100, DEFAULT_BUFFER_SIZE, 4);
         writer.write(batch).await.unwrap();
         let rows = writer.close().await.unwrap();
         assert_eq!(rows, 2);
@@ -1376,7 +1393,8 @@ mod tests {
         .unwrap();
 
         let props = WriterProperties::builder().build();
-        let mut writer = StreamParquetWriter::new(&path, &schema, props, 100, 4);
+        let mut writer =
+            StreamParquetWriter::new(&path, &schema, props, 100, DEFAULT_BUFFER_SIZE, 4);
         writer.write(batch).await.unwrap();
         let rows = writer.close().await.unwrap();
         assert_eq!(rows, 2);
@@ -1426,7 +1444,8 @@ mod tests {
         .unwrap();
 
         let props = WriterProperties::builder().build();
-        let mut writer = StreamParquetWriter::new(&path, &schema, props, 100, 4);
+        let mut writer =
+            StreamParquetWriter::new(&path, &schema, props, 100, DEFAULT_BUFFER_SIZE, 4);
         writer.write(batch).await.unwrap();
         let rows = writer.close().await.unwrap();
         assert_eq!(rows, 2);
@@ -1479,7 +1498,8 @@ mod tests {
         let batch = RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(fixed_list)]).unwrap();
 
         let props = WriterProperties::builder().build();
-        let mut writer = StreamParquetWriter::new(&path, &schema, props, 100, 4);
+        let mut writer =
+            StreamParquetWriter::new(&path, &schema, props, 100, DEFAULT_BUFFER_SIZE, 4);
         writer.write(batch).await.unwrap();
         let rows = writer.close().await.unwrap();
         assert_eq!(rows, 2);

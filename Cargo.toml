@@ -16,6 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "^1.0.100"
+bytesize = "2"
 async-stream = "0.3"
 async-trait = "^0.1.89"
 arrow = { version = "^57.0.0", features = ["default", "ipc_compression"] }
@@ -23,7 +24,7 @@ camino = { version = "1.2.2", features = ["serde1"] }
 chrono = "0.4.42"
 clap = { version = "^4.5.53", features = ["default", "derive"] }
 clap_complete = "^4.5"
-datafusion = { git = "https://github.com/apache/datafusion.git", rev = "1cc9bcd52e5901f9085864c032c5f51a1932a075" }
+datafusion = { git = "https://github.com/apache/datafusion.git", rev = "9a9ff8d6162b7391736b0b7c82c00cb35b0652a1" }
 futures = "^0.3.31"
 glob = "^0.3.3"
 minijinja = "^2.12.0"
