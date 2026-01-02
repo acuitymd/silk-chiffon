@@ -15,6 +15,9 @@ fn main() -> Result<()> {
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.enable_all();
     if let Some(threads) = cli.threads {
+        if threads == 0 {
+            anyhow::bail!("--threads must be at least 1");
+        }
         builder.worker_threads(threads);
     }
     let runtime = builder.build()?;

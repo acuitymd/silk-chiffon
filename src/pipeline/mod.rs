@@ -177,7 +177,7 @@ impl Pipeline {
         }
 
         if let Some(ref memory_limit) = self.config.memory_limit
-            && let Some(bytes) = parse_byte_size(memory_limit)
+            && let Some(bytes) = parse_byte_size(memory_limit).ok()
         {
             // use FairSpillPool which allows spilling to disk when memory is exceeded
             let pool = FairSpillPool::new(bytes);
@@ -194,8 +194,15 @@ impl Pipeline {
 
 /// Parse a human-readable byte size string (e.g., "512MB", "2GB", "1GiB") into bytes.
 #[allow(clippy::cast_possible_truncation)]
-pub fn parse_byte_size(s: &str) -> Option<usize> {
-    s.parse::<ByteSize>().ok().map(|bs| bs.as_u64() as usize)
+pub fn parse_byte_size(s: &str) -> Result<usize> {
+    s.parse::<ByteSize>()
+        .map(|bs| bs.as_u64() as usize)
+        .map_err(|_| {
+            anyhow!(
+                "invalid byte size '{}': expected format like '512MB', '2GB', or '1GiB'",
+                s
+            )
+        })
 }
 
 #[cfg(test)]
@@ -205,44 +212,44 @@ mod tests {
     #[test]
     fn test_parse_byte_size_decimal_units() {
         // KB = 1000 bytes (decimal)
-        assert_eq!(parse_byte_size("1KB"), Some(1000));
-        assert_eq!(parse_byte_size("1MB"), Some(1_000_000));
-        assert_eq!(parse_byte_size("1GB"), Some(1_000_000_000));
-        assert_eq!(parse_byte_size("2GB"), Some(2_000_000_000));
+        assert_eq!(parse_byte_size("1KB").unwrap(), 1000);
+        assert_eq!(parse_byte_size("1MB").unwrap(), 1_000_000);
+        assert_eq!(parse_byte_size("1GB").unwrap(), 1_000_000_000);
+        assert_eq!(parse_byte_size("2GB").unwrap(), 2_000_000_000);
     }
 
     #[test]
     fn test_parse_byte_size_binary_units() {
         // KiB = 1024 bytes (binary)
-        assert_eq!(parse_byte_size("1KiB"), Some(1024));
-        assert_eq!(parse_byte_size("1MiB"), Some(1024 * 1024));
-        assert_eq!(parse_byte_size("1GiB"), Some(1024 * 1024 * 1024));
-        assert_eq!(parse_byte_size("512MiB"), Some(512 * 1024 * 1024));
+        assert_eq!(parse_byte_size("1KiB").unwrap(), 1024);
+        assert_eq!(parse_byte_size("1MiB").unwrap(), 1024 * 1024);
+        assert_eq!(parse_byte_size("1GiB").unwrap(), 1024 * 1024 * 1024);
+        assert_eq!(parse_byte_size("512MiB").unwrap(), 512 * 1024 * 1024);
     }
 
     #[test]
     fn test_parse_byte_size_bare_bytes() {
-        assert_eq!(parse_byte_size("1024"), Some(1024));
-        assert_eq!(parse_byte_size("33554432"), Some(33554432)); // 32MB default buffer
+        assert_eq!(parse_byte_size("1024").unwrap(), 1024);
+        assert_eq!(parse_byte_size("33554432").unwrap(), 33554432); // 32MB default buffer
     }
 
     #[test]
     fn test_parse_byte_size_with_spaces() {
-        assert_eq!(parse_byte_size("512 MB"), Some(512_000_000));
-        assert_eq!(parse_byte_size("1 GiB"), Some(1024 * 1024 * 1024));
+        assert_eq!(parse_byte_size("512 MB").unwrap(), 512_000_000);
+        assert_eq!(parse_byte_size("1 GiB").unwrap(), 1024 * 1024 * 1024);
     }
 
     #[test]
     fn test_parse_byte_size_case_insensitive() {
-        assert_eq!(parse_byte_size("1mb"), Some(1_000_000));
-        assert_eq!(parse_byte_size("1Mb"), Some(1_000_000));
-        assert_eq!(parse_byte_size("1mib"), Some(1024 * 1024));
+        assert_eq!(parse_byte_size("1mb").unwrap(), 1_000_000);
+        assert_eq!(parse_byte_size("1Mb").unwrap(), 1_000_000);
+        assert_eq!(parse_byte_size("1mib").unwrap(), 1024 * 1024);
     }
 
     #[test]
     fn test_parse_byte_size_invalid() {
-        assert_eq!(parse_byte_size("invalid"), None);
-        assert_eq!(parse_byte_size(""), None);
-        assert_eq!(parse_byte_size("MB"), None);
+        assert!(parse_byte_size("invalid").is_err());
+        assert!(parse_byte_size("").is_err());
+        assert!(parse_byte_size("MB").is_err());
     }
 }

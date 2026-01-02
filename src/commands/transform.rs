@@ -76,6 +76,14 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         &parquet_column_encoding,
     )?;
 
+    // validate byte size options early to fail fast with clear error messages
+    if let Some(ref limit) = memory_limit {
+        parse_byte_size(limit)?;
+    }
+    if let Some(ref size) = parquet_buffer_size {
+        parse_byte_size(size)?;
+    }
+
     let mut pipeline = Pipeline::new()
         .with_query_dialect(dialect)
         .with_memory_limit(memory_limit)
@@ -471,7 +479,7 @@ fn create_sink_factory(
                     options = options.with_max_row_group_size(row_group_size);
                 }
                 if let Some(ref buffer_size) = parquet_buffer_size
-                    && let Some(bytes) = parse_byte_size(buffer_size)
+                    && let Some(bytes) = parse_byte_size(buffer_size).ok()
                 {
                     options = options.with_buffer_size(bytes);
                 }
