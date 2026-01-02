@@ -39,6 +39,7 @@ pub fn partition_values_equal(a: &PartitionValues, b: &PartitionValues) -> bool 
 /// - ["us-west", "2024"] -> "7:us-west,4:2024"
 /// - ["a|b", "c"] -> "3:a|b,1:c" (no collision with ["a", "b|c"] -> "1:a,3:b|c")
 /// - ["us-west", NULL] -> "7:us-west,!" (no collision with ["us-west", "null"] -> "7:us-west,4:null")
+/// - ["us-west", ""] -> "7:us-west,0:" (empty string is distinct from null)
 pub fn partition_key(values: &PartitionValues, column_order: &[String]) -> String {
     column_order
         .iter()
@@ -876,6 +877,29 @@ mod tests {
         assert_ne!(key1, key2);
         assert_eq!(key1, "!");
         assert_eq!(key2, "4:null");
+    }
+
+    #[test]
+    fn test_partition_key_empty_string() {
+        // empty string should be distinct from null
+        let mut empty = HashMap::new();
+        empty.insert(
+            "x".to_string(),
+            Arc::new(StringArray::from(vec![""])) as ArrayRef,
+        );
+
+        let mut null_value = HashMap::new();
+        null_value.insert(
+            "x".to_string(),
+            Arc::new(StringArray::from(vec![None as Option<&str>])) as ArrayRef,
+        );
+
+        let empty_key = partition_key(&empty, &["x".to_string()]);
+        let null_key = partition_key(&null_value, &["x".to_string()]);
+
+        assert_eq!(empty_key, "0:");
+        assert_eq!(null_key, "!");
+        assert_ne!(empty_key, null_key);
     }
 
     #[test]
