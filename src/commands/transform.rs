@@ -1,7 +1,7 @@
 use crate::{
     ArrowCompression, ArrowIPCFormat, BloomFilterConfig, ColumnEncodingConfig, DataFormat,
     ListOutputsFormat, ParquetCompression, ParquetEncoding, ParquetStatistics,
-    ParquetWriterVersion, SortSpec, TransformCommand,
+    ParquetWriterVersion, PartitionStrategy, SortSpec, TransformCommand,
     io_strategies::{OutputFileInfo, output_strategy::SinkFactory, path_template::PathTemplate},
     operations::{query::QueryOperation, sort::SortOperation},
     pipeline::Pipeline,
@@ -30,6 +30,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         to,
         to_many,
         by,
+        partition_strategy,
         exclude_columns,
         list_outputs,
         list_outputs_file,
@@ -175,21 +176,26 @@ pub async fn run(args: TransformCommand) -> Result<()> {
     // columns within each file since they are just a single value, so we remove them from
     // the user-specified sort order.
 
-    let partition_sort_spec = if let Some(ref by_cols) = by {
-        SortSpec::from(
-            by_cols
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .collect::<Vec<_>>(),
-        )
+    let partition_columns = if let Some(ref by_cols) = by {
+        by_cols
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .collect::<Vec<_>>()
     } else {
-        SortSpec::default()
+        vec![]
+    };
+
+    // sort-single: requires global sort by partition columns (one file at a time)
+    // nosort-multi: keeps file handles open per partition, no sort required
+    let partition_sort_spec = match partition_strategy {
+        PartitionStrategy::SortSingle => SortSpec::from(partition_columns.clone()),
+        PartitionStrategy::NosortMulti => SortSpec::default(),
     };
 
     let user_sort_spec = sort_by.clone().unwrap_or(SortSpec::default());
 
     let user_sort_spec_without_partition_cols =
-        user_sort_spec.without_columns_named(&partition_sort_spec.column_names());
+        user_sort_spec.without_columns_named(&partition_columns);
 
     let parquet_sort_spec =
         if parquet_sorted_metadata && !user_sort_spec_without_partition_cols.is_empty() {
@@ -232,19 +238,28 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         );
     } else if let Some(template) = to_many {
         let path_template = PathTemplate::new(template);
-        // relying on the partition_sort_spec since it appropriately handles duplicate column names
-        // and is used to perform the sort operation that we will be partitioning on later
-        let partition_columns = partition_sort_spec.column_names();
 
-        pipeline = pipeline.with_output_strategy_with_partitioned_sink(
-            partition_columns,
-            path_template,
-            sink_factory,
-            exclude_columns.clone(),
-            create_dirs,
-            overwrite,
-            list_outputs.unwrap_or_default(),
-        );
+        if partition_strategy == PartitionStrategy::NosortMulti {
+            pipeline = pipeline.with_multi_writer_partitioned_sink(
+                partition_columns,
+                path_template,
+                sink_factory,
+                exclude_columns.clone(),
+                create_dirs,
+                overwrite,
+                list_outputs.unwrap_or_default(),
+            );
+        } else {
+            pipeline = pipeline.with_single_writer_partitioned_sink(
+                partition_columns,
+                path_template,
+                sink_factory,
+                exclude_columns.clone(),
+                create_dirs,
+                overwrite,
+                list_outputs.unwrap_or_default(),
+            );
+        }
     }
 
     if let Some(q) = query {

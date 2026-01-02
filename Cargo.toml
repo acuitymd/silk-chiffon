@@ -75,6 +75,10 @@ predicates = "^3.1.3"
 name = "parquet_writer"
 harness = false
 
+[[bench]]
+name = "partitioning"
+harness = false
+
 [profile.release]
 lto = true
 codegen-units = 1

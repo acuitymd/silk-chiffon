@@ -8,8 +8,11 @@ use std::{
 use anyhow::{Result, anyhow};
 use arrow::array::{ArrayRef, RecordBatch};
 use arrow::compute::partition;
+use arrow::datatypes::{DataType, Schema};
 use datafusion::execution::SendableRecordBatchStream;
 use futures::stream::Stream;
+
+use crate::io_strategies::output_file_info::format_scalar_value;
 
 /// A HashMap of column names to single-row arrays representing a partition value for a column
 pub type PartitionValues = HashMap<String, ArrayRef>;
@@ -28,6 +31,77 @@ pub fn partition_values_equal(a: &PartitionValues, b: &PartitionValues) -> bool 
     })
 }
 
+/// Create a hashable string key from partition values.
+/// Uses length-prefix encoding to avoid collisions when values contain delimiters.
+/// Null values use "!" marker to distinguish from the string "null".
+///
+/// Examples:
+/// - ["us-west", "2024"] -> "7:us-west,4:2024"
+/// - ["a|b", "c"] -> "3:a|b,1:c" (no collision with ["a", "b|c"] -> "1:a,3:b|c")
+/// - ["us-west", NULL] -> "7:us-west,!" (no collision with ["us-west", "null"] -> "7:us-west,4:null")
+/// - ["us-west", ""] -> "7:us-west,0:" (empty string is distinct from null)
+pub fn partition_key(values: &PartitionValues, column_order: &[String]) -> String {
+    column_order
+        .iter()
+        .map(|col| match values.get(col) {
+            Some(arr) if arr.is_null(0) => "!".to_string(),
+            arr => {
+                let v = format_scalar_value(arr);
+                format!("{}:{}", v.len(), v)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Check if a data type is primitive (supported for partitioning).
+pub fn is_primitive_type(dt: &DataType) -> bool {
+    matches!(
+        dt,
+        DataType::Boolean
+            | DataType::Int8
+            | DataType::Int16
+            | DataType::Int32
+            | DataType::Int64
+            | DataType::UInt8
+            | DataType::UInt16
+            | DataType::UInt32
+            | DataType::UInt64
+            | DataType::Float16
+            | DataType::Float32
+            | DataType::Float64
+            | DataType::Utf8
+            | DataType::LargeUtf8
+            | DataType::Utf8View
+            | DataType::Date32
+            | DataType::Date64
+            | DataType::Time32(_)
+            | DataType::Time64(_)
+            | DataType::Timestamp(_, _)
+            | DataType::Duration(_)
+            | DataType::Decimal128(_, _)
+            | DataType::Decimal256(_, _)
+    )
+}
+
+/// Validate that all partition columns are primitive types.
+pub fn validate_partition_columns_primitive(schema: &Schema, columns: &[String]) -> Result<()> {
+    for col in columns {
+        let field = schema
+            .field_with_name(col)
+            .map_err(|_| anyhow!("partition column '{}' not found in schema", col))?;
+        if !is_primitive_type(field.data_type()) {
+            anyhow::bail!(
+                "partition column '{}' has non-primitive type {:?}; \
+                 only primitive types are supported for partitioning",
+                col,
+                field.data_type()
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Stream that partitions record batches by column values, yielding
 /// (partition_values, sliced_batch) tuples where partition_values contains
 /// single-row arrays for each partition column.
@@ -37,7 +111,6 @@ pub fn partition_values_equal(a: &PartitionValues, b: &PartitionValues) -> bool 
 pub struct PartitionedBatchStream {
     inner: SendableRecordBatchStream,
     columns: Vec<String>,
-
     current_batch: Option<RecordBatch>,
     current_ranges: Option<Vec<Range<usize>>>,
     current_range_idx: usize,
@@ -161,7 +234,7 @@ mod tests {
 
     use arrow::{
         array::{Array, Int32Array, RecordBatch, StringArray},
-        datatypes::{DataType, Field, Schema},
+        datatypes::{DataType, Field, Schema, TimeUnit},
     };
     use datafusion::physical_plan::{SendableRecordBatchStream, stream::RecordBatchStreamAdapter};
     use futures::{StreamExt, stream};
@@ -736,5 +809,229 @@ mod tests {
         let region_null = results[1].0.get("region").unwrap();
         let arr_null = region_null.as_any().downcast_ref::<StringArray>().unwrap();
         assert!(arr_null.is_null(0));
+    }
+
+    #[test]
+    fn test_partition_key_single_column() {
+        let mut values = HashMap::new();
+        values.insert(
+            "region".to_string(),
+            Arc::new(StringArray::from(vec!["us-west"])) as ArrayRef,
+        );
+
+        let key = partition_key(&values, &["region".to_string()]);
+        // length-prefix format: "7:us-west"
+        assert_eq!(key, "7:us-west");
+    }
+
+    #[test]
+    fn test_partition_key_multi_column() {
+        let mut values = HashMap::new();
+        values.insert(
+            "region".to_string(),
+            Arc::new(StringArray::from(vec!["us-west"])) as ArrayRef,
+        );
+        values.insert(
+            "year".to_string(),
+            Arc::new(Int32Array::from(vec![2024])) as ArrayRef,
+        );
+
+        // order matters - length-prefix format
+        let key1 = partition_key(&values, &["region".to_string(), "year".to_string()]);
+        let key2 = partition_key(&values, &["year".to_string(), "region".to_string()]);
+        assert_eq!(key1, "7:us-west,4:2024");
+        assert_eq!(key2, "4:2024,7:us-west");
+    }
+
+    #[test]
+    fn test_partition_key_with_null() {
+        let mut values = HashMap::new();
+        values.insert(
+            "region".to_string(),
+            Arc::new(StringArray::from(vec![None as Option<&str>])) as ArrayRef,
+        );
+
+        let key = partition_key(&values, &["region".to_string()]);
+        // null uses special "!" marker
+        assert_eq!(key, "!");
+    }
+
+    #[test]
+    fn test_partition_key_null_vs_string_null() {
+        // actual null should not collide with the string "null"
+        let mut null_value = HashMap::new();
+        null_value.insert(
+            "x".to_string(),
+            Arc::new(StringArray::from(vec![None as Option<&str>])) as ArrayRef,
+        );
+
+        let mut string_null = HashMap::new();
+        string_null.insert(
+            "x".to_string(),
+            Arc::new(StringArray::from(vec!["null"])) as ArrayRef,
+        );
+
+        let key1 = partition_key(&null_value, &["x".to_string()]);
+        let key2 = partition_key(&string_null, &["x".to_string()]);
+
+        assert_ne!(key1, key2);
+        assert_eq!(key1, "!");
+        assert_eq!(key2, "4:null");
+    }
+
+    #[test]
+    fn test_partition_key_empty_string() {
+        // empty string should be distinct from null
+        let mut empty = HashMap::new();
+        empty.insert(
+            "x".to_string(),
+            Arc::new(StringArray::from(vec![""])) as ArrayRef,
+        );
+
+        let mut null_value = HashMap::new();
+        null_value.insert(
+            "x".to_string(),
+            Arc::new(StringArray::from(vec![None as Option<&str>])) as ArrayRef,
+        );
+
+        let empty_key = partition_key(&empty, &["x".to_string()]);
+        let null_key = partition_key(&null_value, &["x".to_string()]);
+
+        assert_eq!(empty_key, "0:");
+        assert_eq!(null_key, "!");
+        assert_ne!(empty_key, null_key);
+    }
+
+    #[test]
+    fn test_partition_key_collision_avoided() {
+        // test that values containing delimiters don't collide
+        let mut values1 = HashMap::new();
+        values1.insert(
+            "a".to_string(),
+            Arc::new(StringArray::from(vec!["x,y"])) as ArrayRef,
+        );
+        values1.insert(
+            "b".to_string(),
+            Arc::new(StringArray::from(vec!["z"])) as ArrayRef,
+        );
+
+        let mut values2 = HashMap::new();
+        values2.insert(
+            "a".to_string(),
+            Arc::new(StringArray::from(vec!["x"])) as ArrayRef,
+        );
+        values2.insert(
+            "b".to_string(),
+            Arc::new(StringArray::from(vec!["y,z"])) as ArrayRef,
+        );
+
+        let key1 = partition_key(&values1, &["a".to_string(), "b".to_string()]);
+        let key2 = partition_key(&values2, &["a".to_string(), "b".to_string()]);
+
+        // these should NOT be equal due to length-prefix encoding
+        assert_ne!(key1, key2);
+        assert_eq!(key1, "3:x,y,1:z");
+        assert_eq!(key2, "1:x,3:y,z");
+    }
+
+    #[test]
+    fn test_is_primitive_type() {
+        // primitive types
+        assert!(is_primitive_type(&DataType::Boolean));
+        assert!(is_primitive_type(&DataType::Int32));
+        assert!(is_primitive_type(&DataType::Int64));
+        assert!(is_primitive_type(&DataType::Float64));
+        assert!(is_primitive_type(&DataType::Utf8));
+        assert!(is_primitive_type(&DataType::Date32));
+        assert!(is_primitive_type(&DataType::Timestamp(
+            TimeUnit::Millisecond,
+            None
+        )));
+
+        // complex types
+        assert!(!is_primitive_type(&DataType::List(Arc::new(Field::new(
+            "item",
+            DataType::Int32,
+            true
+        )))));
+        assert!(!is_primitive_type(&DataType::Struct(
+            vec![Field::new("a", DataType::Int32, true)].into()
+        )));
+    }
+
+    #[test]
+    fn test_validate_partition_columns_primitive_success() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("name", DataType::Utf8, false),
+        ]);
+
+        let result =
+            validate_partition_columns_primitive(&schema, &["id".to_string(), "name".to_string()]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_partition_columns_primitive_fails_for_list() {
+        let schema = Schema::new(vec![Field::new(
+            "tags",
+            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+            false,
+        )]);
+
+        let result = validate_partition_columns_primitive(&schema, &["tags".to_string()]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("non-primitive"));
+    }
+
+    #[test]
+    fn test_validate_partition_columns_primitive_missing_column() {
+        let schema = Schema::new(vec![Field::new("id", DataType::Int32, false)]);
+
+        let result = validate_partition_columns_primitive(&schema, &["missing".to_string()]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_partitioner_interleaved() {
+        // unsorted input: categories are interleaved
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("category", DataType::Utf8, false),
+            Field::new("value", DataType::Int32, false),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(StringArray::from(vec!["b", "a", "b", "a", "c"])),
+                Arc::new(Int32Array::from(vec![1, 2, 3, 4, 5])),
+            ],
+        )
+        .unwrap();
+
+        let stream = create_test_stream(vec![batch]);
+        let partitioner = Partitioner::new(vec!["category".to_string()]);
+        let mut partitioned_stream = partitioner.partition_stream(stream);
+
+        let mut results = Vec::new();
+        while let Some(Ok((values, batch))) = partitioned_stream.next().await {
+            let cat = values
+                .get("category")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .value(0);
+            results.push((cat.to_string(), batch.num_rows()));
+        }
+
+        // without sorting, partitions are fragmented: b(1), a(1), b(1), a(1), c(1)
+        assert_eq!(results.len(), 5);
+        assert_eq!(results[0], ("b".to_string(), 1));
+        assert_eq!(results[1], ("a".to_string(), 1));
+        assert_eq!(results[2], ("b".to_string(), 1));
+        assert_eq!(results[3], ("a".to_string(), 1));
+        assert_eq!(results[4], ("c".to_string(), 1));
     }
 }

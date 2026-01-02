@@ -140,6 +140,22 @@ pub enum ListOutputsFormat {
     Json,
 }
 
+/// Strategy for writing partitioned output files.
+#[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Display)]
+#[value(rename_all = "kebab-case")]
+#[strum(serialize_all = "kebab-case")]
+pub enum PartitionStrategy {
+    /// Sort by partition columns first, then write one file at a time.
+    /// Uses minimal file handles but requires sorting the entire dataset.
+    /// Best for high-cardinality partition columns, or when partition columns are highly fragmented.
+    #[default]
+    SortSingle,
+    /// Keep a file handle open per partition, write rows directly.
+    /// No sorting required, preserves input order within each partition.
+    /// Best for low-cardinality partition columns with low fragmentation.
+    NosortMulti,
+}
+
 #[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Display)]
 #[value(rename_all = "lowercase")]
 pub enum QueryDialect {
@@ -902,8 +918,21 @@ pub struct TransformCommand {
     // ─── Partitioning ──────────────────────────────────────────────────────────────────
     //
     /// Column(s) to partition by (comma-separated for multi-column partitioning).
+    /// Partition output by column values. Only primitive types (integers, floats,
+    /// strings, dates, etc.) are supported. Complex types (arrays, structs, maps)
+    /// will error.
     #[arg(long, short, requires = "to_many", help_heading = "Partitioning")]
     pub by: Option<String>,
+
+    /// Partitioning strategy for writing output files.
+    #[arg(
+        long,
+        value_enum,
+        default_value_t,
+        requires = "by",
+        help_heading = "Partitioning"
+    )]
+    pub partition_strategy: PartitionStrategy,
 
     /// List the output files after creation (only with --to-many).
     #[arg(

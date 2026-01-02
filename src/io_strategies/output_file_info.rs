@@ -38,6 +38,22 @@ pub fn partition_values_to_json(
         .collect()
 }
 
+/// Format a single-row array as a string for use as a partition key component.
+/// This is not the greatest but ArrayRef can't be used as a key in a HashMap
+/// and we need that for the low cardinality partition strategy.
+pub fn format_scalar_value(arr: Option<&ArrayRef>) -> String {
+    match arr {
+        Some(arr) if !arr.is_empty() && !arr.is_null(0) => {
+            let formatter = ArrayFormatter::try_new(arr.as_ref(), &Default::default());
+            match formatter {
+                Ok(fmt) => fmt.value(0).to_string(),
+                Err(_) => "null".to_string(),
+            }
+        }
+        _ => "null".to_string(),
+    }
+}
+
 // extracts scalar value from single-row Arrow array and converts to JSON
 fn array_to_json_value(arr: &ArrayRef) -> Value {
     use arrow::array::*;

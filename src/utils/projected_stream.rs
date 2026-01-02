@@ -109,32 +109,6 @@ pub fn project_stream_with_column_names(
     project_stream(stream, indices?)
 }
 
-pub fn project_stream_with_excluded_column_names(
-    stream: SendableRecordBatchStream,
-    excluded_column_names: &[&str],
-) -> Result<SendableRecordBatchStream, DataFusionError> {
-    let schema = stream.schema();
-
-    let excluded_column_indices: Vec<usize> = excluded_column_names
-        .iter()
-        .map(|name| {
-            schema
-                .index_of(name)
-                .map_err(|_| ArrowError::SchemaError(format!("Column '{}' not found", name)))
-        })
-        .collect::<Result<Vec<usize>, ArrowError>>()?;
-
-    let indices = schema
-        .fields()
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| !excluded_column_indices.contains(i))
-        .map(|(i, _)| i)
-        .collect::<Vec<usize>>();
-
-    project_stream(stream, indices)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,41 +206,6 @@ mod tests {
         assert_eq!(batch.num_columns(), 2);
     }
 
-    #[tokio::test]
-    async fn test_project_stream_with_excluded_columns() {
-        let schema = test_schema();
-        let stream = test_stream(&schema);
-
-        let mut projected = project_stream_with_excluded_column_names(stream, &["name"]).unwrap();
-
-        assert_eq!(projected.schema().fields().len(), 2);
-        assert_eq!(projected.schema().field(0).name(), "id");
-        assert_eq!(projected.schema().field(1).name(), "value");
-
-        let batch = projected.next().await.unwrap().unwrap();
-        assert_eq!(batch.num_columns(), 2);
-    }
-
-    #[tokio::test]
-    async fn test_project_stream_exclude_multiple_columns() {
-        let schema = test_schema();
-        let stream = test_stream(&schema);
-
-        let mut projected =
-            project_stream_with_excluded_column_names(stream, &["id", "value"]).unwrap();
-
-        assert_eq!(projected.schema().fields().len(), 1);
-        assert_eq!(projected.schema().field(0).name(), "name");
-
-        let batch = projected.next().await.unwrap().unwrap();
-        let names = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        assert_eq!(names.value(0), "a");
-    }
-
     #[test]
     fn test_project_stream_index_out_of_bounds() {
         let schema = test_schema();
@@ -283,16 +222,6 @@ mod tests {
         let stream = test_stream(&schema);
 
         let result = project_stream_with_column_names(stream, &["nonexistent"]);
-        let err = result.err().expect("should be an error");
-        assert!(err.to_string().contains("not found"));
-    }
-
-    #[test]
-    fn test_project_stream_excluded_column_not_found() {
-        let schema = test_schema();
-        let stream = test_stream(&schema);
-
-        let result = project_stream_with_excluded_column_names(stream, &["nonexistent"]);
         let err = result.err().expect("should be an error");
         assert!(err.to_string().contains("not found"));
     }
