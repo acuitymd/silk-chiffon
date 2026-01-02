@@ -89,7 +89,7 @@ impl Pipeline {
         overwrite: bool,
         list_outputs: ListOutputsFormat,
     ) -> Self {
-        self.output_strategy = Some(OutputStrategy::PartitionedHighCardinality {
+        self.output_strategy = Some(OutputStrategy::PartitionedSingleWriter {
             columns,
             template: Box::new(template),
             sink_factory,
@@ -113,7 +113,7 @@ impl Pipeline {
         overwrite: bool,
         list_outputs: ListOutputsFormat,
     ) -> Self {
-        self.output_strategy = Some(OutputStrategy::PartitionedLowCardinality {
+        self.output_strategy = Some(OutputStrategy::PartitionedMultiWriter {
             columns,
             template: Box::new(template),
             sink_factory,

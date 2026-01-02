@@ -95,9 +95,9 @@ pub enum OutputStrategy {
         create_dirs: bool,
         overwrite: bool,
     },
-    /// Partitioned output for high-cardinality columns (requires sorted input).
+    /// Partitioned output with a single writer (requires sorted input).
     /// Opens one sink at a time and switches when partition values change.
-    PartitionedHighCardinality {
+    PartitionedSingleWriter {
         columns: Vec<String>,
         template: Box<PathTemplate>,
         sink_factory: SinkFactory,
@@ -106,10 +106,10 @@ pub enum OutputStrategy {
         overwrite: bool,
         list_outputs: ListOutputsFormat,
     },
-    /// Partitioned output for low-cardinality columns (unsorted input).
+    /// Partitioned output with multiple writers (unsorted input).
     /// Keeps a sink open for each partition value seen, dispatching batches to the
     /// appropriate sink based on partition column values.
-    PartitionedLowCardinality {
+    PartitionedMultiWriter {
         columns: Vec<String>,
         template: Box<PathTemplate>,
         sink_factory: SinkFactory,
@@ -159,7 +159,7 @@ impl OutputStrategy {
                     partition_values: vec![],
                 }])
             }
-            OutputStrategy::PartitionedHighCardinality {
+            OutputStrategy::PartitionedSingleWriter {
                 sink_factory,
                 columns,
                 exclude_columns,
@@ -229,7 +229,7 @@ impl OutputStrategy {
 
                 Ok(created_files)
             }
-            OutputStrategy::PartitionedLowCardinality {
+            OutputStrategy::PartitionedMultiWriter {
                 sink_factory,
                 columns,
                 exclude_columns,
@@ -385,7 +385,7 @@ mod tests {
             }))
         });
 
-        let mut strategy = OutputStrategy::PartitionedHighCardinality {
+        let mut strategy = OutputStrategy::PartitionedSingleWriter {
             columns: vec!["category".to_string()],
             template: Box::new(PathTemplate::new("output/{{category}}.parquet".to_string())),
             sink_factory,
@@ -431,7 +431,7 @@ mod tests {
             }))
         });
 
-        let mut strategy = OutputStrategy::PartitionedHighCardinality {
+        let mut strategy = OutputStrategy::PartitionedSingleWriter {
             columns: vec!["category".to_string()],
             template: Box::new(PathTemplate::new("output/{{category}}.parquet".to_string())),
             sink_factory,
@@ -479,7 +479,7 @@ mod tests {
             }))
         });
 
-        let mut strategy = OutputStrategy::PartitionedHighCardinality {
+        let mut strategy = OutputStrategy::PartitionedSingleWriter {
             columns: vec!["category".to_string()],
             template: Box::new(PathTemplate::new("output/{{category}}.parquet".to_string())),
             sink_factory,
@@ -527,7 +527,7 @@ mod tests {
             }))
         });
 
-        let mut strategy = OutputStrategy::PartitionedHighCardinality {
+        let mut strategy = OutputStrategy::PartitionedSingleWriter {
             columns: vec!["region".to_string()],
             template: Box::new(PathTemplate::new("output/{{region}}.parquet".to_string())),
             sink_factory,
@@ -583,7 +583,7 @@ mod tests {
             }))
         });
 
-        let mut strategy = OutputStrategy::PartitionedHighCardinality {
+        let mut strategy = OutputStrategy::PartitionedSingleWriter {
             columns: vec!["category".to_string()],
             template: Box::new(PathTemplate::new("output/{{category}}.parquet".to_string())),
             sink_factory,
@@ -647,7 +647,7 @@ mod tests {
             }))
         });
 
-        let mut strategy = OutputStrategy::PartitionedHighCardinality {
+        let mut strategy = OutputStrategy::PartitionedSingleWriter {
             columns: vec!["category".to_string()],
             template: Box::new(PathTemplate::new("output/{{category}}.parquet".to_string())),
             sink_factory,
@@ -714,7 +714,7 @@ mod tests {
             }) as Box<dyn DataSink>)
         };
 
-        let mut strategy = OutputStrategy::PartitionedHighCardinality {
+        let mut strategy = OutputStrategy::PartitionedSingleWriter {
             sink_factory: Box::new(sink_factory),
             columns: vec!["region".to_string()],
             template: Box::new(PathTemplate::new("output/{{region}}.parquet".to_string())),
@@ -769,7 +769,7 @@ mod tests {
             }) as Box<dyn DataSink>)
         };
 
-        let mut strategy = OutputStrategy::PartitionedHighCardinality {
+        let mut strategy = OutputStrategy::PartitionedSingleWriter {
             sink_factory: Box::new(sink_factory),
             columns: vec!["nonexistent_column".to_string()],
             template: Box::new(PathTemplate::new(
@@ -834,7 +834,7 @@ mod tests {
             }) as Box<dyn DataSink>)
         };
 
-        let mut strategy = OutputStrategy::PartitionedHighCardinality {
+        let mut strategy = OutputStrategy::PartitionedSingleWriter {
             sink_factory: Box::new(sink_factory),
             columns: vec!["region".to_string()],
             template: Box::new(PathTemplate::new("output/{{region}}.parquet".to_string())),
@@ -898,7 +898,7 @@ mod tests {
             }))
         });
 
-        let mut strategy = OutputStrategy::PartitionedLowCardinality {
+        let mut strategy = OutputStrategy::PartitionedMultiWriter {
             columns: vec!["category".to_string()],
             template: Box::new(PathTemplate::new("output/{{category}}.parquet".to_string())),
             sink_factory,
@@ -953,7 +953,7 @@ mod tests {
             }))
         });
 
-        let mut strategy = OutputStrategy::PartitionedLowCardinality {
+        let mut strategy = OutputStrategy::PartitionedMultiWriter {
             columns: vec!["category".to_string()],
             template: Box::new(PathTemplate::new("output/{{category}}.parquet".to_string())),
             sink_factory,
@@ -1009,7 +1009,7 @@ mod tests {
             }))
         });
 
-        let mut strategy = OutputStrategy::PartitionedLowCardinality {
+        let mut strategy = OutputStrategy::PartitionedMultiWriter {
             columns: vec!["category".to_string()],
             template: Box::new(PathTemplate::new("output/{{category}}.parquet".to_string())),
             sink_factory,
@@ -1070,7 +1070,7 @@ mod tests {
             }))
         });
 
-        let mut strategy = OutputStrategy::PartitionedLowCardinality {
+        let mut strategy = OutputStrategy::PartitionedMultiWriter {
             columns: vec!["category".to_string()],
             template: Box::new(PathTemplate::new("output/{{category}}.parquet".to_string())),
             sink_factory,

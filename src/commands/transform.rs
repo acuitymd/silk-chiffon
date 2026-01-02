@@ -1,7 +1,7 @@
 use crate::{
     ArrowCompression, ArrowIPCFormat, BloomFilterConfig, ColumnEncodingConfig, DataFormat,
     ListOutputsFormat, ParquetCompression, ParquetEncoding, ParquetStatistics,
-    ParquetWriterVersion, SortSpec, TransformCommand,
+    ParquetWriterVersion, PartitionStrategy, SortSpec, TransformCommand,
     io_strategies::{OutputFileInfo, output_strategy::SinkFactory, path_template::PathTemplate},
     operations::{query::QueryOperation, sort::SortOperation},
     pipeline::Pipeline,
@@ -30,7 +30,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         to,
         to_many,
         by,
-        low_cardinality_partition,
+        partition_strategy,
         exclude_columns,
         list_outputs,
         list_outputs_file,
@@ -185,12 +185,11 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         vec![]
     };
 
-    // high-cardinality: requires global sort by partition columns (one file at a time)
-    // low-cardinality: keeps file handles open per partition, no sort required
-    let partition_sort_spec = if low_cardinality_partition {
-        SortSpec::default()
-    } else {
-        SortSpec::from(partition_columns.clone())
+    // sort-single: requires global sort by partition columns (one file at a time)
+    // nosort-multi: keeps file handles open per partition, no sort required
+    let partition_sort_spec = match partition_strategy {
+        PartitionStrategy::SortSingle => SortSpec::from(partition_columns.clone()),
+        PartitionStrategy::NosortMulti => SortSpec::default(),
     };
 
     let user_sort_spec = sort_by.clone().unwrap_or(SortSpec::default());
@@ -240,7 +239,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
     } else if let Some(template) = to_many {
         let path_template = PathTemplate::new(template);
 
-        if low_cardinality_partition {
+        if partition_strategy == PartitionStrategy::NosortMulti {
             pipeline = pipeline.with_output_strategy_with_low_cardinality_partitioned_sink(
                 partition_columns,
                 path_template,

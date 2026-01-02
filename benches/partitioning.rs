@@ -14,8 +14,8 @@ use arrow::array::{Date32Array, Int16Array, Int32Array};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use silk_chiffon::TransformCommand;
 use silk_chiffon::commands::transform;
+use silk_chiffon::{PartitionStrategy, TransformCommand};
 use tempfile::TempDir;
 use tokio::runtime::Runtime;
 
@@ -188,7 +188,7 @@ fn default_transform_command() -> TransformCommand {
         to: None,
         to_many: None,
         by: None,
-        low_cardinality_partition: false,
+        partition_strategy: PartitionStrategy::SortSingle,
         exclude_columns: vec![],
         list_outputs: None,
         list_outputs_file: None,
@@ -228,7 +228,7 @@ fn run_partition_benchmark(
     c: &mut Criterion,
     group_name: &str,
     configs: &[Config],
-    low_cardinality: bool,
+    partition_strategy: PartitionStrategy,
     create_batch: BatchCreator,
     sample_size: usize,
 ) {
@@ -286,7 +286,7 @@ fn run_partition_benchmark(
                         from: Some(fixture.input_path.clone()),
                         to_many: Some(fixture.output_template.clone()),
                         by: Some("field1".to_string()),
-                        low_cardinality_partition: low_cardinality,
+                        partition_strategy,
                         ..default_transform_command()
                     };
 
@@ -307,7 +307,7 @@ fn bench_high_card_interleaved(c: &mut Criterion) {
         c,
         "high_card/interleaved",
         STRESS_CONFIGS,
-        false,
+        PartitionStrategy::SortSingle,
         create_interleaved_batch,
         10,
     );
@@ -318,7 +318,7 @@ fn bench_high_card_sorted(c: &mut Criterion) {
         c,
         "high_card/sorted",
         STRESS_CONFIGS,
-        false,
+        PartitionStrategy::SortSingle,
         create_sorted_batch,
         30,
     );
@@ -329,7 +329,7 @@ fn bench_low_card_interleaved(c: &mut Criterion) {
         c,
         "low_card/interleaved",
         STRESS_CONFIGS,
-        true,
+        PartitionStrategy::NosortMulti,
         create_interleaved_batch,
         10,
     );
@@ -340,7 +340,7 @@ fn bench_low_card_sorted(c: &mut Criterion) {
         c,
         "low_card/sorted",
         STRESS_CONFIGS,
-        true,
+        PartitionStrategy::NosortMulti,
         create_sorted_batch,
         30,
     );
@@ -352,7 +352,7 @@ fn bench_high_card_realistic(c: &mut Criterion) {
         c,
         "high_card/realistic",
         REALISTIC_CONFIGS,
-        false,
+        PartitionStrategy::SortSingle,
         create_clustered_batch,
         30,
     );
@@ -363,7 +363,7 @@ fn bench_low_card_realistic(c: &mut Criterion) {
         c,
         "low_card/realistic",
         REALISTIC_CONFIGS,
-        true,
+        PartitionStrategy::NosortMulti,
         create_clustered_batch,
         30,
     );

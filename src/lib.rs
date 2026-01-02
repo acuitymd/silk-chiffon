@@ -140,6 +140,20 @@ pub enum ListOutputsFormat {
     Json,
 }
 
+/// Strategy for writing partitioned output files.
+#[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Display)]
+#[value(rename_all = "kebab-case")]
+#[strum(serialize_all = "kebab-case")]
+pub enum PartitionStrategy {
+    /// Sort by partition columns first, then write one file at a time.
+    /// Uses minimal file handles but requires sorting the entire dataset.
+    #[default]
+    SortSingle,
+    /// Keep a file handle open per partition, write rows directly.
+    /// No sorting required, preserves input order within each partition.
+    NosortMulti,
+}
+
 #[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Display)]
 #[value(rename_all = "lowercase")]
 pub enum QueryDialect {
@@ -908,13 +922,18 @@ pub struct TransformCommand {
     #[arg(long, short, requires = "to_many", help_heading = "Partitioning")]
     pub by: Option<String>,
 
-    /// Use low-cardinality partitioning strategy.
+    /// Partitioning strategy for writing output files.
     ///
-    /// Instead of requiring globally sorted input, keeps a file handle open for
-    /// each partition value. Best for columns with few distinct values (e.g.,
-    /// region, status, category). Preserves input order within each partition.
-    #[arg(long, requires = "by", help_heading = "Partitioning")]
-    pub low_cardinality_partition: bool,
+    /// sort-single: Sort by partition columns first, write one file at a time.
+    /// nosort-multi: Keep file handles open per partition, no sorting required.
+    #[arg(
+        long,
+        value_enum,
+        default_value_t,
+        requires = "by",
+        help_heading = "Partitioning"
+    )]
+    pub partition_strategy: PartitionStrategy,
 
     /// List the output files after creation (only with --to-many).
     #[arg(
