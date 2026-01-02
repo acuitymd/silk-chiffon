@@ -21,7 +21,7 @@ use crate::{
 pub struct PipelineConfig {
     pub working_directory: Option<String>,
     pub query_dialect: QueryDialect,
-    pub memory_limit: Option<String>,
+    pub memory_limit: Option<usize>,
     pub target_partitions: Option<usize>,
 }
 
@@ -112,7 +112,7 @@ impl Pipeline {
         self
     }
 
-    pub fn with_memory_limit(mut self, memory_limit: Option<String>) -> Self {
+    pub fn with_memory_limit(mut self, memory_limit: Option<usize>) -> Self {
         self.config.memory_limit = memory_limit;
         self
     }
@@ -176,9 +176,7 @@ impl Pipeline {
             cfg = cfg.with_target_partitions(target_partitions);
         }
 
-        if let Some(ref memory_limit) = self.config.memory_limit
-            && let Some(bytes) = parse_byte_size(memory_limit).ok()
-        {
+        if let Some(bytes) = self.config.memory_limit {
             // use FairSpillPool which allows spilling to disk when memory is exceeded
             let pool = FairSpillPool::new(bytes);
             let runtime = datafusion::execution::runtime_env::RuntimeEnvBuilder::default()

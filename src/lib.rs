@@ -25,6 +25,32 @@ use std::{
 };
 use strum_macros::Display;
 
+/// Parse a usize that must be at least 1.
+fn parse_at_least_one(s: &str) -> Result<usize, String> {
+    let n: usize = s.parse().map_err(|e| format!("{e}"))?;
+    if n == 0 {
+        Err("value must be at least 1".into())
+    } else {
+        Ok(n)
+    }
+}
+
+/// Parse a human-readable byte size (e.g., "512MB", "2GB") that must be greater than 0.
+#[allow(clippy::cast_possible_truncation)]
+fn parse_nonzero_byte_size(s: &str) -> Result<usize, String> {
+    let bytes = s
+        .parse::<bytesize::ByteSize>()
+        .map_err(|_| {
+            format!("invalid byte size '{s}': expected format like '512MB', '2GB', or '1GiB'")
+        })?
+        .as_u64() as usize;
+    if bytes == 0 {
+        Err("value must be greater than 0".into())
+    } else {
+        Ok(bytes)
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 pub struct Cli {
@@ -34,7 +60,7 @@ pub struct Cli {
     /// query execution. Both DataFusion and parquet encoding use tokio's thread pools
     /// (async pool for queries, blocking pool for CPU-bound work like encoding).
     /// Defaults to the number of CPU cores.
-    #[arg(long, short = 't', global = true)]
+    #[arg(long, short = 't', global = true, value_parser = parse_at_least_one)]
     pub threads: Option<usize>,
 
     #[command(subcommand)]
@@ -861,15 +887,15 @@ pub struct TransformCommand {
     /// aggregation). When exceeded, operators spill to disk. Only tracks large
     /// allocations, not streaming data. Supports suffixes: B, KB, MB, GB, TB
     /// (or KiB, MiB, GiB, TiB for binary). Default: unlimited.
-    #[arg(long, help_heading = "Execution")]
-    pub memory_limit: Option<String>,
+    #[arg(long, help_heading = "Execution", value_parser = parse_nonzero_byte_size)]
+    pub memory_limit: Option<usize>,
 
     /// Number of partitions for query execution parallelism.
     ///
     /// Controls how DataFusion partitions data during queries (aggregations, joins, sorts).
     /// Higher values increase parallelism but use more memory. These tasks run on the
     /// tokio thread pool (--threads). Defaults to CPU cores.
-    #[arg(long, help_heading = "Execution")]
+    #[arg(long, help_heading = "Execution", value_parser = parse_at_least_one)]
     pub target_partitions: Option<usize>,
 
     //
@@ -973,8 +999,8 @@ pub struct TransformCommand {
     /// Controls the size of the buffer used when writing encoded data to disk.
     /// Supports suffixes: B, KB, MB, GB, TB (or KiB, MiB, GiB, TiB for binary).
     /// Default: 32MB.
-    #[arg(long, help_heading = "Parquet Options")]
-    pub parquet_buffer_size: Option<String>,
+    #[arg(long, help_heading = "Parquet Options", value_parser = parse_nonzero_byte_size)]
+    pub parquet_buffer_size: Option<usize>,
 
     /// Enable dictionary encoding for specific columns. Can be specified multiple times.
     ///
@@ -1070,7 +1096,7 @@ pub struct TransformCommand {
     /// Controls how many row groups can be encoded concurrently. Column encoding within
     /// each row group runs on tokio's blocking thread pool via spawn_blocking.
     /// Defaults to the number of CPU cores.
-    #[arg(long, help_heading = "Parquet Options")]
+    #[arg(long, help_heading = "Parquet Options", value_parser = parse_at_least_one)]
     pub parquet_parallelism: Option<usize>,
 
     /// Maximum number of rows per Parquet row group.

@@ -4,7 +4,7 @@ use crate::{
     ParquetWriterVersion, SortSpec, TransformCommand,
     io_strategies::{OutputFileInfo, output_strategy::SinkFactory, path_template::PathTemplate},
     operations::{query::QueryOperation, sort::SortOperation},
-    pipeline::{Pipeline, parse_byte_size},
+    pipeline::Pipeline,
     sinks::{
         arrow::{ArrowSink, ArrowSinkOptions},
         data_sink::DataSink,
@@ -75,26 +75,6 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         parquet_encoding,
         &parquet_column_encoding,
     )?;
-
-    // validate options early to fail fast with clear error messages
-    if let Some(ref limit) = memory_limit {
-        let bytes = parse_byte_size(limit)?;
-        if bytes == 0 {
-            anyhow::bail!("--memory-limit must be greater than 0");
-        }
-    }
-    if let Some(ref size) = parquet_buffer_size {
-        let bytes = parse_byte_size(size)?;
-        if bytes == 0 {
-            anyhow::bail!("--parquet-buffer-size must be greater than 0");
-        }
-    }
-    if target_partitions == Some(0) {
-        anyhow::bail!("--target-partitions must be at least 1");
-    }
-    if parquet_parallelism == Some(0) {
-        anyhow::bail!("--parquet-parallelism must be at least 1");
-    }
 
     let mut pipeline = Pipeline::new()
         .with_query_dialect(dialect)
@@ -452,7 +432,7 @@ fn create_sink_factory(
     arrow_record_batch_size: Option<usize>,
     parquet_compression: Option<ParquetCompression>,
     parquet_row_group_size: Option<usize>,
-    parquet_buffer_size: Option<String>,
+    parquet_buffer_size: Option<usize>,
     parquet_parallelism: Option<usize>,
     parquet_statistics: Option<ParquetStatistics>,
     parquet_writer_version: Option<ParquetWriterVersion>,
@@ -490,10 +470,8 @@ fn create_sink_factory(
                 if let Some(row_group_size) = parquet_row_group_size {
                     options = options.with_max_row_group_size(row_group_size);
                 }
-                if let Some(ref buffer_size) = parquet_buffer_size
-                    && let Some(bytes) = parse_byte_size(buffer_size).ok()
-                {
-                    options = options.with_buffer_size(bytes);
+                if let Some(buffer_size) = parquet_buffer_size {
+                    options = options.with_buffer_size(buffer_size);
                 }
                 options = options.with_max_parallelism(parquet_parallelism);
                 if let Some(stats) = parquet_statistics {
