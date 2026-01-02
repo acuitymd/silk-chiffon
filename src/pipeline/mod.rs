@@ -123,7 +123,7 @@ impl Pipeline {
     }
 
     pub async fn execute(&mut self) -> Result<Vec<OutputFileInfo>> {
-        let mut ctx = self.build_session_context();
+        let mut ctx = self.build_session_context()?;
         self.execute_with_session_context(&mut ctx).await
     }
 
@@ -162,7 +162,7 @@ impl Pipeline {
         Ok(files)
     }
 
-    pub fn build_session_context(&self) -> SessionContext {
+    pub fn build_session_context(&self) -> Result<SessionContext> {
         let mut cfg = SessionConfig::new();
 
         // DuckDB doesn't like joining Datatype::Utf8View to Datatype::Utf8, so we disable
@@ -181,12 +181,14 @@ impl Pipeline {
             let pool = FairSpillPool::new(bytes);
             let runtime = datafusion::execution::runtime_env::RuntimeEnvBuilder::default()
                 .with_memory_pool(std::sync::Arc::new(pool))
-                .build()
-                .expect("failed to build runtime env");
-            return SessionContext::new_with_config_rt(cfg, std::sync::Arc::new(runtime));
+                .build()?;
+            return Ok(SessionContext::new_with_config_rt(
+                cfg,
+                std::sync::Arc::new(runtime),
+            ));
         }
 
-        SessionContext::new_with_config(cfg)
+        Ok(SessionContext::new_with_config(cfg))
     }
 }
 
