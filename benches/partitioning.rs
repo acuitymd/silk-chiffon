@@ -1,7 +1,7 @@
 //! Benchmarks comparing high-cardinality vs low-cardinality partitioning strategies.
 //!
 //! High-cardinality: DataFusion sorts the entire stream, then writes to one file at a time.
-//! Low-cardinality: Keeps file handles open per partition, sorts per-batch only.
+//! Low-cardinality: Keeps file handles open per partition, no sorting required.
 
 use std::sync::Arc;
 

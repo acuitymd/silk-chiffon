@@ -185,8 +185,8 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         vec![]
     };
 
-    // for high-cardinality partitioning, we need to sort by partition columns first
-    // for low-cardinality partitioning, each batch is sorted internally so no global sort needed
+    // high-cardinality: requires global sort by partition columns (one file at a time)
+    // low-cardinality: keeps file handles open per partition, no sort required
     let partition_sort_spec = if low_cardinality_partition {
         SortSpec::default()
     } else {

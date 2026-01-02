@@ -908,12 +908,11 @@ pub struct TransformCommand {
     #[arg(long, short, requires = "to_many", help_heading = "Partitioning")]
     pub by: Option<String>,
 
-    /// Use low-cardinality partitioning strategy (unsorted input).
+    /// Use low-cardinality partitioning strategy.
     ///
-    /// Instead of requiring sorted input, keeps a file handle open for each
-    /// partition value. Best for columns with few distinct values (e.g., region,
-    /// status, category). Each batch is sorted by partition columns to minimize
-    /// file handle switching.
+    /// Instead of requiring globally sorted input, keeps a file handle open for
+    /// each partition value. Best for columns with few distinct values (e.g.,
+    /// region, status, category). Preserves input order within each partition.
     #[arg(long, requires = "by", help_heading = "Partitioning")]
     pub low_cardinality_partition: bool,
 
