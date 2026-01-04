@@ -36,6 +36,7 @@ parquet = { version = "^57.0.0", features = [
   "arrow_canonical_extension_types",
 ] }
 percent-encoding = "^2.3.1"
+rustc-hash = "2"
 serde = { version = "^1.0", features = ["derive"] }
 serde_json = "^1.0.145"
 strum_macros = "^0.27.2"
@@ -77,6 +78,10 @@ harness = false
 
 [[bench]]
 name = "partitioning"
+harness = false
+
+[[bench]]
+name = "transform_to_parquet"
 harness = false
 
 [profile.release]
