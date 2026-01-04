@@ -1,6 +1,20 @@
+mod eager_writer;
+mod sequential_writer;
 mod stream_writer;
 
+pub use eager_writer::EagerParquetWriter;
+pub(crate) use eager_writer::min_dispatch_rows;
 pub use stream_writer::{DEFAULT_BUFFER_SIZE, StreamParquetWriter, recommended_concurrency};
+
+/// Strategy for encoding batches into parquet.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EncodingStrategy {
+    /// Coalesce batches into full row groups before encoding (current default).
+    #[default]
+    Coalesced,
+    /// Start encoding immediately when batches before the whole row group is assembled. (Experimental)
+    Eager,
+}
 
 use parquet::{
     file::{
@@ -42,6 +56,7 @@ pub struct ParquetSinkOptions {
     column_encodings: Vec<ColumnEncodingConfig>,
     ndv_map: HashMap<String, u64>,
     metadata: HashMap<String, Option<String>>,
+    encoding_strategy: EncodingStrategy,
 }
 
 impl Default for ParquetSinkOptions {
@@ -69,6 +84,7 @@ impl ParquetSinkOptions {
             column_encodings: Vec::new(),
             ndv_map: HashMap::new(),
             metadata: HashMap::new(),
+            encoding_strategy: EncodingStrategy::default(),
         }
     }
 
@@ -156,11 +172,37 @@ impl ParquetSinkOptions {
         self.ndv_map = ndv_map;
         self
     }
+
+    pub fn with_encoding_strategy(mut self, encoding_strategy: EncodingStrategy) -> Self {
+        self.encoding_strategy = encoding_strategy;
+        self
+    }
+}
+
+enum ParquetWriterImpl {
+    Coalesced(StreamParquetWriter),
+    Eager(EagerParquetWriter),
+}
+
+impl ParquetWriterImpl {
+    async fn write(&mut self, batch: RecordBatch) -> Result<()> {
+        match self {
+            Self::Coalesced(w) => w.write(batch).await,
+            Self::Eager(w) => w.write(batch).await,
+        }
+    }
+
+    async fn close(&mut self) -> Result<u64> {
+        match self {
+            Self::Coalesced(w) => w.close().await,
+            Self::Eager(w) => w.close().await,
+        }
+    }
 }
 
 struct ParquetSinkInner {
     path: PathBuf,
-    writer: Option<StreamParquetWriter>,
+    writer: Option<ParquetWriterImpl>,
 }
 
 pub struct ParquetSink {
@@ -200,14 +242,25 @@ impl ParquetSink {
 
         let concurrency = options.max_parallelism.unwrap_or_else(Self::num_cpus);
 
-        let writer = StreamParquetWriter::new(
-            &path,
-            schema,
-            props,
-            options.max_row_group_size,
-            options.buffer_size,
-            concurrency,
-        );
+        let writer = match options.encoding_strategy {
+            EncodingStrategy::Coalesced => ParquetWriterImpl::Coalesced(StreamParquetWriter::new(
+                &path,
+                schema,
+                props,
+                options.max_row_group_size,
+                options.buffer_size,
+                concurrency,
+            )),
+            EncodingStrategy::Eager => ParquetWriterImpl::Eager(EagerParquetWriter::new(
+                &path,
+                schema,
+                props,
+                options.max_row_group_size,
+                options.buffer_size,
+                concurrency,
+                min_dispatch_rows(),
+            )),
+        };
 
         Ok(Self {
             inner: Mutex::new(ParquetSinkInner {
@@ -1343,6 +1396,197 @@ mod tests {
 
             let data_type = ParquetSink::resolve_column_type(&schema, "outer.nonexistent");
             assert_eq!(data_type, None);
+        }
+    }
+
+    mod encoding_strategy_tests {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_sink_eager_strategy_basic() {
+            let temp_dir = tempdir().unwrap();
+            let output_path = temp_dir.path().join("output.parquet");
+
+            let schema = test_data::simple_schema();
+            let batch =
+                test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["a", "b", "c"]);
+
+            let mut sink = ParquetSink::create(
+                output_path.clone(),
+                &schema,
+                &ParquetSinkOptions::new().with_encoding_strategy(EncodingStrategy::Eager),
+            )
+            .unwrap();
+
+            sink.write_batch(batch).await.unwrap();
+            let result = sink.finish().await.unwrap();
+
+            assert_eq!(result.rows_written, 3);
+
+            let batches = verify::read_parquet_file(&output_path).unwrap();
+            verify::assert_id_name_batch_data_matches(&batches[0], &[1, 2, 3], &["a", "b", "c"]);
+        }
+
+        #[tokio::test]
+        async fn test_sink_eager_strategy_multiple_batches() {
+            let temp_dir = tempdir().unwrap();
+            let output_path = temp_dir.path().join("output.parquet");
+
+            let schema = test_data::simple_schema();
+
+            let mut sink = ParquetSink::create(
+                output_path.clone(),
+                &schema,
+                &ParquetSinkOptions::new().with_encoding_strategy(EncodingStrategy::Eager),
+            )
+            .unwrap();
+
+            for i in 0..5 {
+                let ids: Vec<i32> = (i * 10..(i + 1) * 10).collect();
+                let names: Vec<String> = ids.iter().map(|x| format!("name_{x}")).collect();
+                let names_ref: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+                let batch = test_data::create_batch_with_ids_and_names(&schema, &ids, &names_ref);
+                sink.write_batch(batch).await.unwrap();
+            }
+
+            let result = sink.finish().await.unwrap();
+            assert_eq!(result.rows_written, 50);
+
+            let batches = verify::read_parquet_file(&output_path).unwrap();
+            let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+            assert_eq!(total_rows, 50);
+        }
+
+        #[tokio::test]
+        async fn test_sink_eager_strategy_multiple_row_groups() {
+            let temp_dir = tempdir().unwrap();
+            let output_path = temp_dir.path().join("output.parquet");
+
+            let schema = test_data::simple_schema();
+
+            let mut sink = ParquetSink::create(
+                output_path.clone(),
+                &schema,
+                &ParquetSinkOptions::new()
+                    .with_encoding_strategy(EncodingStrategy::Eager)
+                    .with_max_row_group_size(20),
+            )
+            .unwrap();
+
+            for i in 0..5 {
+                let ids: Vec<i32> = (i * 10..(i + 1) * 10).collect();
+                let names: Vec<String> = ids.iter().map(|x| format!("name_{x}")).collect();
+                let names_ref: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+                let batch = test_data::create_batch_with_ids_and_names(&schema, &ids, &names_ref);
+                sink.write_batch(batch).await.unwrap();
+            }
+
+            let result = sink.finish().await.unwrap();
+            assert_eq!(result.rows_written, 50);
+
+            let file = read_entire_parquet_file(&output_path).unwrap();
+            assert_eq!(file.row_groups.len(), 3); // 50 / 20 = 2.5 -> 3 row groups
+        }
+
+        #[tokio::test]
+        async fn test_sink_eager_strategy_with_compression() {
+            let temp_dir = tempdir().unwrap();
+            let output_path = temp_dir.path().join("output.parquet");
+
+            let schema = test_data::simple_schema();
+            let batch = test_data::create_batch_with_ids_and_names(
+                &schema,
+                &[1, 1, 1, 1, 1, 2, 2, 2, 2, 2],
+                &["a", "a", "a", "a", "a", "b", "b", "b", "b", "b"],
+            );
+
+            let mut sink = ParquetSink::create(
+                output_path.clone(),
+                &schema,
+                &ParquetSinkOptions::new()
+                    .with_encoding_strategy(EncodingStrategy::Eager)
+                    .with_compression(ParquetCompression::Zstd),
+            )
+            .unwrap();
+
+            sink.write_batch(batch).await.unwrap();
+            let result = sink.finish().await.unwrap();
+
+            assert_eq!(result.rows_written, 10);
+
+            let batches = verify::read_parquet_file(&output_path).unwrap();
+            assert_eq!(batches[0].num_rows(), 10);
+        }
+
+        #[tokio::test]
+        async fn test_strategies_produce_equivalent_output() {
+            let schema = test_data::simple_schema();
+
+            let ids: Vec<i32> = (0..100).collect();
+            let names: Vec<String> = ids.iter().map(|x| format!("name_{x}")).collect();
+            let names_ref: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+            let batch = test_data::create_batch_with_ids_and_names(&schema, &ids, &names_ref);
+
+            // write with coalesced strategy
+            let temp_dir = tempdir().unwrap();
+            let coalesced_path = temp_dir.path().join("coalesced.parquet");
+            let mut coalesced_sink = ParquetSink::create(
+                coalesced_path.clone(),
+                &schema,
+                &ParquetSinkOptions::new()
+                    .with_encoding_strategy(EncodingStrategy::Coalesced)
+                    .with_max_row_group_size(30),
+            )
+            .unwrap();
+            coalesced_sink.write_batch(batch.clone()).await.unwrap();
+            let coalesced_result = coalesced_sink.finish().await.unwrap();
+
+            // write with eager strategy
+            let eager_path = temp_dir.path().join("eager.parquet");
+            let mut eager_sink = ParquetSink::create(
+                eager_path.clone(),
+                &schema,
+                &ParquetSinkOptions::new()
+                    .with_encoding_strategy(EncodingStrategy::Eager)
+                    .with_max_row_group_size(30),
+            )
+            .unwrap();
+            eager_sink.write_batch(batch).await.unwrap();
+            let eager_result = eager_sink.finish().await.unwrap();
+
+            // verify same row count
+            assert_eq!(coalesced_result.rows_written, eager_result.rows_written);
+
+            // verify same number of row groups
+            let coalesced_file = read_entire_parquet_file(&coalesced_path).unwrap();
+            let eager_file = read_entire_parquet_file(&eager_path).unwrap();
+            assert_eq!(coalesced_file.row_groups.len(), eager_file.row_groups.len());
+
+            // verify same data
+            let coalesced_batches = verify::read_parquet_file(&coalesced_path).unwrap();
+            let eager_batches = verify::read_parquet_file(&eager_path).unwrap();
+
+            let coalesced_rows: usize = coalesced_batches.iter().map(|b| b.num_rows()).sum();
+            let eager_rows: usize = eager_batches.iter().map(|b| b.num_rows()).sum();
+            assert_eq!(coalesced_rows, eager_rows);
+        }
+
+        #[tokio::test]
+        async fn test_sink_eager_strategy_empty() {
+            let temp_dir = tempdir().unwrap();
+            let output_path = temp_dir.path().join("output.parquet");
+
+            let schema = test_data::simple_schema();
+
+            let mut sink = ParquetSink::create(
+                output_path.clone(),
+                &schema,
+                &ParquetSinkOptions::new().with_encoding_strategy(EncodingStrategy::Eager),
+            )
+            .unwrap();
+
+            let result = sink.finish().await.unwrap();
+            assert_eq!(result.rows_written, 0);
         }
     }
 }

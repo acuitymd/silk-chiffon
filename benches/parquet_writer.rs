@@ -11,8 +11,17 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
 use silk_chiffon::sinks::parquet::{
-    DEFAULT_BUFFER_SIZE, StreamParquetWriter, recommended_concurrency,
+    DEFAULT_BUFFER_SIZE, EagerParquetWriter, StreamParquetWriter, recommended_concurrency,
 };
+
+const DEFAULT_MIN_DISPATCH_ROWS: usize = 32768;
+
+fn min_dispatch_rows() -> usize {
+    std::env::var("SILK_MIN_DISPATCH_ROWS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_MIN_DISPATCH_ROWS)
+}
 use tempfile::tempdir;
 use tokio::runtime::Runtime;
 
@@ -215,6 +224,7 @@ impl<'a> Iterator for BatchIterator<'a> {
 
 fn bench_sequential(c: &mut Criterion) {
     let mut group = c.benchmark_group("sequential");
+    group.sample_size(10);
 
     for config in CONFIGS {
         let schema = create_schema(config.cols);
@@ -298,5 +308,58 @@ fn bench_stream_parallel(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_sequential, bench_stream_parallel);
+fn bench_eager_parallel(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+    let mut group = c.benchmark_group("eager_parallel");
+
+    for config in CONFIGS {
+        let schema = create_schema(config.cols);
+        let template = BatchTemplate::new(&schema, INPUT_BATCH_SIZE);
+        let size = template.estimated_row_size() * config.rows as u64;
+
+        let concurrency = recommended_concurrency(config.cols);
+
+        group.throughput(Throughput::Bytes(size));
+        group.bench_with_input(
+            BenchmarkId::from_parameter(config),
+            &(&schema, &template, config, concurrency),
+            |b, (schema, template, config, concurrency)| {
+                b.iter(|| {
+                    rt.block_on(async {
+                        let temp_dir = tempdir().unwrap();
+                        let path = temp_dir.path().join("test.parquet");
+                        let props = WriterProperties::builder().build();
+
+                        let mut writer = EagerParquetWriter::new(
+                            &path,
+                            schema,
+                            props,
+                            config.row_group_size,
+                            DEFAULT_BUFFER_SIZE,
+                            *concurrency,
+                            min_dispatch_rows(),
+                        );
+
+                        for batch in black_box(BatchIterator {
+                            template,
+                            remaining: config.rows,
+                        }) {
+                            writer.write(batch).await.unwrap();
+                        }
+                        writer.close().await.unwrap();
+                    });
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_sequential,
+    bench_stream_parallel,
+    bench_eager_parallel
+);
 criterion_main!(benches);
