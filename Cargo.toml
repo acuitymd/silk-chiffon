@@ -24,7 +24,7 @@ camino = { version = "1.2.2", features = ["serde1"] }
 chrono = "0.4.42"
 clap = { version = "^4.5.53", features = ["default", "derive"] }
 clap_complete = "^4.5"
-datafusion = { git = "https://github.com/apache/datafusion.git", rev = "9a9ff8d6162b7391736b0b7c82c00cb35b0652a1" }
+datafusion = { git = "https://github.com/apache/datafusion.git", rev = "3a0ca4ef791458528bac04f78994f264b95f7556" }
 futures = "^0.3.31"
 glob = "^0.3.3"
 minijinja = "^2.12.0"
