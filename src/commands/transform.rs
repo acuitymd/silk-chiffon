@@ -1,7 +1,7 @@
 use crate::{
     ArrowCompression, ArrowIPCFormat, BloomFilterConfig, ColumnEncodingConfig, DataFormat,
-    ListOutputsFormat, ParquetCompression, ParquetEncoding, ParquetStatistics,
-    ParquetWriterVersion, PartitionStrategy, SortSpec, TransformCommand,
+    ListOutputsFormat, ParquetCompression, ParquetEncoding, ParquetEncodingStrategy,
+    ParquetStatistics, ParquetWriterVersion, PartitionStrategy, SortSpec, TransformCommand,
     io_strategies::{OutputFileInfo, output_strategy::SinkFactory, path_template::PathTemplate},
     operations::{query::QueryOperation, sort::SortOperation},
     pipeline::Pipeline,
@@ -60,6 +60,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         parquet_encoding,
         parquet_column_encoding,
         parquet_sorted_metadata,
+        parquet_encoding_strategy,
         vortex_record_batch_size,
     } = args;
 
@@ -225,6 +226,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         parquet_column_encoding,
         bloom_filter,
         parquet_sort_spec,
+        parquet_encoding_strategy,
         vortex_record_batch_size,
     )?;
 
@@ -458,6 +460,7 @@ fn create_sink_factory(
     parquet_column_encoding: Vec<ColumnEncodingConfig>,
     parquet_bloom_filter: BloomFilterConfig,
     parquet_sort_spec: Option<SortSpec>,
+    parquet_encoding_strategy: Option<ParquetEncodingStrategy>,
     vortex_record_batch_size: Option<usize>,
 ) -> Result<SinkFactory> {
     Ok(Box::new(move |path: String, schema: SchemaRef| {
@@ -506,6 +509,9 @@ fn create_sink_factory(
                     .with_bloom_filters(parquet_bloom_filter.clone());
                 if let Some(sort_spec) = parquet_sort_spec.clone() {
                     options = options.with_sort_spec(sort_spec);
+                }
+                if let Some(strategy) = parquet_encoding_strategy {
+                    options = options.with_encoding_strategy(strategy);
                 }
                 Box::new(ParquetSink::create(path.into(), &schema, &options)?)
             }

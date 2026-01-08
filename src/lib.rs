@@ -263,6 +263,17 @@ impl From<ParquetWriterVersion> for i32 {
     }
 }
 
+/// Strategy for encoding batches into parquet.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "lowercase")]
+pub enum ParquetEncodingStrategy {
+    /// Coalesce batches into full row groups before encoding (current default).
+    #[default]
+    Coalesced,
+    /// Start encoding immediately before the whole row group is assembled. (Experimental)
+    Eager,
+}
+
 #[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq)]
 #[value(rename_all = "kebab-case")]
 pub enum ParquetEncoding {
@@ -1150,6 +1161,17 @@ pub struct TransformCommand {
     /// Parquet writer version.
     #[arg(long, value_enum, help_heading = "Parquet Options")]
     pub parquet_writer_version: Option<ParquetWriterVersion>,
+
+    /// Strategy for encoding batches into parquet row groups.
+    ///
+    /// Options:
+    ///   coalesced - Buffer batches until a full row group is assembled before encoding (default)
+    ///   eager     - Start encoding columns immediately as batches arrive (experimental)
+    ///
+    /// Eager encoding can reduce memory usage for large row groups by encoding columns
+    /// incrementally, but may have different performance characteristics.
+    #[arg(long, value_enum, help_heading = "Parquet Options")]
+    pub parquet_encoding_strategy: Option<ParquetEncodingStrategy>,
 
     //
     // ─── Vortex Options ────────────────────────────────────────────────────────────────
