@@ -6,16 +6,6 @@ pub use eager_writer::EagerParquetWriter;
 pub(crate) use eager_writer::min_dispatch_rows;
 pub use stream_writer::{DEFAULT_BUFFER_SIZE, StreamParquetWriter, recommended_concurrency};
 
-/// Strategy for encoding batches into parquet.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum EncodingStrategy {
-    /// Coalesce batches into full row groups before encoding (current default).
-    #[default]
-    Coalesced,
-    /// Start encoding immediately when batches before the whole row group is assembled. (Experimental)
-    Eager,
-}
-
 use parquet::{
     file::{
         metadata::SortingColumn,
@@ -35,7 +25,7 @@ use async_trait::async_trait;
 
 use crate::{
     BloomFilterConfig, ColumnEncodingConfig, ParquetCompression, ParquetEncoding,
-    ParquetStatistics, ParquetWriterVersion, SortDirection, SortSpec,
+    ParquetEncodingStrategy, ParquetStatistics, ParquetWriterVersion, SortDirection, SortSpec,
     sinks::data_sink::{DataSink, SinkResult},
 };
 
@@ -56,7 +46,7 @@ pub struct ParquetSinkOptions {
     column_encodings: Vec<ColumnEncodingConfig>,
     ndv_map: HashMap<String, u64>,
     metadata: HashMap<String, Option<String>>,
-    encoding_strategy: EncodingStrategy,
+    encoding_strategy: ParquetEncodingStrategy,
 }
 
 impl Default for ParquetSinkOptions {
@@ -84,7 +74,7 @@ impl ParquetSinkOptions {
             column_encodings: Vec::new(),
             ndv_map: HashMap::new(),
             metadata: HashMap::new(),
-            encoding_strategy: EncodingStrategy::default(),
+            encoding_strategy: ParquetEncodingStrategy::default(),
         }
     }
 
@@ -173,7 +163,7 @@ impl ParquetSinkOptions {
         self
     }
 
-    pub fn with_encoding_strategy(mut self, encoding_strategy: EncodingStrategy) -> Self {
+    pub fn with_encoding_strategy(mut self, encoding_strategy: ParquetEncodingStrategy) -> Self {
         self.encoding_strategy = encoding_strategy;
         self
     }
@@ -243,15 +233,17 @@ impl ParquetSink {
         let concurrency = options.max_parallelism.unwrap_or_else(Self::num_cpus);
 
         let writer = match options.encoding_strategy {
-            EncodingStrategy::Coalesced => ParquetWriterImpl::Coalesced(StreamParquetWriter::new(
-                &path,
-                schema,
-                props,
-                options.max_row_group_size,
-                options.buffer_size,
-                concurrency,
-            )),
-            EncodingStrategy::Eager => ParquetWriterImpl::Eager(EagerParquetWriter::new(
+            ParquetEncodingStrategy::Coalesced => {
+                ParquetWriterImpl::Coalesced(StreamParquetWriter::new(
+                    &path,
+                    schema,
+                    props,
+                    options.max_row_group_size,
+                    options.buffer_size,
+                    concurrency,
+                ))
+            }
+            ParquetEncodingStrategy::Eager => ParquetWriterImpl::Eager(EagerParquetWriter::new(
                 &path,
                 schema,
                 props,
@@ -1414,7 +1406,7 @@ mod tests {
             let mut sink = ParquetSink::create(
                 output_path.clone(),
                 &schema,
-                &ParquetSinkOptions::new().with_encoding_strategy(EncodingStrategy::Eager),
+                &ParquetSinkOptions::new().with_encoding_strategy(ParquetEncodingStrategy::Eager),
             )
             .unwrap();
 
@@ -1437,7 +1429,7 @@ mod tests {
             let mut sink = ParquetSink::create(
                 output_path.clone(),
                 &schema,
-                &ParquetSinkOptions::new().with_encoding_strategy(EncodingStrategy::Eager),
+                &ParquetSinkOptions::new().with_encoding_strategy(ParquetEncodingStrategy::Eager),
             )
             .unwrap();
 
@@ -1468,7 +1460,7 @@ mod tests {
                 output_path.clone(),
                 &schema,
                 &ParquetSinkOptions::new()
-                    .with_encoding_strategy(EncodingStrategy::Eager)
+                    .with_encoding_strategy(ParquetEncodingStrategy::Eager)
                     .with_max_row_group_size(20),
             )
             .unwrap();
@@ -1504,7 +1496,7 @@ mod tests {
                 output_path.clone(),
                 &schema,
                 &ParquetSinkOptions::new()
-                    .with_encoding_strategy(EncodingStrategy::Eager)
+                    .with_encoding_strategy(ParquetEncodingStrategy::Eager)
                     .with_compression(ParquetCompression::Zstd),
             )
             .unwrap();
@@ -1534,7 +1526,7 @@ mod tests {
                 coalesced_path.clone(),
                 &schema,
                 &ParquetSinkOptions::new()
-                    .with_encoding_strategy(EncodingStrategy::Coalesced)
+                    .with_encoding_strategy(ParquetEncodingStrategy::Coalesced)
                     .with_max_row_group_size(30),
             )
             .unwrap();
@@ -1547,7 +1539,7 @@ mod tests {
                 eager_path.clone(),
                 &schema,
                 &ParquetSinkOptions::new()
-                    .with_encoding_strategy(EncodingStrategy::Eager)
+                    .with_encoding_strategy(ParquetEncodingStrategy::Eager)
                     .with_max_row_group_size(30),
             )
             .unwrap();
@@ -1581,7 +1573,7 @@ mod tests {
             let mut sink = ParquetSink::create(
                 output_path.clone(),
                 &schema,
-                &ParquetSinkOptions::new().with_encoding_strategy(EncodingStrategy::Eager),
+                &ParquetSinkOptions::new().with_encoding_strategy(ParquetEncodingStrategy::Eager),
             )
             .unwrap();
 

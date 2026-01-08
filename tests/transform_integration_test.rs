@@ -142,6 +142,7 @@ async fn test_transform_arrow_to_arrow_basic() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -198,6 +199,7 @@ async fn test_transform_arrow_to_parquet() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -255,6 +257,7 @@ async fn test_transform_parquet_to_arrow() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -311,6 +314,7 @@ async fn test_transform_parquet_to_parquet() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -374,6 +378,7 @@ async fn test_transform_from_many_basic() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -438,6 +443,7 @@ async fn test_transform_from_many_with_glob() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -495,6 +501,7 @@ async fn test_transform_to_many_partitioned() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -559,6 +566,7 @@ async fn test_transform_with_query() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -620,6 +628,7 @@ async fn test_transform_with_sorting() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -683,6 +692,7 @@ async fn test_transform_with_arrow_compression() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -749,6 +759,7 @@ async fn test_transform_with_parquet_bloom_filters() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -811,6 +822,7 @@ async fn test_transform_with_sorted_metadata() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: true,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -871,6 +883,7 @@ async fn test_transform_partition_with_create_dirs() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -930,6 +943,7 @@ async fn test_transform_partition_with_overwrite() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await;
@@ -973,6 +987,7 @@ async fn test_transform_partition_with_overwrite() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -1022,6 +1037,7 @@ async fn test_transform_from_many_empty_glob() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await;
@@ -1082,6 +1098,7 @@ async fn test_transform_partition_exclude_columns() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -1141,6 +1158,7 @@ async fn test_transform_with_projection_query() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -1198,6 +1216,7 @@ async fn test_transform_with_aggregation_query() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -1265,6 +1284,7 @@ async fn test_transform_query_and_sort_combined() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -1351,6 +1371,7 @@ async fn test_transform_multi_column_sort() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -1430,6 +1451,7 @@ async fn test_transform_sort_descending() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -1504,6 +1526,7 @@ async fn test_transform_parquet_compression_gzip() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -1561,6 +1584,7 @@ async fn test_transform_parquet_compression_lz4() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -1621,6 +1645,7 @@ async fn test_transform_parquet_bloom_all() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -1677,6 +1702,7 @@ async fn test_transform_parquet_statistics() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -1733,6 +1759,7 @@ async fn test_transform_parquet_writer_version() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -1789,6 +1816,7 @@ async fn test_transform_parquet_no_dictionary() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -1846,6 +1874,7 @@ async fn test_transform_parquet_column_no_dictionary() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -1903,6 +1932,7 @@ async fn test_transform_parquet_column_dictionary() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -1959,6 +1989,7 @@ async fn test_transform_arrow_format_stream() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -2015,6 +2046,7 @@ async fn test_transform_arrow_record_batch_size() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -2071,6 +2103,7 @@ async fn test_transform_parquet_row_group_size() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -2128,6 +2161,7 @@ async fn test_transform_partition_to_parquet() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -2202,6 +2236,7 @@ async fn test_transform_low_cardinality_partition() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -2301,6 +2336,7 @@ async fn test_transform_multi_column_partition() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -2368,6 +2404,7 @@ async fn test_transform_from_many_to_partitioned() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -2451,6 +2488,7 @@ async fn test_transform_invalid_query() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await;
@@ -2503,6 +2541,7 @@ async fn test_transform_empty_file() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -2562,6 +2601,7 @@ async fn test_transform_bloom_filter_with_custom_ndv() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -2624,6 +2664,7 @@ async fn test_transform_bloom_filter_column_specific_with_ndv() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -2688,6 +2729,7 @@ async fn test_transform_mixed_parquet_and_arrow_inputs() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -2745,6 +2787,7 @@ async fn test_transform_partition_list_outputs_text() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -2804,6 +2847,7 @@ async fn test_transform_partition_list_outputs_json() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -2862,6 +2906,7 @@ async fn test_transform_explicit_input_format_arrow_to_parquet() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -2918,6 +2963,7 @@ async fn test_transform_explicit_output_format_parquet() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -2974,6 +3020,7 @@ async fn test_transform_arrow_compression_lz4() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -3044,6 +3091,7 @@ async fn test_transform_query_with_partition() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -3120,6 +3168,7 @@ async fn test_transform_query_with_different_dialect() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -3197,6 +3246,7 @@ async fn test_transform_partition_with_query_and_sort() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -3391,6 +3441,7 @@ async fn test_parquet_roundtrip_data_fidelity() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -3446,6 +3497,7 @@ async fn test_parquet_roundtrip_data_fidelity() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -3808,6 +3860,7 @@ async fn test_multi_column_partition_verifies_data_arrow() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -3917,6 +3970,7 @@ async fn test_multi_column_partition_verifies_data_parquet() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -4013,6 +4067,7 @@ async fn test_multi_column_partition_three_columns_arrow() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -4102,6 +4157,7 @@ async fn test_multi_column_partition_three_columns_parquet() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -4191,6 +4247,7 @@ async fn test_multi_column_partition_mixed_types() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -4288,6 +4345,7 @@ async fn test_multi_column_partition_parquet_with_exclude() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -4369,6 +4427,7 @@ async fn test_multi_column_partition_arrow_with_exclude() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -4453,6 +4512,7 @@ async fn test_multi_column_partition_verifies_output_paths_arrow() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -4597,6 +4657,7 @@ async fn test_multi_column_partition_verifies_output_paths_parquet() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -4798,6 +4859,7 @@ async fn test_partition_strategies_produce_same_output() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await
@@ -4845,6 +4907,7 @@ async fn test_partition_strategies_produce_same_output() {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     })
     .await

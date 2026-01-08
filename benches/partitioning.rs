@@ -218,6 +218,7 @@ fn default_transform_command() -> TransformCommand {
         parquet_encoding: None,
         parquet_column_encoding: vec![],
         parquet_sorted_metadata: false,
+        parquet_encoding_strategy: None,
         vortex_record_batch_size: None,
     }
 }
