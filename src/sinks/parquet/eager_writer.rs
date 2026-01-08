@@ -26,9 +26,8 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 
 use crate::utils::{
-    OrderedDemuxConfig, OrderedDemuxExt,
     ordered_channel::{OrderedReceiver, block_on},
-    ordered_demux::Partitioned,
+    ordered_demux::{OrderedDemuxConfig, OrderedDemuxExt, Partitioned},
 };
 
 // Default minimum rows to accumulate before dispatching to column threads.

@@ -58,7 +58,7 @@ pub struct OrderedDemuxConfig {
 /// Extension trait for streams to enable ordered demultiplexing.
 ///
 /// This lets us write code like this:
-/// ```
+/// ```ignore
 /// let output = input.ordered_demux(config, cancel, |key, rx, cancel| async move {
 ///     let mut sum = 0;
 ///     while let Ok(item) = rx.recv().await {

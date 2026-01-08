@@ -26,7 +26,7 @@ use std::{
 use strum_macros::Display;
 
 /// Parse a usize that must be at least 1.
-fn parse_at_least_one(s: &str) -> Result<usize, String> {
+pub fn parse_at_least_one(s: &str) -> Result<usize, String> {
     let n: usize = s.parse().map_err(|e| format!("{e}"))?;
     if n == 0 {
         Err("value must be at least 1".into())
@@ -37,7 +37,7 @@ fn parse_at_least_one(s: &str) -> Result<usize, String> {
 
 /// Parse a human-readable byte size (e.g., "512MB", "2GB") that must be greater than 0.
 #[allow(clippy::cast_possible_truncation)]
-fn parse_nonzero_byte_size(s: &str) -> Result<usize, String> {
+pub fn parse_nonzero_byte_size(s: &str) -> Result<usize, String> {
     let bytes = s
         .parse::<bytesize::ByteSize>()
         .map_err(|_| {
