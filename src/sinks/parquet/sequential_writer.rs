@@ -105,6 +105,14 @@ impl SequentialParquetWriter {
     }
 }
 
+impl Drop for SequentialParquetWriter {
+    fn drop(&mut self) {
+        if let Some(writer) = self.writer.take() {
+            let _ = writer.close();
+        }
+    }
+}
+
 #[async_trait]
 impl ParquetWriter for SequentialParquetWriter {
     async fn write(&mut self, batch: RecordBatch) -> Result<()> {

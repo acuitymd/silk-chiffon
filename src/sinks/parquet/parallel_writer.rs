@@ -208,7 +208,7 @@ impl ParallelParquetWriter {
 
 impl Drop for ParallelParquetWriter {
     fn drop(&mut self) {
-        if self.monitor_handle.is_some() {
+        if let Some(_handle) = self.monitor_handle.take() {
             self.cancel_token.cancel();
         }
     }
