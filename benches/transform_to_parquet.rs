@@ -14,34 +14,23 @@ use arrow::record_batch::RecordBatch;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
-use silk_chiffon::sinks::parquet::{
-    DEFAULT_BUFFER_SIZE, EagerParquetWriter, StreamParquetWriter, recommended_concurrency,
-};
+use silk_chiffon::sinks::parquet::{ParallelParquetWriter, ParallelWriterConfig, ParquetPools};
 use tempfile::TempDir;
 use tokio::runtime::Runtime;
 
-const DEFAULT_MIN_DISPATCH_ROWS: usize = 32768;
-
-fn min_dispatch_rows() -> usize {
-    std::env::var("SILK_MIN_DISPATCH_ROWS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(DEFAULT_MIN_DISPATCH_ROWS)
-}
+const DEFAULT_BUFFER_SIZE: usize = 8 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug)]
 enum WriterStrategy {
     Sequential,
-    Stream,
-    Eager,
+    Parallel,
 }
 
 impl std::fmt::Display for WriterStrategy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             WriterStrategy::Sequential => write!(f, "seq"),
-            WriterStrategy::Stream => write!(f, "stream"),
-            WriterStrategy::Eager => write!(f, "eager"),
+            WriterStrategy::Parallel => write!(f, "parallel"),
         }
     }
 }
@@ -211,6 +200,8 @@ fn bench_transform(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let temp_dir = TempDir::new().unwrap();
 
+    let pools = Arc::new(ParquetPools::default_pools().unwrap());
+
     // pre-create all Arrow files
     println!("Creating Arrow test files...");
     let arrow_files: Vec<(Config, PathBuf)> = CONFIGS
@@ -232,17 +223,13 @@ fn bench_transform(c: &mut Criterion) {
         let total_bytes = row_size * config.rows as u64;
         group.throughput(Throughput::Bytes(total_bytes));
 
-        for strategy in [
-            WriterStrategy::Sequential,
-            WriterStrategy::Stream,
-            WriterStrategy::Eager,
-        ] {
+        for strategy in [WriterStrategy::Sequential, WriterStrategy::Parallel] {
             let bench_id = BenchmarkId::new(format!("{}", strategy), format!("{}", config));
 
             group.bench_with_input(
                 bench_id,
-                &(arrow_path, config),
-                |b, (arrow_path, config)| {
+                &(arrow_path, config, &pools),
+                |b, (arrow_path, config, pools)| {
                     b.iter(|| {
                         // read Arrow file from disk each iteration
                         let file = File::open(arrow_path).unwrap();
@@ -271,41 +258,21 @@ fn bench_transform(c: &mut Criterion) {
                                 }
                                 writer.close().unwrap();
                             }
-                            WriterStrategy::Stream => rt.block_on(async {
-                                let concurrency = recommended_concurrency(config.cols);
-                                let mut writer = StreamParquetWriter::new(
+                            WriterStrategy::Parallel => rt.block_on(async {
+                                let writer_config = ParallelWriterConfig {
+                                    max_row_group_size: config.row_group_size,
+                                    max_row_group_concurrency: 4,
+                                    buffer_size: DEFAULT_BUFFER_SIZE,
+                                    encoding_batch_size: 122_880,
+                                    batch_channel_size: 16,
+                                    encoded_channel_size: 4,
+                                };
+                                let mut writer = ParallelParquetWriter::new(
                                     &out_path,
                                     &schema,
                                     props,
-                                    config.row_group_size,
-                                    DEFAULT_BUFFER_SIZE,
-                                    concurrency,
-                                );
-
-                                // need to collect since FileReader isn't Send
-                                let file = File::open(arrow_path).unwrap();
-                                let reader =
-                                    arrow::ipc::reader::FileReader::try_new(file, None).unwrap();
-                                for batch in reader {
-                                    writer.write(batch.unwrap()).await.unwrap();
-                                }
-                                writer.close().await.unwrap();
-                            }),
-                            WriterStrategy::Eager => rt.block_on(async {
-                                // cap total column threads to ~3x CPU count
-                                let num_cpus = std::thread::available_parallelism()
-                                    .map(|n| n.get())
-                                    .unwrap_or(8);
-                                let max_threads = num_cpus * 3;
-                                let concurrency = 4.min(max_threads / config.cols).max(1);
-                                let mut writer = EagerParquetWriter::new(
-                                    &out_path,
-                                    &schema,
-                                    props,
-                                    config.row_group_size,
-                                    DEFAULT_BUFFER_SIZE,
-                                    concurrency,
-                                    min_dispatch_rows(),
+                                    Arc::clone(pools),
+                                    writer_config,
                                 );
 
                                 // need to collect since FileReader isn't Send

@@ -1,0 +1,13 @@
+# Shared dependencies for uv scripts in this directory.
+# This lets type checkers (ty, pyright) resolve imports that are
+# declared in each script's PEP 723 frontmatter.
+#
+# Setup:  uv sync --directory scripts/
+# Check:  uvx ty check scripts/ --python scripts/.venv
+#    or:  cd scripts && uvx ty check .
+
+[project]
+name = "silk-chiffon-scripts"
+version = "0.0.0"
+requires-python = ">=3.11"
+dependencies = ["psutil"]

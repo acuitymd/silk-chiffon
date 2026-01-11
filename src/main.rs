@@ -11,10 +11,14 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // handle thread limit next so that it's set before any other operations
+    let threads = match &cli.command {
+        Commands::Transform(args) => args.threads,
+        _ => None,
+    };
+
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.enable_all();
-    if let Some(threads) = cli.threads {
+    if let Some(threads) = threads {
         builder.worker_threads(threads);
     }
     let runtime = builder.build()?;

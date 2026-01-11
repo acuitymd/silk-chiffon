@@ -1,10 +1,7 @@
-//! Ordered channel for async message passing with index-based ordering.
+//! Ordered channel for delivering items in sequence order regardless of send order.
 //!
-//! Items can be sent out of order but are received in order. Senders specify
-//! an index for each item, and the receiver delivers items in index order
-//! (0, 1, 2, ...).
-//!
-//! Blocks until the next index is available when there is no more space in the buffer.
+//! Senders specify an index when sending. The receiver always gets items in index order
+//! (0, 1, 2, ...). Backpressure is applied when senders get too far ahead of the receiver.
 
 use std::{
     collections::BTreeMap,
@@ -47,7 +44,6 @@ enum TakeNextResult<T> {
     Empty,
 }
 
-/// Inner state of the ordered channel. Expects to be protected by a mutex.
 impl<T> Inner<T> {
     fn new(capacity: usize) -> Self {
         Self {
@@ -95,6 +91,7 @@ struct Shared<T> {
     receiver_count: AtomicUsize,
     send_notify: Notify,
     recv_notify: Notify,
+    cancel: CancellationToken,
 }
 
 pub struct OrderedSender<T> {
@@ -109,9 +106,6 @@ impl<T> Debug for OrderedSender<T> {
 
 impl<T> Clone for OrderedSender<T> {
     fn clone(&self) -> Self {
-        // a clone and a drop cannot happen at the same time for the same sender,
-        // so the counter will have 1 for this self.shared already and concurrent
-        // drops can't decrement it to 0
         self.shared.sender_count.fetch_add(1, Ordering::Relaxed);
         Self {
             shared: Arc::clone(&self.shared),
@@ -127,34 +121,23 @@ impl<T> Drop for OrderedSender<T> {
     }
 }
 
-pub(crate) fn block_on<F: std::future::Future>(f: F) -> F::Output {
+fn block_on<F: std::future::Future>(f: F) -> F::Output {
     match tokio::runtime::Handle::try_current() {
-        Ok(handle) => {
-            // block_in_place is a no-op when called from spawn_blocking,
-            // but correctly handles being called from a worker thread
-            tokio::task::block_in_place(|| handle.block_on(f))
-        }
+        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(f)),
         Err(_) => futures::executor::block_on(f),
     }
 }
 
 impl<T> OrderedSender<T> {
-    #[allow(dead_code)] // part of complete API, tested
     pub fn blocking_send(&self, index: usize, item: T) -> Result<(), SendError<T>> {
         block_on(self.send(index, item))
     }
 
-    #[allow(dead_code)] // part of complete API, also tested
-    pub async fn send_cancellable(
-        &self,
-        index: usize,
-        item: T,
-        cancel: &CancellationToken,
-    ) -> Result<(), SendError<T>> {
+    pub async fn send(&self, index: usize, item: T) -> Result<(), SendError<T>> {
         let mut item = item;
 
         loop {
-            if cancel.is_cancelled() {
+            if self.shared.cancel.is_cancelled() {
                 return Err(SendError::Closed(item));
             }
 
@@ -188,49 +171,9 @@ impl<T> OrderedSender<T> {
             };
 
             tokio::select! {
-                _ = cancel.cancelled() => return Err(SendError::Closed(item)),
+                _ = self.shared.cancel.cancelled() => return Err(SendError::Closed(item)),
                 _ = notified => {}
             }
-        }
-    }
-
-    pub async fn send(&self, index: usize, item: T) -> Result<(), SendError<T>> {
-        let mut item = item;
-
-        loop {
-            let notified = {
-                let mut inner = self.shared.inner.lock().await;
-
-                match inner.insert(index, item) {
-                    InsertResult::Success => {
-                        if index == inner.next_index {
-                            // next_index only advances on take_next(), not on insert, so this
-                            // checks if we just inserted the item the receiver is waiting for
-                            self.shared.recv_notify.notify_one();
-                        }
-                        return Ok(());
-                    }
-                    InsertResult::TooFarAhead(returned_item) => {
-                        item = returned_item;
-                        // register notifier while we still have the lock to avoid race
-                        let notified = self.shared.send_notify.notified();
-
-                        if self.shared.receiver_count.load(Ordering::Acquire) == 0 {
-                            return Err(SendError::Closed(item));
-                        }
-
-                        notified
-                    }
-                    InsertResult::Stale(returned_item) => {
-                        return Err(SendError::Stale(returned_item));
-                    }
-                    InsertResult::Duplicate(returned_item) => {
-                        return Err(SendError::Duplicate(returned_item));
-                    }
-                }
-            };
-
-            notified.await;
         }
     }
 }
@@ -263,31 +206,21 @@ impl<T> Drop for OrderedReceiver<T> {
 }
 
 impl<T> OrderedReceiver<T> {
-    #[allow(dead_code)] // part of complete API, tested
     pub fn blocking_recv(&mut self) -> Result<T, RecvError> {
         block_on(self.recv())
     }
 
-    pub fn blocking_recv_cancellable(
-        &mut self,
-        cancel: &CancellationToken,
-    ) -> Result<T, RecvError> {
-        block_on(async {
-            tokio::select! {
-                _ = cancel.cancelled() => Err(RecvError),
-                result = self.recv() => result,
-            }
-        })
-    }
-
     pub async fn recv(&mut self) -> Result<T, RecvError> {
         loop {
+            if self.shared.cancel.is_cancelled() {
+                return Err(RecvError);
+            }
+
             let notified = {
                 let mut inner = self.shared.inner.lock().await;
 
                 match inner.take_next() {
                     TakeNextResult::Success(item) => {
-                        // notify all senders since we don't know which has the next index
                         self.shared.send_notify.notify_waiters();
 
                         if inner.next_index_available() {
@@ -297,7 +230,6 @@ impl<T> OrderedReceiver<T> {
                         return Ok(item);
                     }
                     TakeNextResult::Empty => {
-                        // register notifier before checking sender count to avoid race
                         let notified = self.shared.recv_notify.notified();
 
                         if self.shared.sender_count.load(Ordering::Acquire) == 0 {
@@ -309,11 +241,13 @@ impl<T> OrderedReceiver<T> {
                 }
             };
 
-            notified.await;
+            tokio::select! {
+                _ = self.shared.cancel.cancelled() => return Err(RecvError),
+                _ = notified => {}
+            }
         }
     }
 
-    #[allow(dead_code)] // part of complete API, tested
     pub fn into_stream(self) -> impl Stream<Item = T> {
         futures::stream::unfold(self, |mut rx| async {
             match rx.recv().await {
@@ -324,18 +258,17 @@ impl<T> OrderedReceiver<T> {
     }
 }
 
-/// Create an ordered channel with the given capacity.
-///
-/// # Panics
-/// Panics if capacity is 0.
-pub fn ordered_channel<T>(capacity: usize) -> (OrderedSender<T>, OrderedReceiver<T>) {
-    assert!(capacity > 0, "ordered_channel capacity must be > 0");
+pub fn ordered_channel<T>(
+    capacity: usize,
+    cancel: CancellationToken,
+) -> (OrderedSender<T>, OrderedReceiver<T>) {
     let shared = Arc::new(Shared {
         inner: Mutex::new(Inner::new(capacity)),
         sender_count: AtomicUsize::new(1),
         receiver_count: AtomicUsize::new(1),
         send_notify: Notify::new(),
         recv_notify: Notify::new(),
+        cancel,
     });
 
     (
@@ -350,9 +283,13 @@ pub fn ordered_channel<T>(capacity: usize) -> (OrderedSender<T>, OrderedReceiver
 mod tests {
     use super::*;
 
+    fn test_cancel() -> CancellationToken {
+        CancellationToken::new()
+    }
+
     #[tokio::test]
     async fn test_basic_send_recv() {
-        let (tx, mut rx) = ordered_channel::<i32>(4);
+        let (tx, mut rx) = ordered_channel::<i32>(4, test_cancel());
 
         tx.send(0, 10).await.unwrap();
         tx.send(1, 20).await.unwrap();
@@ -363,7 +300,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_out_of_order_send() {
-        let (tx, mut rx) = ordered_channel::<i32>(4);
+        let (tx, mut rx) = ordered_channel::<i32>(4, test_cancel());
 
         tx.send(1, 20).await.unwrap();
         tx.send(0, 10).await.unwrap();
@@ -376,7 +313,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_channel_closure() {
-        let (tx, mut rx) = ordered_channel::<i32>(4);
+        let (tx, mut rx) = ordered_channel::<i32>(4, test_cancel());
 
         tx.send(0, 10).await.unwrap();
         drop(tx);
@@ -387,7 +324,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stale_index() {
-        let (tx, mut rx) = ordered_channel::<i32>(4);
+        let (tx, mut rx) = ordered_channel::<i32>(4, test_cancel());
 
         tx.send(0, 10).await.unwrap();
         rx.recv().await.unwrap();
@@ -398,7 +335,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_duplicate_index() {
-        let (tx, _rx) = ordered_channel::<i32>(4);
+        let (tx, _rx) = ordered_channel::<i32>(4, test_cancel());
 
         tx.send(0, 10).await.unwrap();
         let result = tx.send(0, 20).await;
@@ -407,7 +344,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_multiple_senders() {
-        let (tx1, mut rx) = ordered_channel::<i32>(4);
+        let (tx1, mut rx) = ordered_channel::<i32>(4, test_cancel());
         let tx2 = tx1.clone();
 
         tx1.send(0, 10).await.unwrap();
@@ -424,7 +361,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_backpressure() {
-        let (tx, mut rx) = ordered_channel::<i32>(2);
+        let (tx, mut rx) = ordered_channel::<i32>(2, test_cancel());
 
         tx.send(0, 10).await.unwrap();
         tx.send(1, 20).await.unwrap();
@@ -448,7 +385,7 @@ mod tests {
     async fn test_stream() {
         use futures::StreamExt;
 
-        let (tx, rx) = ordered_channel::<i32>(4);
+        let (tx, rx) = ordered_channel::<i32>(4, test_cancel());
 
         tx.send(1, 20).await.unwrap();
         tx.send(0, 10).await.unwrap();
@@ -461,7 +398,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_receiver_closure() {
-        let (tx, rx) = ordered_channel::<i32>(2);
+        let (tx, rx) = ordered_channel::<i32>(2, test_cancel());
 
         tx.send(0, 10).await.unwrap();
         tx.send(1, 20).await.unwrap();
@@ -473,27 +410,59 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cancellation() {
-        let (tx, _rx) = ordered_channel::<i32>(1);
+    async fn test_multiple_receivers() {
+        let (tx, rx1) = ordered_channel::<i32>(4, test_cancel());
+        let rx2 = rx1.clone();
+
+        tx.send(0, 10).await.unwrap();
+        drop(tx);
+
+        drop(rx1);
+
+        let mut rx2 = rx2;
+        assert_eq!(rx2.recv().await.unwrap(), 10);
+
+        assert!(rx2.recv().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_cancellation_send() {
         let cancel = CancellationToken::new();
+        let (tx, _rx) = ordered_channel::<i32>(1, cancel.clone());
 
         tx.send(0, 10).await.unwrap();
 
-        let cancel_clone = cancel.clone();
         let tx_clone = tx.clone();
-        let handle =
-            tokio::spawn(async move { tx_clone.send_cancellable(1, 20, &cancel_clone).await });
+        let cancel_clone = cancel.clone();
+        let handle = tokio::spawn(async move { tx_clone.send(1, 20).await });
 
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        cancel.cancel();
+        cancel_clone.cancel();
 
         let result = handle.await.unwrap();
         assert!(matches!(result, Err(SendError::Closed(20))));
     }
 
+    #[tokio::test]
+    async fn test_cancellation_recv() {
+        let cancel = CancellationToken::new();
+        let (tx, mut rx) = ordered_channel::<i32>(4, cancel.clone());
+
+        let cancel_clone = cancel.clone();
+        let handle = tokio::spawn(async move { rx.recv().await });
+
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        cancel_clone.cancel();
+
+        let result = handle.await.unwrap();
+        assert!(result.is_err());
+
+        drop(tx);
+    }
+
     #[test]
     fn test_blocking_send_recv() {
-        let (tx, mut rx) = ordered_channel::<i32>(4);
+        let (tx, mut rx) = ordered_channel::<i32>(4, test_cancel());
 
         let tx_clone = tx.clone();
         let handle = std::thread::spawn(move || {
@@ -506,6 +475,41 @@ mod tests {
 
         assert_eq!(rx.blocking_recv().unwrap(), 10);
         assert_eq!(rx.blocking_recv().unwrap(), 20);
+    }
+
+    #[test]
+    fn test_blocking_recv() {
+        let (tx, rx) = ordered_channel::<i32>(4, test_cancel());
+
+        tx.blocking_send(0, 10).unwrap();
+        tx.blocking_send(1, 20).unwrap();
+        drop(tx);
+
+        let handle = std::thread::spawn(move || {
+            let mut rx = rx;
+            let a = rx.blocking_recv().unwrap();
+            let b = rx.blocking_recv().unwrap();
+            assert!(rx.blocking_recv().is_err());
+            (a, b)
+        });
+
+        let results = handle.join().unwrap();
+        assert_eq!(results, (10, 20));
+    }
+
+    #[test]
+    fn test_blocking_out_of_order() {
+        let (tx, mut rx) = ordered_channel::<i32>(4, test_cancel());
+
+        tx.blocking_send(2, 30).unwrap();
+        tx.blocking_send(0, 10).unwrap();
+        tx.blocking_send(1, 20).unwrap();
+        drop(tx);
+
+        assert_eq!(rx.blocking_recv().unwrap(), 10);
+        assert_eq!(rx.blocking_recv().unwrap(), 20);
+        assert_eq!(rx.blocking_recv().unwrap(), 30);
+        assert!(rx.blocking_recv().is_err());
     }
 
     const _: () = {
