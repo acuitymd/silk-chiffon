@@ -1,7 +1,8 @@
-use arrow::array::{Array, Int32Array, RecordBatch, StringArray};
+use arrow::array::{Array, Int32Array, Int64Array, RecordBatch, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::reader::FileReader;
 use assert_cmd::cargo;
+use datafusion::prelude::*;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use std::fs::File;
 use std::path::Path;
@@ -1117,4 +1118,139 @@ async fn test_vortex_query_with_count_and_avg() {
     assert_eq!(result_batches.len(), 1);
     assert_eq!(result_batches[0].num_rows(), 2);
     assert_eq!(result_batches[0].num_columns(), 3);
+}
+
+#[tokio::test]
+async fn test_parallel_parquet_row_order_preserved() {
+    let temp = TempDir::new().unwrap();
+    let input = temp.path().join("input.arrow");
+    let output = temp.path().join("output.parquet");
+
+    // create schema with row_id for tracking order
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("row_id", DataType::Int64, false),
+        Field::new("value", DataType::Int32, false),
+        Field::new("name", DataType::Utf8, false),
+    ]));
+
+    let num_batches = 10;
+    let rows_per_batch = 50_000;
+    let total_rows = num_batches * rows_per_batch;
+
+    let mut batches = Vec::new();
+    for batch_idx in 0..num_batches {
+        let start = batch_idx * rows_per_batch;
+        let row_ids: Vec<i64> = (start..start + rows_per_batch).map(i64::from).collect();
+        let values: Vec<i32> = row_ids.iter().map(|&id| (id * 7 % 1000) as i32).collect();
+        let names: Vec<String> = row_ids.iter().map(|&id| format!("row_{:06}", id)).collect();
+
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int64Array::from(row_ids)),
+                Arc::new(Int32Array::from(values)),
+                Arc::new(StringArray::from(names)),
+            ],
+        )
+        .unwrap();
+        batches.push(batch);
+    }
+
+    write_arrow_file(&input, &schema, batches);
+
+    cargo::cargo_bin_cmd!("silk-chiffon")
+        .args([
+            "transform",
+            "--from",
+            input.to_str().unwrap(),
+            "--to",
+            output.to_str().unwrap(),
+            "--parquet-encoder",
+            "parallel",
+            "--parquet-row-group-size",
+            "100000",
+        ])
+        .assert()
+        .success();
+
+    // use DataFusion to verify row order
+    let ctx = SessionContext::new();
+
+    ctx.register_parquet(
+        "output",
+        output.to_str().unwrap(),
+        ParquetReadOptions::default(),
+    )
+    .await
+    .unwrap();
+
+    let count_df = ctx.sql("SELECT COUNT(*) as cnt FROM output").await.unwrap();
+    let count_batches = count_df.collect().await.unwrap();
+    let count = count_batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap()
+        .value(0);
+    assert_eq!(count, i64::from(total_rows), "row count mismatch");
+
+    // verify each row is in the correct position by checking row_id matches expected sequence
+    // we do this by adding a row number and comparing
+    let verify_df = ctx
+        .sql(
+            "WITH numbered AS (
+                SELECT row_id, ROW_NUMBER() OVER (ORDER BY row_id) - 1 as expected_pos
+                FROM output
+            )
+            SELECT COUNT(*) as mismatches
+            FROM numbered
+            WHERE row_id != expected_pos",
+        )
+        .await
+        .unwrap();
+
+    let verify_batches = verify_df.collect().await.unwrap();
+    let mismatches = verify_batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap()
+        .value(0);
+    assert_eq!(mismatches, 0, "found rows out of order");
+
+    let value_check_df = ctx
+        .sql(
+            "SELECT COUNT(*) as bad_values
+            FROM output
+            WHERE value != CAST((row_id * 7) % 1000 AS INT)",
+        )
+        .await
+        .unwrap();
+
+    let value_batches = value_check_df.collect().await.unwrap();
+    let bad_values = value_batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap()
+        .value(0);
+    assert_eq!(bad_values, 0, "found rows with incorrect values");
+
+    let name_check_df = ctx
+        .sql(
+            "SELECT COUNT(*) as bad_names
+            FROM output
+            WHERE name != CONCAT('row_', LPAD(CAST(row_id AS VARCHAR), 6, '0'))",
+        )
+        .await
+        .unwrap();
+
+    let name_batches = name_check_df.collect().await.unwrap();
+    let bad_names = name_batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap()
+        .value(0);
+    assert_eq!(bad_names, 0, "found rows with incorrect names");
 }

@@ -3276,26 +3276,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pin-project"
-version = "1.1.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "677f1add503faace112b9f1373e43e9e054bfdd22ff1a63c1bc485eaec6a6a8a"
-dependencies = [
- "pin-project-internal",
-]
-
-[[package]]
-name = "pin-project-internal"
-version = "1.1.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e918e4ff8c4549eb882f14b3a4bc8c8bc93de829416eacf579f1207a8fbf861"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.114",
-]
-
-[[package]]
 name = "pin-project-lite"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3836,15 +3816,13 @@ dependencies = [
  "parquet",
  "percent-encoding",
  "predicates",
- "rustc-hash",
+ "rayon",
  "serde",
  "serde_json",
  "strum_macros",
  "tabled",
  "tempfile",
  "tokio",
- "tokio-par-util",
- "tokio-stream",
  "tokio-util",
  "uuid",
  "vortex",
@@ -4160,29 +4138,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tokio-par-util"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e6935dad8da2748b0453ffe93749be37d2e6738cb647694b2c24ab27c4e964ee"
-dependencies = [
- "futures-util",
- "pin-project",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
-name = "tokio-stream"
-version = "0.1.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32da49809aab5c3bc678af03902d4ccddea2a87d028d86392a4b1560c6906c70"
-dependencies = [
- "futures-core",
- "pin-project-lite",
- "tokio",
-]
-
-[[package]]
 name = "tokio-util"
 version = "0.7.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4191,7 +4146,6 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
- "futures-util",
  "pin-project-lite",
  "tokio",
 ]

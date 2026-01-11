@@ -1,9 +1,10 @@
 pub mod arrow_versioning;
+pub mod cancellable_channel;
 pub mod collections;
 pub mod filesystem;
 pub mod first_error;
 pub mod ordered_channel;
-pub mod ordered_demux;
 pub mod parquet_inspection;
 pub mod projected_stream;
+pub mod rayon_bridge;
 pub mod test_helpers;

@@ -54,15 +54,6 @@ pub fn parse_nonzero_byte_size(s: &str) -> Result<usize, String> {
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 pub struct Cli {
-    /// Maximum worker threads for the tokio async runtime.
-    ///
-    /// Controls the thread pool size for async operations including I/O and DataFusion
-    /// query execution. Both DataFusion and parquet encoding use tokio's thread pools
-    /// (async pool for queries, blocking pool for CPU-bound work like encoding).
-    /// Defaults to the number of CPU cores.
-    #[arg(long, short = 't', global = true, value_parser = parse_at_least_one)]
-    pub threads: Option<usize>,
-
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -263,15 +254,15 @@ impl From<ParquetWriterVersion> for i32 {
     }
 }
 
-/// Strategy for encoding batches into parquet.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+/// Parquet encoder strategy.
+#[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq)]
 #[value(rename_all = "lowercase")]
-pub enum ParquetEncodingStrategy {
-    /// Coalesce batches into full row groups before encoding (current default).
+pub enum ParquetEncoder {
+    /// Sequential single-threaded encoder using Arrow's built-in writer.
+    Sequential,
+    /// Parallel encoder using rayon for concurrent column encoding.
     #[default]
-    Coalesced,
-    /// Start encoding immediately before the whole row group is assembled. (Experimental)
-    Eager,
+    Parallel,
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq)]
@@ -925,6 +916,13 @@ pub struct TransformCommand {
     #[arg(long, help_heading = "Execution", value_parser = parse_at_least_one)]
     pub target_partitions: Option<usize>,
 
+    /// Maximum worker threads for the tokio async runtime.
+    ///
+    /// Controls the thread pool size for async operations including I/O and DataFusion
+    /// query execution. Defaults to the number of CPU cores.
+    #[arg(long, short = 't', help_heading = "Execution", value_parser = parse_at_least_one)]
+    pub threads: Option<usize>,
+
     //
     // ─── Partitioning ──────────────────────────────────────────────────────────────────
     //
@@ -1034,12 +1032,20 @@ pub struct TransformCommand {
     )]
     pub parquet_bloom_column: Vec<ColumnSpecificBloomFilterConfig>,
 
+    /// Channel buffer size for batches sent to row group encoder tasks.
+    ///
+    /// Controls how many batches can be buffered between the coordinator and each
+    /// row group encoder. Higher values reduce backpressure but use more memory.
+    /// Defaults to 16.
+    #[arg(long, help_heading = "Parquet Tuning Options", value_parser = parse_at_least_one)]
+    pub parquet_batch_channel_size: Option<usize>,
+
     /// I/O buffer size for Parquet writing (e.g., "32MB", "64MB", "1GB").
     ///
     /// Controls the size of the buffer used when writing encoded data to disk.
     /// Supports suffixes: B, KB, MB, GB, TB (or KiB, MiB, GiB, TiB for binary).
     /// Default: 32MB.
-    #[arg(long, help_heading = "Parquet Options", value_parser = parse_nonzero_byte_size)]
+    #[arg(long, help_heading = "Parquet Tuning Options", value_parser = parse_nonzero_byte_size)]
     pub parquet_buffer_size: Option<usize>,
 
     /// Enable dictionary encoding for specific columns. Can be specified multiple times.
@@ -1079,6 +1085,22 @@ pub struct TransformCommand {
     )]
     pub parquet_column_encoding: Vec<ColumnEncodingConfig>,
 
+    /// Number of threads for CPU-bound parquet column encoding.
+    ///
+    /// Controls the rayon thread pool size for encoding columns within row groups.
+    /// Column encoding is CPU-intensive and benefits from parallelism.
+    /// Defaults to the number of CPU cores.
+    #[arg(long, help_heading = "Parquet Tuning Options", value_parser = parse_at_least_one)]
+    pub parquet_column_encoding_threads: Option<usize>,
+
+    /// Channel buffer size for encoded row groups sent to the writer task.
+    ///
+    /// Controls how many encoded row groups can be buffered before writing to disk.
+    /// Higher values allow more encoding to proceed while I/O is in progress.
+    /// Defaults to 4.
+    #[arg(long, help_heading = "Parquet Tuning Options", value_parser = parse_at_least_one)]
+    pub parquet_encoded_channel_size: Option<usize>,
+
     /// Disable dictionary encoding for specific columns. Can be specified multiple times.
     ///
     /// Overrides the default (dictionary enabled) for the named columns.
@@ -1096,6 +1118,19 @@ pub struct TransformCommand {
     /// Parquet compression codec.
     #[arg(long, value_enum, help_heading = "Parquet Options")]
     pub parquet_compression: Option<ParquetCompression>,
+
+    /// Parquet encoder strategy.
+    ///
+    /// Controls whether to use the sequential (single-threaded) or parallel
+    /// (multi-threaded) encoder. Parallel is faster for large files but has
+    /// higher memory overhead.
+    #[arg(
+        long,
+        value_enum,
+        default_value_t,
+        help_heading = "Parquet Tuning Options"
+    )]
+    pub parquet_encoder: ParquetEncoder,
 
     /// Data page encoding for Parquet columns.
     ///
@@ -1118,6 +1153,14 @@ pub struct TransformCommand {
     )]
     pub parquet_encoding: Option<ParquetEncoding>,
 
+    /// Number of threads for blocking parquet I/O operations.
+    ///
+    /// Controls the rayon thread pool size for file writes during parquet output.
+    /// Typically needs fewer threads than encoding since I/O is less CPU-intensive.
+    /// Defaults to 1.
+    #[arg(long, help_heading = "Parquet Tuning Options", value_parser = parse_at_least_one)]
+    pub parquet_io_threads: Option<usize>,
+
     /// Disable dictionary encoding globally for all Parquet columns.
     ///
     /// Dictionary encoding builds a dictionary of unique values and stores references to it,
@@ -1131,13 +1174,14 @@ pub struct TransformCommand {
     #[arg(long, verbatim_doc_comment, help_heading = "Parquet Options")]
     pub parquet_no_dictionary: bool,
 
-    /// Maximum row groups to encode in parallel.
+    /// Maximum number of row groups that can be encoding concurrently.
     ///
-    /// Controls how many row groups can be encoded concurrently. Column encoding within
-    /// each row group runs on tokio's blocking thread pool via spawn_blocking.
-    /// Defaults to the number of CPU cores.
-    #[arg(long, help_heading = "Parquet Options", value_parser = parse_at_least_one)]
-    pub parquet_parallelism: Option<usize>,
+    /// Controls how many row groups can be actively encoding at once. Higher values
+    /// increase parallelism but use more memory. Each row group encodes its columns
+    /// in parallel using --parquet-column-encoding-threads.
+    /// Defaults to 4.
+    #[arg(long, help_heading = "Parquet Tuning Options", value_parser = parse_at_least_one)]
+    pub parquet_row_group_concurrency: Option<usize>,
 
     /// Maximum number of rows per Parquet row group.
     #[arg(long, help_heading = "Parquet Options")]
@@ -1161,17 +1205,6 @@ pub struct TransformCommand {
     /// Parquet writer version.
     #[arg(long, value_enum, help_heading = "Parquet Options")]
     pub parquet_writer_version: Option<ParquetWriterVersion>,
-
-    /// Strategy for encoding batches into parquet row groups.
-    ///
-    /// Options:
-    ///   coalesced - Buffer batches until a full row group is assembled before encoding (default)
-    ///   eager     - Start encoding columns immediately as batches arrive (experimental)
-    ///
-    /// Eager encoding can reduce memory usage for large row groups by encoding columns
-    /// incrementally, but may have different performance characteristics.
-    #[arg(long, value_enum, help_heading = "Parquet Options")]
-    pub parquet_encoding_strategy: Option<ParquetEncodingStrategy>,
 
     //
     // ─── Vortex Options ────────────────────────────────────────────────────────────────
