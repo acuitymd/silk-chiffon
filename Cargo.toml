@@ -24,10 +24,12 @@ camino = { version = "1.2.2", features = ["serde1"] }
 chrono = "0.4.42"
 clap = { version = "^4.5.53", features = ["default", "derive"] }
 clap_complete = "^4.5"
-datafusion = { git = "https://github.com/apache/datafusion.git", rev = "3a0ca4ef791458528bac04f78994f264b95f7556" }
+datafusion = { git = "https://github.com/apache/datafusion.git", rev = "bc043c3a5fe448fc5735d9fa173b69ac95a7e11c" }
 futures = "^0.3.31"
 glob = "^0.3.3"
+humansize = "2.1"
 minijinja = "^2.12.0"
+num-format = "0.4"
 owo-colors = "4"
 parquet = { version = "^57.0.0", features = [
   "default",
@@ -40,7 +42,7 @@ rayon = "1.11.0"
 serde = { version = "^1.0", features = ["derive"] }
 serde_json = "^1.0.145"
 strum_macros = "^0.27.2"
-tabled = { version = "0.18", features = ["ansi"] }
+tabled = { version = "0.20", features = ["ansi"] }
 tempfile = "^3.23.0"
 tokio = { version = "^1.48.0", features = [
   "rt-multi-thread",
@@ -51,16 +53,9 @@ tokio = { version = "^1.48.0", features = [
 ] }
 tokio-util = "0.7.17"
 uuid = { version = "^1.18.1", features = ["v4"] }
-humansize = "2.1"
-num-format = "0.4"
-
-# Vortex support (Arrow 56 - compatible with our Arrow 57)
-vortex = { version = "0.56.0", features = ["tokio", "files"] }
-vortex-array = "0.56.0"
-vortex-session = "0.56.0"
-arrow-array = "56"
-arrow-ipc = "56"
-arrow-schema = "56"
+vortex = { version = "0.58.0", features = ["tokio", "files"] }
+vortex-array = "0.58.0"
+vortex-session = "0.58.0"
 
 [features]
 default = []

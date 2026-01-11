@@ -1,11 +1,11 @@
+use std::any::Any;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::{any::Any, error::Error};
 
 use anyhow::Result;
-use arrow::datatypes::SchemaRef;
-use arrow_schema as arrow_schema_v56;
+use arrow::array::{RecordBatch, StructArray};
+use arrow::datatypes::{DataType, SchemaRef};
 use async_trait::async_trait;
 use datafusion::catalog::TableProvider;
 use datafusion::datasource::TableType;
@@ -20,17 +20,11 @@ use datafusion::physical_plan::{
 use datafusion::prelude::{Expr, SessionContext};
 use futures::StreamExt;
 use vortex::VortexSessionDefault;
-use vortex::arrow::IntoArrowArray;
 use vortex::file::OpenOptionsSessionExt;
+use vortex_array::arrow::IntoArrowArray;
 use vortex_session::VortexSession;
 
-use arrow_array::RecordBatch as RecordBatchv56;
-use arrow_array::StructArray as StructArrayv56;
-
-use crate::{
-    sources::data_source::DataSource,
-    utils::arrow_versioning::{convert_record_batch_56_to_57, convert_schema_56_to_57},
-};
+use crate::sources::data_source::DataSource;
 
 pub struct VortexDataSource {
     path: String,
@@ -59,11 +53,11 @@ impl DataSource for VortexDataSource {
                     .map_err(|e| anyhow::anyhow!("Failed to open Vortex file: {}", e))?;
 
                 let dtype = vortex_file.dtype();
-                let arrow_schema_v56 = dtype.to_arrow_schema().map_err(|e| {
+                let arrow_schema = dtype.to_arrow_schema().map_err(|e| {
                     anyhow::anyhow!("Failed to convert Vortex DType to Arrow Schema: {}", e)
                 })?;
 
-                convert_schema_56_to_57(Arc::new(arrow_schema_v56))
+                Ok(Arc::new(arrow_schema))
             })
         })
     }
@@ -234,28 +228,25 @@ impl ExecutionPlan for VortexExec {
             let mut array_stream = Box::pin(array_stream);
 
             let vortex_dtype = vortex_file.dtype();
-            let arrow_schema_v56 = vortex_dtype
+            let arrow_schema = vortex_dtype
                 .to_arrow_schema()
                 .map_err(|e| DataFusionError::External(Box::new(e)))?;
-            let arrow_data_type_v56 = arrow_schema_v56::DataType::Struct(arrow_schema_v56.fields().clone());
+            let arrow_data_type = DataType::Struct(arrow_schema.fields().clone());
 
             while let Some(array_result) = array_stream.next().await {
                 let vortex_array = array_result
                     .map_err(|e| DataFusionError::External(Box::new(e)))?;
 
-                let arrow_array_v56 = vortex_array
-                    .into_arrow(&arrow_data_type_v56)
+                let arrow_array = vortex_array
+                    .into_arrow(&arrow_data_type)
                     .map_err(|e| DataFusionError::External(Box::new(e)))?;
 
-                let struct_array_v56 = arrow_array_v56
+                let struct_array = arrow_array
                     .as_any()
-                    .downcast_ref::<StructArrayv56>()
+                    .downcast_ref::<StructArray>()
                     .ok_or_else(|| DataFusionError::Internal("Expected StructArray from Vortex".into()))?;
 
-                let batch_v56 = RecordBatchv56::from(struct_array_v56);
-
-                let mut batch = convert_record_batch_56_to_57(&batch_v56)
-                    .map_err(|e| DataFusionError::External(Box::<dyn Error + Send + Sync>::from(e)))?;
+                let mut batch = RecordBatch::from(struct_array);
 
                 if let Some(ref proj) = projection {
                     batch = batch.project(proj)

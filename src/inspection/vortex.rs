@@ -12,9 +12,7 @@ use vortex::file::{OpenOptionsSessionExt, SegmentSpec};
 use vortex_array::stats::StatsSet;
 use vortex_session::VortexSession;
 
-use crate::{
-    inspection::magic::magic_bytes_match_start, utils::arrow_versioning::convert_schema_56_to_57,
-};
+use crate::inspection::magic::magic_bytes_match_start;
 
 use tabled::Tabled;
 
@@ -59,11 +57,11 @@ impl VortexInspector {
                     .map_err(|e| anyhow::anyhow!("Failed to open Vortex file: {}", e))?;
 
                 let dtype = vortex_file.dtype();
-                let arrow_schema_v56 = dtype.to_arrow_schema().map_err(|e| {
+                let arrow_schema = dtype.to_arrow_schema().map_err(|e| {
                     anyhow::anyhow!("Failed to convert Vortex DType to Arrow Schema: {}", e)
                 })?;
 
-                let schema = convert_schema_56_to_57(Arc::new(arrow_schema_v56))?;
+                let schema = Arc::new(arrow_schema);
                 let num_rows = vortex_file.row_count();
                 let file_stats = vortex_file.file_stats().cloned();
                 let footer = vortex_file.footer();

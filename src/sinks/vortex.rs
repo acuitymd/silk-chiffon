@@ -9,18 +9,16 @@ use async_trait::async_trait;
 use futures::stream;
 use tokio::sync::mpsc;
 use tokio::{fs::File, sync::Mutex};
-use vortex::arrow::FromArrowArray;
+use vortex::VortexSessionDefault;
 use vortex::dtype::DType;
 use vortex::dtype::arrow::FromArrowType;
 use vortex::file::WriteOptionsSessionExt;
-use vortex::stream::ArrayStreamAdapter;
-use vortex::{ArrayRef, VortexSessionDefault};
+use vortex_array::ArrayRef;
+use vortex_array::arrow::FromArrowArray;
+use vortex_array::stream::ArrayStreamAdapter;
 use vortex_session::VortexSession;
 
-use crate::{
-    sinks::data_sink::{DataSink, SinkResult},
-    utils::arrow_versioning::{convert_record_batch_57_to_56, convert_schema_57_to_56},
-};
+use crate::sinks::data_sink::{DataSink, SinkResult};
 
 #[derive(Clone, Copy)]
 pub struct VortexSinkOptions {
@@ -55,8 +53,7 @@ struct VortexSinkInner {
 impl VortexSinkInner {
     async fn flush_completed_batches(&mut self) -> Result<()> {
         while let Some(completed_batch) = self.coalescer.next_completed_batch() {
-            let batch_v56 = convert_record_batch_57_to_56(&completed_batch)?;
-            let vortex_array = ArrayRef::from_arrow(batch_v56, false);
+            let vortex_array = ArrayRef::from_arrow(completed_batch.clone(), false);
 
             self.sender
                 .as_ref()
@@ -130,8 +127,7 @@ impl VortexSink {
 
         let session = VortexSession::default();
 
-        // need an arrow 56 schema to convert to vortex dtype, so we can't just use the passed in schema
-        let dtype = DType::from_arrow(convert_schema_57_to_56(schema)?);
+        let dtype = DType::from_arrow(schema);
 
         let array_stream = ArrayStreamAdapter::new(
             dtype.clone(),
