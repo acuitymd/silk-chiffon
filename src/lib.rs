@@ -1184,7 +1184,7 @@ pub struct TransformCommand {
     pub parquet_row_group_concurrency: Option<usize>,
 
     /// Maximum number of rows per Parquet row group.
-    #[arg(long, help_heading = "Parquet Options")]
+    #[arg(long, help_heading = "Parquet Options", value_parser = parse_at_least_one)]
     pub parquet_row_group_size: Option<usize>,
 
     /// Embed metadata indicating that the file's data is sorted.

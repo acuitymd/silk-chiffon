@@ -114,6 +114,10 @@ impl ParallelParquetWriter {
         pools: Arc<ParquetPools>,
         config: ParallelWriterConfig,
     ) -> Self {
+        assert!(
+            config.max_row_group_size > 0,
+            "max_row_group_size must be > 0"
+        );
         let path = path.as_ref().to_path_buf();
         let schema = Arc::clone(schema);
         let cancel_token = CancellationToken::new();
