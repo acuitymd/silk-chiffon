@@ -1,4 +1,3 @@
-pub mod arrow_versioning;
 pub mod cancellable_channel;
 pub mod collections;
 pub mod filesystem;
