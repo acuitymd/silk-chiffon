@@ -382,7 +382,11 @@ async fn coordinator_task(
         first_error.set(e);
     }
 
-    join_set.join_all().await;
+    while let Some(result) = join_set.join_next().await {
+        if let Err(e) = result {
+            first_error.set(anyhow!("row group task panicked: {e}"));
+        }
+    }
 
     if let Some(e) = first_error.take() {
         return Err(e);
@@ -481,7 +485,9 @@ async fn coordinator_loop(
                 );
 
                 while join_set.len() >= max_row_group_concurrency {
-                    join_set.join_next().await;
+                    if let Some(Err(e)) = join_set.join_next().await {
+                        first_error.set(anyhow!("row group task panicked: {e}"));
+                    }
                     if first_error.is_cancelled() {
                         return Ok(());
                     }
