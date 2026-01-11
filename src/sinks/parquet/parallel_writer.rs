@@ -118,6 +118,23 @@ impl ParallelParquetWriter {
             config.max_row_group_size > 0,
             "max_row_group_size must be > 0"
         );
+        assert!(
+            config.max_row_group_concurrency > 0,
+            "max_row_group_concurrency must be > 0"
+        );
+        assert!(
+            config.encoded_channel_size > 0,
+            "encoded_channel_size must be > 0"
+        );
+        assert!(
+            config.batch_channel_size > 0,
+            "batch_channel_size must be > 0"
+        );
+        assert!(config.buffer_size > 0, "buffer_size must be > 0");
+        assert!(
+            config.encoding_batch_size > 0,
+            "encoding_batch_size must be > 0"
+        );
         let path = path.as_ref().to_path_buf();
         let schema = Arc::clone(schema);
         let cancel_token = CancellationToken::new();

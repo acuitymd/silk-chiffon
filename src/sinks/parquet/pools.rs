@@ -14,6 +14,8 @@ pub struct ParquetPools {
 
 impl ParquetPools {
     pub fn new(encoding_threads: usize, io_threads: usize) -> Result<Self> {
+        assert!(encoding_threads > 0, "encoding_threads must be > 0");
+        assert!(io_threads > 0, "io_threads must be > 0");
         Ok(Self {
             encoding: rayon::ThreadPoolBuilder::new()
                 .num_threads(encoding_threads)
