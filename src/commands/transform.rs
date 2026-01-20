@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
 use crate::{
-    ArrowCompression, ArrowIPCFormat, BloomFilterConfig, ColumnEncodingConfig, DataFormat,
-    ListOutputsFormat, ParquetCompression, ParquetEncoder, ParquetEncoding, ParquetStatistics,
-    ParquetWriterVersion, PartitionStrategy, SortSpec, TransformCommand,
+    AllColumnsBloomFilterConfig, ArrowCompression, ArrowIPCFormat, BloomFilterConfig,
+    ColumnEncodingConfig, DEFAULT_BLOOM_FILTER_FPP, DataFormat, ListOutputsFormat,
+    ParquetCompression, ParquetEncoder, ParquetEncoding, ParquetStatistics, ParquetWriterVersion,
+    PartitionStrategy, SortSpec, TransformCommand,
     io_strategies::{OutputFileInfo, output_strategy::SinkFactory, path_template::PathTemplate},
     operations::{query::QueryOperation, sort::SortOperation},
     pipeline::Pipeline,
@@ -42,6 +43,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         dialect,
         sort_by,
         memory_limit,
+        preserve_input_order,
         target_partitions,
         input_format,
         output_format,
@@ -50,7 +52,9 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         arrow_record_batch_size,
         parquet_batch_channel_size,
         parquet_bloom_all,
+        parquet_no_bloom_all,
         parquet_bloom_column,
+        parquet_no_bloom_column,
         parquet_buffer_size,
         parquet_column_dictionary,
         parquet_column_encoding,
@@ -67,6 +71,12 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         parquet_sorted_metadata,
         parquet_statistics,
         parquet_writer_version,
+        parquet_data_page_size,
+        parquet_data_page_row_limit,
+        parquet_dictionary_page_size,
+        parquet_write_batch_size,
+        parquet_offset_index,
+        parquet_arrow_metadata,
         threads: _,
         vortex_record_batch_size,
     } = args;
@@ -79,13 +89,17 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         parquet_io_threads.unwrap_or(1),
     )?);
 
-    let bloom_filter = if let Some(all_config) = parquet_bloom_all {
-        BloomFilterConfig::All(all_config)
-    } else if !parquet_bloom_column.is_empty() {
-        BloomFilterConfig::Columns(parquet_bloom_column)
+    let all_enabled = if parquet_no_bloom_all {
+        None
     } else {
-        BloomFilterConfig::None
+        parquet_bloom_all.or(Some(AllColumnsBloomFilterConfig {
+            fpp: DEFAULT_BLOOM_FILTER_FPP,
+            ndv: None,
+        }))
     };
+    let bloom_filter =
+        BloomFilterConfig::try_new(all_enabled, parquet_bloom_column, parquet_no_bloom_column)
+            .map_err(anyhow::Error::msg)?;
 
     validate_encoding_version_compatibility(
         parquet_writer_version,
@@ -93,10 +107,20 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         &parquet_column_encoding,
     )?;
 
+    if preserve_input_order && from.is_none() {
+        anyhow::bail!("--preserve-input-order requires --from (single input file)");
+    }
+
+    let effective_target_partitions = if preserve_input_order {
+        Some(1)
+    } else {
+        target_partitions
+    };
+
     let mut pipeline = Pipeline::new()
         .with_query_dialect(dialect)
         .with_memory_limit(memory_limit)
-        .with_target_partitions(target_partitions);
+        .with_target_partitions(effective_target_partitions);
 
     let (input_paths, should_glob) = if let Some(single_input) = from {
         (vec![single_input], false)
@@ -244,6 +268,12 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         parquet_sort_spec,
         parquet_statistics,
         parquet_writer_version,
+        parquet_data_page_size,
+        parquet_data_page_row_limit,
+        parquet_dictionary_page_size,
+        parquet_write_batch_size,
+        parquet_offset_index,
+        parquet_arrow_metadata,
         vortex_record_batch_size,
         pools,
     )?;
@@ -481,6 +511,12 @@ fn create_sink_factory(
     parquet_sort_spec: Option<SortSpec>,
     parquet_statistics: Option<ParquetStatistics>,
     parquet_writer_version: Option<ParquetWriterVersion>,
+    parquet_data_page_size: Option<usize>,
+    parquet_data_page_row_limit: Option<usize>,
+    parquet_dictionary_page_size: Option<usize>,
+    parquet_write_batch_size: Option<usize>,
+    parquet_offset_index: bool,
+    parquet_arrow_metadata: bool,
     vortex_record_batch_size: Option<usize>,
     pools: Arc<ParquetPools>,
 ) -> Result<SinkFactory> {
@@ -536,7 +572,21 @@ fn create_sink_factory(
                     .with_encoding(parquet_encoding)
                     .with_column_encodings(parquet_column_encoding.clone())
                     .with_bloom_filters(parquet_bloom_filter.clone())
-                    .with_encoder(parquet_encoder);
+                    .with_encoder(parquet_encoder)
+                    .with_offset_index_enabled(parquet_offset_index)
+                    .with_skip_arrow_metadata(!parquet_arrow_metadata);
+                if let Some(size) = parquet_data_page_size {
+                    options = options.with_data_page_size_limit(size);
+                }
+                if let Some(limit) = parquet_data_page_row_limit {
+                    options = options.with_data_page_row_count_limit(limit);
+                }
+                if let Some(size) = parquet_dictionary_page_size {
+                    options = options.with_dictionary_page_size_limit(size);
+                }
+                if let Some(size) = parquet_write_batch_size {
+                    options = options.with_write_batch_size(size);
+                }
                 if let Some(sort_spec) = parquet_sort_spec.clone() {
                     options = options.with_sort_spec(sort_spec);
                 }

@@ -49,6 +49,8 @@ pub struct ParallelWriterConfig {
     pub batch_channel_size: usize,
     /// Channel buffer size for encoded row groups sent to the writer task.
     pub encoded_channel_size: usize,
+    /// Whether to skip embedding Arrow schema in the parquet file metadata.
+    pub skip_arrow_metadata: bool,
 }
 
 impl Default for ParallelWriterConfig {
@@ -60,6 +62,7 @@ impl Default for ParallelWriterConfig {
             encoding_batch_size: 122_880,
             batch_channel_size: 16,
             encoded_channel_size: 4,
+            skip_arrow_metadata: true,
         }
     }
 }
@@ -296,7 +299,9 @@ async fn run_pipeline(
     let arrow_writer = ArrowWriter::try_new_with_options(
         file,
         Arc::clone(&schema),
-        ArrowWriterOptions::new().with_properties(props),
+        ArrowWriterOptions::new()
+            .with_properties(props)
+            .with_skip_arrow_metadata(config.skip_arrow_metadata),
     )?;
     let (file_writer, row_group_factory) = arrow_writer.into_serialized_writer()?;
     let row_group_factory = Arc::new(row_group_factory);
@@ -420,12 +425,13 @@ async fn coordinator_loop(
 
     let (current_tx, rx) =
         cancellable_channel::<RecordBatch>(batch_channel_size, cancel.clone(), "row_group");
+    let column_writers = factory.create_column_writers(row_group_index)?;
     join_set.spawn(row_group_task(
         row_group_index,
         rx,
         encoded_tx.clone(),
         Arc::clone(&pools),
-        Arc::clone(&factory),
+        column_writers,
         Arc::clone(&schema),
         Arc::clone(&first_error),
     ));
@@ -498,12 +504,13 @@ async fn coordinator_loop(
                     cancel.clone(),
                     "row_group",
                 );
+                let column_writers = factory.create_column_writers(row_group_index)?;
                 join_set.spawn(row_group_task(
                     row_group_index,
                     rx,
                     encoded_tx.clone(),
                     Arc::clone(&pools),
-                    Arc::clone(&factory),
+                    column_writers,
                     Arc::clone(&schema),
                     Arc::clone(&first_error),
                 ));
@@ -533,22 +540,19 @@ async fn coordinator_loop(
 }
 
 /// Row group task: receives batches, encodes columns incrementally, sends to writer.
+///
+/// Column writers are created by the coordinator before spawning this task to ensure
+/// they're created in sequential order (the factory is not thread-safe for concurrent
+/// out-of-order creation).
 async fn row_group_task(
     row_group_index: usize,
     mut batch_rx: CancellableReceiver<RecordBatch>,
     encoded_tx: OrderedSender<EncodedRowGroup>,
     pools: Arc<ParquetPools>,
-    factory: Arc<ArrowRowGroupWriterFactory>,
+    column_writers: Vec<ArrowColumnWriter>,
     schema: SchemaRef,
     first_error: Arc<FirstError>,
 ) {
-    let column_writers = match factory.create_column_writers(row_group_index) {
-        Ok(w) => w,
-        Err(e) => {
-            first_error.set(e.into());
-            return;
-        }
-    };
     let num_columns = column_writers.len();
     let mut writers: Vec<Option<ArrowColumnWriter>> =
         column_writers.into_iter().map(Some).collect();

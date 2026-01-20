@@ -4,17 +4,18 @@
 
 ## ✨ What is Silk Chiffon?
 
-Silk Chiffon is a blazingly fast, memory-efficient CLI tool for converting from/to the Apache Arrow IPC and Parquet columnar data formats. Written in Rust for maximum performance.
+Silk Chiffon is a blazingly fast, memory-efficient CLI tool for converting from/to the Apache Arrow IPC, Parquet, and Vortex columnar data formats. Written in Rust for maximum performance.
 
 Like its namesake fabric -- light, flowing, and effortlessly elegant -- this tool makes data transformations silky smooth.
 
 ### ️🎯 Core Features
 
 - **⚡ Lightning Fast**: Built with Rust for native performance.
-- **🤹🏻‍♀ Multi-Format Support**: Convert to/from Arrow IPC (file/stream) and Parquet.
+- **🤹🏻‍♀ Multi-Format Support**: Convert to/from Arrow IPC (file/stream), Parquet, and Vortex.
 - **🪓 Partitioning**: Partition data into multiple files based on column values.
 - **🔗 Merging**: Merge data from multiple files into a single file.
 - **🧠 Smart Processing**: Sort, compress, filter with SQL, and optimize your data on-the-fly.
+- **🦋 Re-cast column types**: Use SQL to convert input columns to right-sized output columns and even add new ones.
 - **🤏🏻 Memory Efficient**: Configurable batch processing for huge datasets.
 - **⚙️ Rich Configuration**: Fine-tune many aspects of your conversions.
 
@@ -92,6 +93,21 @@ silk-chiffon transform --from data.arrow --to filtered.parquet \
   --query "SELECT * FROM data WHERE amount > 1000 AND status = 'active'"
 ```
 
+### SQL Casting
+
+Convert input columns to different types, and even add new ones:
+
+```bash
+silk-chiffon transform --from data.arrow --to date_casted.parquet \
+  --query "SELECT * EXCEPT (created_at), arrow_cast(created_at, 'Date32') AS created_at FROM data"
+
+silk-chiffon transform --from data.arrow --to id_casted.parquet \
+  --query "SELECT * EXCEPT (id), arrow_cast(id, 'Int32') AS id FROM data"
+
+silk-chiffon transform --from data.arrow --to added_creation_year.parquet \
+  --query "SELECT *, extract(year FROM created_at) AS creation_year FROM data"
+```
+
 ### Combining Operations
 
 Merge, filter, sort, and partition in one command:
@@ -151,9 +167,17 @@ silk-chiffon transform [OPTIONS]
 - `--parquet-no-dictionary` - Disable dictionary encoding
 - `--parquet-sorted-metadata` - Embed sorted metadata (requires `--sort-by`)
 
+### Vortex Options
+
+- `--vortex-record-batch-size <VORTEX_RECORD_BATCH_SIZE>` - Vortex record batch size
+
 ### Bloom Filter Options
 
-Enable bloom filters for all columns:
+Bloom filters are enabled for all columns by default (fpp=0.01, auto NDV). Use
+`--parquet-no-bloom-all` to disable globally, and `--parquet-no-bloom-column`
+to exclude specific columns.
+
+Customize bloom filters for all columns:
 
 ```bash
 --parquet-bloom-all                     # Use defaults (fpp=0.01, auto NDV)
@@ -162,13 +186,14 @@ Enable bloom filters for all columns:
 --parquet-bloom-all "fpp=0.001,ndv=10000" # Both custom
 ```
 
-Enable bloom filters for specific columns:
+Customize bloom filters for specific columns (overrides defaults):
 
 ```bash
 --parquet-bloom-column "user_id"                    # Defaults
 --parquet-bloom-column "user_id:fpp=0.001"          # Custom FPP
 --parquet-bloom-column "user_id:ndv=50000"          # Custom NDV
 --parquet-bloom-column "user_id:fpp=0.001,ndv=50000" # Both
+--parquet-no-bloom-all --parquet-bloom-column "user_id" # Only user_id
 ```
 
 ### Other Options

@@ -10,9 +10,14 @@ use humansize::{BINARY, FormatSizeOptions, format_size};
 use num_format::{Locale, ToFormattedString};
 use serde::Serialize;
 use serde_json::Value;
-use tabled::Tabled;
+use tabled::{
+    Tabled,
+    settings::{Alignment, Modify, object::Columns},
+};
 
-use super::style::{dim, header, label, rounded_table, value};
+use crate::inspection::style::{boolean_false, boolean_true};
+
+use super::style::{column_name, data_type, dim, header, label, rounded_table, value};
 
 /// Common trait for inspecting data files.
 pub trait Inspectable: Send + Sync {
@@ -115,18 +120,25 @@ pub fn render_schema_fields(schema: &SchemaRef, out: &mut dyn Write) -> Result<(
     let rows: Vec<SchemaFieldRow> = schema
         .fields()
         .iter()
-        .map(|f| SchemaFieldRow {
-            name: f.name().clone(),
-            data_type: format!("{}", f.data_type()),
-            nullable: if f.is_nullable() {
-                "yes".to_string()
-            } else {
-                dim("no")
-            },
+        .map(|f| {
+            let dt = format!("{}", f.data_type());
+            SchemaFieldRow {
+                name: column_name(f.name()),
+                data_type: data_type(&dt),
+                nullable: if f.is_nullable() {
+                    boolean_true()
+                } else {
+                    boolean_false()
+                },
+            }
         })
         .collect();
 
-    writeln!(out, "{}", rounded_table(rows))?;
+    writeln!(
+        out,
+        "{}",
+        rounded_table(rows).with(Modify::new(Columns::new(2..)).with(Alignment::center()))
+    )?;
     Ok(())
 }
 
@@ -144,7 +156,8 @@ pub fn render_schema_fields_detailed(schema: &SchemaRef, out: &mut dyn Write) ->
             header(field.name()),
             dim(format!("({})", nullable))
         )?;
-        writeln!(out, "    {}: {}", label("Type"), value(field.data_type()))?;
+        let dt = format!("{}", field.data_type());
+        writeln!(out, "    {}: {}", label("Type"), data_type(&dt))?;
 
         let meta = field.metadata();
         if meta.is_empty() {

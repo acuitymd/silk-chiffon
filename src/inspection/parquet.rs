@@ -6,31 +6,46 @@ use std::{
     io::Write,
 };
 
-use camino::{Utf8Path, Utf8PathBuf};
-
 use anyhow::Result;
 use arrow::datatypes::SchemaRef;
+use camino::{Utf8Path, Utf8PathBuf};
+use chrono::{DateTime, NaiveDate, Utc};
+use num_format::{Locale, ToFormattedString};
+use owo_colors::OwoColorize;
 use parquet::{
     arrow::parquet_to_arrow_schema,
-    basic::Compression,
+    basic::{Compression, LogicalType, TimeUnit},
     column::page::Page,
     file::{
         metadata::SortingColumn,
         reader::{FileReader, RowGroupReader, SerializedFileReader},
-        statistics::Statistics as ParquetStatistics,
+        statistics::Statistics,
     },
 };
 use serde::Serialize;
 use serde_json::{Value, json};
+use tabled::{
+    Table, Tabled,
+    settings::{
+        Alignment, Color, Modify, Remove, Style,
+        object::{Columns, Rows},
+    },
+};
 
-use crate::inspection::magic::{magic_bytes_match_end, magic_bytes_match_start};
+use crate::inspection::{
+    magic::{magic_bytes_match_end, magic_bytes_match_start},
+    style::missing_value,
+};
 
 use super::{
     inspectable::{
         Inspectable, format_bytes, format_number, render_metadata_map, render_schema_fields,
         schema_to_json,
     },
-    style::{dim, header, label, value},
+    style::{
+        apply_theme, boolean_false, boolean_true, column_name, compression, dim, encoding, header,
+        label, value,
+    },
 };
 
 const PARQUET_MAGIC: &[u8] = b"PAR1";
@@ -39,15 +54,18 @@ pub struct ParquetInspector {
     schema: SchemaRef,
     row_groups: Vec<RowGroupInfo>,
     num_rows: u64,
+    num_columns: usize,
     total_compressed_size: u64,
     total_uncompressed_size: u64,
     compression_codecs: HashSet<String>,
     has_dictionary: bool,
     has_bloom_filters: bool,
+    has_page_index: bool,
     custom_metadata: HashMap<String, String>,
     file_path: Utf8PathBuf,
-    /// aggregated per-column stats across all row groups
     file_column_stats: Vec<FileColumnStats>,
+    format_version: String,
+    created_by: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -83,9 +101,14 @@ pub struct ColumnInfo {
     pub compression: String,
     pub compressed_size: u64,
     pub uncompressed_size: u64,
+    pub has_dictionary: bool,
     pub has_bloom_filter: bool,
+    pub has_page_index: bool,
+    pub has_statistics: bool,
     /// high-level encoding list from column chunk metadata (free)
     pub encodings: Vec<String>,
+    /// detailed page-level encodings (requires reading pages)
+    pub page_encodings: Option<PageEncodings>,
     pub statistics: Option<ColumnStatistics>,
 }
 
@@ -119,10 +142,7 @@ pub struct FileColumnStats {
 }
 
 impl ColumnStatistics {
-    fn from_parquet(
-        stats: &ParquetStatistics,
-        logical_type: Option<&parquet::basic::LogicalType>,
-    ) -> Self {
+    fn from_parquet(stats: &Statistics, logical_type: Option<&LogicalType>) -> Self {
         Self {
             min: format_stat_value(stats, logical_type, true),
             max: format_stat_value(stats, logical_type, false),
@@ -133,14 +153,10 @@ impl ColumnStatistics {
 }
 
 fn format_stat_value(
-    stats: &ParquetStatistics,
-    logical_type: Option<&parquet::basic::LogicalType>,
+    stats: &Statistics,
+    logical_type: Option<&LogicalType>,
     is_min: bool,
 ) -> Option<String> {
-    use chrono::NaiveDate;
-    use parquet::basic::LogicalType;
-    use parquet::file::statistics::Statistics;
-
     match stats {
         Statistics::Int32(s) => {
             let val = if is_min { *s.min_opt()? } else { *s.max_opt()? };
@@ -148,14 +164,14 @@ fn format_stat_value(
                 let date = NaiveDate::from_num_days_from_ce_opt(val + 719163)?;
                 return Some(date.to_string());
             }
-            Some(val.to_string())
+            Some(val.to_formatted_string(&Locale::en))
         }
         Statistics::Int64(s) => {
             let val = if is_min { *s.min_opt()? } else { *s.max_opt()? };
             if let Some(LogicalType::Timestamp { unit, .. }) = logical_type {
                 return Some(format_timestamp_chrono(val, unit));
             }
-            Some(val.to_string())
+            Some(val.to_formatted_string(&Locale::en))
         }
         Statistics::Float(s) => {
             let val = if is_min { s.min_opt()? } else { s.max_opt()? };
@@ -187,10 +203,7 @@ fn format_bytes_as_string_or_hex(bytes: &[u8]) -> String {
     format!("0x{}", hex)
 }
 
-fn format_timestamp_chrono(val: i64, unit: &parquet::basic::TimeUnit) -> String {
-    use chrono::{DateTime, Utc};
-    use parquet::basic::TimeUnit;
-
+fn format_timestamp_chrono(val: i64, unit: &TimeUnit) -> String {
     let datetime: Option<DateTime<Utc>> = match unit {
         TimeUnit::MILLIS => DateTime::from_timestamp_millis(val),
         TimeUnit::MICROS => DateTime::from_timestamp_micros(val),
@@ -240,7 +253,6 @@ fn read_page_encodings(rg_reader: &dyn RowGroupReader, col_idx: usize) -> Option
                 if data_encodings_seen.insert(enc_str.clone()) {
                     encodings.data.push(enc_str);
                 }
-                // v2 pages always use RLE for def/rep levels
             }
         }
     }
@@ -263,18 +275,25 @@ impl ParquetInspector {
         // parquet metadata uses i64 for sizes/counts; clamp negatives to 0 for safety
         let num_rows = u64::try_from(file_metadata.num_rows()).unwrap_or(0);
 
+        let format_version = format!("{:?}", file_metadata.version());
+        let created_by = file_metadata.created_by().map(String::from);
+
         let mut inspector = Self {
             schema: schema.into(),
             row_groups: Vec::new(),
             num_rows,
+            num_columns: 0,
             total_compressed_size: 0,
             total_uncompressed_size: 0,
             compression_codecs: HashSet::new(),
             has_dictionary: false,
             has_bloom_filters: false,
+            has_page_index: false,
             custom_metadata: HashMap::new(),
             file_path: path.to_owned(),
             file_column_stats: Vec::new(),
+            format_version,
+            created_by,
         };
 
         if let Some(kv_meta) = file_metadata.key_value_metadata() {
@@ -299,6 +318,7 @@ impl ParquetInspector {
 
         for rg_idx in 0..metadata.num_row_groups() {
             let rg_meta = metadata.row_group(rg_idx);
+            let rg_reader = reader.get_row_group(rg_idx)?;
             let mut columns = Vec::new();
 
             for col_idx in 0..rg_meta.num_columns() {
@@ -325,11 +345,17 @@ impl ParquetInspector {
                     col_meta.encodings().map(|e| format!("{e:?}")).collect();
 
                 // detect dictionary usage from encodings
-                if encodings
+                let has_dict = encodings
                     .iter()
-                    .any(|e| e.contains("DICTIONARY") || e == "PLAIN_DICTIONARY")
-                {
+                    .any(|e| e.contains("DICTIONARY") || e == "PLAIN_DICTIONARY");
+                if has_dict {
                     inspector.has_dictionary = true;
+                }
+
+                let has_page_idx = col_meta.column_index_offset().is_some()
+                    || col_meta.offset_index_offset().is_some();
+                if has_page_idx {
+                    inspector.has_page_index = true;
                 }
 
                 let logical_type = col_meta.column_descr().logical_type_ref();
@@ -345,6 +371,8 @@ impl ParquetInspector {
                     .statistics()
                     .map(|s| ColumnStatistics::from_parquet(s, logical_type));
 
+                let has_stats = stats.is_some();
+
                 // only produce a total if ALL row groups have null count stats
                 match (
                     col_null_counts[col_idx],
@@ -355,13 +383,19 @@ impl ParquetInspector {
                     (None, _) => {} // already invalidated
                 }
 
+                let page_encodings = read_page_encodings(rg_reader.as_ref(), col_idx);
+
                 columns.push(ColumnInfo {
                     name,
                     compression: compression_str.to_string(),
                     compressed_size,
                     uncompressed_size,
+                    has_dictionary: has_dict,
                     has_bloom_filter: has_bloom,
+                    has_page_index: has_page_idx,
+                    has_statistics: has_stats,
                     encodings,
+                    page_encodings,
                     statistics: stats,
                 });
             }
@@ -386,6 +420,8 @@ impl ParquetInspector {
                 total_uncompressed_size: col_uncompressed[i],
             })
             .collect();
+
+        inspector.num_columns = num_columns;
 
         Ok(inspector)
     }
@@ -627,6 +663,452 @@ impl ParquetInspector {
             codecs.join(", ")
         }
     }
+
+    pub fn render_with_row_group(&self, out: &mut dyn Write, row_group_idx: usize) -> Result<()> {
+        fn format_encodings(col: &ColumnInfo) -> String {
+            if let Some(ref pe) = col.page_encodings {
+                let mut parts = Vec::new();
+                if let Some(ref dict) = pe.dictionary {
+                    parts.push(format!("{} {}", dim("Dict:"), encoding(dict)));
+                }
+                if !pe.data.is_empty() {
+                    let encoded: Vec<_> = pe.data.iter().map(|e| encoding(e)).collect();
+                    parts.push(format!("{} {}", dim("Data:"), encoded.join(", ")));
+                }
+                if !parts.is_empty() {
+                    return parts.join(", ");
+                }
+            }
+            col.encodings
+                .iter()
+                .map(|e| encoding(e))
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+
+        writeln!(out, "{}", header(&self.file_path))?;
+        writeln!(out)?;
+
+        let is_uncompressed = self.compression_codecs.iter().all(|c| c == "UNCOMPRESSED");
+
+        #[derive(Tabled)]
+        struct InfoRow {
+            #[tabled(rename = "")]
+            label: String,
+            #[tabled(rename = "")]
+            value: String,
+        }
+
+        let version_display = format!("{}.0", self.format_version);
+
+        let mut info_rows = vec![
+            InfoRow {
+                label: "Format".to_string(),
+                value: format!("Parquet {}", version_display),
+            },
+            InfoRow {
+                label: "Row groups".to_string(),
+                value: self.row_groups.len().to_string(),
+            },
+            InfoRow {
+                label: "Rows".to_string(),
+                value: format_number(self.num_rows),
+            },
+            InfoRow {
+                label: "Columns".to_string(),
+                value: self.num_columns.to_string(),
+            },
+            InfoRow {
+                label: "Uncompressed".to_string(),
+                value: format_bytes(self.total_uncompressed_size),
+            },
+            InfoRow {
+                label: "Compressed".to_string(),
+                value: if is_uncompressed {
+                    missing_value()
+                } else {
+                    format_bytes(self.total_compressed_size)
+                },
+            },
+        ];
+
+        if let Some(ref created_by) = self.created_by {
+            info_rows.insert(
+                1,
+                InfoRow {
+                    label: "Created by".to_string(),
+                    value: created_by.clone(),
+                },
+            );
+        }
+
+        let info_table = Table::new(&info_rows)
+            .with(Remove::row(Rows::first()))
+            .with(Style::rounded().remove_horizontals())
+            .with(Modify::new(Columns::new(0..1)).with(Alignment::right()))
+            .with(
+                Modify::new(Columns::new(1..))
+                    .with(Alignment::left())
+                    .with(Color::BOLD),
+            )
+            .to_string();
+        writeln!(out, "{info_table}")?;
+
+        writeln!(out)?;
+        writeln!(out, "{}", header("Schema"))?;
+        render_schema_fields(&self.schema, out)?;
+
+        writeln!(out)?;
+        writeln!(out, "{}", header("Row Groups"))?;
+        #[derive(Tabled)]
+        struct RowGroupRow {
+            #[tabled(rename = "RG")]
+            index: usize,
+            #[tabled(rename = "Rows")]
+            rows: String,
+            #[tabled(rename = "Uncompressed")]
+            uncompressed: String,
+            #[tabled(rename = "Compressed")]
+            compressed: String,
+        }
+        let rg_rows: Vec<RowGroupRow> = self
+            .row_groups
+            .iter()
+            .map(|rg| RowGroupRow {
+                index: rg.index,
+                rows: format_number(rg.num_rows),
+                uncompressed: format_bytes(rg.uncompressed_size),
+                compressed: format_bytes(rg.compressed_size),
+            })
+            .collect();
+        let mut rg_table = Table::new(&rg_rows);
+        apply_theme(&mut rg_table);
+        let rg_table = rg_table
+            .with(Modify::new(Columns::new(1..)).with(Alignment::right()))
+            .to_string();
+        writeln!(out, "{rg_table}")?;
+
+        if let Some(rg) = self.row_groups.get(row_group_idx) {
+            writeln!(out)?;
+            writeln!(
+                out,
+                "{} {}",
+                header("Column Chunks"),
+                dim(format!("(row group {})", row_group_idx))
+            )?;
+            #[derive(Tabled)]
+            struct ColChunkRow {
+                #[tabled(rename = "Column")]
+                name: String,
+                #[tabled(rename = "Encoding(s)")]
+                encodings: String,
+                #[tabled(rename = "Compression")]
+                compression: String,
+                #[tabled(rename = "Uncompressed")]
+                uncompressed: String,
+                #[tabled(rename = "Compressed")]
+                compressed: String,
+                #[tabled(rename = "Dict")]
+                dict: String,
+                #[tabled(rename = "Stats")]
+                stats: String,
+                #[tabled(rename = "PageIdx")]
+                page_idx: String,
+                #[tabled(rename = "Bloom")]
+                bloom: String,
+            }
+            let col_rows: Vec<ColChunkRow> = rg
+                .columns
+                .iter()
+                .map(|col| ColChunkRow {
+                    name: column_name(&col.name),
+                    encodings: format_encodings(col),
+                    compression: compression(&col.compression),
+                    uncompressed: format_bytes(col.uncompressed_size),
+                    compressed: if col.compression == "UNCOMPRESSED" {
+                        missing_value()
+                    } else {
+                        format_bytes(col.compressed_size)
+                    },
+                    dict: if col.has_dictionary {
+                        boolean_true()
+                    } else {
+                        boolean_false()
+                    },
+                    stats: if col.has_statistics {
+                        boolean_true()
+                    } else {
+                        boolean_false()
+                    },
+                    page_idx: if col.has_page_index {
+                        boolean_true()
+                    } else {
+                        boolean_false()
+                    },
+                    bloom: if col.has_bloom_filter {
+                        boolean_true()
+                    } else {
+                        boolean_false()
+                    },
+                })
+                .collect();
+            let mut col_table = Table::new(&col_rows);
+            apply_theme(&mut col_table);
+            let col_table = col_table
+                .with(Modify::new(Columns::new(3..=4)).with(Alignment::right()))
+                .with(Modify::new(Columns::new(5..)).with(Alignment::center()))
+                .to_string();
+            writeln!(out, "{col_table}")?;
+
+            let has_any_stats = rg.columns.iter().any(|c| c.statistics.is_some());
+            if has_any_stats {
+                writeln!(out)?;
+                writeln!(
+                    out,
+                    "{} {}",
+                    header("Column Statistics"),
+                    dim(format!("(row group {})", row_group_idx))
+                )?;
+                #[derive(Tabled)]
+                struct StatsRow {
+                    #[tabled(rename = "Column")]
+                    name: String,
+                    #[tabled(rename = "Nulls")]
+                    nulls: String,
+                    #[tabled(rename = "Distinct")]
+                    distinct: String,
+                    #[tabled(rename = "Min")]
+                    min: String,
+                    #[tabled(rename = "Max")]
+                    max: String,
+                }
+                let stats_rows: Vec<StatsRow> = rg
+                    .columns
+                    .iter()
+                    .map(|col| {
+                        let (nulls, distinct, min, max) = if let Some(s) = &col.statistics {
+                            (
+                                s.null_count.map_or_else(missing_value, format_number),
+                                s.distinct_count.map_or_else(missing_value, format_number),
+                                s.min.clone().unwrap_or_else(missing_value),
+                                s.max.clone().unwrap_or_else(missing_value),
+                            )
+                        } else {
+                            (
+                                missing_value(),
+                                missing_value(),
+                                missing_value(),
+                                missing_value(),
+                            )
+                        };
+                        StatsRow {
+                            name: column_name(&col.name),
+                            nulls,
+                            distinct,
+                            min,
+                            max,
+                        }
+                    })
+                    .collect();
+                let mut stats_table = Table::new(&stats_rows);
+                apply_theme(&mut stats_table);
+                let stats_table = stats_table
+                    .with(Modify::new(Columns::new(1..)).with(Alignment::right()))
+                    .to_string();
+                writeln!(out, "{stats_table}")?;
+            }
+        } else {
+            writeln!(out)?;
+            let msg = format!(
+                "Row group {} does not exist (file has {} row group{})",
+                row_group_idx,
+                self.row_groups.len(),
+                if self.row_groups.len() == 1 { "" } else { "s" }
+            );
+            #[derive(Tabled)]
+            struct MsgRow {
+                #[tabled(rename = "")]
+                msg: String,
+            }
+            let styled_msg = msg.style(owo_colors::Style::new().red()).to_string();
+            let mut msg_table = Table::new([MsgRow { msg: styled_msg }]);
+            msg_table
+                .with(Remove::row(Rows::first()))
+                .with(tabled::settings::Style::rounded().remove_horizontals());
+            writeln!(out, "{msg_table}")?;
+        }
+
+        if !self.custom_metadata.is_empty() {
+            writeln!(out)?;
+            writeln!(out, "{}", header("Metadata"))?;
+            #[derive(Tabled)]
+            struct MetaRow {
+                #[tabled(rename = "Key")]
+                key: String,
+                #[tabled(rename = "Value")]
+                value: String,
+            }
+            let meta_rows: Vec<MetaRow> = self
+                .custom_metadata
+                .iter()
+                .map(|(k, v)| {
+                    let truncated = if v.len() > 60 {
+                        format!("{}...", &v[..57])
+                    } else {
+                        v.clone()
+                    };
+                    MetaRow {
+                        key: k.clone(),
+                        value: truncated,
+                    }
+                })
+                .collect();
+            let mut meta_table = Table::new(&meta_rows);
+            apply_theme(&mut meta_table);
+            let meta_table = meta_table.to_string();
+            writeln!(out, "{meta_table}")?;
+        }
+
+        Ok(())
+    }
+
+    /// Render page-level details for specified columns in a row group.
+    pub fn render_pages(
+        &self,
+        out: &mut dyn Write,
+        row_group_idx: usize,
+        columns: Option<&[&str]>,
+    ) -> Result<()> {
+        let file = File::open(&self.file_path)?;
+        let reader = SerializedFileReader::new(file)?;
+        let metadata = reader.metadata();
+
+        if row_group_idx >= metadata.num_row_groups() {
+            return Ok(());
+        }
+
+        let rg_reader = reader.get_row_group(row_group_idx)?;
+        let rg_meta = metadata.row_group(row_group_idx);
+
+        let column_names: Vec<String> = (0..rg_meta.num_columns())
+            .map(|i| rg_meta.column(i).column_descr().name().to_string())
+            .collect();
+
+        let columns_to_show: Vec<usize> = match columns {
+            Some(names) => {
+                let mut indices = Vec::new();
+                for name in names {
+                    if let Some(idx) = column_names.iter().position(|n| n == name) {
+                        indices.push(idx);
+                    }
+                }
+                indices
+            }
+            None => (0..rg_meta.num_columns()).collect(),
+        };
+
+        for col_idx in columns_to_show {
+            let col_name = &column_names[col_idx];
+            writeln!(out)?;
+            writeln!(
+                out,
+                "{} {} {}",
+                header("Pages"),
+                label(col_name),
+                dim(format!("(row group {})", row_group_idx))
+            )?;
+
+            #[derive(Tabled)]
+            struct PageRow {
+                #[tabled(rename = "#")]
+                index: usize,
+                #[tabled(rename = "Type")]
+                page_type: String,
+                #[tabled(rename = "Encoding")]
+                encoding: String,
+                #[tabled(rename = "Values")]
+                num_values: String,
+                #[tabled(rename = "Size")]
+                size: String,
+                #[tabled(rename = "Rows")]
+                rows: String,
+                #[tabled(rename = "Nulls")]
+                nulls: String,
+            }
+
+            let mut page_rows = Vec::new();
+            if let Ok(mut page_reader) = rg_reader.get_column_page_reader(col_idx) {
+                let mut page_idx = 0;
+                while let Ok(Some(page)) = page_reader.get_next_page() {
+                    let (page_type, enc, num_values, size, rows, nulls) = match &page {
+                        Page::DictionaryPage {
+                            buf,
+                            num_values,
+                            encoding,
+                            ..
+                        } => (
+                            "Dict".to_string(),
+                            format!("{:?}", encoding),
+                            *num_values,
+                            buf.len(),
+                            None,
+                            None,
+                        ),
+                        Page::DataPage {
+                            buf,
+                            num_values,
+                            encoding,
+                            ..
+                        } => (
+                            "Data".to_string(),
+                            format!("{:?}", encoding),
+                            *num_values,
+                            buf.len(),
+                            None,
+                            None,
+                        ),
+                        Page::DataPageV2 {
+                            buf,
+                            num_values,
+                            encoding,
+                            num_nulls,
+                            num_rows,
+                            ..
+                        } => (
+                            "DataV2".to_string(),
+                            format!("{:?}", encoding),
+                            *num_values,
+                            buf.len(),
+                            Some(*num_rows),
+                            Some(*num_nulls),
+                        ),
+                    };
+
+                    page_rows.push(PageRow {
+                        index: page_idx,
+                        page_type,
+                        encoding: encoding(&enc),
+                        num_values: format_number(u64::from(num_values)),
+                        size: format_bytes(size as u64),
+                        rows: rows.map_or_else(|| dim("-"), |r| format_number(u64::from(r))),
+                        nulls: nulls.map_or_else(|| dim("-"), |n| format_number(u64::from(n))),
+                    });
+                    page_idx += 1;
+                }
+            }
+
+            if page_rows.is_empty() {
+                writeln!(out, "  {}", dim("(no pages)"))?;
+            } else {
+                let mut table = Table::new(&page_rows);
+                apply_theme(&mut table);
+                table.with(Modify::new(Columns::new(3..)).with(Alignment::right()));
+                writeln!(out, "{table}")?;
+            }
+        }
+
+        Ok(())
+    }
 }
 
 fn format_compression(c: Compression) -> &'static str {
@@ -678,60 +1160,7 @@ impl Inspectable for ParquetInspector {
     }
 
     fn render_default(&self, out: &mut dyn Write) -> Result<()> {
-        writeln!(out, "{} {}", header(&self.file_path), dim("(Parquet)"))?;
-        writeln!(out)?;
-        writeln!(
-            out,
-            "{:<14} {}",
-            label("Rows:"),
-            value(format_number(self.num_rows))
-        )?;
-        writeln!(
-            out,
-            "{:<14} {}",
-            label("Row groups:"),
-            value(self.row_groups.len())
-        )?;
-        writeln!(
-            out,
-            "{:<14} {}",
-            label("Compressed:"),
-            value(format_bytes(self.total_compressed_size))
-        )?;
-        writeln!(
-            out,
-            "{:<14} {}",
-            label("Uncompressed:"),
-            value(format_bytes(self.total_uncompressed_size))
-        )?;
-
-        if self.total_compressed_size > 0 {
-            #[allow(clippy::cast_precision_loss)]
-            let ratio = self.total_uncompressed_size as f64 / self.total_compressed_size as f64;
-            writeln!(
-                out,
-                "{:<14} {}",
-                label("Ratio:"),
-                value(format!("{:.2}x", ratio))
-            )?;
-        }
-
-        writeln!(
-            out,
-            "{:<14} {}",
-            label("Compression:"),
-            value(self.compression_summary())
-        )?;
-        writeln!(out)?;
-        writeln!(
-            out,
-            "{} ({}):",
-            header("Columns"),
-            value(self.schema.fields().len())
-        )?;
-        render_schema_fields(&self.schema, out)?;
-
-        Ok(())
+        self.render_with_row_group(out, 0)
     }
 
     fn to_json(&self) -> Value {

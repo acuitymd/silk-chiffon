@@ -99,7 +99,7 @@ pub fn read_entire_parquet_file(path: &Path) -> Result<ParquetContents> {
             result.total_uncompressed_size_bytes += col_meta.uncompressed_size();
 
             columns.push(Column {
-                name: col_meta.column_path().to_string(),
+                name: col_meta.column_path().parts().join("."),
                 compression,
                 encodings: col_meta.encodings().collect::<Vec<_>>(),
                 num_values: col_meta.num_values(),

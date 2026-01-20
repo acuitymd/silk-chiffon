@@ -8,9 +8,9 @@ use anyhow::Result;
 use arrow::datatypes::SchemaRef;
 use serde_json::{Value, json};
 use vortex::VortexSessionDefault;
+use vortex::array::stats::StatsSet;
 use vortex::file::{OpenOptionsSessionExt, SegmentSpec};
-use vortex_array::stats::StatsSet;
-use vortex_session::VortexSession;
+use vortex::session::VortexSession;
 
 use crate::inspection::magic::magic_bytes_match_start;
 

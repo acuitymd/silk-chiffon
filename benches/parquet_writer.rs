@@ -280,6 +280,7 @@ fn bench_parallel(c: &mut Criterion) {
                             encoding_batch_size: 122_880,
                             batch_channel_size: 16,
                             encoded_channel_size: 4,
+                            skip_arrow_metadata: true,
                         };
 
                         let mut writer = ParallelParquetWriter::new(

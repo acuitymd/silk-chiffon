@@ -20,9 +20,9 @@ use datafusion::physical_plan::{
 use datafusion::prelude::{Expr, SessionContext};
 use futures::StreamExt;
 use vortex::VortexSessionDefault;
+use vortex::array::arrow::IntoArrowArray;
 use vortex::file::OpenOptionsSessionExt;
-use vortex_array::arrow::IntoArrowArray;
-use vortex_session::VortexSession;
+use vortex::session::VortexSession;
 
 use crate::sources::data_source::DataSource;
 

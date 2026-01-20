@@ -9,12 +9,14 @@ use arrow::datatypes::SchemaRef;
 use arrow::ipc::reader::{FileReader, StreamReader};
 use serde::Serialize;
 use serde_json::{Value, json};
+use tabled::{
+    Table, Tabled,
+    settings::{Alignment, Modify, Remove, Style, object::Columns, object::Rows},
+};
 
 use super::{
-    inspectable::{
-        Inspectable, format_number, render_metadata_map, render_schema_fields, schema_to_json,
-    },
-    style::{dim, header, label, value},
+    inspectable::{Inspectable, format_bytes, format_number, render_schema_fields, schema_to_json},
+    style::{apply_theme, dim, header},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
@@ -36,6 +38,7 @@ impl std::fmt::Display for ArrowVariant {
 pub struct ArrowInspector {
     schema: SchemaRef,
     variant: ArrowVariant,
+    file_size: u64,
     num_rows: Option<u64>,
     num_batches: Option<usize>,
     batch_info: Option<Vec<BatchInfo>>,
@@ -62,6 +65,7 @@ impl ArrowInspector {
 
     pub fn open_file(path: &Utf8Path, count_rows: bool) -> Result<Self> {
         let file = File::open(path)?;
+        let file_size = file.metadata()?.len();
         let reader = FileReader::try_new(file, None)?;
         let schema = reader.schema();
 
@@ -88,6 +92,7 @@ impl ArrowInspector {
             Ok(Self {
                 schema,
                 variant: ArrowVariant::File,
+                file_size,
                 num_rows: Some(total_rows),
                 num_batches: Some(batch_info.len()),
                 batch_info: Some(batch_info),
@@ -95,11 +100,13 @@ impl ArrowInspector {
                 file_path: path.to_owned(),
             })
         } else {
+            let num_batches = reader.num_batches();
             Ok(Self {
                 schema,
                 variant: ArrowVariant::File,
+                file_size,
                 num_rows: None,
-                num_batches: None,
+                num_batches: Some(num_batches),
                 batch_info: None,
                 custom_metadata,
                 file_path: path.to_owned(),
@@ -109,6 +116,7 @@ impl ArrowInspector {
 
     pub fn open_stream(path: &Utf8Path, count_rows: bool) -> Result<Self> {
         let file = File::open(path)?;
+        let file_size = file.metadata()?.len();
         let reader = StreamReader::try_new(file, None)?;
         let schema = reader.schema();
 
@@ -135,6 +143,7 @@ impl ArrowInspector {
             Ok(Self {
                 schema,
                 variant: ArrowVariant::Stream,
+                file_size,
                 num_rows: Some(total_rows),
                 num_batches: Some(batch_info.len()),
                 batch_info: Some(batch_info),
@@ -145,6 +154,7 @@ impl ArrowInspector {
             Ok(Self {
                 schema,
                 variant: ArrowVariant::Stream,
+                file_size,
                 num_rows: None,
                 num_batches: None,
                 batch_info: None,
@@ -159,61 +169,38 @@ impl ArrowInspector {
     }
 
     pub fn render_batches(&self, out: &mut dyn Write) -> Result<()> {
+        writeln!(out)?;
+        writeln!(out, "{}", header("Record Batches"))?;
+
         match &self.batch_info {
             Some(batches) => {
-                writeln!(
-                    out,
-                    "\n{} ({}):",
-                    header("Record Batches"),
-                    value(batches.len())
-                )?;
-                writeln!(out)?;
-
-                // collapse identical consecutive batch sizes
-                let mut i = 0;
-                while i < batches.len() {
-                    let size = batches[i].num_rows;
-                    let start = i;
-                    while i < batches.len() && batches[i].num_rows == size {
-                        i += 1;
-                    }
-                    let end = i - 1;
-
-                    if start == end {
-                        writeln!(
-                            out,
-                            "  {} {}: {} rows",
-                            label("Batch"),
-                            value(start),
-                            value(format_number(size as u64))
-                        )?;
-                    } else {
-                        writeln!(
-                            out,
-                            "  {} {}-{}: {} rows each",
-                            label("Batches"),
-                            value(start),
-                            value(end),
-                            value(format_number(size as u64))
-                        )?;
-                    }
+                #[derive(Tabled)]
+                struct BatchRow {
+                    #[tabled(rename = "Batch")]
+                    batch: String,
+                    #[tabled(rename = "Rows")]
+                    rows: String,
                 }
+
+                let rows: Vec<BatchRow> = batches
+                    .iter()
+                    .map(|b| BatchRow {
+                        batch: b.index.to_string(),
+                        rows: format_number(b.num_rows as u64),
+                    })
+                    .collect();
+
+                let mut table = Table::new(&rows);
+                apply_theme(&mut table);
+                table.with(Modify::new(Columns::new(1..)).with(Alignment::right()));
+                writeln!(out, "{table}")?;
             }
             None => {
-                writeln!(
-                    out,
-                    "\n{}: {}",
-                    label("Record Batches"),
-                    dim("(use --row-count to read)")
-                )?;
+                writeln!(out, "  {}", dim("(use --row-count to read)"))?;
             }
         }
 
         Ok(())
-    }
-
-    pub fn render_metadata(&self, out: &mut dyn Write) -> Result<()> {
-        render_metadata_map(out, "Custom Metadata", &self.custom_metadata)
     }
 
     /// Detect which Arrow IPC variant this file is.
@@ -276,41 +263,95 @@ impl Inspectable for ArrowInspector {
     }
 
     fn render_default(&self, out: &mut dyn Write) -> Result<()> {
-        writeln!(
-            out,
-            "{} {}",
-            header(&self.file_path),
-            dim(format!("({})", self.format_name()))
-        )?;
+        writeln!(out, "{}", header(&self.file_path))?;
         writeln!(out)?;
 
-        match self.num_rows {
-            Some(n) => writeln!(out, "{:<15} {}", label("Rows:"), value(format_number(n)))?,
-            None => writeln!(
-                out,
-                "{:<15} {}",
-                label("Rows:"),
-                dim("(use --row-count to read)")
-            )?,
-        }
-        match self.num_batches {
-            Some(n) => writeln!(out, "{:<15} {}", label("Record batches:"), value(n))?,
-            None => writeln!(
-                out,
-                "{:<15} {}",
-                label("Record batches:"),
-                dim("(use --row-count to read)")
-            )?,
+        #[derive(Tabled)]
+        struct InfoRow {
+            #[tabled(rename = "")]
+            label: String,
+            #[tabled(rename = "")]
+            value: String,
         }
 
+        let format_display = match self.variant {
+            ArrowVariant::File => "Arrow IPC (file)",
+            ArrowVariant::Stream => "Arrow IPC (stream)",
+        };
+
+        let rows_display = self
+            .num_rows
+            .map_or_else(|| dim("(use --row-count)"), format_number);
+
+        let batches_display = self
+            .num_batches
+            .map_or_else(|| dim("(use --row-count)"), |n| n.to_string());
+
+        let info_rows = vec![
+            InfoRow {
+                label: "Format".to_string(),
+                value: format_display.to_string(),
+            },
+            InfoRow {
+                label: "Rows".to_string(),
+                value: rows_display,
+            },
+            InfoRow {
+                label: "Record batches".to_string(),
+                value: batches_display,
+            },
+            InfoRow {
+                label: "Columns".to_string(),
+                value: self.schema.fields().len().to_string(),
+            },
+            InfoRow {
+                label: "Size".to_string(),
+                value: format_bytes(self.file_size),
+            },
+        ];
+
+        let info_table = Table::new(&info_rows)
+            .with(Remove::row(Rows::first()))
+            .with(Style::rounded().remove_horizontals())
+            .with(Modify::new(Columns::new(1..)).with(Alignment::right()))
+            .to_string();
+        writeln!(out, "{info_table}")?;
+
         writeln!(out)?;
-        writeln!(
-            out,
-            "{} ({}):",
-            header("Columns"),
-            value(self.schema.fields().len())
-        )?;
+        writeln!(out, "{}", header("Schema"))?;
         render_schema_fields(&self.schema, out)?;
+
+        if !self.custom_metadata.is_empty() {
+            writeln!(out)?;
+            writeln!(out, "{}", header("File Metadata"))?;
+            for (k, v) in &self.custom_metadata {
+                let truncated = if v.len() > 60 {
+                    format!("{}...", &v[..57])
+                } else {
+                    v.clone()
+                };
+                writeln!(out, "  {}: {}", k, truncated)?;
+            }
+        }
+
+        let has_column_meta = self
+            .schema
+            .fields()
+            .iter()
+            .any(|f| !f.metadata().is_empty());
+        if has_column_meta {
+            writeln!(out)?;
+            writeln!(out, "{}", header("Column Metadata"))?;
+            for field in self.schema.fields() {
+                let field_meta = field.metadata();
+                if !field_meta.is_empty() {
+                    writeln!(out, "  {}:", field.name())?;
+                    for (k, v) in field_meta {
+                        writeln!(out, "    {}: {}", k, v)?;
+                    }
+                }
+            }
+        }
 
         Ok(())
     }

@@ -521,4 +521,39 @@ mod tests {
         assert_send::<OrderedReceiver<i32>>();
         assert_sync::<OrderedReceiver<i32>>();
     };
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn test_stress_concurrent_sends() {
+        for iteration in 0..100 {
+            let (tx, mut rx) = ordered_channel::<usize>(4, test_cancel());
+            let num_items = 20;
+
+            let mut handles = vec![];
+            for i in 0..num_items {
+                let tx = tx.clone();
+                handles.push(tokio::spawn(async move {
+                    if i % 3 == 0 {
+                        tokio::task::yield_now().await;
+                    }
+                    tx.send(i, i * 10).await.unwrap();
+                }));
+            }
+            drop(tx);
+
+            let mut received = vec![];
+            while let Ok(item) = rx.recv().await {
+                received.push(item);
+            }
+
+            for h in handles {
+                h.await.unwrap();
+            }
+
+            let expected: Vec<usize> = (0..num_items).map(|i| i * 10).collect();
+            assert_eq!(
+                received, expected,
+                "Iteration {iteration}: expected {expected:?}, got {received:?}"
+            );
+        }
+    }
 }

@@ -83,18 +83,12 @@ fn test_inspect_parquet_default() {
     test_helpers::write_parquet_file(&file, &schema, vec![batch]);
 
     let mut cmd = cargo_bin_cmd!("silk-chiffon");
-    cmd.args([
-        "inspect",
-        "parquet",
-        file.to_str().unwrap(),
-        "--format",
-        "text",
-    ])
-    .assert()
-    .success()
-    .stdout(predicate::str::contains("Parquet"))
-    .stdout(predicate::str::contains("Rows:"))
-    .stdout(predicate::str::contains("Columns"));
+    cmd.args(["inspect", "parquet", file.to_str().unwrap(), "-f", "text"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Parquet"))
+        .stdout(predicate::str::contains("Rows"))
+        .stdout(predicate::str::contains("Columns"));
 }
 
 #[test]
@@ -107,19 +101,12 @@ fn test_inspect_parquet_schema() {
     test_helpers::write_parquet_file(&file, &schema, vec![batch]);
 
     let mut cmd = cargo_bin_cmd!("silk-chiffon");
-    cmd.args([
-        "inspect",
-        "parquet",
-        file.to_str().unwrap(),
-        "--schema",
-        "--format",
-        "text",
-    ])
-    .assert()
-    .success()
-    .stdout(predicate::str::contains("Schema"))
-    .stdout(predicate::str::contains("id"))
-    .stdout(predicate::str::contains("name"));
+    cmd.args(["inspect", "parquet", file.to_str().unwrap(), "-f", "text"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Schema"))
+        .stdout(predicate::str::contains("id"))
+        .stdout(predicate::str::contains("name"));
 }
 
 #[test]
@@ -132,17 +119,10 @@ fn test_inspect_parquet_stats() {
     test_helpers::write_parquet_file(&file, &schema, vec![batch]);
 
     let mut cmd = cargo_bin_cmd!("silk-chiffon");
-    cmd.args([
-        "inspect",
-        "parquet",
-        file.to_str().unwrap(),
-        "--stats",
-        "--format",
-        "text",
-    ])
-    .assert()
-    .success()
-    .stdout(predicate::str::contains("Column Statistics"));
+    cmd.args(["inspect", "parquet", file.to_str().unwrap(), "-f", "text"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Column Statistics"));
 }
 
 #[test]
@@ -155,17 +135,10 @@ fn test_inspect_parquet_row_groups() {
     test_helpers::write_parquet_file(&file, &schema, vec![batch]);
 
     let mut cmd = cargo_bin_cmd!("silk-chiffon");
-    cmd.args([
-        "inspect",
-        "parquet",
-        file.to_str().unwrap(),
-        "--row-groups",
-        "--format",
-        "text",
-    ])
-    .assert()
-    .success()
-    .stdout(predicate::str::contains("Row Group"));
+    cmd.args(["inspect", "parquet", file.to_str().unwrap(), "-f", "text"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Row Group"));
 }
 
 #[test]
@@ -216,33 +189,8 @@ fn test_inspect_arrow_file_default() {
     .success()
     .stdout(predicate::str::contains("Arrow IPC"))
     .stdout(predicate::str::contains("file"))
-    .stdout(predicate::str::contains("Rows:"))
+    .stdout(predicate::str::contains("Rows"))
     .stdout(predicate::str::contains("Columns"));
-}
-
-#[test]
-fn test_inspect_arrow_file_schema() {
-    let temp_dir = TempDir::new().unwrap();
-    let file = temp_dir.path().join("test.arrow");
-
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    test_helpers::write_arrow_file(&file, &schema, vec![batch]);
-
-    let mut cmd = cargo_bin_cmd!("silk-chiffon");
-    cmd.args([
-        "inspect",
-        "arrow",
-        file.to_str().unwrap(),
-        "--schema",
-        "--format",
-        "text",
-    ])
-    .assert()
-    .success()
-    .stdout(predicate::str::contains("Schema"))
-    .stdout(predicate::str::contains("id"))
-    .stdout(predicate::str::contains("name"));
 }
 
 #[test]
@@ -340,7 +288,7 @@ fn test_inspect_arrow_stream_row_count() {
     ])
     .assert()
     .success()
-    .stdout(predicate::str::contains("Rows:"));
+    .stdout(predicate::str::contains("Rows"));
 }
 
 #[test]
@@ -886,7 +834,6 @@ mod parity_tests {
             "inspect",
             "parquet",
             file.to_str().unwrap(),
-            "--stats",
             "--format",
             "json",
         ]);
@@ -913,8 +860,6 @@ mod parity_tests {
             "inspect",
             "parquet",
             file.to_str().unwrap(),
-            "--row-groups",
-            "--encodings",
             "--format",
             "json",
         ]);
@@ -943,8 +888,6 @@ mod parity_tests {
             "inspect",
             "parquet",
             file.to_str().unwrap(),
-            "--row-groups",
-            "--stats",
             "--format",
             "json",
         ]);
@@ -1019,7 +962,6 @@ mod parity_tests {
             "inspect",
             "parquet",
             file.to_str().unwrap(),
-            "--row-groups",
             "--format",
             "json",
         ]);
@@ -1047,7 +989,6 @@ mod parity_tests {
             "inspect",
             "parquet",
             file.to_str().unwrap(),
-            "--metadata",
             "--format",
             "json",
         ]);
@@ -1092,7 +1033,6 @@ mod parity_tests {
             "inspect",
             "arrow",
             file.to_str().unwrap(),
-            "--metadata",
             "--format",
             "json",
         ]);
@@ -1194,11 +1134,6 @@ mod parity_tests {
             "inspect",
             "parquet",
             file.to_str().unwrap(),
-            "--schema",
-            "--stats",
-            "--encodings",
-            "--row-groups",
-            "--metadata",
             "--format",
             "json",
         ]);
@@ -1231,9 +1166,7 @@ mod parity_tests {
             "inspect",
             "arrow",
             file.to_str().unwrap(),
-            "--schema",
             "--batches",
-            "--metadata",
             "--row-count",
             "--format",
             "json",
