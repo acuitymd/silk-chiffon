@@ -164,7 +164,7 @@ silk-chiffon transform [OPTIONS]
 - `--parquet-row-group-size <SIZE>` - Maximum rows per row group
 - `--parquet-statistics <LEVEL>` - Statistics level (none, chunk, page)
 - `--parquet-writer-version <VERSION>` - Writer version (v1, v2)
-- `--parquet-no-dictionary` - Disable dictionary encoding
+- `--parquet-dictionary-all-off` - Disable dictionary encoding
 - `--parquet-sorted-metadata` - Embed sorted metadata (requires `--sort-by`)
 
 ### Vortex Options
