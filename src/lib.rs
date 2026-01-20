@@ -1127,17 +1127,17 @@ pub struct TransformCommand {
     ///   --parquet-bloom-all "ndv=VALUE"           # Custom NDV
     ///   --parquet-bloom-all "fpp=VALUE,ndv=VALUE" # Custom FPP and NDV
     ///
-    /// Can be combined with --parquet-no-bloom-column to exclude specific columns.
+    /// Can be combined with --parquet-bloom-column-off to exclude specific columns.
     ///
     /// Examples:
     ///   --parquet-bloom-all                     # Use defaults
     ///   --parquet-bloom-all "fpp=0.001"         # Custom FPP
     ///   --parquet-bloom-all "ndv=10000"         # Custom NDV (10k distinct values)
-    ///   --parquet-bloom-all --parquet-no-bloom-column user_id  # All except user_id
+    ///   --parquet-bloom-all --parquet-bloom-column-off user_id  # All except user_id
     #[arg(
         long,
         value_name = "[fpp=VALUE][,ndv=VALUE]",
-        conflicts_with = "parquet_no_bloom_all",
+        conflicts_with = "parquet_bloom_all_off",
         num_args = 0..=1,
         default_missing_value = "",
         verbatim_doc_comment,
@@ -1150,19 +1150,19 @@ pub struct TransformCommand {
     /// Can be combined with --parquet-bloom-column to enable for specific columns only.
     ///
     /// Examples:
-    ///   --parquet-no-bloom-all --parquet-bloom-column user_id  # Only user_id has bloom filter
+    ///   --parquet-bloom-all-off --parquet-bloom-column user_id  # Only user_id has bloom filter
     #[arg(
-        long,
+        long = "parquet-bloom-all-off",
         conflicts_with = "parquet_bloom_all",
         verbatim_doc_comment,
         help_heading = "Parquet Options"
     )]
-    pub parquet_no_bloom_all: bool,
+    pub parquet_bloom_all_off: bool,
 
     /// Customize bloom filters for specific columns with optional custom settings.
     ///
-    /// Overrides --parquet-no-bloom-all for the specified columns.
-    /// Use with --parquet-no-bloom-all to enable only specific columns.
+    /// Overrides --parquet-bloom-all-off for the specified columns.
+    /// Use with --parquet-bloom-all-off to enable only specific columns.
     ///
     /// Formats:
     ///   COLUMN                     # Use defaults (fpp=0.01, auto NDV)
@@ -1187,15 +1187,15 @@ pub struct TransformCommand {
     /// Overrides --parquet-bloom-all for the specified columns.
     ///
     /// Examples:
-    ///   --parquet-bloom-all --parquet-no-bloom-column user_id  # All columns except user_id
-    ///   --parquet-no-bloom-column user_id --parquet-no-bloom-column session_id
+    ///   --parquet-bloom-all --parquet-bloom-column-off user_id  # All columns except user_id
+    ///   --parquet-bloom-column-off user_id --parquet-bloom-column-off session_id
     #[arg(
-        long,
+        long = "parquet-bloom-column-off",
         value_name = "COLUMN",
         verbatim_doc_comment,
         help_heading = "Parquet Options"
     )]
-    pub parquet_no_bloom_column: Vec<String>,
+    pub parquet_bloom_column_off: Vec<String>,
 
     /// Channel buffer size for batches sent to row group encoder tasks.
     ///
@@ -1213,20 +1213,37 @@ pub struct TransformCommand {
     #[arg(long, help_heading = "Parquet Tuning Options", value_parser = parse_nonzero_byte_size)]
     pub parquet_buffer_size: Option<usize>,
 
+    /// Disable dictionary encoding globally for all Parquet columns.
+    ///
+    /// Dictionary encoding builds a dictionary of unique values and stores references to it,
+    /// which is very effective for low-cardinality columns (few unique values). When disabled,
+    /// columns use their data page encoding directly.
+    ///
+    /// Default: dictionary encoding is enabled.
+    ///
+    /// Use --parquet-dictionary-column or --parquet-dictionary-column-off to override
+    /// this setting for specific columns.
+    #[arg(
+        long = "parquet-dictionary-all-off",
+        verbatim_doc_comment,
+        help_heading = "Parquet Options"
+    )]
+    pub parquet_dictionary_all_off: bool,
+
     /// Enable dictionary encoding for specific columns. Can be specified multiple times.
     ///
-    /// Overrides --parquet-no-dictionary for the named columns, enabling dictionary encoding
+    /// Overrides --parquet-dictionary-all-off for the named columns, enabling dictionary encoding
     /// even when it's globally disabled.
     ///
     /// Useful when most columns have high cardinality (dictionary disabled globally) but
     /// a few columns have low cardinality and would benefit from dictionary encoding.
     #[arg(
-        long,
+        long = "parquet-dictionary-column",
         value_name = "COLUMN",
         verbatim_doc_comment,
         help_heading = "Parquet Options"
     )]
-    pub parquet_column_dictionary: Vec<String>,
+    pub parquet_dictionary_column: Vec<String>,
 
     /// Set data page encoding for specific columns. Can be specified multiple times.
     ///
@@ -1273,12 +1290,12 @@ pub struct TransformCommand {
     /// Useful for high-cardinality columns like UUIDs or timestamps where dictionary
     /// encoding adds overhead without compression benefit.
     #[arg(
-        long,
+        long = "parquet-dictionary-column-off",
         value_name = "COLUMN",
         verbatim_doc_comment,
         help_heading = "Parquet Options"
     )]
-    pub parquet_column_no_dictionary: Vec<String>,
+    pub parquet_dictionary_column_off: Vec<String>,
 
     /// Parquet compression codec.
     #[arg(long, value_enum, help_heading = "Parquet Options")]
@@ -1325,19 +1342,6 @@ pub struct TransformCommand {
     /// Defaults to 1.
     #[arg(long, help_heading = "Parquet Tuning Options", value_parser = parse_at_least_one)]
     pub parquet_io_threads: Option<usize>,
-
-    /// Disable dictionary encoding globally for all Parquet columns.
-    ///
-    /// Dictionary encoding builds a dictionary of unique values and stores references to it,
-    /// which is very effective for low-cardinality columns (few unique values). When disabled,
-    /// columns use their data page encoding directly.
-    ///
-    /// Default: dictionary encoding is enabled.
-    ///
-    /// Use --parquet-column-dictionary or --parquet-column-no-dictionary to override
-    /// this setting for specific columns.
-    #[arg(long, verbatim_doc_comment, help_heading = "Parquet Options")]
-    pub parquet_no_dictionary: bool,
 
     /// Maximum number of row groups that can be encoding concurrently.
     ///
@@ -1425,6 +1429,70 @@ pub struct TransformCommand {
     /// Vortex record batch size.
     #[arg(long, help_heading = "Vortex Options")]
     pub vortex_record_batch_size: Option<usize>,
+}
+
+impl TransformCommand {
+    pub fn new() -> Self {
+        Self {
+            from: None,
+            from_many: vec![],
+            to: None,
+            to_many: None,
+            input_format: None,
+            output_format: None,
+            dialect: QueryDialect::default(),
+            exclude_columns: vec![],
+            query: None,
+            sort_by: None,
+            memory_limit: None,
+            preserve_input_order: false,
+            target_partitions: None,
+            threads: None,
+            by: None,
+            partition_strategy: PartitionStrategy::default(),
+            list_outputs: None,
+            list_outputs_file: None,
+            create_dirs: true,
+            overwrite: false,
+            arrow_compression: None,
+            arrow_format: None,
+            arrow_record_batch_size: None,
+            parquet_batch_channel_size: None,
+            parquet_bloom_all: None,
+            parquet_bloom_all_off: false,
+            parquet_bloom_column: vec![],
+            parquet_bloom_column_off: vec![],
+            parquet_buffer_size: None,
+            parquet_dictionary_column: vec![],
+            parquet_column_encoding: vec![],
+            parquet_column_encoding_threads: None,
+            parquet_encoded_channel_size: None,
+            parquet_dictionary_column_off: vec![],
+            parquet_compression: None,
+            parquet_encoder: ParquetEncoder::default(),
+            parquet_encoding: None,
+            parquet_io_threads: None,
+            parquet_dictionary_all_off: false,
+            parquet_row_group_concurrency: None,
+            parquet_row_group_size: None,
+            parquet_sorted_metadata: false,
+            parquet_statistics: None,
+            parquet_writer_version: None,
+            parquet_data_page_size: None,
+            parquet_data_page_row_limit: None,
+            parquet_dictionary_page_size: None,
+            parquet_write_batch_size: None,
+            parquet_offset_index: false,
+            parquet_arrow_metadata: false,
+            vortex_record_batch_size: None,
+        }
+    }
+}
+
+impl Default for TransformCommand {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Args, Debug)]

@@ -174,7 +174,7 @@ silk-chiffon transform [OPTIONS]
 ### Bloom Filter Options
 
 Bloom filters are enabled for all columns by default (fpp=0.01, auto NDV). Use
-`--parquet-no-bloom-all` to disable globally, and `--parquet-no-bloom-column`
+`--parquet-bloom-all-off` to disable globally, and `--parquet-bloom-column-off`
 to exclude specific columns.
 
 Customize bloom filters for all columns:
@@ -193,7 +193,7 @@ Customize bloom filters for specific columns (overrides defaults):
 --parquet-bloom-column "user_id:fpp=0.001"          # Custom FPP
 --parquet-bloom-column "user_id:ndv=50000"          # Custom NDV
 --parquet-bloom-column "user_id:fpp=0.001,ndv=50000" # Both
---parquet-no-bloom-all --parquet-bloom-column "user_id" # Only user_id
+--parquet-bloom-all-off --parquet-bloom-column "user_id" # Only user_id
 ```
 
 ### Other Options

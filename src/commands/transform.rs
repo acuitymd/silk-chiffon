@@ -52,20 +52,20 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         arrow_record_batch_size,
         parquet_batch_channel_size,
         parquet_bloom_all,
-        parquet_no_bloom_all,
+        parquet_bloom_all_off,
         parquet_bloom_column,
-        parquet_no_bloom_column,
+        parquet_bloom_column_off,
         parquet_buffer_size,
-        parquet_column_dictionary,
+        parquet_dictionary_column,
         parquet_column_encoding,
         parquet_column_encoding_threads,
-        parquet_column_no_dictionary,
+        parquet_dictionary_column_off,
         parquet_compression,
         parquet_encoded_channel_size,
         parquet_encoder,
         parquet_encoding,
         parquet_io_threads,
-        parquet_no_dictionary,
+        parquet_dictionary_all_off,
         parquet_row_group_concurrency,
         parquet_row_group_size,
         parquet_sorted_metadata,
@@ -89,7 +89,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         parquet_io_threads.unwrap_or(1),
     )?);
 
-    let all_enabled = if parquet_no_bloom_all {
+    let all_enabled = if parquet_bloom_all_off {
         None
     } else {
         parquet_bloom_all.or(Some(AllColumnsBloomFilterConfig {
@@ -98,7 +98,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         }))
     };
     let bloom_filter =
-        BloomFilterConfig::try_new(all_enabled, parquet_bloom_column, parquet_no_bloom_column)
+        BloomFilterConfig::try_new(all_enabled, parquet_bloom_column, parquet_bloom_column_off)
             .map_err(anyhow::Error::msg)?;
 
     validate_encoding_version_compatibility(
@@ -255,14 +255,14 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         parquet_batch_channel_size,
         bloom_filter,
         parquet_buffer_size,
-        parquet_column_dictionary,
+        parquet_dictionary_column,
         parquet_column_encoding,
-        parquet_column_no_dictionary,
+        parquet_dictionary_column_off,
         parquet_compression,
         parquet_encoded_channel_size,
         parquet_encoder,
         parquet_encoding,
-        parquet_no_dictionary,
+        parquet_dictionary_all_off,
         parquet_row_group_concurrency,
         parquet_row_group_size,
         parquet_sort_spec,
@@ -498,14 +498,14 @@ fn create_sink_factory(
     parquet_batch_channel_size: Option<usize>,
     parquet_bloom_filter: BloomFilterConfig,
     parquet_buffer_size: Option<usize>,
-    parquet_column_dictionary: Vec<String>,
+    parquet_dictionary_column: Vec<String>,
     parquet_column_encoding: Vec<ColumnEncodingConfig>,
-    parquet_column_no_dictionary: Vec<String>,
+    parquet_dictionary_column_off: Vec<String>,
     parquet_compression: Option<ParquetCompression>,
     parquet_encoded_channel_size: Option<usize>,
     parquet_encoder: ParquetEncoder,
     parquet_encoding: Option<ParquetEncoding>,
-    parquet_no_dictionary: bool,
+    parquet_dictionary_all_off: bool,
     parquet_row_group_concurrency: Option<usize>,
     parquet_row_group_size: Option<usize>,
     parquet_sort_spec: Option<SortSpec>,
@@ -563,12 +563,12 @@ fn create_sink_factory(
                 if let Some(version) = parquet_writer_version {
                     options = options.with_writer_version(version);
                 }
-                if parquet_no_dictionary {
+                if parquet_dictionary_all_off {
                     options = options.with_no_dictionary(true);
                 }
                 options = options
-                    .with_column_dictionary(parquet_column_dictionary.clone())
-                    .with_column_no_dictionary(parquet_column_no_dictionary.clone())
+                    .with_column_dictionary(parquet_dictionary_column.clone())
+                    .with_column_no_dictionary(parquet_dictionary_column_off.clone())
                     .with_encoding(parquet_encoding)
                     .with_column_encodings(parquet_column_encoding.clone())
                     .with_bloom_filters(parquet_bloom_filter.clone())
