@@ -10,13 +10,13 @@ use futures::stream;
 use tokio::sync::mpsc;
 use tokio::{fs::File, sync::Mutex};
 use vortex::VortexSessionDefault;
+use vortex::array::ArrayRef;
+use vortex::array::arrow::FromArrowArray;
+use vortex::array::stream::ArrayStreamAdapter;
 use vortex::dtype::DType;
 use vortex::dtype::arrow::FromArrowType;
 use vortex::file::WriteOptionsSessionExt;
-use vortex_array::ArrayRef;
-use vortex_array::arrow::FromArrowArray;
-use vortex_array::stream::ArrayStreamAdapter;
-use vortex_session::VortexSession;
+use vortex::session::VortexSession;
 
 use crate::sinks::data_sink::{DataSink, SinkResult};
 

@@ -42,25 +42,17 @@ fn run_parquet(args: &InspectParquetArgs) -> Result<()> {
 
     if args.format.resolves_to_json() {
         inspector.render_to_json(&mut out)?;
-        return Ok(());
-    }
+    } else {
+        inspector.render_with_row_group(&mut out, args.row_group)?;
 
-    inspector.render_default(&mut out)?;
-
-    if args.schema {
-        inspector.render_schema(&mut out)?;
-    }
-
-    if args.stats {
-        inspector.render_stats(&mut out)?;
-    }
-
-    if args.row_groups {
-        inspector.render_row_groups(&mut out, args.stats, args.encodings)?;
-    }
-
-    if args.metadata {
-        inspector.render_metadata(&mut out)?;
+        if let Some(ref columns) = args.pages {
+            let columns: Option<Vec<&str>> = if columns.is_empty() {
+                None
+            } else {
+                Some(columns.split(',').map(|s| s.trim()).collect())
+            };
+            inspector.render_pages(&mut out, args.row_group, columns.as_deref())?;
+        }
     }
 
     out.flush()?;
@@ -80,16 +72,8 @@ fn run_arrow(args: &InspectArrowArgs) -> Result<()> {
 
     inspector.render_default(&mut out)?;
 
-    if args.schema {
-        inspector.render_schema(&mut out)?;
-    }
-
     if args.batches {
         inspector.render_batches(&mut out)?;
-    }
-
-    if args.metadata {
-        inspector.render_metadata(&mut out)?;
     }
 
     out.flush()?;

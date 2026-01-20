@@ -24,6 +24,7 @@ use super::ParquetWriter;
 pub struct SequentialWriterConfig {
     pub max_row_group_size: usize,
     pub buffer_size: usize,
+    pub skip_arrow_metadata: bool,
 }
 
 impl Default for SequentialWriterConfig {
@@ -31,6 +32,7 @@ impl Default for SequentialWriterConfig {
         Self {
             max_row_group_size: DEFAULT_MAX_ROW_GROUP_SIZE,
             buffer_size: DEFAULT_BUFFER_SIZE,
+            skip_arrow_metadata: true,
         }
     }
 }
@@ -56,7 +58,9 @@ impl SequentialParquetWriter {
         let writer = ArrowWriter::try_new_with_options(
             buf_writer,
             Arc::clone(schema),
-            ArrowWriterOptions::new().with_properties(props),
+            ArrowWriterOptions::new()
+                .with_properties(props)
+                .with_skip_arrow_metadata(config.skip_arrow_metadata),
         )?;
 
         Ok(Self {

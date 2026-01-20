@@ -16,53 +16,51 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "^1.0.100"
-bytesize = "2"
-async-stream = "0.3"
+bytesize = "^2.3.1"
+async-stream = "^0.3.6"
 async-trait = "^0.1.89"
-arrow = { version = "^57.0.0", features = ["default", "ipc_compression"] }
-camino = { version = "1.2.2", features = ["serde1"] }
-chrono = "0.4.42"
-clap = { version = "^4.5.53", features = ["default", "derive"] }
-clap_complete = "^4.5"
-datafusion = { git = "https://github.com/apache/datafusion.git", rev = "bc043c3a5fe448fc5735d9fa173b69ac95a7e11c" }
+arrow = { version = "^57.2.0", features = ["default", "ipc_compression"] }
+camino = { version = "^1.2.2", features = ["serde1"] }
+chrono = "^0.4.43"
+clap = { version = "^4.5.54", features = ["default", "derive"] }
+clap_complete = "^4.5.65"
+datafusion = { git = "https://github.com/apache/datafusion.git", rev = "9f3ddcecd6033a9d55161175d5dbe29697a9a922" }
 futures = "^0.3.31"
 glob = "^0.3.3"
-humansize = "2.1"
-minijinja = "^2.12.0"
-num-format = "0.4"
-owo-colors = "4"
-parquet = { version = "^57.0.0", features = [
+humansize = "^2.1.3"
+minijinja = "^2.14.0"
+num-format = "^0.4.4"
+owo-colors = "^4.2.3"
+parquet = { version = "^57.2.0", features = [
   "default",
   "async",
   "json",
   "arrow_canonical_extension_types",
 ] }
-percent-encoding = "^2.3.1"
+percent-encoding = "^2.3.2"
 rayon = "1.11.0"
-serde = { version = "^1.0", features = ["derive"] }
-serde_json = "^1.0.145"
+serde = { version = "^1.0.228", features = ["derive"] }
+serde_json = "^1.0.149"
 strum_macros = "^0.27.2"
-tabled = { version = "0.20", features = ["ansi"] }
-tempfile = "^3.23.0"
-tokio = { version = "^1.48.0", features = [
+tabled = { version = "^0.20.0", features = ["ansi"] }
+tempfile = "^3.24.0"
+tokio = { version = "^1.49.0", features = [
   "rt-multi-thread",
   "macros",
   "io-util",
   "fs",
   "sync",
 ] }
-tokio-util = "0.7.17"
-uuid = { version = "^1.18.1", features = ["v4"] }
-vortex = { version = "0.58.0", features = ["tokio", "files"] }
-vortex-array = "0.58.0"
-vortex-session = "0.58.0"
+tokio-util = "^0.7.18"
+uuid = { version = "^1.19.0", features = ["v4"] }
+vortex = { version = "^0.58.0", features = ["tokio", "files"] }
 
 [features]
 default = []
 
 [dev-dependencies]
-assert_cmd = "^2.1.1"
-criterion = { version = "^0.8", features = ["html_reports"] }
+assert_cmd = "^2.1.2"
+criterion = { version = "^0.8.1", features = ["html_reports"] }
 predicates = "^3.1.3"
 
 [[bench]]

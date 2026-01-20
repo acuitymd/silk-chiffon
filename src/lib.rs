@@ -26,10 +26,11 @@ use std::{
 use strum_macros::Display;
 
 /// Parse a usize that must be at least 1.
-pub fn parse_at_least_one(s: &str) -> Result<usize, String> {
-    let n: usize = s.parse().map_err(|e| format!("{e}"))?;
+pub fn parse_at_least_one(s: &str) -> Result<usize> {
+    let n: usize = s.parse().map_err(anyhow::Error::new)?;
+
     if n == 0 {
-        Err("value must be at least 1".into())
+        anyhow::bail!("value must be at least 1");
     } else {
         Ok(n)
     }
@@ -37,15 +38,15 @@ pub fn parse_at_least_one(s: &str) -> Result<usize, String> {
 
 /// Parse a human-readable byte size (e.g., "512MB", "2GB") that must be greater than 0.
 #[allow(clippy::cast_possible_truncation)]
-pub fn parse_nonzero_byte_size(s: &str) -> Result<usize, String> {
+pub fn parse_nonzero_byte_size(s: &str) -> Result<usize> {
     let bytes = s
         .parse::<bytesize::ByteSize>()
         .map_err(|_| {
-            format!("invalid byte size '{s}': expected format like '512MB', '2GB', or '1GiB'")
+            anyhow!("invalid byte size '{s}': expected format like '512MB', '2GB', or '1GiB'")
         })?
         .as_u64() as usize;
     if bytes == 0 {
-        Err("value must be greater than 0".into())
+        anyhow::bail!("value must be greater than 0");
     } else {
         Ok(bytes)
     }
@@ -213,8 +214,8 @@ impl From<ParquetCompression> for Compression {
 #[value(rename_all = "lowercase")]
 pub enum ParquetStatistics {
     None,
-    Chunk,
     #[default]
+    Chunk,
     Page,
 }
 
@@ -228,7 +229,7 @@ impl From<ParquetStatistics> for EnabledStatistics {
     }
 }
 
-#[derive(ValueEnum, Clone, Copy, Debug, Default)]
+#[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[value(rename_all = "lowercase")]
 pub enum ParquetWriterVersion {
     V1,
@@ -799,17 +800,135 @@ impl FromStr for ColumnSpecificBloomFilterConfig {
     }
 }
 
+/// Bloom filter configuration with granular control.
+///
+/// Resolution order:
+/// 1. Column-specific enables (`column_enabled`) take highest precedence
+/// 2. Column-specific disables (`column_disabled`) take second precedence
+/// 3. Global setting (`all_enabled`) applies as default for unspecified columns
 #[derive(Debug, Clone, Default)]
-pub enum BloomFilterConfig {
-    #[default]
-    None,
-    All(AllColumnsBloomFilterConfig),
-    Columns(Vec<ColumnSpecificBloomFilterConfig>),
+pub struct BloomFilterConfig {
+    /// Global setting: Some(config) = enabled for all, None = disabled for all
+    all_enabled: Option<AllColumnsBloomFilterConfig>,
+    /// Columns explicitly enabled with config (overrides all_enabled)
+    column_enabled: Vec<ColumnSpecificBloomFilterConfig>,
+    /// Columns explicitly disabled (overrides all_enabled, but not column_enabled)
+    column_disabled: Vec<String>,
 }
 
 impl BloomFilterConfig {
+    pub fn try_new(
+        all_enabled: Option<AllColumnsBloomFilterConfig>,
+        column_enabled: Vec<ColumnSpecificBloomFilterConfig>,
+        column_disabled: Vec<String>,
+    ) -> Result<Self> {
+        let config = Self {
+            all_enabled,
+            column_enabled,
+            column_disabled,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
     pub fn is_configured(&self) -> bool {
-        !matches!(self, BloomFilterConfig::None)
+        self.all_enabled.is_some() || !self.column_enabled.is_empty()
+    }
+
+    pub fn all_enabled(&self) -> Option<&AllColumnsBloomFilterConfig> {
+        self.all_enabled.as_ref()
+    }
+
+    pub fn column_enabled(&self) -> &[ColumnSpecificBloomFilterConfig] {
+        &self.column_enabled
+    }
+
+    pub fn column_disabled(&self) -> &[String] {
+        &self.column_disabled
+    }
+
+    pub fn is_column_enabled(&self, col_name: &str) -> bool {
+        self.column_enabled.iter().any(|c| c.name == col_name)
+    }
+
+    pub fn is_column_disabled(&self, col_name: &str) -> bool {
+        self.column_disabled.iter().any(|c| c == col_name)
+    }
+
+    pub fn get_column_config(&self, col_name: &str) -> Option<&ColumnSpecificBloomFilterConfig> {
+        self.column_enabled.iter().find(|c| c.name == col_name)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        let mut seen_enabled = std::collections::HashSet::new();
+        for config in &self.column_enabled {
+            if !seen_enabled.insert(&config.name) {
+                anyhow::bail!(
+                    "column '{}' specified multiple times as enabled",
+                    config.name
+                );
+            }
+        }
+
+        let mut seen_disabled = std::collections::HashSet::new();
+        for name in &self.column_disabled {
+            if !seen_disabled.insert(name) {
+                anyhow::bail!("column '{}' specified multiple times as disabled", name);
+            }
+        }
+
+        for enabled in &self.column_enabled {
+            if self.column_disabled.contains(&enabled.name) {
+                anyhow::bail!(
+                    "column '{}' specified as both enabled and disabled",
+                    enabled.name
+                );
+            }
+        }
+        Ok(())
+    }
+
+    pub fn builder() -> BloomFilterConfigBuilder {
+        BloomFilterConfigBuilder::default()
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct BloomFilterConfigBuilder {
+    all_enabled: Option<AllColumnsBloomFilterConfig>,
+    column_enabled: Vec<ColumnSpecificBloomFilterConfig>,
+    column_disabled: Vec<String>,
+}
+
+impl BloomFilterConfigBuilder {
+    pub fn all_enabled(mut self, config: AllColumnsBloomFilterConfig) -> Self {
+        self.all_enabled = Some(config);
+        self
+    }
+
+    pub fn all_disabled(mut self) -> Self {
+        self.all_enabled = None;
+        self
+    }
+
+    pub fn enable_column(mut self, config: ColumnSpecificBloomFilterConfig) -> Self {
+        self.column_enabled.push(config);
+        self
+    }
+
+    pub fn disable_column(mut self, name: impl Into<String>) -> Self {
+        self.column_disabled.push(name.into());
+        self
+    }
+
+    pub fn build(self) -> Result<BloomFilterConfig> {
+        let config = BloomFilterConfig {
+            all_enabled: self.all_enabled,
+            column_enabled: self.column_enabled,
+            column_disabled: self.column_disabled,
+        };
+        config.validate()?;
+        Ok(config)
     }
 }
 
@@ -908,6 +1027,20 @@ pub struct TransformCommand {
     #[arg(long, help_heading = "Execution", value_parser = parse_nonzero_byte_size)]
     pub memory_limit: Option<usize>,
 
+    /// Preserve the row order from the input file in the output.
+    ///
+    /// By default, DataFusion reads files using multiple partitions for parallelism,
+    /// which can interleave rows. This flag forces single-partition reading to maintain
+    /// the original row order. Only valid for single-file-to-single-file transforms
+    /// without queries or sorting.
+    #[arg(
+        long,
+        default_value_t = false,
+        conflicts_with_all = ["query", "sort_by", "to_many", "from_many"],
+        help_heading = "Execution"
+    )]
+    pub preserve_input_order: bool,
+
     /// Number of partitions for query execution parallelism.
     ///
     /// Controls how DataFusion partitions data during queries (aggregations, joins, sorts).
@@ -986,7 +1119,7 @@ pub struct TransformCommand {
     //
     // ─── Parquet Options ───────────────────────────────────────────────────────────────
     //
-    /// Enable bloom filters for all columns with optional custom settings.
+    /// Bloom filters are enabled for all columns by default; use this to customize settings.
     ///
     /// Formats:
     ///   --parquet-bloom-all                       # Use defaults (fpp=0.01, auto NDV)
@@ -994,15 +1127,17 @@ pub struct TransformCommand {
     ///   --parquet-bloom-all "ndv=VALUE"           # Custom NDV
     ///   --parquet-bloom-all "fpp=VALUE,ndv=VALUE" # Custom FPP and NDV
     ///
+    /// Can be combined with --parquet-bloom-column-off to exclude specific columns.
+    ///
     /// Examples:
     ///   --parquet-bloom-all                     # Use defaults
     ///   --parquet-bloom-all "fpp=0.001"         # Custom FPP
     ///   --parquet-bloom-all "ndv=10000"         # Custom NDV (10k distinct values)
-    ///   --parquet-bloom-all "fpp=0.001,ndv=10000" # Custom FPP and NDV
+    ///   --parquet-bloom-all --parquet-bloom-column-off user_id  # All except user_id
     #[arg(
         long,
         value_name = "[fpp=VALUE][,ndv=VALUE]",
-        conflicts_with = "parquet_bloom_column",
+        conflicts_with = "parquet_bloom_all_off",
         num_args = 0..=1,
         default_missing_value = "",
         verbatim_doc_comment,
@@ -1010,7 +1145,24 @@ pub struct TransformCommand {
     )]
     pub parquet_bloom_all: Option<AllColumnsBloomFilterConfig>,
 
-    /// Enable bloom filter for specific columns with optional custom settings.
+    /// Disable bloom filters for all columns (default is enabled for all columns).
+    ///
+    /// Can be combined with --parquet-bloom-column to enable for specific columns only.
+    ///
+    /// Examples:
+    ///   --parquet-bloom-all-off --parquet-bloom-column user_id  # Only user_id has bloom filter
+    #[arg(
+        long = "parquet-bloom-all-off",
+        conflicts_with = "parquet_bloom_all",
+        verbatim_doc_comment,
+        help_heading = "Parquet Options"
+    )]
+    pub parquet_bloom_all_off: bool,
+
+    /// Customize bloom filters for specific columns with optional custom settings.
+    ///
+    /// Overrides --parquet-bloom-all-off for the specified columns.
+    /// Use with --parquet-bloom-all-off to enable only specific columns.
     ///
     /// Formats:
     ///   COLUMN                     # Use defaults (fpp=0.01, auto NDV)
@@ -1021,16 +1173,29 @@ pub struct TransformCommand {
     /// Examples:
     ///   --parquet-bloom-column "user_id"                   # Use defaults
     ///   --parquet-bloom-column "user_id:fpp=0.001"         # Custom FPP
-    ///   --parquet-bloom-column "user_id:ndv=50000"         # Custom NDV (50k distinct values)
-    ///   --parquet-bloom-column "user_id:fpp=0.001,ndv=50000" # Custom FPP and NDV
+    ///   --parquet-bloom-column "user_id:ndv=50000"         # Custom NDV
     #[arg(
         long,
         value_name = "COLUMN[:fpp=VALUE][,ndv=VALUE]",
-        conflicts_with = "parquet_bloom_all",
         verbatim_doc_comment,
         help_heading = "Parquet Options"
     )]
     pub parquet_bloom_column: Vec<ColumnSpecificBloomFilterConfig>,
+
+    /// Disable bloom filter for specific columns (repeatable).
+    ///
+    /// Overrides --parquet-bloom-all for the specified columns.
+    ///
+    /// Examples:
+    ///   --parquet-bloom-all --parquet-bloom-column-off user_id  # All columns except user_id
+    ///   --parquet-bloom-column-off user_id --parquet-bloom-column-off session_id
+    #[arg(
+        long = "parquet-bloom-column-off",
+        value_name = "COLUMN",
+        verbatim_doc_comment,
+        help_heading = "Parquet Options"
+    )]
+    pub parquet_bloom_column_off: Vec<String>,
 
     /// Channel buffer size for batches sent to row group encoder tasks.
     ///
@@ -1048,20 +1213,37 @@ pub struct TransformCommand {
     #[arg(long, help_heading = "Parquet Tuning Options", value_parser = parse_nonzero_byte_size)]
     pub parquet_buffer_size: Option<usize>,
 
+    /// Disable dictionary encoding globally for all Parquet columns.
+    ///
+    /// Dictionary encoding builds a dictionary of unique values and stores references to it,
+    /// which is very effective for low-cardinality columns (few unique values). When disabled,
+    /// columns use their data page encoding directly.
+    ///
+    /// Default: dictionary encoding is enabled.
+    ///
+    /// Use --parquet-dictionary-column or --parquet-dictionary-column-off to override
+    /// this setting for specific columns.
+    #[arg(
+        long = "parquet-dictionary-all-off",
+        verbatim_doc_comment,
+        help_heading = "Parquet Options"
+    )]
+    pub parquet_dictionary_all_off: bool,
+
     /// Enable dictionary encoding for specific columns. Can be specified multiple times.
     ///
-    /// Overrides --parquet-no-dictionary for the named columns, enabling dictionary encoding
+    /// Overrides --parquet-dictionary-all-off for the named columns, enabling dictionary encoding
     /// even when it's globally disabled.
     ///
     /// Useful when most columns have high cardinality (dictionary disabled globally) but
     /// a few columns have low cardinality and would benefit from dictionary encoding.
     #[arg(
-        long,
+        long = "parquet-dictionary-column",
         value_name = "COLUMN",
         verbatim_doc_comment,
         help_heading = "Parquet Options"
     )]
-    pub parquet_column_dictionary: Vec<String>,
+    pub parquet_dictionary_column: Vec<String>,
 
     /// Set data page encoding for specific columns. Can be specified multiple times.
     ///
@@ -1108,12 +1290,12 @@ pub struct TransformCommand {
     /// Useful for high-cardinality columns like UUIDs or timestamps where dictionary
     /// encoding adds overhead without compression benefit.
     #[arg(
-        long,
+        long = "parquet-dictionary-column-off",
         value_name = "COLUMN",
         verbatim_doc_comment,
         help_heading = "Parquet Options"
     )]
-    pub parquet_column_no_dictionary: Vec<String>,
+    pub parquet_dictionary_column_off: Vec<String>,
 
     /// Parquet compression codec.
     #[arg(long, value_enum, help_heading = "Parquet Options")]
@@ -1161,19 +1343,6 @@ pub struct TransformCommand {
     #[arg(long, help_heading = "Parquet Tuning Options", value_parser = parse_at_least_one)]
     pub parquet_io_threads: Option<usize>,
 
-    /// Disable dictionary encoding globally for all Parquet columns.
-    ///
-    /// Dictionary encoding builds a dictionary of unique values and stores references to it,
-    /// which is very effective for low-cardinality columns (few unique values). When disabled,
-    /// columns use their data page encoding directly.
-    ///
-    /// Default: dictionary encoding is enabled.
-    ///
-    /// Use --parquet-column-dictionary or --parquet-column-no-dictionary to override
-    /// this setting for specific columns.
-    #[arg(long, verbatim_doc_comment, help_heading = "Parquet Options")]
-    pub parquet_no_dictionary: bool,
-
     /// Maximum number of row groups that can be encoding concurrently.
     ///
     /// Controls how many row groups can be actively encoding at once. Higher values
@@ -1206,12 +1375,124 @@ pub struct TransformCommand {
     #[arg(long, value_enum, help_heading = "Parquet Options")]
     pub parquet_writer_version: Option<ParquetWriterVersion>,
 
+    /// Maximum data page size in bytes.
+    ///
+    /// Controls the maximum size of each data page within a column chunk.
+    /// Larger pages reduce overhead but increase granularity of reads.
+    /// Default: 100MB (DuckDB MAX_UNCOMPRESSED_PAGE_SIZE).
+    #[arg(long, help_heading = "Parquet Tuning Options", value_parser = parse_nonzero_byte_size)]
+    pub parquet_data_page_size: Option<usize>,
+
+    /// Maximum rows per data page.
+    ///
+    /// Controls the maximum number of rows in each data page within a column chunk.
+    /// Default: unlimited (one page per row group for optimal DuckDB compatibility).
+    #[arg(long, help_heading = "Parquet Tuning Options", value_parser = parse_at_least_one)]
+    pub parquet_data_page_row_limit: Option<usize>,
+
+    /// Maximum dictionary page size in bytes.
+    ///
+    /// Controls the maximum size of dictionary pages. When a dictionary exceeds this
+    /// size, the writer falls back to the data page encoding for remaining values.
+    /// Default: 1GB (DuckDB MAX_UNCOMPRESSED_DICT_PAGE_SIZE).
+    #[arg(long, help_heading = "Parquet Tuning Options", value_parser = parse_nonzero_byte_size)]
+    pub parquet_dictionary_page_size: Option<usize>,
+
+    /// Internal write batch size.
+    ///
+    /// Controls how many rows are processed at once when writing data pages.
+    /// Larger values improve throughput but use more memory.
+    /// Default: 8192.
+    #[arg(long, help_heading = "Parquet Tuning Options", value_parser = parse_at_least_one)]
+    pub parquet_write_batch_size: Option<usize>,
+
+    /// Enable offset index writing.
+    ///
+    /// Offset indexes store the position of each data page within column chunks,
+    /// enabling faster page-level seeks. Only useful when there are multiple data
+    /// pages per column chunk.
+    /// Default: disabled (not needed with one page per row group).
+    #[arg(long, help_heading = "Parquet Options")]
+    pub parquet_offset_index: bool,
+
+    /// Embed Arrow schema in file metadata.
+    ///
+    /// Stores the original Arrow schema in the Parquet file's key-value metadata.
+    /// This enables exact schema round-tripping but adds overhead.
+    /// Default: disabled (not needed for most use cases).
+    #[arg(long, help_heading = "Parquet Options")]
+    pub parquet_arrow_metadata: bool,
+
     //
     // ─── Vortex Options ────────────────────────────────────────────────────────────────
     //
     /// Vortex record batch size.
     #[arg(long, help_heading = "Vortex Options")]
     pub vortex_record_batch_size: Option<usize>,
+}
+
+impl TransformCommand {
+    pub fn new() -> Self {
+        Self {
+            from: None,
+            from_many: vec![],
+            to: None,
+            to_many: None,
+            input_format: None,
+            output_format: None,
+            dialect: QueryDialect::default(),
+            exclude_columns: vec![],
+            query: None,
+            sort_by: None,
+            memory_limit: None,
+            preserve_input_order: false,
+            target_partitions: None,
+            threads: None,
+            by: None,
+            partition_strategy: PartitionStrategy::default(),
+            list_outputs: None,
+            list_outputs_file: None,
+            create_dirs: true,
+            overwrite: false,
+            arrow_compression: None,
+            arrow_format: None,
+            arrow_record_batch_size: None,
+            parquet_batch_channel_size: None,
+            parquet_bloom_all: None,
+            parquet_bloom_all_off: false,
+            parquet_bloom_column: vec![],
+            parquet_bloom_column_off: vec![],
+            parquet_buffer_size: None,
+            parquet_dictionary_column: vec![],
+            parquet_column_encoding: vec![],
+            parquet_column_encoding_threads: None,
+            parquet_encoded_channel_size: None,
+            parquet_dictionary_column_off: vec![],
+            parquet_compression: None,
+            parquet_encoder: ParquetEncoder::default(),
+            parquet_encoding: None,
+            parquet_io_threads: None,
+            parquet_dictionary_all_off: false,
+            parquet_row_group_concurrency: None,
+            parquet_row_group_size: None,
+            parquet_sorted_metadata: false,
+            parquet_statistics: None,
+            parquet_writer_version: None,
+            parquet_data_page_size: None,
+            parquet_data_page_row_limit: None,
+            parquet_dictionary_page_size: None,
+            parquet_write_batch_size: None,
+            parquet_offset_index: false,
+            parquet_arrow_metadata: false,
+            vortex_record_batch_size: None,
+        }
+    }
+}
+
+impl Default for TransformCommand {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Args, Debug)]
@@ -1247,24 +1528,15 @@ pub struct InspectParquetArgs {
     /// Path to the Parquet file
     #[arg(value_hint = ValueHint::FilePath)]
     pub file: Utf8PathBuf,
-    /// Show full schema details
-    #[arg(long)]
-    pub schema: bool,
-    /// Show column statistics and encoding details
-    #[arg(long)]
-    pub stats: bool,
-    /// Show detailed encoding breakdown (dictionary vs data pages)
-    #[arg(long)]
-    pub encodings: bool,
-    /// Show per-row-group details
-    #[arg(long)]
-    pub row_groups: bool,
-    /// Show file-level key-value metadata
-    #[arg(long)]
-    pub metadata: bool,
     /// Output format (auto-detects based on TTY if not specified)
     #[arg(long, short = 'f', value_enum, default_value = "auto")]
     pub format: OutputFormat,
+    /// Row group to display details for (default: 0)
+    #[arg(long, short = 'g', default_value = "0")]
+    pub row_group: usize,
+    /// Show page details for columns (comma-separated, or omit value for all columns)
+    #[arg(long, short = 'p', num_args = 0..=1, default_missing_value = "")]
+    pub pages: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -1272,19 +1544,13 @@ pub struct InspectArrowArgs {
     /// Path to the Arrow IPC file
     #[arg(value_hint = ValueHint::FilePath)]
     pub file: Utf8PathBuf,
-    /// Show full schema details
-    #[arg(long)]
-    pub schema: bool,
     /// Show per-record-batch details
     #[arg(long)]
     pub batches: bool,
-    /// Show custom metadata (file format only)
-    #[arg(long)]
-    pub metadata: bool,
     /// Output format (auto-detects based on TTY if not specified)
     #[arg(long, short = 'f', value_enum, default_value = "auto")]
     pub format: OutputFormat,
-    /// Count total rows (slow! requires reading entire file)
+    /// Count total rows (requires reading entire file)
     #[arg(long)]
     pub row_count: bool,
 }
@@ -1533,6 +1799,176 @@ mod tests {
             let result: Result<ColumnEncodingConfig, _> = "id=invalid".parse();
             assert!(result.is_err());
             assert!(result.unwrap_err().to_string().contains("Invalid encoding"));
+        }
+    }
+
+    mod bloom_filter_config_builder_tests {
+        use super::*;
+
+        #[test]
+        fn test_builder_default() {
+            let config = BloomFilterConfig::builder().build().unwrap();
+            assert!(config.all_enabled().is_none());
+            assert!(config.column_enabled().is_empty());
+            assert!(config.column_disabled().is_empty());
+        }
+
+        #[test]
+        fn test_builder_all_enabled() {
+            let config = BloomFilterConfig::builder()
+                .all_enabled(AllColumnsBloomFilterConfig {
+                    fpp: 0.01,
+                    ndv: None,
+                })
+                .build()
+                .unwrap();
+            let all_enabled = config.all_enabled().expect("expected all-enabled config");
+            assert_eq!(all_enabled.fpp, 0.01);
+        }
+
+        #[test]
+        fn test_builder_enable_column() {
+            let config = BloomFilterConfig::builder()
+                .enable_column(ColumnSpecificBloomFilterConfig {
+                    name: "user_id".to_string(),
+                    config: ColumnBloomFilterConfig {
+                        fpp: 0.05,
+                        ndv: Some(1000),
+                    },
+                })
+                .build()
+                .unwrap();
+            assert_eq!(config.column_enabled().len(), 1);
+            assert_eq!(config.column_enabled()[0].name, "user_id");
+        }
+
+        #[test]
+        fn test_builder_disable_column() {
+            let config = BloomFilterConfig::builder()
+                .disable_column("status")
+                .build()
+                .unwrap();
+            assert_eq!(config.column_disabled().len(), 1);
+            assert_eq!(config.column_disabled()[0], "status");
+        }
+
+        #[test]
+        fn test_builder_rejects_conflict() {
+            let result = BloomFilterConfig::builder()
+                .enable_column(ColumnSpecificBloomFilterConfig {
+                    name: "user_id".to_string(),
+                    config: ColumnBloomFilterConfig {
+                        fpp: 0.05,
+                        ndv: None,
+                    },
+                })
+                .disable_column("user_id")
+                .build();
+            assert!(result.is_err());
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("column 'user_id' specified as both enabled and disabled")
+            );
+        }
+
+        #[test]
+        fn test_builder_combined() {
+            let config = BloomFilterConfig::builder()
+                .all_enabled(AllColumnsBloomFilterConfig {
+                    fpp: 0.01,
+                    ndv: None,
+                })
+                .enable_column(ColumnSpecificBloomFilterConfig {
+                    name: "user_id".to_string(),
+                    config: ColumnBloomFilterConfig {
+                        fpp: 0.001,
+                        ndv: Some(100_000),
+                    },
+                })
+                .disable_column("status")
+                .build()
+                .unwrap();
+
+            assert!(config.all_enabled().is_some());
+            assert_eq!(config.column_enabled().len(), 1);
+            assert_eq!(config.column_disabled().len(), 1);
+        }
+    }
+
+    mod cli_validation_tests {
+        use super::*;
+        use clap::Parser;
+
+        #[test]
+        fn test_preserve_input_order_conflicts_with_query() {
+            let result = Cli::try_parse_from([
+                "silk-chiffon",
+                "transform",
+                "--from",
+                "input.parquet",
+                "--to",
+                "output.parquet",
+                "--preserve-input-order",
+                "--query",
+                "SELECT * FROM data",
+            ]);
+            assert!(result.is_err());
+            let err = result.unwrap_err().to_string();
+            assert!(err.contains("preserve-input-order") || err.contains("query"));
+        }
+
+        #[test]
+        fn test_preserve_input_order_conflicts_with_sort_by() {
+            let result = Cli::try_parse_from([
+                "silk-chiffon",
+                "transform",
+                "--from",
+                "input.parquet",
+                "--to",
+                "output.parquet",
+                "--preserve-input-order",
+                "--sort-by",
+                "id",
+            ]);
+            assert!(result.is_err());
+            let err = result.unwrap_err().to_string();
+            assert!(err.contains("preserve-input-order") || err.contains("sort-by"));
+        }
+
+        #[test]
+        fn test_preserve_input_order_conflicts_with_to_many() {
+            let result = Cli::try_parse_from([
+                "silk-chiffon",
+                "transform",
+                "--from",
+                "input.parquet",
+                "--to-many",
+                "output_{id}.parquet",
+                "--preserve-input-order",
+                "--by",
+                "id",
+            ]);
+            assert!(result.is_err());
+            let err = result.unwrap_err().to_string();
+            assert!(err.contains("preserve-input-order") || err.contains("to-many"));
+        }
+
+        #[test]
+        fn test_preserve_input_order_conflicts_with_from_many() {
+            let result = Cli::try_parse_from([
+                "silk-chiffon",
+                "transform",
+                "--from-many",
+                "*.parquet",
+                "--to",
+                "output.parquet",
+                "--preserve-input-order",
+            ]);
+            assert!(result.is_err());
+            let err = result.unwrap_err().to_string();
+            assert!(err.contains("preserve-input-order") || err.contains("from-many"));
         }
     }
 }

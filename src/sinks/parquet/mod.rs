@@ -9,8 +9,11 @@ pub use sequential_writer::{SequentialParquetWriter, SequentialWriterConfig};
 pub use writer_trait::ParquetWriter;
 
 /// Default buffer size for parquet file I/O.
-pub const DEFAULT_BUFFER_SIZE: usize = 32 * 1024 * 1024;
+pub const DEFAULT_BUFFER_SIZE: usize = 32 * 1024 * 1024; // 32MiB
 pub const DEFAULT_MAX_ROW_GROUP_SIZE: usize = 1_048_576;
+pub const DEFAULT_WRITE_BATCH_SIZE: usize = 8192;
+pub const DEFAULT_DATA_PAGE_SIZE_LIMIT: usize = 100 * 1024 * 1024; // 100MiB (DuckDB MAX_UNCOMPRESSED_PAGE_SIZE)
+pub const DEFAULT_DICTIONARY_PAGE_SIZE_LIMIT: usize = 1024 * 1024 * 1024; // 1GiB (DuckDB MAX_UNCOMPRESSED_DICT_PAGE_SIZE)
 
 use parquet::{
     file::{
@@ -55,6 +58,12 @@ pub struct ParquetSinkOptions {
     pub ndv_map: HashMap<String, u64>,
     pub metadata: HashMap<String, Option<String>>,
     pub encoder: ParquetEncoder,
+    pub data_page_size_limit: usize,
+    pub data_page_row_count_limit: usize,
+    pub dictionary_page_size_limit: usize,
+    pub write_batch_size: usize,
+    pub offset_index_enabled: bool,
+    pub skip_arrow_metadata: bool,
 }
 
 impl Default for ParquetSinkOptions {
@@ -85,6 +94,12 @@ impl ParquetSinkOptions {
             ndv_map: HashMap::new(),
             metadata: HashMap::new(),
             encoder: ParquetEncoder::default(),
+            data_page_size_limit: DEFAULT_DATA_PAGE_SIZE_LIMIT,
+            data_page_row_count_limit: usize::MAX,
+            dictionary_page_size_limit: DEFAULT_DICTIONARY_PAGE_SIZE_LIMIT,
+            write_batch_size: DEFAULT_WRITE_BATCH_SIZE,
+            offset_index_enabled: false,
+            skip_arrow_metadata: true,
         }
     }
 
@@ -187,6 +202,36 @@ impl ParquetSinkOptions {
         self.encoder = encoder;
         self
     }
+
+    pub fn with_data_page_size_limit(mut self, limit: usize) -> Self {
+        self.data_page_size_limit = limit;
+        self
+    }
+
+    pub fn with_data_page_row_count_limit(mut self, limit: usize) -> Self {
+        self.data_page_row_count_limit = limit;
+        self
+    }
+
+    pub fn with_dictionary_page_size_limit(mut self, limit: usize) -> Self {
+        self.dictionary_page_size_limit = limit;
+        self
+    }
+
+    pub fn with_write_batch_size(mut self, size: usize) -> Self {
+        self.write_batch_size = size;
+        self
+    }
+
+    pub fn with_offset_index_enabled(mut self, enabled: bool) -> Self {
+        self.offset_index_enabled = enabled;
+        self
+    }
+
+    pub fn with_skip_arrow_metadata(mut self, skip: bool) -> Self {
+        self.skip_arrow_metadata = skip;
+        self
+    }
 }
 
 struct ParquetSinkInner {
@@ -206,11 +251,17 @@ impl ParquetSink {
         pools: Arc<ParquetPools>,
     ) -> Result<Self> {
         let mut writer_builder = WriterProperties::builder()
+            .set_created_by(format!("silk-chiffon v{}", env!("CARGO_PKG_VERSION")))
             .set_max_row_group_size(options.max_row_group_size)
             .set_compression(options.compression.into())
             .set_writer_version(options.writer_version.into())
             .set_statistics_enabled(options.statistics.into())
-            .set_dictionary_enabled(!options.no_dictionary);
+            .set_dictionary_enabled(!options.no_dictionary)
+            .set_data_page_size_limit(options.data_page_size_limit)
+            .set_data_page_row_count_limit(options.data_page_row_count_limit)
+            .set_dictionary_page_size_limit(options.dictionary_page_size_limit)
+            .set_write_batch_size(options.write_batch_size)
+            .set_offset_index_disabled(!options.offset_index_enabled);
 
         writer_builder = Self::apply_column_dictionary(
             writer_builder,
@@ -220,15 +271,20 @@ impl ParquetSink {
 
         Self::validate_column_encodings(schema, &options.column_encodings)?;
 
-        writer_builder =
-            Self::apply_encodings(writer_builder, &options.encoding, &options.column_encodings);
+        writer_builder = Self::apply_encodings(
+            writer_builder,
+            schema,
+            options.writer_version,
+            &options.encoding,
+            &options.column_encodings,
+        );
 
         writer_builder = Self::apply_bloom_filters(
             writer_builder,
             schema,
             &options.bloom_filters,
             &options.ndv_map,
-        )?;
+        );
 
         writer_builder = Self::apply_sort_metadata(&options.sort_spec, writer_builder, schema)?;
 
@@ -239,6 +295,7 @@ impl ParquetSink {
                 let config = SequentialWriterConfig {
                     max_row_group_size: options.max_row_group_size,
                     buffer_size: options.buffer_size,
+                    skip_arrow_metadata: options.skip_arrow_metadata,
                 };
                 Box::new(SequentialParquetWriter::new(&path, schema, props, config)?)
             }
@@ -250,6 +307,7 @@ impl ParquetSink {
                     encoding_batch_size: options.encoding_batch_size,
                     batch_channel_size: options.batch_channel_size,
                     encoded_channel_size: options.encoded_channel_size,
+                    skip_arrow_metadata: options.skip_arrow_metadata,
                 };
                 Box::new(ParallelParquetWriter::new(
                     &path, schema, props, pools, config,
@@ -334,11 +392,42 @@ impl ParquetSink {
 
     fn apply_encodings(
         mut builder: WriterPropertiesBuilder,
+        schema: &SchemaRef,
+        writer_version: ParquetWriterVersion,
         default_encoding: &Option<ParquetEncoding>,
         column_encodings: &[ColumnEncodingConfig],
     ) -> WriterPropertiesBuilder {
         if let Some(encoding) = default_encoding {
             builder = builder.set_encoding((*encoding).into());
+        }
+
+        for field in schema.fields() {
+            let col_path = ColumnPath::from(field.name().as_str());
+            match field.data_type() {
+                DataType::Boolean => {
+                    builder = builder.set_column_encoding(col_path, ParquetEncoding::Plain.into());
+                }
+                DataType::Float32 | DataType::Float64
+                    if writer_version == ParquetWriterVersion::V2 =>
+                {
+                    builder = builder
+                        .set_column_encoding(col_path, ParquetEncoding::ByteStreamSplit.into());
+                }
+                DataType::Int8
+                | DataType::Int16
+                | DataType::Int32
+                | DataType::Int64
+                | DataType::UInt8
+                | DataType::UInt16
+                | DataType::UInt32
+                | DataType::UInt64
+                    if writer_version == ParquetWriterVersion::V2 =>
+                {
+                    builder = builder
+                        .set_column_encoding(col_path, ParquetEncoding::DeltaBinaryPacked.into());
+                }
+                _ => {}
+            }
         }
 
         for col_encoding in column_encodings {
@@ -354,48 +443,49 @@ impl ParquetSink {
         schema: &SchemaRef,
         bloom_filters: &BloomFilterConfig,
         ndv_map: &HashMap<String, u64>,
-    ) -> Result<WriterPropertiesBuilder> {
-        match &bloom_filters {
-            BloomFilterConfig::None => Ok(builder),
-            BloomFilterConfig::All(bloom_all) => {
-                let fpp = bloom_all.fpp;
+    ) -> WriterPropertiesBuilder {
+        let disabled_cols: std::collections::HashSet<&str> = bloom_filters
+            .column_disabled()
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
+
+        if let Some(all_config) = bloom_filters.all_enabled() {
+            // enable per-column instead of globally - parquet-rs set_column_bloom_filter_enabled(false)
+            // doesn't override a global enable, and set_bloom_filter_fpp implicitly enables globally
+            for field in schema.fields() {
+                let col_name = field.name().as_str();
+                if disabled_cols.contains(col_name) {
+                    continue;
+                }
+                let col_path = ColumnPath::from(col_name);
                 builder = builder
-                    .set_bloom_filter_enabled(true)
-                    .set_bloom_filter_fpp(fpp);
-
-                if let Some(user_ndv) = bloom_all.ndv {
-                    for field in schema.fields() {
-                        let col_path = ColumnPath::from(field.name().as_str());
-                        builder = builder.set_column_bloom_filter_ndv(col_path, user_ndv);
-                    }
-                } else {
-                    for (col_name, &ndv) in ndv_map {
-                        let col_path = ColumnPath::from(col_name.as_str());
-                        builder = builder.set_column_bloom_filter_ndv(col_path, ndv);
-                    }
+                    .set_column_bloom_filter_enabled(col_path.clone(), true)
+                    .set_column_bloom_filter_fpp(col_path.clone(), all_config.fpp);
+                if let Some(ndv) = all_config.ndv.or_else(|| ndv_map.get(col_name).copied()) {
+                    builder = builder.set_column_bloom_filter_ndv(col_path, ndv);
                 }
-                Ok(builder)
-            }
-            BloomFilterConfig::Columns(columns) => {
-                for bloom_col in columns {
-                    let col_path = ColumnPath::from(bloom_col.name.as_str());
-                    let fpp = bloom_col.config.fpp;
-
-                    builder = builder
-                        .set_column_bloom_filter_enabled(col_path.clone(), true)
-                        .set_column_bloom_filter_fpp(col_path.clone(), fpp);
-
-                    let ndv = bloom_col
-                        .config
-                        .ndv
-                        .or_else(|| ndv_map.get(&bloom_col.name).copied());
-                    if let Some(ndv) = ndv {
-                        builder = builder.set_column_bloom_filter_ndv(col_path, ndv);
-                    }
-                }
-                Ok(builder)
             }
         }
+
+        for bloom_col in bloom_filters.column_enabled() {
+            let col_path = ColumnPath::from(bloom_col.name.as_str());
+            let fpp = bloom_col.config.fpp;
+
+            builder = builder
+                .set_column_bloom_filter_enabled(col_path.clone(), true)
+                .set_column_bloom_filter_fpp(col_path.clone(), fpp);
+
+            let ndv = bloom_col
+                .config
+                .ndv
+                .or_else(|| ndv_map.get(&bloom_col.name).copied());
+            if let Some(ndv) = ndv {
+                builder = builder.set_column_bloom_filter_ndv(col_path, ndv);
+            }
+        }
+
+        builder
     }
 
     fn apply_sort_metadata(
@@ -753,7 +843,7 @@ mod tests {
             let batch =
                 test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["a", "b", "c"]);
 
-            let bloom_filters = BloomFilterConfig::None;
+            let bloom_filters = BloomFilterConfig::default();
 
             let options = ParquetSinkOptions::new().with_bloom_filters(bloom_filters);
 
@@ -778,10 +868,13 @@ mod tests {
             let batch =
                 test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["a", "b", "c"]);
 
-            let bloom_filters = BloomFilterConfig::All(AllColumnsBloomFilterConfig {
-                fpp: 0.01,
-                ndv: None,
-            });
+            let bloom_filters = BloomFilterConfig::builder()
+                .all_enabled(AllColumnsBloomFilterConfig {
+                    fpp: 0.01,
+                    ndv: None,
+                })
+                .build()
+                .unwrap();
 
             let mut ndv_map = HashMap::new();
             ndv_map.insert("id".to_string(), 3);
@@ -812,13 +905,16 @@ mod tests {
             let batch =
                 test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["a", "b", "c"]);
 
-            let bloom_filters = BloomFilterConfig::Columns(vec![ColumnSpecificBloomFilterConfig {
-                name: "id".to_string(),
-                config: ColumnBloomFilterConfig {
-                    fpp: 0.05,
-                    ndv: None,
-                },
-            }]);
+            let bloom_filters = BloomFilterConfig::builder()
+                .enable_column(ColumnSpecificBloomFilterConfig {
+                    name: "id".to_string(),
+                    config: ColumnBloomFilterConfig {
+                        fpp: 0.05,
+                        ndv: None,
+                    },
+                })
+                .build()
+                .unwrap();
 
             let mut ndv_map = HashMap::new();
             ndv_map.insert("id".to_string(), 3);
@@ -837,6 +933,50 @@ mod tests {
             assert!(file.has_any_bloom_filters);
             assert!(file.row_groups[0].columns[0].has_bloom_filter);
             assert!(!file.row_groups[0].columns[1].has_bloom_filter);
+        }
+
+        #[tokio::test]
+        async fn test_sink_with_bloom_all_enabled_but_specific_columns_disabled() {
+            let temp_dir = tempdir().unwrap();
+            let output_path = temp_dir.path().join("output.parquet");
+
+            let schema = test_data::simple_schema();
+            let batch =
+                test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["a", "b", "c"]);
+
+            let bloom_filters = BloomFilterConfig::builder()
+                .all_enabled(AllColumnsBloomFilterConfig {
+                    fpp: 0.01,
+                    ndv: None,
+                })
+                .disable_column("id")
+                .build()
+                .unwrap();
+
+            let mut ndv_map = HashMap::new();
+            ndv_map.insert("id".to_string(), 3);
+            ndv_map.insert("name".to_string(), 3);
+
+            let options = ParquetSinkOptions::new()
+                .with_bloom_filters(bloom_filters)
+                .with_ndv_map(ndv_map);
+
+            let mut sink =
+                ParquetSink::create(output_path.clone(), &schema, &options, test_pools()).unwrap();
+
+            sink.write_batch(batch).await.unwrap();
+            sink.finish().await.unwrap();
+
+            let file = read_entire_parquet_file(&output_path).unwrap();
+            assert!(file.has_any_bloom_filters);
+            assert!(
+                !file.row_groups[0].columns[0].has_bloom_filter,
+                "id column should NOT have bloom filter"
+            );
+            assert!(
+                file.row_groups[0].columns[1].has_bloom_filter,
+                "name column should have bloom filter"
+            );
         }
 
         #[tokio::test]
@@ -1010,13 +1150,16 @@ mod tests {
             let batch =
                 test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["a", "b", "c"]);
 
-            let bloom_filters = BloomFilterConfig::Columns(vec![ColumnSpecificBloomFilterConfig {
-                name: "id".to_string(),
-                config: ColumnBloomFilterConfig {
-                    fpp: 0.05,
-                    ndv: None,
-                },
-            }]);
+            let bloom_filters = BloomFilterConfig::builder()
+                .enable_column(ColumnSpecificBloomFilterConfig {
+                    name: "id".to_string(),
+                    config: ColumnBloomFilterConfig {
+                        fpp: 0.05,
+                        ndv: None,
+                    },
+                })
+                .build()
+                .unwrap();
 
             let options = ParquetSinkOptions::new().with_bloom_filters(bloom_filters);
 
@@ -1040,10 +1183,13 @@ mod tests {
             let batch =
                 test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["a", "b", "c"]);
 
-            let bloom_filters = BloomFilterConfig::All(AllColumnsBloomFilterConfig {
-                fpp: 0.01,
-                ndv: Some(5000),
-            });
+            let bloom_filters = BloomFilterConfig::builder()
+                .all_enabled(AllColumnsBloomFilterConfig {
+                    fpp: 0.01,
+                    ndv: Some(5000),
+                })
+                .build()
+                .unwrap();
 
             let options = ParquetSinkOptions::new().with_bloom_filters(bloom_filters);
 
@@ -1068,13 +1214,16 @@ mod tests {
             let batch =
                 test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["a", "b", "c"]);
 
-            let bloom_filters = BloomFilterConfig::Columns(vec![ColumnSpecificBloomFilterConfig {
-                name: "id".to_string(),
-                config: ColumnBloomFilterConfig {
-                    fpp: 0.01,
-                    ndv: Some(10000),
-                },
-            }]);
+            let bloom_filters = BloomFilterConfig::builder()
+                .enable_column(ColumnSpecificBloomFilterConfig {
+                    name: "id".to_string(),
+                    config: ColumnBloomFilterConfig {
+                        fpp: 0.01,
+                        ndv: Some(10000),
+                    },
+                })
+                .build()
+                .unwrap();
 
             let mut ndv_map = HashMap::new();
             ndv_map.insert("id".to_string(), 500);
@@ -1144,8 +1293,8 @@ mod tests {
             assert_eq!(options.encoding_batch_size, 122_880);
             assert_eq!(options.max_row_group_size, DEFAULT_MAX_ROW_GROUP_SIZE);
             assert!(matches!(options.compression, ParquetCompression::None));
-            assert!(matches!(options.bloom_filters, BloomFilterConfig::None));
-            assert!(matches!(options.statistics, ParquetStatistics::Page));
+            assert!(!options.bloom_filters.is_configured());
+            assert!(matches!(options.statistics, ParquetStatistics::Chunk));
             assert!(!options.no_dictionary);
             assert!(matches!(options.writer_version, ParquetWriterVersion::V2));
             assert!(options.metadata.is_empty());
@@ -1163,10 +1312,13 @@ mod tests {
                 }],
             };
 
-            let bloom_filters = BloomFilterConfig::All(AllColumnsBloomFilterConfig {
-                fpp: 0.01,
-                ndv: None,
-            });
+            let bloom_filters = BloomFilterConfig::builder()
+                .all_enabled(AllColumnsBloomFilterConfig {
+                    fpp: 0.01,
+                    ndv: None,
+                })
+                .build()
+                .unwrap();
 
             let options = ParquetSinkOptions::new()
                 .with_encoding_batch_size(1000)
@@ -1183,7 +1335,7 @@ mod tests {
             assert_eq!(options.max_row_group_size, 5000);
             assert_eq!(options.sort_spec.columns.len(), 1);
             assert!(matches!(options.compression, ParquetCompression::Zstd));
-            assert!(matches!(options.bloom_filters, BloomFilterConfig::All(_)));
+            assert!(options.bloom_filters.is_configured());
             assert!(matches!(options.statistics, ParquetStatistics::None));
             assert!(options.no_dictionary);
             assert!(matches!(options.writer_version, ParquetWriterVersion::V1));
@@ -1425,6 +1577,201 @@ mod tests {
 
             let data_type = ParquetSink::resolve_column_type(&schema, "outer.nonexistent");
             assert_eq!(data_type, None);
+        }
+    }
+
+    mod default_encoding_tests {
+        use std::path::Path;
+
+        use super::*;
+        use arrow::array::{BooleanArray, Float32Array, Float64Array, Int64Array};
+        use arrow::datatypes::Field;
+        use parquet::basic::Encoding;
+
+        fn numeric_schema() -> SchemaRef {
+            Arc::new(arrow::datatypes::Schema::new(vec![
+                Field::new("int_col", DataType::Int64, false),
+                Field::new("float_col", DataType::Float32, false),
+                Field::new("double_col", DataType::Float64, false),
+                Field::new("bool_col", DataType::Boolean, false),
+                Field::new("string_col", DataType::Utf8, false),
+            ]))
+        }
+
+        fn create_numeric_batch(schema: &SchemaRef) -> RecordBatch {
+            RecordBatch::try_new(
+                Arc::clone(schema),
+                vec![
+                    Arc::new(Int64Array::from(vec![1, 2, 3])),
+                    Arc::new(Float32Array::from(vec![1.0, 2.0, 3.0])),
+                    Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                    Arc::new(BooleanArray::from(vec![true, false, true])),
+                    Arc::new(arrow::array::StringArray::from(vec!["a", "b", "c"])),
+                ],
+            )
+            .unwrap()
+        }
+
+        fn get_column_encodings(path: &Path) -> HashMap<String, Vec<Encoding>> {
+            let file = read_entire_parquet_file(path).unwrap();
+            file.row_groups[0]
+                .columns
+                .iter()
+                .map(|c| (c.name.clone(), c.encodings.clone()))
+                .collect()
+        }
+
+        #[tokio::test]
+        async fn test_v2_applies_byte_stream_split_to_floats() {
+            let temp_dir = tempdir().unwrap();
+            let output_path = temp_dir.path().join("output.parquet");
+
+            let schema = numeric_schema();
+            let batch = create_numeric_batch(&schema);
+
+            let options = ParquetSinkOptions::new()
+                .with_writer_version(ParquetWriterVersion::V2)
+                .with_no_dictionary(true); // disable dict to see the fallback encoding
+
+            let mut sink =
+                ParquetSink::create(output_path.clone(), &schema, &options, test_pools()).unwrap();
+            sink.write_batch(batch).await.unwrap();
+            sink.finish().await.unwrap();
+
+            let encodings = get_column_encodings(&output_path);
+            assert!(
+                encodings["float_col"].contains(&Encoding::BYTE_STREAM_SPLIT),
+                "float_col should use BYTE_STREAM_SPLIT, got {:?}",
+                encodings["float_col"]
+            );
+            assert!(
+                encodings["double_col"].contains(&Encoding::BYTE_STREAM_SPLIT),
+                "double_col should use BYTE_STREAM_SPLIT, got {:?}",
+                encodings["double_col"]
+            );
+        }
+
+        #[tokio::test]
+        async fn test_v2_applies_delta_binary_packed_to_integers() {
+            let temp_dir = tempdir().unwrap();
+            let output_path = temp_dir.path().join("output.parquet");
+
+            let schema = numeric_schema();
+            let batch = create_numeric_batch(&schema);
+
+            let options = ParquetSinkOptions::new()
+                .with_writer_version(ParquetWriterVersion::V2)
+                .with_no_dictionary(true);
+
+            let mut sink =
+                ParquetSink::create(output_path.clone(), &schema, &options, test_pools()).unwrap();
+            sink.write_batch(batch).await.unwrap();
+            sink.finish().await.unwrap();
+
+            let encodings = get_column_encodings(&output_path);
+            assert!(
+                encodings["int_col"].contains(&Encoding::DELTA_BINARY_PACKED),
+                "int_col should use DELTA_BINARY_PACKED, got {:?}",
+                encodings["int_col"]
+            );
+        }
+
+        #[tokio::test]
+        async fn test_booleans_always_use_plain() {
+            let temp_dir = tempdir().unwrap();
+            let output_path = temp_dir.path().join("output.parquet");
+
+            let schema = numeric_schema();
+            let batch = create_numeric_batch(&schema);
+
+            let options = ParquetSinkOptions::new().with_writer_version(ParquetWriterVersion::V2);
+
+            let mut sink =
+                ParquetSink::create(output_path.clone(), &schema, &options, test_pools()).unwrap();
+            sink.write_batch(batch).await.unwrap();
+            sink.finish().await.unwrap();
+
+            let encodings = get_column_encodings(&output_path);
+            // booleans should use PLAIN for data encoding
+            // (RLE may still appear for definition/repetition levels)
+            assert!(
+                encodings["bool_col"].contains(&Encoding::PLAIN),
+                "bool_col should use PLAIN, got {:?}",
+                encodings["bool_col"]
+            );
+        }
+
+        #[tokio::test]
+        async fn test_v1_uses_plain_for_floats_and_integers() {
+            let temp_dir = tempdir().unwrap();
+            let output_path = temp_dir.path().join("output.parquet");
+
+            let schema = numeric_schema();
+            let batch = create_numeric_batch(&schema);
+
+            let options = ParquetSinkOptions::new()
+                .with_writer_version(ParquetWriterVersion::V1)
+                .with_no_dictionary(true);
+
+            let mut sink =
+                ParquetSink::create(output_path.clone(), &schema, &options, test_pools()).unwrap();
+            sink.write_batch(batch).await.unwrap();
+            sink.finish().await.unwrap();
+
+            let encodings = get_column_encodings(&output_path);
+
+            assert!(
+                !encodings["float_col"].contains(&Encoding::BYTE_STREAM_SPLIT),
+                "V1 float_col should NOT use BYTE_STREAM_SPLIT"
+            );
+            assert!(
+                encodings["float_col"].contains(&Encoding::PLAIN),
+                "V1 float_col should use PLAIN"
+            );
+            assert!(
+                !encodings["int_col"].contains(&Encoding::DELTA_BINARY_PACKED),
+                "V1 int_col should NOT use DELTA_BINARY_PACKED"
+            );
+            assert!(
+                encodings["int_col"].contains(&Encoding::PLAIN),
+                "V1 int_col should use PLAIN"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_user_encoding_overrides_default() {
+            let temp_dir = tempdir().unwrap();
+            let output_path = temp_dir.path().join("output.parquet");
+
+            let schema = numeric_schema();
+            let batch = create_numeric_batch(&schema);
+
+            let options = ParquetSinkOptions::new()
+                .with_writer_version(ParquetWriterVersion::V2)
+                .with_no_dictionary(true)
+                .with_column_encodings(vec![ColumnEncodingConfig {
+                    name: "float_col".to_string(),
+                    encoding: ParquetEncoding::Plain,
+                }]);
+
+            let mut sink =
+                ParquetSink::create(output_path.clone(), &schema, &options, test_pools()).unwrap();
+            sink.write_batch(batch).await.unwrap();
+            sink.finish().await.unwrap();
+
+            let encodings = get_column_encodings(&output_path);
+            assert!(
+                encodings["float_col"].contains(&Encoding::PLAIN),
+                "float_col should use PLAIN (user override)"
+            );
+            assert!(
+                !encodings["float_col"].contains(&Encoding::BYTE_STREAM_SPLIT),
+                "float_col should NOT use BYTE_STREAM_SPLIT when overridden"
+            );
+            assert!(
+                encodings["double_col"].contains(&Encoding::BYTE_STREAM_SPLIT),
+                "double_col should use BYTE_STREAM_SPLIT"
+            );
         }
     }
 }
