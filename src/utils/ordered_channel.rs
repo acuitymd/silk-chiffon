@@ -16,6 +16,8 @@ use futures::Stream;
 use tokio::sync::{Mutex, Notify};
 use tokio_util::sync::CancellationToken;
 
+use crate::utils::blocking::block_on;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SendError<T> {
     Stale(T),
@@ -118,13 +120,6 @@ impl<T> Drop for OrderedSender<T> {
         if self.shared.sender_count.fetch_sub(1, Ordering::AcqRel) == 1 {
             self.shared.recv_notify.notify_waiters();
         }
-    }
-}
-
-fn block_on<F: std::future::Future>(f: F) -> F::Output {
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(f)),
-        Err(_) => futures::executor::block_on(f),
     }
 }
 
@@ -283,14 +278,9 @@ pub fn ordered_channel<T>(
 mod tests {
     use super::*;
 
-    fn test_cancel() -> CancellationToken {
-        CancellationToken::new()
-    }
-
     #[tokio::test]
     async fn test_basic_send_recv() {
-        let (tx, mut rx) = ordered_channel::<i32>(4, test_cancel());
-
+        let (tx, mut rx) = ordered_channel::<i32>(4, CancellationToken::new());
         tx.send(0, 10).await.unwrap();
         tx.send(1, 20).await.unwrap();
 
@@ -300,7 +290,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_out_of_order_send() {
-        let (tx, mut rx) = ordered_channel::<i32>(4, test_cancel());
+        let (tx, mut rx) = ordered_channel::<i32>(4, CancellationToken::new());
 
         tx.send(1, 20).await.unwrap();
         tx.send(0, 10).await.unwrap();
@@ -313,7 +303,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_channel_closure() {
-        let (tx, mut rx) = ordered_channel::<i32>(4, test_cancel());
+        let (tx, mut rx) = ordered_channel::<i32>(4, CancellationToken::new());
 
         tx.send(0, 10).await.unwrap();
         drop(tx);
@@ -324,7 +314,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stale_index() {
-        let (tx, mut rx) = ordered_channel::<i32>(4, test_cancel());
+        let (tx, mut rx) = ordered_channel::<i32>(4, CancellationToken::new());
 
         tx.send(0, 10).await.unwrap();
         rx.recv().await.unwrap();
@@ -335,7 +325,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_duplicate_index() {
-        let (tx, _rx) = ordered_channel::<i32>(4, test_cancel());
+        let (tx, _rx) = ordered_channel::<i32>(4, CancellationToken::new());
 
         tx.send(0, 10).await.unwrap();
         let result = tx.send(0, 20).await;
@@ -344,7 +334,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_multiple_senders() {
-        let (tx1, mut rx) = ordered_channel::<i32>(4, test_cancel());
+        let (tx1, mut rx) = ordered_channel::<i32>(4, CancellationToken::new());
         let tx2 = tx1.clone();
 
         tx1.send(0, 10).await.unwrap();
@@ -361,7 +351,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_backpressure() {
-        let (tx, mut rx) = ordered_channel::<i32>(2, test_cancel());
+        let (tx, mut rx) = ordered_channel::<i32>(2, CancellationToken::new());
 
         tx.send(0, 10).await.unwrap();
         tx.send(1, 20).await.unwrap();
@@ -385,7 +375,7 @@ mod tests {
     async fn test_stream() {
         use futures::StreamExt;
 
-        let (tx, rx) = ordered_channel::<i32>(4, test_cancel());
+        let (tx, rx) = ordered_channel::<i32>(4, CancellationToken::new());
 
         tx.send(1, 20).await.unwrap();
         tx.send(0, 10).await.unwrap();
@@ -398,7 +388,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_receiver_closure() {
-        let (tx, rx) = ordered_channel::<i32>(2, test_cancel());
+        let (tx, rx) = ordered_channel::<i32>(2, CancellationToken::new());
 
         tx.send(0, 10).await.unwrap();
         tx.send(1, 20).await.unwrap();
@@ -411,7 +401,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_multiple_receivers() {
-        let (tx, rx1) = ordered_channel::<i32>(4, test_cancel());
+        let (tx, rx1) = ordered_channel::<i32>(4, CancellationToken::new());
         let rx2 = rx1.clone();
 
         tx.send(0, 10).await.unwrap();
@@ -427,17 +417,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_cancellation_send() {
-        let cancel = CancellationToken::new();
-        let (tx, _rx) = ordered_channel::<i32>(1, cancel.clone());
+        let cancel_signal = CancellationToken::new();
+        let (tx, _rx) = ordered_channel::<i32>(1, cancel_signal.clone());
 
         tx.send(0, 10).await.unwrap();
 
         let tx_clone = tx.clone();
-        let cancel_clone = cancel.clone();
         let handle = tokio::spawn(async move { tx_clone.send(1, 20).await });
 
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        cancel_clone.cancel();
+        cancel_signal.cancel();
 
         let result = handle.await.unwrap();
         assert!(matches!(result, Err(SendError::Closed(20))));
@@ -445,14 +434,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_cancellation_recv() {
-        let cancel = CancellationToken::new();
-        let (tx, mut rx) = ordered_channel::<i32>(4, cancel.clone());
+        let cancel_signal = CancellationToken::new();
+        let (tx, mut rx) = ordered_channel::<i32>(4, cancel_signal.clone());
 
-        let cancel_clone = cancel.clone();
         let handle = tokio::spawn(async move { rx.recv().await });
 
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        cancel_clone.cancel();
+        cancel_signal.cancel();
 
         let result = handle.await.unwrap();
         assert!(result.is_err());
@@ -462,7 +450,7 @@ mod tests {
 
     #[test]
     fn test_blocking_send_recv() {
-        let (tx, mut rx) = ordered_channel::<i32>(4, test_cancel());
+        let (tx, mut rx) = ordered_channel::<i32>(4, CancellationToken::new());
 
         let tx_clone = tx.clone();
         let handle = std::thread::spawn(move || {
@@ -479,7 +467,7 @@ mod tests {
 
     #[test]
     fn test_blocking_recv() {
-        let (tx, rx) = ordered_channel::<i32>(4, test_cancel());
+        let (tx, rx) = ordered_channel::<i32>(4, CancellationToken::new());
 
         tx.blocking_send(0, 10).unwrap();
         tx.blocking_send(1, 20).unwrap();
@@ -499,7 +487,7 @@ mod tests {
 
     #[test]
     fn test_blocking_out_of_order() {
-        let (tx, mut rx) = ordered_channel::<i32>(4, test_cancel());
+        let (tx, mut rx) = ordered_channel::<i32>(4, CancellationToken::new());
 
         tx.blocking_send(2, 30).unwrap();
         tx.blocking_send(0, 10).unwrap();
@@ -525,7 +513,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn test_stress_concurrent_sends() {
         for iteration in 0..100 {
-            let (tx, mut rx) = ordered_channel::<usize>(4, test_cancel());
+            let (tx, mut rx) = ordered_channel::<usize>(4, CancellationToken::new());
             let num_items = 20;
 
             let mut handles = vec![];

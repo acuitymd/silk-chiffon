@@ -40,18 +40,26 @@ fn run_parquet(args: &InspectParquetArgs) -> Result<()> {
 
     let mut out = io::stdout();
 
+    let columns_filter: Option<Vec<&str>> = args.pages.as_ref().and_then(|cols| {
+        if cols.is_empty() {
+            None
+        } else {
+            Some(cols.split(',').map(|s| s.trim()).collect())
+        }
+    });
+
     if args.format.resolves_to_json() {
-        inspector.render_to_json(&mut out)?;
+        if args.pages.is_some() {
+            let json = inspector.to_json_with_pages(columns_filter.as_deref());
+            writeln!(out, "{}", serde_json::to_string(&json)?)?;
+        } else {
+            inspector.render_to_json(&mut out)?;
+        }
     } else {
         inspector.render_with_row_group(&mut out, args.row_group)?;
 
-        if let Some(ref columns) = args.pages {
-            let columns: Option<Vec<&str>> = if columns.is_empty() {
-                None
-            } else {
-                Some(columns.split(',').map(|s| s.trim()).collect())
-            };
-            inspector.render_pages(&mut out, args.row_group, columns.as_deref())?;
+        if args.pages.is_some() {
+            inspector.render_pages(&mut out, args.row_group, columns_filter.as_deref())?;
         }
     }
 

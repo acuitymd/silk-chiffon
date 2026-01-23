@@ -31,9 +31,8 @@ pub fn parse_at_least_one(s: &str) -> Result<usize> {
 
     if n == 0 {
         anyhow::bail!("value must be at least 1");
-    } else {
-        Ok(n)
     }
+    Ok(n)
 }
 
 /// Parse a human-readable byte size (e.g., "512MB", "2GB") that must be greater than 0.
@@ -47,9 +46,8 @@ pub fn parse_nonzero_byte_size(s: &str) -> Result<usize> {
         .as_u64() as usize;
     if bytes == 0 {
         anyhow::bail!("value must be greater than 0");
-    } else {
-        Ok(bytes)
     }
+    Ok(bytes)
 }
 
 #[derive(Parser, Debug)]
@@ -255,17 +253,6 @@ impl From<ParquetWriterVersion> for i32 {
     }
 }
 
-/// Parquet encoder strategy.
-#[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq)]
-#[value(rename_all = "lowercase")]
-pub enum ParquetEncoder {
-    /// Sequential single-threaded encoder using Arrow's built-in writer.
-    Sequential,
-    /// Parallel encoder using rayon for concurrent column encoding.
-    #[default]
-    Parallel,
-}
-
 #[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq)]
 #[value(rename_all = "kebab-case")]
 pub enum ParquetEncoding {
@@ -279,17 +266,6 @@ pub enum ParquetEncoding {
 }
 
 impl ParquetEncoding {
-    /// Returns true if this encoding requires parquet writer version 2 for compatibility.
-    pub fn requires_v2(&self) -> bool {
-        matches!(
-            self,
-            ParquetEncoding::DeltaBinaryPacked
-                | ParquetEncoding::DeltaLengthByteArray
-                | ParquetEncoding::DeltaByteArray
-                | ParquetEncoding::ByteStreamSplit
-        )
-    }
-
     /// Validates that this encoding is compatible with the given Arrow data type.
     /// Returns an error message if incompatible, None if compatible.
     pub fn validate_for_type(&self, data_type: &arrow::datatypes::DataType) -> Option<String> {
@@ -454,6 +430,63 @@ impl FromStr for ColumnEncodingConfig {
     }
 }
 
+/// Dictionary mode for per-column dictionary configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DictionaryMode {
+    /// Always attempt dictionary encoding; parquet-rs handles overflow at write time.
+    Always,
+    /// Analyze cardinality per row group and decide whether to use dictionary.
+    #[default]
+    Analyze,
+}
+
+/// Per-column dictionary configuration, parsed from "column:mode" format.
+///
+/// Modes:
+/// - `col:always` - always attempt dictionary encoding
+/// - `col:analyze` - use cardinality analysis to decide
+#[derive(Debug, Clone)]
+pub struct ColumnDictionaryConfig {
+    pub name: String,
+    pub mode: DictionaryMode,
+}
+
+impl FromStr for ColumnDictionaryConfig {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s = s.trim();
+        if s.is_empty() {
+            return Err(anyhow!("Column name cannot be empty"));
+        }
+
+        let (name, mode) = if let Some((name, mode_str)) = s.split_once(':') {
+            let name = name.trim();
+            if name.is_empty() {
+                return Err(anyhow!("Column name cannot be empty in '{}'", s));
+            }
+            let mode = match mode_str.trim().to_lowercase().as_str() {
+                "always" => DictionaryMode::Always,
+                "analyze" => DictionaryMode::Analyze,
+                other => {
+                    return Err(anyhow!(
+                        "Invalid dictionary mode '{}'. Valid options: always, analyze",
+                        other
+                    ));
+                }
+            };
+            (name.to_string(), mode)
+        } else {
+            return Err(anyhow!(
+                "Missing dictionary mode for '{}'. Format: COLUMN:MODE where MODE is 'always' or 'analyze'",
+                s
+            ));
+        };
+
+        Ok(ColumnDictionaryConfig { name, mode })
+    }
+}
+
 #[derive(ValueEnum, Clone, Debug, Default, Copy)]
 #[value(rename_all = "lowercase")]
 pub enum ArrowCompression {
@@ -601,6 +634,76 @@ impl fmt::Display for SortSpec {
 
 pub const DEFAULT_BLOOM_FILTER_FPP: f64 = 0.01;
 
+/// Parsed bloom filter parameters (fpp and optional ndv).
+struct BloomFilterParams {
+    fpp: Option<f64>,
+    ndv: Option<u64>,
+}
+
+fn parse_bloom_filter_params(s: &str) -> Result<BloomFilterParams> {
+    let mut fpp = None;
+    let mut ndv = None;
+
+    let parts = s
+        .split(',')
+        .map(|p| p.trim())
+        .filter(|p| !p.is_empty())
+        .collect::<Vec<&str>>();
+
+    for part in parts {
+        if part.is_empty() {
+            return Err(anyhow!("Invalid bloom filter specification: {}", s));
+        }
+
+        if let Some((key, value)) = part.split_once('=') {
+            let key = key.trim();
+            let value = value.trim();
+
+            match key {
+                "fpp" => {
+                    if fpp.is_some() {
+                        return Err(anyhow!(
+                            "Invalid bloom filter specification, fpp is set twice: {}",
+                            s
+                        ));
+                    }
+
+                    fpp =
+                        Some(value.parse::<f64>().map_err(|e| {
+                            anyhow::anyhow!("Invalid fpp value '{}': {}", value, e)
+                        })?);
+                }
+                "ndv" => {
+                    if ndv.is_some() {
+                        return Err(anyhow!(
+                            "Invalid bloom filter specification, ndv is set twice: {}",
+                            s
+                        ));
+                    }
+
+                    ndv =
+                        Some(value.parse::<u64>().map_err(|e| {
+                            anyhow::anyhow!("Invalid ndv value '{}': {}", value, e)
+                        })?);
+                }
+                _ => {
+                    return Err(anyhow::anyhow!(
+                        "Unknown parameter '{}'. Valid parameters are 'fpp' and 'ndv'",
+                        key
+                    ));
+                }
+            }
+        } else {
+            return Err(anyhow::anyhow!(
+                "Invalid parameter format '{}'. Expected 'key=value'",
+                part
+            ));
+        }
+    }
+
+    Ok(BloomFilterParams { fpp, ndv })
+}
+
 #[derive(Debug, Clone)]
 pub struct AllColumnsBloomFilterConfig {
     pub fpp: f64,
@@ -612,73 +715,16 @@ impl FromStr for AllColumnsBloomFilterConfig {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if s.trim().is_empty() {
-            return Ok(AllColumnsBloomFilterConfig {
+            return Ok(Self {
                 fpp: DEFAULT_BLOOM_FILTER_FPP,
                 ndv: None,
             });
         }
 
-        let mut fpp = None;
-        let mut ndv = None;
-
-        let parts = s
-            .split(',')
-            .map(|p| p.trim())
-            .filter(|p| !p.is_empty())
-            .collect::<Vec<&str>>();
-
-        for part in parts {
-            if part.is_empty() {
-                return Err(anyhow!("Invalid bloom filter specification: {}", s));
-            }
-
-            if let Some((key, value)) = part.split_once('=') {
-                let key = key.trim();
-                let value = value.trim();
-
-                match key {
-                    "fpp" => {
-                        if fpp.is_some() {
-                            return Err(anyhow!(
-                                "Invalid bloom filter specification, fpp is set twice: {}",
-                                s
-                            ));
-                        }
-
-                        fpp = Some(value.parse::<f64>().map_err(|e| {
-                            anyhow::anyhow!("Invalid fpp value '{}': {}", value, e)
-                        })?);
-                    }
-                    "ndv" => {
-                        if ndv.is_some() {
-                            return Err(anyhow!(
-                                "Invalid bloom filter specification, ndv is set twice: {}",
-                                s
-                            ));
-                        }
-
-                        ndv = Some(value.parse::<u64>().map_err(|e| {
-                            anyhow::anyhow!("Invalid ndv value '{}': {}", value, e)
-                        })?);
-                    }
-                    _ => {
-                        return Err(anyhow::anyhow!(
-                            "Unknown parameter '{}'. Valid parameters are 'fpp' and 'ndv'",
-                            key
-                        ));
-                    }
-                }
-            } else {
-                return Err(anyhow::anyhow!(
-                    "Invalid parameter format '{}'. Expected 'key=value'",
-                    part
-                ));
-            }
-        }
-
-        Ok(AllColumnsBloomFilterConfig {
-            fpp: fpp.unwrap_or(DEFAULT_BLOOM_FILTER_FPP),
-            ndv,
+        let params = parse_bloom_filter_params(s)?;
+        Ok(Self {
+            fpp: params.fpp.unwrap_or(DEFAULT_BLOOM_FILTER_FPP),
+            ndv: params.ndv,
         })
     }
 }
@@ -693,67 +739,10 @@ impl FromStr for ColumnBloomFilterConfig {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let mut fpp = None;
-        let mut ndv = None;
-
-        let parts = s
-            .split(',')
-            .map(|p| p.trim())
-            .filter(|p| !p.is_empty())
-            .collect::<Vec<&str>>();
-
-        for part in parts {
-            if part.is_empty() {
-                return Err(anyhow!("Invalid bloom filter specification: {}", s));
-            }
-
-            if let Some((key, value)) = part.split_once('=') {
-                let key = key.trim();
-                let value = value.trim();
-
-                match key {
-                    "fpp" => {
-                        if fpp.is_some() {
-                            return Err(anyhow!(
-                                "Invalid bloom filter specification, fpp is set twice: {}",
-                                s
-                            ));
-                        }
-
-                        fpp = Some(value.parse::<f64>().map_err(|e| {
-                            anyhow::anyhow!("Invalid fpp value '{}': {}", value, e)
-                        })?);
-                    }
-                    "ndv" => {
-                        if ndv.is_some() {
-                            return Err(anyhow!(
-                                "Invalid bloom filter specification, ndv is set twice: {}",
-                                s
-                            ));
-                        }
-
-                        ndv = Some(value.parse::<u64>().map_err(|e| {
-                            anyhow::anyhow!("Invalid ndv value '{}': {}", value, e)
-                        })?);
-                    }
-                    _ => {
-                        return Err(anyhow::anyhow!(
-                            "Unknown parameter '{}'. Valid parameters are 'fpp' and 'ndv'",
-                            key
-                        ));
-                    }
-                }
-            } else {
-                return Err(anyhow::anyhow!(
-                    "Invalid parameter format '{}'. Expected 'key=value'",
-                    part
-                ));
-            }
-        }
-
-        Ok(ColumnBloomFilterConfig {
-            fpp: fpp.unwrap_or(DEFAULT_BLOOM_FILTER_FPP),
-            ndv,
+        let params = parse_bloom_filter_params(s)?;
+        Ok(Self {
+            fpp: params.fpp.unwrap_or(DEFAULT_BLOOM_FILTER_FPP),
+            ndv: params.ndv,
         })
     }
 }
@@ -857,6 +846,17 @@ impl BloomFilterConfig {
 
     pub fn get_column_config(&self, col_name: &str) -> Option<&ColumnSpecificBloomFilterConfig> {
         self.column_enabled.iter().find(|c| c.name == col_name)
+    }
+
+    /// Returns true if user specified NDV for any column or globally.
+    /// When NDV is specified, bloom filters should be enabled unconditionally (not tied to dictionary).
+    pub fn has_user_specified_ndv(&self) -> bool {
+        // check global setting
+        if self.all_enabled.as_ref().is_some_and(|c| c.ndv.is_some()) {
+            return true;
+        }
+        // check per-column settings
+        self.column_enabled.iter().any(|c| c.config.ndv.is_some())
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -1119,21 +1119,34 @@ pub struct TransformCommand {
     //
     // ─── Parquet Options ───────────────────────────────────────────────────────────────
     //
-    /// Bloom filters are enabled for all columns by default; use this to customize settings.
+    /// Enable bloom filters for columns (default behavior).
+    ///
+    /// DICTIONARY/BLOOM INTERACTION:
+    /// Bloom filters are coupled to dictionary encoding decisions:
+    ///   - Columns that KEEP dictionary encoding → bloom filter enabled (using analyzed NDV)
+    ///   - Columns where dictionary is DISABLED (high cardinality) → bloom filter disabled
+    ///   - This coupling exists because both features degrade for high-cardinality data
+    ///
+    /// To force bloom filters ON regardless of dictionary decisions, specify explicit NDV:
+    ///   --parquet-bloom-column "high_card_col:ndv=100000"
+    ///
+    /// NESTED TYPES (structs, lists, maps):
+    /// Bloom filters apply to leaf columns within nested structures. The column path uses
+    /// dot notation (e.g., "struct_col.field" or "list_col.element").
     ///
     /// Formats:
     ///   --parquet-bloom-all                       # Use defaults (fpp=0.01, auto NDV)
-    ///   --parquet-bloom-all "fpp=VALUE"           # Custom FPP
-    ///   --parquet-bloom-all "ndv=VALUE"           # Custom NDV
-    ///   --parquet-bloom-all "fpp=VALUE,ndv=VALUE" # Custom FPP and NDV
+    ///   --parquet-bloom-all "fpp=VALUE"           # Custom false positive probability
+    ///   --parquet-bloom-all "ndv=VALUE"           # Force bloom on with explicit NDV
+    ///   --parquet-bloom-all "fpp=VALUE,ndv=VALUE" # Both custom
     ///
-    /// Can be combined with --parquet-bloom-column-off to exclude specific columns.
+    /// CONFLICTS: Cannot be used with --parquet-bloom-all-off.
     ///
     /// Examples:
-    ///   --parquet-bloom-all                     # Use defaults
-    ///   --parquet-bloom-all "fpp=0.001"         # Custom FPP
-    ///   --parquet-bloom-all "ndv=10000"         # Custom NDV (10k distinct values)
-    ///   --parquet-bloom-all --parquet-bloom-column-off user_id  # All except user_id
+    ///   --parquet-bloom-all                                     # Bloom for low-cardinality columns
+    ///   --parquet-bloom-all "fpp=0.001"                         # Tighter false positive rate
+    ///   --parquet-bloom-all "ndv=10000"                         # Force bloom on ALL columns
+    ///   --parquet-bloom-all --parquet-bloom-column-off user_id  # Exclude user_id
     #[arg(
         long,
         value_name = "[fpp=VALUE][,ndv=VALUE]",
@@ -1145,12 +1158,15 @@ pub struct TransformCommand {
     )]
     pub parquet_bloom_all: Option<AllColumnsBloomFilterConfig>,
 
-    /// Disable bloom filters for all columns (default is enabled for all columns).
+    /// Disable bloom filters for all columns.
     ///
-    /// Can be combined with --parquet-bloom-column to enable for specific columns only.
+    /// Use with --parquet-bloom-column to enable bloom filters for specific columns only.
+    ///
+    /// CONFLICTS: Cannot be used with --parquet-bloom-all.
     ///
     /// Examples:
-    ///   --parquet-bloom-all-off --parquet-bloom-column user_id  # Only user_id has bloom filter
+    ///   --parquet-bloom-all-off                                 # No bloom filters
+    ///   --parquet-bloom-all-off --parquet-bloom-column user_id  # Only user_id
     #[arg(
         long = "parquet-bloom-all-off",
         conflicts_with = "parquet_bloom_all",
@@ -1159,21 +1175,31 @@ pub struct TransformCommand {
     )]
     pub parquet_bloom_all_off: bool,
 
-    /// Customize bloom filters for specific columns with optional custom settings.
+    /// Enable or customize bloom filters for specific columns.
     ///
     /// Overrides --parquet-bloom-all-off for the specified columns.
-    /// Use with --parquet-bloom-all-off to enable only specific columns.
+    ///
+    /// WITHOUT explicit NDV: bloom filter depends on dictionary decision (see --parquet-bloom-all).
+    /// WITH explicit NDV: bloom filter is FORCED ON regardless of dictionary encoding.
+    ///
+    /// Use explicit NDV to enable bloom filters on high-cardinality columns that won't
+    /// use dictionary encoding (e.g., UUIDs, timestamps).
+    ///
+    /// NESTED TYPES: Use dot notation for leaf columns (e.g., "struct_col.field").
     ///
     /// Formats:
-    ///   COLUMN                     # Use defaults (fpp=0.01, auto NDV)
-    ///   COLUMN:fpp=VALUE           # Custom FPP
-    ///   COLUMN:ndv=VALUE           # Custom NDV
-    ///   COLUMN:fpp=VALUE,ndv=VALUE # Custom FPP and NDV
+    ///   COLUMN                     # Depends on dictionary decision
+    ///   COLUMN:fpp=VALUE           # Custom false positive probability
+    ///   COLUMN:ndv=VALUE           # Force bloom ON with explicit NDV
+    ///   COLUMN:fpp=VALUE,ndv=VALUE # Both custom
+    ///
+    /// CONFLICTS: Cannot specify same column in both --parquet-bloom-column and
+    /// --parquet-bloom-column-off.
     ///
     /// Examples:
-    ///   --parquet-bloom-column "user_id"                   # Use defaults
-    ///   --parquet-bloom-column "user_id:fpp=0.001"         # Custom FPP
-    ///   --parquet-bloom-column "user_id:ndv=50000"         # Custom NDV
+    ///   --parquet-bloom-column "region"                    # If region keeps dictionary
+    ///   --parquet-bloom-column "user_id:ndv=1000000"       # Force bloom on high-card column
+    ///   --parquet-bloom-column "user_id:fpp=0.001"         # Tighter FPP
     #[arg(
         long,
         value_name = "COLUMN[:fpp=VALUE][,ndv=VALUE]",
@@ -1186,9 +1212,14 @@ pub struct TransformCommand {
     ///
     /// Overrides --parquet-bloom-all for the specified columns.
     ///
+    /// NESTED TYPES: Use dot notation for leaf columns (e.g., "struct_col.field").
+    ///
+    /// CONFLICTS: Cannot specify same column in both --parquet-bloom-column and
+    /// --parquet-bloom-column-off.
+    ///
     /// Examples:
-    ///   --parquet-bloom-all --parquet-bloom-column-off user_id  # All columns except user_id
-    ///   --parquet-bloom-column-off user_id --parquet-bloom-column-off session_id
+    ///   --parquet-bloom-all --parquet-bloom-column-off user_id  # All except user_id
+    ///   --parquet-bloom-column-off col1 --parquet-bloom-column-off col2  # Disable multiple
     #[arg(
         long = "parquet-bloom-column-off",
         value_name = "COLUMN",
@@ -1196,14 +1227,6 @@ pub struct TransformCommand {
         help_heading = "Parquet Options"
     )]
     pub parquet_bloom_column_off: Vec<String>,
-
-    /// Channel buffer size for batches sent to row group encoder tasks.
-    ///
-    /// Controls how many batches can be buffered between the coordinator and each
-    /// row group encoder. Higher values reduce backpressure but use more memory.
-    /// Defaults to 16.
-    #[arg(long, help_heading = "Parquet Tuning Options", value_parser = parse_at_least_one)]
-    pub parquet_batch_channel_size: Option<usize>,
 
     /// I/O buffer size for Parquet writing (e.g., "32MB", "64MB", "1GB").
     ///
@@ -1216,13 +1239,19 @@ pub struct TransformCommand {
     /// Disable dictionary encoding globally for all Parquet columns.
     ///
     /// Dictionary encoding builds a dictionary of unique values and stores references to it,
-    /// which is very effective for low-cardinality columns (few unique values). When disabled,
-    /// columns use their data page encoding directly.
+    /// which is effective for low-cardinality columns (few unique values). When disabled,
+    /// columns use their data page encoding directly (see --parquet-encoding).
     ///
-    /// Default: dictionary encoding is enabled.
+    /// DEFAULT BEHAVIOR (without this flag):
+    ///   - Primitive columns use "analyze" mode: cardinality analysis decides per-row-group
+    ///     whether to use dictionary (disabled if >20% distinct values)
+    ///   - Nested columns (structs, lists, maps) use "always" mode: dictionary encoding is
+    ///     always attempted (parquet-rs handles overflow gracefully)
     ///
-    /// Use --parquet-dictionary-column or --parquet-dictionary-column-off to override
-    /// this setting for specific columns.
+    /// BLOOM FILTER IMPACT: Disabling dictionary also disables bloom filters for affected
+    /// columns (unless explicit NDV is provided via --parquet-bloom-column).
+    ///
+    /// Use --parquet-dictionary-column to re-enable for specific columns.
     #[arg(
         long = "parquet-dictionary-all-off",
         verbatim_doc_comment,
@@ -1232,23 +1261,46 @@ pub struct TransformCommand {
 
     /// Enable dictionary encoding for specific columns. Can be specified multiple times.
     ///
-    /// Overrides --parquet-dictionary-all-off for the named columns, enabling dictionary encoding
-    /// even when it's globally disabled.
+    /// Overrides --parquet-dictionary-all-off for the named columns.
     ///
-    /// Useful when most columns have high cardinality (dictionary disabled globally) but
-    /// a few columns have low cardinality and would benefit from dictionary encoding.
+    /// Format: COLUMN:MODE where MODE is:
+    ///   - analyze: Cardinality analysis decides per-row-group (disabled if >20% distinct)
+    ///   - always: Always attempt dictionary; parquet-rs handles overflow gracefully
+    ///
+    /// NESTED TYPES (structs, lists, maps):
+    /// Cardinality analysis only works on primitive columns. Nested columns automatically
+    /// use "always" mode even if you specify "analyze". Use dot notation for leaf columns
+    /// (e.g., "struct_col.field").
+    ///
+    /// BLOOM FILTER INTERACTION:
+    /// The cardinality analysis from "analyze" mode also provides NDV for bloom filter sizing.
+    /// When dictionary is disabled (high cardinality), bloom filters are also disabled unless
+    /// you provide explicit NDV via --parquet-bloom-column.
+    ///
+    /// CONFLICTS: Cannot specify same column in both --parquet-dictionary-column and
+    /// --parquet-dictionary-column-off.
+    ///
+    /// Examples:
+    ///   --parquet-dictionary-column region:analyze       # Let analysis decide
+    ///   --parquet-dictionary-column region:always        # Force dictionary on
+    ///   --parquet-dictionary-column "nested.field:always"  # Nested column leaf
     #[arg(
         long = "parquet-dictionary-column",
-        value_name = "COLUMN",
+        value_name = "COLUMN:MODE",
         verbatim_doc_comment,
         help_heading = "Parquet Options"
     )]
-    pub parquet_dictionary_column: Vec<String>,
+    pub parquet_dictionary_column: Vec<ColumnDictionaryConfig>,
 
     /// Set data page encoding for specific columns. Can be specified multiple times.
     ///
-    /// Overrides --parquet-encoding for the named column. See --parquet-encoding for
-    /// how this interacts with dictionary encoding.
+    /// Overrides --parquet-encoding and automatic encoding selection for the named column.
+    ///
+    /// DICTIONARY INTERACTION:
+    ///   - Dictionary ENABLED: this encoding is used when dictionary overflows
+    ///   - Dictionary DISABLED: this encoding is used for all data
+    ///
+    /// NESTED TYPES: Use dot notation for leaf columns (e.g., "struct_col.field").
     ///
     /// Format: COLUMN=ENCODING
     ///
@@ -1256,9 +1308,9 @@ pub struct TransformCommand {
     /// byte-stream-split
     ///
     /// Examples:
-    ///   --parquet-column-encoding id=delta-binary-packed
-    ///   --parquet-column-encoding name=delta-byte-array
-    ///   --parquet-column-encoding price=byte-stream-split
+    ///   --parquet-column-encoding id=delta-binary-packed      # Efficient for sorted integers
+    ///   --parquet-column-encoding name=delta-byte-array       # Efficient for strings
+    ///   --parquet-column-encoding price=byte-stream-split     # Efficient for floats
     #[arg(
         long,
         value_name = "COLUMN=ENCODING",
@@ -1275,17 +1327,38 @@ pub struct TransformCommand {
     #[arg(long, help_heading = "Parquet Tuning Options", value_parser = parse_at_least_one)]
     pub parquet_column_encoding_threads: Option<usize>,
 
-    /// Channel buffer size for encoded row groups sent to the writer task.
+    /// Queue size for record batches waiting to be assembled into row groups.
     ///
-    /// Controls how many encoded row groups can be buffered before writing to disk.
-    /// Higher values allow more encoding to proceed while I/O is in progress.
-    /// Defaults to 4.
-    #[arg(long, help_heading = "Parquet Tuning Options", value_parser = parse_at_least_one)]
-    pub parquet_encoded_channel_size: Option<usize>,
+    /// Controls backpressure between the data source and ingestion stage. Higher
+    /// values allow the source to stay ahead of row group assembly.
+    #[arg(long, help_heading = "Parquet Tuning Options", default_value = "1", value_parser = parse_at_least_one)]
+    pub parquet_ingest_queue_size: usize,
+
+    /// Queue size for row groups waiting to be encoded.
+    ///
+    /// Controls backpressure between ingestion and encoding stages. Higher values
+    /// allow more row groups to be assembled while encoders are busy.
+    #[arg(long, help_heading = "Parquet Tuning Options", default_value = "4", value_parser = parse_at_least_one)]
+    pub parquet_encoding_queue_size: usize,
+
+    /// Queue size for encoded row groups waiting to be written to disk.
+    ///
+    /// Controls backpressure between encoding and I/O stages. Higher values allow
+    /// more encoding to proceed while I/O is in progress.
+    #[arg(long, help_heading = "Parquet Tuning Options", default_value = "4", value_parser = parse_at_least_one)]
+    pub parquet_write_queue_size: usize,
 
     /// Disable dictionary encoding for specific columns. Can be specified multiple times.
     ///
-    /// Overrides the default (dictionary enabled) for the named columns.
+    /// Overrides the default (dictionary enabled with analysis) for the named columns.
+    ///
+    /// BLOOM FILTER IMPACT: Disabling dictionary also disables bloom filters for the column
+    /// (unless you provide explicit NDV via --parquet-bloom-column).
+    ///
+    /// NESTED TYPES: Use dot notation for leaf columns (e.g., "struct_col.field").
+    ///
+    /// CONFLICTS: Cannot specify same column in both --parquet-dictionary-column and
+    /// --parquet-dictionary-column-off.
     ///
     /// Useful for high-cardinality columns like UUIDs or timestamps where dictionary
     /// encoding adds overhead without compression benefit.
@@ -1301,29 +1374,27 @@ pub struct TransformCommand {
     #[arg(long, value_enum, help_heading = "Parquet Options")]
     pub parquet_compression: Option<ParquetCompression>,
 
-    /// Parquet encoder strategy.
-    ///
-    /// Controls whether to use the sequential (single-threaded) or parallel
-    /// (multi-threaded) encoder. Parallel is faster for large files but has
-    /// higher memory overhead.
-    #[arg(
-        long,
-        value_enum,
-        default_value_t,
-        help_heading = "Parquet Tuning Options"
-    )]
-    pub parquet_encoder: ParquetEncoder,
-
     /// Data page encoding for Parquet columns.
     ///
     /// This encoding is used for column data pages. Its role depends on dictionary encoding:
-    /// - Dictionary enabled (default): this is the fallback encoding, used when the dictionary
-    ///   becomes too large or is inefficient for the data.
-    /// - Dictionary disabled: this is the primary encoding for all data.
+    ///   - Dictionary ENABLED: this is the fallback encoding when dictionary overflows
+    ///   - Dictionary DISABLED: this is the primary encoding for all data
     ///
-    /// If not specified, the writer automatically selects an encoding based on column type
-    /// and writer version. With Parquet v2: integers use delta-binary-packed, strings use
-    /// delta-byte-array, booleans use rle. With Parquet v1: everything uses plain.
+    /// AUTOMATIC ENCODING (when not specified):
+    /// The writer automatically selects encodings based on writer version:
+    ///
+    ///   V1 (--parquet-writer-version=v1):
+    ///     All columns use PLAIN encoding for maximum compatibility with older readers.
+    ///
+    ///   V2 (default):
+    ///     Optimized encodings are selected based on column type:
+    ///       - Integers → delta-binary-packed (good for sorted/sequential data)
+    ///       - Floats → byte-stream-split (better compression for floats)
+    ///       - Strings/Binary → delta-length-byte-array
+    ///       - Booleans → plain
+    ///
+    /// Use this flag to override automatic selection globally, or --parquet-column-encoding
+    /// for specific columns.
     ///
     /// Options: plain, rle, delta-binary-packed, delta-length-byte-array, delta-byte-array,
     /// byte-stream-split
@@ -1415,6 +1486,17 @@ pub struct TransformCommand {
     #[arg(long, help_heading = "Parquet Options")]
     pub parquet_offset_index: bool,
 
+    /// Write statistics to page headers.
+    ///
+    /// Embeds min/max statistics in each data page header. This is redundant with
+    /// column index statistics and can increase file size. Plus it's generally
+    /// not used by query engines.
+    ///
+    /// Only use if you know what you're doing.
+    /// Default: disabled.
+    #[arg(long, help_heading = "Parquet Options")]
+    pub parquet_page_header_statistics: bool,
+
     /// Embed Arrow schema in file metadata.
     ///
     /// Stores the original Arrow schema in the Parquet file's key-value metadata.
@@ -1457,7 +1539,6 @@ impl TransformCommand {
             arrow_compression: None,
             arrow_format: None,
             arrow_record_batch_size: None,
-            parquet_batch_channel_size: None,
             parquet_bloom_all: None,
             parquet_bloom_all_off: false,
             parquet_bloom_column: vec![],
@@ -1466,10 +1547,11 @@ impl TransformCommand {
             parquet_dictionary_column: vec![],
             parquet_column_encoding: vec![],
             parquet_column_encoding_threads: None,
-            parquet_encoded_channel_size: None,
+            parquet_ingest_queue_size: 1,
+            parquet_encoding_queue_size: 4,
+            parquet_write_queue_size: 4,
             parquet_dictionary_column_off: vec![],
             parquet_compression: None,
-            parquet_encoder: ParquetEncoder::default(),
             parquet_encoding: None,
             parquet_io_threads: None,
             parquet_dictionary_all_off: false,
@@ -1483,6 +1565,7 @@ impl TransformCommand {
             parquet_dictionary_page_size: None,
             parquet_write_batch_size: None,
             parquet_offset_index: false,
+            parquet_page_header_statistics: false,
             parquet_arrow_metadata: false,
             vortex_record_batch_size: None,
         }
@@ -1701,16 +1784,6 @@ mod tests {
                 ParquetEncoding::from_str("byte-stream-split", true),
                 Ok(ParquetEncoding::ByteStreamSplit)
             );
-        }
-
-        #[test]
-        fn test_parquet_encoding_requires_v2() {
-            assert!(!ParquetEncoding::Plain.requires_v2());
-            assert!(!ParquetEncoding::Rle.requires_v2());
-            assert!(ParquetEncoding::DeltaBinaryPacked.requires_v2());
-            assert!(ParquetEncoding::DeltaLengthByteArray.requires_v2());
-            assert!(ParquetEncoding::DeltaByteArray.requires_v2());
-            assert!(ParquetEncoding::ByteStreamSplit.requires_v2());
         }
 
         #[test]

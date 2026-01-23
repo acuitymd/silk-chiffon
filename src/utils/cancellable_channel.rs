@@ -1,12 +1,14 @@
-//! Cancellable channel wrappers built on tokio mpsc.
+//! Cancellable channel wrappers built on flume.
 //!
-//! Provides wrappers around tokio bounded channels that support graceful
+//! Provides wrappers around flume channels that support graceful
 //! cancellation via a shared CancellationToken.
 
 use std::fmt::{self, Display, Formatter};
 
-use tokio::sync::mpsc;
+use flume::{Receiver, Sender, bounded, unbounded};
 use tokio_util::sync::CancellationToken;
+
+use crate::utils::blocking::block_on;
 
 /// Error type for channel operations.
 #[derive(Debug)]
@@ -38,17 +40,17 @@ impl Display for ChannelError {
 impl std::error::Error for ChannelError {}
 
 pub struct CancellableSender<T> {
-    tx: mpsc::Sender<T>,
-    token: CancellationToken,
+    tx: Sender<T>,
+    cancel_token: CancellationToken,
     channel_name: &'static str,
     task_name: Option<String>,
 }
 
 impl<T> CancellableSender<T> {
-    pub fn new(tx: mpsc::Sender<T>, token: CancellationToken, channel_name: &'static str) -> Self {
+    pub fn new(tx: Sender<T>, cancel_token: CancellationToken, channel_name: &'static str) -> Self {
         Self {
             tx,
-            token,
+            cancel_token,
             channel_name,
             task_name: None,
         }
@@ -63,8 +65,8 @@ impl<T> CancellableSender<T> {
     pub async fn send(&self, value: T) -> Result<(), ChannelError> {
         tokio::select! {
             biased;
-            _ = self.token.cancelled() => Err(ChannelError::Cancelled),
-            result = self.tx.send(value) => {
+            _ = self.cancel_token.cancelled() => Err(ChannelError::Cancelled),
+            result = self.tx.send_async(value) => {
                 result.map_err(|_| ChannelError::Disconnected {
                     channel: self.channel_name,
                     task: self.task_name.clone(),
@@ -72,35 +74,48 @@ impl<T> CancellableSender<T> {
             }
         }
     }
+
+    pub fn blocking_send(&self, value: T) -> Result<(), ChannelError> {
+        block_on(self.send(value))
+    }
 }
 
 impl<T> Clone for CancellableSender<T> {
     fn clone(&self) -> Self {
         Self {
             tx: self.tx.clone(),
-            token: self.token.clone(),
+            cancel_token: self.cancel_token.clone(),
             channel_name: self.channel_name,
-            task_name: None,
+            task_name: self.task_name.clone(),
         }
     }
 }
 
+impl<T> std::fmt::Debug for CancellableSender<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CancellableSender")
+            .field("channel_name", &self.channel_name)
+            .field("task_name", &self.task_name)
+            .finish_non_exhaustive()
+    }
+}
+
 pub struct CancellableReceiver<T> {
-    rx: mpsc::Receiver<T>,
-    token: CancellationToken,
+    rx: Receiver<T>,
+    cancel_token: CancellationToken,
     channel_name: &'static str,
     task_name: Option<String>,
 }
 
 impl<T> CancellableReceiver<T> {
     pub fn new(
-        rx: mpsc::Receiver<T>,
-        token: CancellationToken,
+        rx: Receiver<T>,
+        cancel_token: CancellationToken,
         channel_name: &'static str,
     ) -> Self {
         Self {
             rx,
-            token,
+            cancel_token,
             channel_name,
             task_name: None,
         }
@@ -115,27 +130,67 @@ impl<T> CancellableReceiver<T> {
     pub async fn recv(&mut self) -> Result<T, ChannelError> {
         tokio::select! {
             biased;
-            _ = self.token.cancelled() => Err(ChannelError::Cancelled),
-            msg = self.rx.recv() => {
-                msg.ok_or(ChannelError::Disconnected {
+            _ = self.cancel_token.cancelled() => Err(ChannelError::Cancelled),
+            result = self.rx.recv_async() => {
+                result.map_err(|_| ChannelError::Disconnected {
                     channel: self.channel_name,
                     task: self.task_name.clone(),
                 })
             }
         }
     }
+
+    pub fn blocking_recv(&mut self) -> Result<T, ChannelError> {
+        block_on(self.recv())
+    }
+}
+
+impl<T> Clone for CancellableReceiver<T> {
+    fn clone(&self) -> Self {
+        Self {
+            rx: self.rx.clone(),
+            cancel_token: self.cancel_token.clone(),
+            channel_name: self.channel_name,
+            task_name: self.task_name.clone(),
+        }
+    }
+}
+
+impl<T> std::fmt::Debug for CancellableReceiver<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CancellableReceiver")
+            .field("channel_name", &self.channel_name)
+            .field("task_name", &self.task_name)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Create a cancellable bounded channel.
-pub fn cancellable_channel<T>(
+pub fn cancellable_channel_bounded<T>(
     capacity: usize,
-    token: CancellationToken,
+    cancel_token: CancellationToken,
     channel_name: &'static str,
 ) -> (CancellableSender<T>, CancellableReceiver<T>) {
-    let (tx, rx) = mpsc::channel(capacity);
+    let (tx, rx) = bounded::<T>(capacity);
     (
-        CancellableSender::new(tx, token.clone(), channel_name),
-        CancellableReceiver::new(rx, token, channel_name),
+        CancellableSender::new(tx, cancel_token.clone(), channel_name),
+        CancellableReceiver::new(rx, cancel_token, channel_name),
+    )
+}
+
+/// Create a cancellable unbounded channel.
+///
+/// Warning: unbounded channels can grow without limit if the receiver
+/// is slower than the sender. Use bounded channels when backpressure
+/// is needed to prevent unbounded memory growth.
+pub fn cancellable_channel_unbounded<T>(
+    cancel_token: CancellationToken,
+    channel_name: &'static str,
+) -> (CancellableSender<T>, CancellableReceiver<T>) {
+    let (tx, rx) = unbounded::<T>();
+    (
+        CancellableSender::new(tx, cancel_token.clone(), channel_name),
+        CancellableReceiver::new(rx, cancel_token, channel_name),
     )
 }
 
@@ -145,8 +200,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_recv_basic() {
-        let token = CancellationToken::new();
-        let (tx, mut rx) = cancellable_channel(4, token, "test");
+        let cancel_token = CancellationToken::new();
+        let (tx, mut rx) = cancellable_channel_bounded(4, cancel_token, "test");
 
         tx.send(42).await.unwrap();
         let received = rx.recv().await.unwrap();
@@ -155,10 +210,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_cancelled_send() {
-        let token = CancellationToken::new();
-        let (tx, mut _rx) = cancellable_channel::<i32>(1, token.clone(), "test");
+        let cancel_token = CancellationToken::new();
+        let (tx, mut _rx) = cancellable_channel_bounded::<i32>(1, cancel_token.clone(), "test");
 
-        token.cancel();
+        cancel_token.cancel();
 
         let result = tx.send(42).await;
         assert!(matches!(result, Err(ChannelError::Cancelled)));
@@ -166,10 +221,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_cancelled_recv() {
-        let token = CancellationToken::new();
-        let (_tx, mut rx) = cancellable_channel::<i32>(4, token.clone(), "test");
+        let cancel_token = CancellationToken::new();
+        let (_tx, mut rx) = cancellable_channel_bounded::<i32>(4, cancel_token.clone(), "test");
 
-        token.cancel();
+        cancel_token.cancel();
 
         let result = rx.recv().await;
         assert!(matches!(result, Err(ChannelError::Cancelled)));
@@ -177,8 +232,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_disconnected_on_drop() {
-        let token = CancellationToken::new();
-        let (tx, mut rx) = cancellable_channel::<i32>(4, token, "test");
+        let cancel_token = CancellationToken::new();
+        let (tx, mut rx) = cancellable_channel_bounded::<i32>(4, cancel_token.clone(), "test");
 
         drop(tx);
 
@@ -194,8 +249,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_task_name_in_recv_error() {
-        let token = CancellationToken::new();
-        let (tx, rx) = cancellable_channel::<i32>(4, token, "input");
+        let cancel_token = CancellationToken::new();
+        let (tx, rx) = cancellable_channel_bounded::<i32>(4, cancel_token.clone(), "input");
         let mut rx = rx.with_task_name("reader-0");
 
         drop(tx);
@@ -212,8 +267,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_task_name_in_send_error() {
-        let token = CancellationToken::new();
-        let (tx, rx) = cancellable_channel::<i32>(4, token, "output");
+        let cancel_token = CancellationToken::new();
+        let (tx, rx) = cancellable_channel_bounded::<i32>(4, cancel_token.clone(), "output");
         let tx = tx.with_task_name("writer-0");
 
         drop(rx);
@@ -226,5 +281,49 @@ mod tests {
             }
             _ => panic!("expected Disconnected error"),
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_blocking_send_recv() {
+        let cancel_token = CancellationToken::new();
+        let (tx, mut rx) = cancellable_channel_bounded::<i32>(4, cancel_token, "test");
+
+        tx.blocking_send(42).unwrap();
+        tx.blocking_send(43).unwrap();
+
+        assert_eq!(rx.blocking_recv().unwrap(), 42);
+        assert_eq!(rx.blocking_recv().unwrap(), 43);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_blocking_cancelled() {
+        let cancel_token = CancellationToken::new();
+        let (tx, mut rx) = cancellable_channel_bounded::<i32>(4, cancel_token.clone(), "test");
+
+        cancel_token.cancel();
+
+        assert!(matches!(tx.blocking_send(42), Err(ChannelError::Cancelled)));
+        assert!(matches!(rx.blocking_recv(), Err(ChannelError::Cancelled)));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_blocking_disconnected() {
+        let cancel_token = CancellationToken::new();
+        let (tx, rx) = cancellable_channel_bounded::<i32>(4, cancel_token, "test");
+
+        drop(rx);
+        assert!(matches!(
+            tx.blocking_send(42),
+            Err(ChannelError::Disconnected { .. })
+        ));
+
+        let cancel_token = CancellationToken::new();
+        let (tx, mut rx) = cancellable_channel_bounded::<i32>(4, cancel_token, "test");
+
+        drop(tx);
+        assert!(matches!(
+            rx.blocking_recv(),
+            Err(ChannelError::Disconnected { .. })
+        ));
     }
 }

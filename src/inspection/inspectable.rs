@@ -15,9 +15,9 @@ use tabled::{
     settings::{Alignment, Modify, object::Columns},
 };
 
-use crate::inspection::style::{boolean_false, boolean_true};
-
-use super::style::{column_name, data_type, dim, header, label, rounded_table, value};
+use crate::inspection::style::{
+    boolean_display, column_name, data_type, dim, header, label, rounded_table, value,
+};
 
 /// Common trait for inspecting data files.
 pub trait Inspectable: Send + Sync {
@@ -74,6 +74,14 @@ pub fn format_number(n: u64) -> String {
     n.to_formatted_string(&Locale::en)
 }
 
+/// Truncate a string to at most `max_chars` characters, returning a slice.
+pub fn truncate_chars(s: &str, max_chars: usize) -> &str {
+    match s.char_indices().nth(max_chars) {
+        Some((idx, _)) => &s[..idx],
+        None => s,
+    }
+}
+
 const MAX_METADATA_DISPLAY_CHARS: usize = 100;
 
 /// Truncate a string for display, adding char count if truncated.
@@ -125,11 +133,7 @@ pub fn render_schema_fields(schema: &SchemaRef, out: &mut dyn Write) -> Result<(
             SchemaFieldRow {
                 name: column_name(f.name()),
                 data_type: data_type(&dt),
-                nullable: if f.is_nullable() {
-                    boolean_true()
-                } else {
-                    boolean_false()
-                },
+                nullable: boolean_display(f.is_nullable()),
             }
         })
         .collect();

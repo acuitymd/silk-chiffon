@@ -7,15 +7,15 @@
 use anyhow::{Context, Result};
 use rayon::ThreadPool;
 
-pub struct ParquetPools {
+pub struct ParquetThreadPools {
     pub encoding: ThreadPool,
     pub io: ThreadPool,
 }
 
-impl ParquetPools {
+impl ParquetThreadPools {
     pub fn new(encoding_threads: usize, io_threads: usize) -> Result<Self> {
-        assert!(encoding_threads > 0, "encoding_threads must be > 0");
-        assert!(io_threads > 0, "io_threads must be > 0");
+        anyhow::ensure!(encoding_threads > 0, "encoding_threads must be > 0");
+        anyhow::ensure!(io_threads > 0, "io_threads must be > 0");
         Ok(Self {
             encoding: rayon::ThreadPoolBuilder::new()
                 .num_threads(encoding_threads)
@@ -45,14 +45,14 @@ mod tests {
 
     #[test]
     fn test_pools_creation() {
-        let pools = ParquetPools::new(2, 2).unwrap();
+        let pools = ParquetThreadPools::new(2, 2).unwrap();
         assert_eq!(pools.encoding.current_num_threads(), 2);
         assert_eq!(pools.io.current_num_threads(), 2);
     }
 
     #[test]
     fn test_default_pools() {
-        let pools = ParquetPools::default_pools().unwrap();
+        let pools = ParquetThreadPools::default_pools().unwrap();
         let cpus = std::thread::available_parallelism()
             .map(|p| p.get())
             .unwrap_or(4);
@@ -62,7 +62,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_pools_work_independently() {
-        let pools = ParquetPools::new(2, 2).unwrap();
+        let pools = ParquetThreadPools::new(2, 2).unwrap();
 
         let encoding_result = spawn_on_pool(&pools.encoding, || {
             let mut sum = 0u64;

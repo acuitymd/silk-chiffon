@@ -140,6 +140,16 @@ pub fn boolean_false() -> String {
     dim("□")
 }
 
+/// Format a boolean for display using glyph styling.
+pub fn boolean_display(b: bool) -> String {
+    if b { boolean_true() } else { boolean_false() }
+}
+
+/// Format a boolean for display using glyph styling, or missing value if false.
+pub fn true_or_missing_display(b: bool) -> String {
+    if b { boolean_true() } else { missing_value() }
+}
+
 pub fn missing_value() -> String {
     dim("-")
 }

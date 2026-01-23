@@ -14,7 +14,7 @@ use num_format::{Locale, ToFormattedString};
 use owo_colors::OwoColorize;
 use parquet::{
     arrow::parquet_to_arrow_schema,
-    basic::{Compression, LogicalType, TimeUnit},
+    basic::{Compression, ConvertedType, LogicalType, TimeUnit},
     column::page::Page,
     file::{
         metadata::SortingColumn,
@@ -33,18 +33,14 @@ use tabled::{
 };
 
 use crate::inspection::{
-    magic::{magic_bytes_match_end, magic_bytes_match_start},
-    style::missing_value,
-};
-
-use super::{
     inspectable::{
         Inspectable, format_bytes, format_number, render_metadata_map, render_schema_fields,
-        schema_to_json,
+        schema_to_json, truncate_chars,
     },
+    magic::{magic_bytes_match_end, magic_bytes_match_start},
     style::{
-        apply_theme, boolean_false, boolean_true, column_name, compression, dim, encoding, header,
-        label, value,
+        apply_theme, boolean_display, column_name, compression, dim, encoding, header, label,
+        missing_value, true_or_missing_display, value,
     },
 };
 
@@ -55,8 +51,10 @@ pub struct ParquetInspector {
     row_groups: Vec<RowGroupInfo>,
     num_rows: u64,
     num_columns: usize,
+    file_size: u64,
     total_compressed_size: u64,
     total_uncompressed_size: u64,
+    total_bloom_filter_size: u64,
     compression_codecs: HashSet<String>,
     has_dictionary: bool,
     has_bloom_filters: bool,
@@ -142,10 +140,14 @@ pub struct FileColumnStats {
 }
 
 impl ColumnStatistics {
-    fn from_parquet(stats: &Statistics, logical_type: Option<&LogicalType>) -> Self {
+    fn from_parquet(
+        stats: &Statistics,
+        logical_type: Option<&LogicalType>,
+        converted_type: ConvertedType,
+    ) -> Self {
         Self {
-            min: format_stat_value(stats, logical_type, true),
-            max: format_stat_value(stats, logical_type, false),
+            min: format_stat_value(stats, logical_type, converted_type, true),
+            max: format_stat_value(stats, logical_type, converted_type, false),
             null_count: stats.null_count_opt(),
             distinct_count: stats.distinct_count_opt(),
         }
@@ -155,12 +157,16 @@ impl ColumnStatistics {
 fn format_stat_value(
     stats: &Statistics,
     logical_type: Option<&LogicalType>,
+    converted_type: ConvertedType,
     is_min: bool,
 ) -> Option<String> {
     match stats {
         Statistics::Int32(s) => {
             let val = if is_min { *s.min_opt()? } else { *s.max_opt()? };
-            if let Some(LogicalType::Date) = logical_type {
+            if matches!(logical_type, Some(LogicalType::Date))
+                || converted_type == ConvertedType::DATE
+            {
+                // 719163 = days from 0001-01-01 CE to 1970-01-01 (parquet stores days since CE)
                 let date = NaiveDate::from_num_days_from_ce_opt(val + 719163)?;
                 return Some(date.to_string());
             }
@@ -170,6 +176,16 @@ fn format_stat_value(
             let val = if is_min { *s.min_opt()? } else { *s.max_opt()? };
             if let Some(LogicalType::Timestamp { unit, .. }) = logical_type {
                 return Some(format_timestamp_chrono(val, unit));
+            }
+            // fallback to legacy converted types for timestamps
+            match converted_type {
+                ConvertedType::TIMESTAMP_MILLIS => {
+                    return Some(format_timestamp_chrono(val, &TimeUnit::MILLIS));
+                }
+                ConvertedType::TIMESTAMP_MICROS => {
+                    return Some(format_timestamp_chrono(val, &TimeUnit::MICROS));
+                }
+                _ => {}
             }
             Some(val.to_formatted_string(&Locale::en))
         }
@@ -260,8 +276,90 @@ fn read_page_encodings(rg_reader: &dyn RowGroupReader, col_idx: usize) -> Option
     Some(encodings)
 }
 
+/// read pages from a column and return JSON array of page details
+fn read_pages_json(rg_reader: &dyn RowGroupReader, col_idx: usize) -> Option<Vec<Value>> {
+    let mut page_reader = rg_reader.get_column_page_reader(col_idx).ok()?;
+    let mut pages = Vec::new();
+    let mut page_idx = 0;
+
+    while let Ok(Some(page)) = page_reader.get_next_page() {
+        let page_json = match &page {
+            Page::DictionaryPage {
+                buf,
+                num_values,
+                encoding,
+                is_sorted,
+            } => {
+                json!({
+                    "index": page_idx,
+                    "type": "Dict",
+                    "encoding": format!("{encoding:?}"),
+                    "num_values": num_values,
+                    "size": buf.len(),
+                    "is_sorted": is_sorted,
+                })
+            }
+            Page::DataPage {
+                buf,
+                num_values,
+                encoding,
+                def_level_encoding,
+                rep_level_encoding,
+                statistics,
+            } => {
+                let stats_json = statistics.as_ref().map(|_s| {
+                    // statistics in DataPage are already decoded by parquet-rs
+                    // but we don't have access to logical type here, so just note presence
+                    json!(true)
+                });
+                json!({
+                    "index": page_idx,
+                    "type": "Data",
+                    "encoding": format!("{encoding:?}"),
+                    "num_values": num_values,
+                    "size": buf.len(),
+                    "def_level_encoding": format!("{def_level_encoding:?}"),
+                    "rep_level_encoding": format!("{rep_level_encoding:?}"),
+                    "has_statistics": stats_json.is_some(),
+                })
+            }
+            Page::DataPageV2 {
+                buf,
+                num_values,
+                encoding,
+                num_nulls,
+                num_rows,
+                def_levels_byte_len,
+                rep_levels_byte_len,
+                is_compressed,
+                statistics,
+            } => {
+                let stats_json = statistics.as_ref().map(|_s| json!(true));
+                json!({
+                    "index": page_idx,
+                    "type": "DataV2",
+                    "encoding": format!("{encoding:?}"),
+                    "num_values": num_values,
+                    "size": buf.len(),
+                    "num_rows": num_rows,
+                    "num_nulls": num_nulls,
+                    "def_levels_byte_len": def_levels_byte_len,
+                    "rep_levels_byte_len": rep_levels_byte_len,
+                    "is_compressed": is_compressed,
+                    "has_statistics": stats_json.is_some(),
+                })
+            }
+        };
+        pages.push(page_json);
+        page_idx += 1;
+    }
+
+    if pages.is_empty() { None } else { Some(pages) }
+}
+
 impl ParquetInspector {
     pub fn open(path: &Utf8Path) -> Result<Self> {
+        let file_size = std::fs::metadata(path)?.len();
         let file = File::open(path)?;
         let reader = SerializedFileReader::new(file)?;
         let metadata = reader.metadata();
@@ -283,8 +381,10 @@ impl ParquetInspector {
             row_groups: Vec::new(),
             num_rows,
             num_columns: 0,
+            file_size,
             total_compressed_size: 0,
             total_uncompressed_size: 0,
+            total_bloom_filter_size: 0,
             compression_codecs: HashSet::new(),
             has_dictionary: false,
             has_bloom_filters: false,
@@ -324,9 +424,12 @@ impl ParquetInspector {
             for col_idx in 0..rg_meta.num_columns() {
                 let col_meta = rg_meta.column(col_idx);
                 let has_bloom = col_meta.bloom_filter_offset().is_some();
+                let bloom_filter_size =
+                    u64::from(col_meta.bloom_filter_length().unwrap_or(0).cast_unsigned());
                 let compression = col_meta.compression();
 
                 inspector.has_bloom_filters |= has_bloom;
+                inspector.total_bloom_filter_size += bloom_filter_size;
                 let compression_str = format_compression(compression);
                 inspector
                     .compression_codecs
@@ -358,7 +461,9 @@ impl ParquetInspector {
                     inspector.has_page_index = true;
                 }
 
-                let logical_type = col_meta.column_descr().logical_type_ref();
+                let col_descr = col_meta.column_descr();
+                let logical_type = col_descr.logical_type_ref();
+                let converted_type = col_descr.converted_type();
 
                 // column_path().to_string() wraps names in quotes, use parts instead
                 let name = col_meta.column_path().parts().join(".");
@@ -369,7 +474,7 @@ impl ParquetInspector {
 
                 let stats = col_meta
                     .statistics()
-                    .map(|s| ColumnStatistics::from_parquet(s, logical_type));
+                    .map(|s| ColumnStatistics::from_parquet(s, logical_type, converted_type));
 
                 let has_stats = stats.is_some();
 
@@ -424,6 +529,33 @@ impl ParquetInspector {
         inspector.num_columns = num_columns;
 
         Ok(inspector)
+    }
+
+    pub fn row_groups(&self) -> &[RowGroupInfo] {
+        &self.row_groups
+    }
+
+    pub fn column(&self, name: &str) -> Option<&ColumnInfo> {
+        self.row_groups
+            .first()?
+            .columns
+            .iter()
+            .find(|c| c.name == name)
+    }
+
+    pub fn column_in_row_group(&self, row_group: usize, name: &str) -> Option<&ColumnInfo> {
+        self.row_groups
+            .get(row_group)?
+            .columns
+            .iter()
+            .find(|c| c.name == name)
+    }
+
+    /// Calculate the metadata size (file_size - data - bloom filters).
+    fn metadata_size(&self) -> u64 {
+        self.file_size
+            .saturating_sub(self.total_compressed_size)
+            .saturating_sub(self.total_bloom_filter_size)
     }
 
     pub fn render_stats(&self, out: &mut dyn Write) -> Result<()> {
@@ -700,6 +832,7 @@ impl ParquetInspector {
         }
 
         let version_display = format!("{}.0", self.format_version);
+        let metadata_size = self.metadata_size();
 
         let mut info_rows = vec![
             InfoRow {
@@ -730,7 +863,26 @@ impl ParquetInspector {
                     format_bytes(self.total_compressed_size)
                 },
             },
+            InfoRow {
+                label: "File size".to_string(),
+                value: format_bytes(self.file_size),
+            },
         ];
+
+        // only show bloom filter size if there are bloom filters
+        if self.total_bloom_filter_size > 0 {
+            info_rows.push(InfoRow {
+                label: "Bloom filters".to_string(),
+                value: format_bytes(self.total_bloom_filter_size),
+            });
+        }
+
+        if metadata_size > 1024 {
+            info_rows.push(InfoRow {
+                label: "Metadata".to_string(),
+                value: format_bytes(metadata_size),
+            });
+        }
 
         if let Some(ref created_by) = self.created_by {
             info_rows.insert(
@@ -830,26 +982,10 @@ impl ParquetInspector {
                     } else {
                         format_bytes(col.compressed_size)
                     },
-                    dict: if col.has_dictionary {
-                        boolean_true()
-                    } else {
-                        boolean_false()
-                    },
-                    stats: if col.has_statistics {
-                        boolean_true()
-                    } else {
-                        boolean_false()
-                    },
-                    page_idx: if col.has_page_index {
-                        boolean_true()
-                    } else {
-                        boolean_false()
-                    },
-                    bloom: if col.has_bloom_filter {
-                        boolean_true()
-                    } else {
-                        boolean_false()
-                    },
+                    dict: boolean_display(col.has_dictionary),
+                    stats: boolean_display(col.has_statistics),
+                    page_idx: boolean_display(col.has_page_index),
+                    bloom: boolean_display(col.has_bloom_filter),
                 })
                 .collect();
             let mut col_table = Table::new(&col_rows);
@@ -953,7 +1089,7 @@ impl ParquetInspector {
                 .iter()
                 .map(|(k, v)| {
                     let truncated = if v.len() > 60 {
-                        format!("{}...", &v[..57])
+                        format!("{}...", truncate_chars(v, 57))
                     } else {
                         v.clone()
                     };
@@ -984,6 +1120,12 @@ impl ParquetInspector {
         let metadata = reader.metadata();
 
         if row_group_idx >= metadata.num_row_groups() {
+            writeln!(
+                out,
+                "Error: row group {} does not exist (file has {} row groups)",
+                row_group_idx,
+                metadata.num_row_groups()
+            )?;
             return Ok(());
         }
 
@@ -1034,65 +1176,83 @@ impl ParquetInspector {
                 rows: String,
                 #[tabled(rename = "Nulls")]
                 nulls: String,
+                #[tabled(rename = "Def")]
+                def_info: String,
+                #[tabled(rename = "Rep")]
+                rep_info: String,
+                #[tabled(rename = "Extra")]
+                extra: String,
             }
 
             let mut page_rows = Vec::new();
             if let Ok(mut page_reader) = rg_reader.get_column_page_reader(col_idx) {
                 let mut page_idx = 0;
                 while let Ok(Some(page)) = page_reader.get_next_page() {
-                    let (page_type, enc, num_values, size, rows, nulls) = match &page {
+                    let row = match &page {
                         Page::DictionaryPage {
                             buf,
                             num_values,
-                            encoding,
-                            ..
-                        } => (
-                            "Dict".to_string(),
-                            format!("{:?}", encoding),
-                            *num_values,
-                            buf.len(),
-                            None,
-                            None,
-                        ),
+                            encoding: enc,
+                            is_sorted,
+                        } => PageRow {
+                            index: page_idx,
+                            page_type: "Dict".to_string(),
+                            encoding: encoding(&format!("{enc:?}")),
+                            num_values: format_number(u64::from(*num_values)),
+                            size: format_bytes(buf.len() as u64),
+                            rows: missing_value(),
+                            nulls: missing_value(),
+                            def_info: missing_value(),
+                            rep_info: missing_value(),
+                            extra: true_or_missing_display(*is_sorted),
+                        },
                         Page::DataPage {
                             buf,
                             num_values,
-                            encoding,
+                            encoding: enc,
+                            def_level_encoding,
+                            rep_level_encoding,
                             ..
-                        } => (
-                            "Data".to_string(),
-                            format!("{:?}", encoding),
-                            *num_values,
-                            buf.len(),
-                            None,
-                            None,
-                        ),
+                        } => PageRow {
+                            index: page_idx,
+                            page_type: "Data".to_string(),
+                            encoding: encoding(&format!("{enc:?}")),
+                            num_values: format_number(u64::from(*num_values)),
+                            size: format_bytes(buf.len() as u64),
+                            rows: missing_value(),
+                            nulls: missing_value(),
+                            def_info: encoding(&format!("{def_level_encoding:?}")),
+                            rep_info: encoding(&format!("{rep_level_encoding:?}")),
+                            extra: missing_value(),
+                        },
                         Page::DataPageV2 {
                             buf,
                             num_values,
-                            encoding,
+                            encoding: enc,
                             num_nulls,
                             num_rows,
+                            def_levels_byte_len,
+                            rep_levels_byte_len,
+                            is_compressed,
                             ..
-                        } => (
-                            "DataV2".to_string(),
-                            format!("{:?}", encoding),
-                            *num_values,
-                            buf.len(),
-                            Some(*num_rows),
-                            Some(*num_nulls),
-                        ),
+                        } => PageRow {
+                            index: page_idx,
+                            page_type: "DataV2".to_string(),
+                            encoding: encoding(&format!("{enc:?}")),
+                            num_values: format_number(u64::from(*num_values)),
+                            size: format_bytes(buf.len() as u64),
+                            rows: format_number(u64::from(*num_rows)),
+                            nulls: format_number(u64::from(*num_nulls)),
+                            def_info: format_bytes(u64::from(*def_levels_byte_len)),
+                            rep_info: format_bytes(u64::from(*rep_levels_byte_len)),
+                            extra: if *is_compressed {
+                                dim("comp")
+                            } else {
+                                missing_value()
+                            },
+                        },
                     };
-
-                    page_rows.push(PageRow {
-                        index: page_idx,
-                        page_type,
-                        encoding: encoding(&enc),
-                        num_values: format_number(u64::from(num_values)),
-                        size: format_bytes(size as u64),
-                        rows: rows.map_or_else(|| dim("-"), |r| format_number(u64::from(r))),
-                        nulls: nulls.map_or_else(|| dim("-"), |n| format_number(u64::from(n))),
-                    });
+                    page_rows.push(row);
                     page_idx += 1;
                 }
             }
@@ -1108,6 +1268,137 @@ impl ParquetInspector {
         }
 
         Ok(())
+    }
+
+    /// Get JSON output including page-level details for specified columns.
+    pub fn to_json_with_pages(&self, columns: Option<&[&str]>) -> Value {
+        self.to_json_impl(true, columns)
+    }
+
+    fn to_json_impl(&self, include_pages: bool, columns_filter: Option<&[&str]>) -> Value {
+        // file_column_stats are Parquet leaf columns which don't map 1:1 to Arrow
+        // schema fields for nested types, so we just output the stats without
+        // trying to correlate with schema field metadata
+        let file_columns: Vec<Value> = self
+            .file_column_stats
+            .iter()
+            .map(|fcs| {
+                json!({
+                    "name": fcs.name,
+                    "total_null_count": fcs.total_null_count,
+                    "total_compressed_size": fcs.total_compressed_size,
+                    "total_uncompressed_size": fcs.total_uncompressed_size,
+                })
+            })
+            .collect();
+
+        let reader = if include_pages {
+            File::open(&self.file_path)
+                .ok()
+                .and_then(|f| SerializedFileReader::new(f).ok())
+        } else {
+            None
+        };
+
+        let row_groups_json: Vec<Value> = self
+            .row_groups
+            .iter()
+            .map(|rg| {
+                let rg_reader = reader.as_ref().and_then(|r| r.get_row_group(rg.index).ok());
+
+                let cols: Vec<Value> = rg
+                    .columns
+                    .iter()
+                    .enumerate()
+                    .map(|(col_idx, col)| {
+                        let stats_json = col.statistics.as_ref().map(|s| {
+                            let mut stats = serde_json::Map::new();
+                            if let Some(min) = &s.min {
+                                stats.insert("min".to_string(), json!(min));
+                            }
+                            if let Some(max) = &s.max {
+                                stats.insert("max".to_string(), json!(max));
+                            }
+                            if let Some(null_count) = s.null_count {
+                                stats.insert("null_count".to_string(), json!(null_count));
+                            }
+                            if let Some(distinct_count) = s.distinct_count {
+                                stats.insert("distinct_count".to_string(), json!(distinct_count));
+                            }
+                            Value::Object(stats)
+                        });
+
+                        let page_encodings_json = col.page_encodings.as_ref().map(|pe| {
+                            json!({
+                                "dictionary": pe.dictionary,
+                                "data": pe.data,
+                                "def_levels": pe.def_levels,
+                                "rep_levels": pe.rep_levels,
+                            })
+                        });
+
+                        // read pages if requested and column matches filter
+                        let pages_json = if include_pages
+                            && columns_filter.is_none_or(|cols| cols.contains(&col.name.as_str()))
+                        {
+                            rg_reader
+                                .as_ref()
+                                .and_then(|r| read_pages_json(r.as_ref(), col_idx))
+                        } else {
+                            None
+                        };
+
+                        json!({
+                            "name": col.name,
+                            "compression": col.compression,
+                            "compressed_size": col.compressed_size,
+                            "uncompressed_size": col.uncompressed_size,
+                            "has_dictionary": col.has_dictionary,
+                            "has_bloom_filter": col.has_bloom_filter,
+                            "has_page_index": col.has_page_index,
+                            "has_statistics": col.has_statistics,
+                            "encodings": col.encodings,
+                            "page_encodings": page_encodings_json,
+                            "statistics": stats_json,
+                            "pages": pages_json,
+                        })
+                    })
+                    .collect();
+                json!({
+                    "index": rg.index,
+                    "num_rows": rg.num_rows,
+                    "compressed_size": rg.compressed_size,
+                    "uncompressed_size": rg.uncompressed_size,
+                    "sorting_columns": rg.sorting_columns,
+                    "columns": cols,
+                })
+            })
+            .collect();
+
+        let metadata_size = self.metadata_size();
+
+        json!({
+            "format": "parquet",
+            "format_version": self.format_version,
+            "created_by": self.created_by,
+            "file": &self.file_path,
+            "rows": self.num_rows,
+            "num_columns": self.num_columns,
+            "num_row_groups": self.row_groups.len(),
+            "file_size": self.file_size,
+            "compressed_size": self.total_compressed_size,
+            "uncompressed_size": self.total_uncompressed_size,
+            "bloom_filter_size": self.total_bloom_filter_size,
+            "metadata_size": metadata_size,
+            "compression": self.compression_summary(),
+            "has_dictionary": self.has_dictionary,
+            "has_bloom_filters": self.has_bloom_filters,
+            "has_page_index": self.has_page_index,
+            "schema": schema_to_json(&self.schema),
+            "columns": file_columns,
+            "row_groups": row_groups_json,
+            "metadata": self.custom_metadata,
+        })
     }
 }
 
@@ -1164,84 +1455,7 @@ impl Inspectable for ParquetInspector {
     }
 
     fn to_json(&self) -> Value {
-        // file_column_stats are Parquet leaf columns which don't map 1:1 to Arrow
-        // schema fields for nested types, so we just output the stats without
-        // trying to correlate with schema field metadata
-        let file_columns: Vec<Value> = self
-            .file_column_stats
-            .iter()
-            .map(|fcs| {
-                json!({
-                    "name": fcs.name,
-                    "total_null_count": fcs.total_null_count,
-                    "total_compressed_size": fcs.total_compressed_size,
-                    "total_uncompressed_size": fcs.total_uncompressed_size,
-                })
-            })
-            .collect();
-
-        let row_groups_json: Vec<Value> = self
-            .row_groups
-            .iter()
-            .map(|rg| {
-                let cols: Vec<Value> = rg
-                    .columns
-                    .iter()
-                    .map(|col| {
-                        let stats_json = col.statistics.as_ref().map(|s| {
-                            let mut stats = serde_json::Map::new();
-                            if let Some(min) = &s.min {
-                                stats.insert("min".to_string(), json!(min));
-                            }
-                            if let Some(max) = &s.max {
-                                stats.insert("max".to_string(), json!(max));
-                            }
-                            if let Some(null_count) = s.null_count {
-                                stats.insert("null_count".to_string(), json!(null_count));
-                            }
-                            if let Some(distinct_count) = s.distinct_count {
-                                stats.insert("distinct_count".to_string(), json!(distinct_count));
-                            }
-                            Value::Object(stats)
-                        });
-
-                        json!({
-                            "name": col.name,
-                            "compression": col.compression,
-                            "compressed_size": col.compressed_size,
-                            "uncompressed_size": col.uncompressed_size,
-                            "has_bloom_filter": col.has_bloom_filter,
-                            "encodings": col.encodings,
-                            "statistics": stats_json,
-                        })
-                    })
-                    .collect();
-                json!({
-                    "index": rg.index,
-                    "num_rows": rg.num_rows,
-                    "compressed_size": rg.compressed_size,
-                    "uncompressed_size": rg.uncompressed_size,
-                    "sorting_columns": rg.sorting_columns,
-                    "columns": cols,
-                })
-            })
-            .collect();
-
-        json!({
-            "format": "parquet",
-            "file": &self.file_path,
-            "rows": self.num_rows,
-            "num_row_groups": self.row_groups.len(),
-            "compressed_size": self.total_compressed_size,
-            "uncompressed_size": self.total_uncompressed_size,
-            "compression": self.compression_summary(),
-            "has_dictionary": self.has_dictionary,
-            "has_bloom_filters": self.has_bloom_filters,
-            "schema": schema_to_json(&self.schema),
-            "columns": file_columns,
-            "row_groups": row_groups_json,
-            "metadata": self.custom_metadata,
-        })
+        self.to_json_impl(false, None)
     }
 }
 

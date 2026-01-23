@@ -18,12 +18,18 @@ pub struct FirstError {
     cancel: CancellationToken,
 }
 
+impl Default for FirstError {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FirstError {
-    /// Create a new FirstError that will trigger the given cancellation token.
-    pub fn new(cancel: CancellationToken) -> Self {
+    /// Create a new FirstError that will trigger the given cancellation signal.
+    pub fn new() -> Self {
         Self {
             error: Mutex::new(None),
-            cancel,
+            cancel: CancellationToken::new(),
         }
     }
 
@@ -56,22 +62,12 @@ impl FirstError {
         self.error.lock().unwrap_or_else(|e| e.into_inner()).take()
     }
 
-    /// Check if an error has been captured.
-    #[allow(dead_code)]
-    pub fn has_error(&self) -> bool {
-        self.error
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_some()
-    }
-
     /// Check if cancellation was triggered.
     pub fn is_cancelled(&self) -> bool {
         self.cancel.is_cancelled()
     }
 
     /// Get a clone of the cancellation token.
-    #[allow(dead_code)]
     pub fn cancel_token(&self) -> CancellationToken {
         self.cancel.clone()
     }
@@ -84,15 +80,15 @@ mod tests {
 
     #[test]
     fn test_first_error_captures_first() {
-        let cancel = CancellationToken::new();
-        let first_error = FirstError::new(cancel.clone());
+        let first_error = FirstError::new();
+        let cancel = first_error.cancel_token();
 
-        assert!(!first_error.has_error());
+        assert!(!first_error.is_cancelled());
         assert!(!cancel.is_cancelled());
 
         // first error is captured
         assert!(first_error.set(anyhow!("error 1")));
-        assert!(first_error.has_error());
+        assert!(first_error.is_cancelled());
         assert!(cancel.is_cancelled());
 
         // second error is ignored
@@ -108,18 +104,17 @@ mod tests {
 
     #[test]
     fn test_first_error_no_error() {
-        let cancel = CancellationToken::new();
-        let first_error = FirstError::new(cancel.clone());
+        let first_error = FirstError::new();
+        let cancel = first_error.cancel_token();
 
-        assert!(!first_error.has_error());
+        assert!(!first_error.is_cancelled());
         assert!(first_error.take().is_none());
         assert!(!cancel.is_cancelled());
     }
 
     #[test]
     fn test_first_error_rejects_after_take() {
-        let cancel = CancellationToken::new();
-        let first_error = FirstError::new(cancel.clone());
+        let first_error = FirstError::new();
 
         // set and take
         assert!(first_error.set(anyhow!("error 1")));

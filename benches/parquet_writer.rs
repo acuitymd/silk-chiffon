@@ -1,4 +1,4 @@
-//! Benchmarks comparing sequential vs parallel parquet writing.
+//! Benchmarks for parquet writing performance.
 
 use std::sync::Arc;
 
@@ -10,7 +10,9 @@ use std::hint::black_box;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
-use silk_chiffon::sinks::parquet::{ParallelParquetWriter, ParallelWriterConfig, ParquetPools};
+use silk_chiffon::sinks::parquet::{
+    AdaptiveParquetWriter, AdaptiveWriterConfig, ParquetThreadPools,
+};
 
 use tempfile::tempdir;
 use tokio::runtime::Runtime;
@@ -251,11 +253,11 @@ fn bench_sequential(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_parallel(c: &mut Criterion) {
+fn bench_adaptive(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("parallel");
+    let mut group = c.benchmark_group("adaptive");
 
-    let pools = Arc::new(ParquetPools::default_pools().unwrap());
+    let pools = Arc::new(ParquetThreadPools::default_pools().unwrap());
 
     for config in CONFIGS {
         let schema = create_schema(config.cols);
@@ -273,17 +275,18 @@ fn bench_parallel(c: &mut Criterion) {
                         let path = temp_dir.path().join("test.parquet");
                         let props = WriterProperties::builder().build();
 
-                        let writer_config = ParallelWriterConfig {
+                        let writer_config = AdaptiveWriterConfig {
                             max_row_group_size: config.row_group_size,
                             max_row_group_concurrency: 4,
                             buffer_size: 8 * 1024 * 1024,
-                            encoding_batch_size: 122_880,
-                            batch_channel_size: 16,
-                            encoded_channel_size: 4,
+                            ingest_queue_size: 1,
+                            encoding_queue_size: 4,
+                            write_queue_size: 4,
                             skip_arrow_metadata: true,
+                            ..Default::default()
                         };
 
-                        let mut writer = ParallelParquetWriter::new(
+                        let mut writer = AdaptiveParquetWriter::new(
                             &path,
                             schema,
                             props,
@@ -307,5 +310,5 @@ fn bench_parallel(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_sequential, bench_parallel);
+criterion_group!(benches, bench_sequential, bench_adaptive);
 criterion_main!(benches);

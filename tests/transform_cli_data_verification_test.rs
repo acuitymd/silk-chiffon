@@ -1,81 +1,10 @@
 use arrow::array::{Array, Int32Array, Int64Array, RecordBatch, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
-use arrow::ipc::reader::FileReader;
 use assert_cmd::cargo;
 use datafusion::prelude::*;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use std::fs::File;
-use std::path::Path;
+use silk_chiffon::utils::test_data::{TestBatch, TestExtract, TestFile};
 use std::sync::Arc;
 use tempfile::TempDir;
-
-fn simple_schema() -> Arc<Schema> {
-    Arc::new(Schema::new(vec![
-        Field::new("id", DataType::Int32, false),
-        Field::new("name", DataType::Utf8, false),
-    ]))
-}
-
-fn create_batch(schema: &Arc<Schema>, ids: &[i32], names: &[&str]) -> RecordBatch {
-    RecordBatch::try_new(
-        Arc::clone(schema),
-        vec![
-            Arc::new(Int32Array::from(ids.to_vec())),
-            Arc::new(StringArray::from(names.to_vec())),
-        ],
-    )
-    .unwrap()
-}
-
-fn write_arrow_file(path: &Path, schema: &Arc<Schema>, batches: Vec<RecordBatch>) {
-    use arrow::ipc::writer::FileWriter;
-
-    let file = File::create(path).unwrap();
-    let mut writer = FileWriter::try_new(file, schema).unwrap();
-    for batch in batches {
-        writer.write(&batch).unwrap();
-    }
-    writer.finish().unwrap();
-}
-
-fn read_arrow_file(path: &Path) -> Vec<RecordBatch> {
-    let file = File::open(path).unwrap();
-    let reader = FileReader::try_new(file, None).unwrap();
-    reader.collect::<Result<Vec<_>, _>>().unwrap()
-}
-
-fn read_parquet_file(path: &Path) -> Vec<RecordBatch> {
-    let file = File::open(path).unwrap();
-    let reader = ParquetRecordBatchReaderBuilder::try_new(file)
-        .unwrap()
-        .build()
-        .unwrap();
-    reader.collect::<Result<Vec<_>, _>>().unwrap()
-}
-
-fn extract_ids(batches: &[RecordBatch]) -> Vec<i32> {
-    let mut ids = Vec::new();
-    for batch in batches {
-        let col = batch.column_by_name("id").unwrap();
-        let arr = col.as_any().downcast_ref::<Int32Array>().unwrap();
-        for i in 0..arr.len() {
-            ids.push(arr.value(i));
-        }
-    }
-    ids
-}
-
-fn extract_names(batches: &[RecordBatch]) -> Vec<String> {
-    let mut names = Vec::new();
-    for batch in batches {
-        let col = batch.column_by_name("name").unwrap();
-        let arr = col.as_any().downcast_ref::<StringArray>().unwrap();
-        for i in 0..arr.len() {
-            names.push(arr.value(i).to_string());
-        }
-    }
-    names
-}
 
 fn count_rows(batches: &[RecordBatch]) -> usize {
     batches.iter().map(|b| b.num_rows()).sum()
@@ -87,9 +16,8 @@ fn test_arrow_to_arrow() {
     let input = temp_dir.path().join("input.arrow");
     let output = temp_dir.path().join("output.arrow");
 
-    let schema = simple_schema();
-    let batch = create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
@@ -102,9 +30,12 @@ fn test_arrow_to_arrow() {
         .assert()
         .success();
 
-    let batches = read_arrow_file(&output);
-    assert_eq!(extract_ids(&batches), vec![1, 2, 3]);
-    assert_eq!(extract_names(&batches), vec!["a", "b", "c"]);
+    let batches = TestFile::read_arrow(&output);
+    assert_eq!(TestExtract::i32_all(&batches, "id"), vec![1, 2, 3]);
+    assert_eq!(
+        TestExtract::string_all(&batches, "name"),
+        vec!["a", "b", "c"]
+    );
 }
 
 #[test]
@@ -113,9 +44,8 @@ fn test_arrow_to_parquet() {
     let input = temp_dir.path().join("input.arrow");
     let output = temp_dir.path().join("output.parquet");
 
-    let schema = simple_schema();
-    let batch = create_batch(&schema, &[10, 20, 30], &["x", "y", "z"]);
-    write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[10, 20, 30], &["x", "y", "z"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
@@ -128,9 +58,12 @@ fn test_arrow_to_parquet() {
         .assert()
         .success();
 
-    let batches = read_parquet_file(&output);
-    assert_eq!(extract_ids(&batches), vec![10, 20, 30]);
-    assert_eq!(extract_names(&batches), vec!["x", "y", "z"]);
+    let batches = TestFile::read_parquet(&output);
+    assert_eq!(TestExtract::i32_all(&batches, "id"), vec![10, 20, 30]);
+    assert_eq!(
+        TestExtract::string_all(&batches, "name"),
+        vec!["x", "y", "z"]
+    );
 }
 
 #[test]
@@ -140,11 +73,10 @@ fn test_merge_two_files() {
     let input2 = temp_dir.path().join("input2.arrow");
     let output = temp_dir.path().join("merged.arrow");
 
-    let schema = simple_schema();
-    let batch1 = create_batch(&schema, &[1, 2], &["a", "b"]);
-    let batch2 = create_batch(&schema, &[3, 4], &["c", "d"]);
-    write_arrow_file(&input1, &schema, vec![batch1]);
-    write_arrow_file(&input2, &schema, vec![batch2]);
+    let batch1 = TestBatch::simple_with(&[1, 2], &["a", "b"]);
+    let batch2 = TestBatch::simple_with(&[3, 4], &["c", "d"]);
+    TestFile::write_arrow_batch(&input1, &batch1);
+    TestFile::write_arrow_batch(&input2, &batch2);
 
     cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
@@ -159,10 +91,10 @@ fn test_merge_two_files() {
         .assert()
         .success();
 
-    let batches = read_arrow_file(&output);
+    let batches = TestFile::read_arrow(&output);
     assert_eq!(count_rows(&batches), 4);
 
-    let mut ids = extract_ids(&batches);
+    let mut ids = TestExtract::i32_all(&batches, "id");
     ids.sort();
     assert_eq!(ids, vec![1, 2, 3, 4]);
 }
@@ -175,10 +107,9 @@ fn test_merge_with_glob() {
     let input3 = temp_dir.path().join("data3.arrow");
     let output = temp_dir.path().join("merged.parquet");
 
-    let schema = simple_schema();
-    write_arrow_file(&input1, &schema, vec![create_batch(&schema, &[1], &["a"])]);
-    write_arrow_file(&input2, &schema, vec![create_batch(&schema, &[2], &["b"])]);
-    write_arrow_file(&input3, &schema, vec![create_batch(&schema, &[3], &["c"])]);
+    TestFile::write_arrow_batch(&input1, &TestBatch::simple_with(&[1], &["a"]));
+    TestFile::write_arrow_batch(&input2, &TestBatch::simple_with(&[2], &["b"]));
+    TestFile::write_arrow_batch(&input3, &TestBatch::simple_with(&[3], &["c"]));
 
     let glob_pattern = temp_dir.path().join("data*.arrow");
 
@@ -193,8 +124,8 @@ fn test_merge_with_glob() {
         .assert()
         .success();
 
-    let batches = read_parquet_file(&output);
-    let mut ids = extract_ids(&batches);
+    let batches = TestFile::read_parquet(&output);
+    let mut ids = TestExtract::i32_all(&batches, "id");
     ids.sort();
     assert_eq!(ids, vec![1, 2, 3]);
 }
@@ -205,9 +136,8 @@ fn test_partition() {
     let input = temp_dir.path().join("input.arrow");
     let output_template = temp_dir.path().join("{{name}}.arrow");
 
-    let schema = simple_schema();
-    let batch = create_batch(&schema, &[1, 2, 3, 4, 5], &["x", "y", "x", "y", "z"]);
-    write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3, 4, 5], &["x", "y", "x", "y", "z"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
@@ -223,18 +153,18 @@ fn test_partition() {
         .success();
 
     let output_x = temp_dir.path().join("x.arrow");
-    let batches_x = read_arrow_file(&output_x);
-    assert_eq!(extract_ids(&batches_x), vec![1, 3]);
-    assert_eq!(extract_names(&batches_x), vec!["x", "x"]);
+    let batches_x = TestFile::read_arrow(&output_x);
+    assert_eq!(TestExtract::i32_all(&batches_x, "id"), vec![1, 3]);
+    assert_eq!(TestExtract::string_all(&batches_x, "name"), vec!["x", "x"]);
 
     let output_y = temp_dir.path().join("y.arrow");
-    let batches_y = read_arrow_file(&output_y);
-    assert_eq!(extract_ids(&batches_y), vec![2, 4]);
-    assert_eq!(extract_names(&batches_y), vec!["y", "y"]);
+    let batches_y = TestFile::read_arrow(&output_y);
+    assert_eq!(TestExtract::i32_all(&batches_y, "id"), vec![2, 4]);
+    assert_eq!(TestExtract::string_all(&batches_y, "name"), vec!["y", "y"]);
 
     let output_z = temp_dir.path().join("z.arrow");
-    let batches_z = read_arrow_file(&output_z);
-    assert_eq!(extract_ids(&batches_z), vec![5]);
+    let batches_z = TestFile::read_arrow(&output_z);
+    assert_eq!(TestExtract::i32_all(&batches_z, "id"), vec![5]);
 }
 
 #[test]
@@ -243,9 +173,8 @@ fn test_partition_to_parquet() {
     let input = temp_dir.path().join("input.arrow");
     let output_template = temp_dir.path().join("category_{{name}}.parquet");
 
-    let schema = simple_schema();
-    let batch = create_batch(&schema, &[100, 200, 300], &["alpha", "beta", "alpha"]);
-    write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[100, 200, 300], &["alpha", "beta", "alpha"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
@@ -261,12 +190,12 @@ fn test_partition_to_parquet() {
         .success();
 
     let output_alpha = temp_dir.path().join("category_alpha.parquet");
-    let batches_alpha = read_parquet_file(&output_alpha);
-    assert_eq!(extract_ids(&batches_alpha), vec![100, 300]);
+    let batches_alpha = TestFile::read_parquet(&output_alpha);
+    assert_eq!(TestExtract::i32_all(&batches_alpha, "id"), vec![100, 300]);
 
     let output_beta = temp_dir.path().join("category_beta.parquet");
-    let batches_beta = read_parquet_file(&output_beta);
-    assert_eq!(extract_ids(&batches_beta), vec![200]);
+    let batches_beta = TestFile::read_parquet(&output_beta);
+    assert_eq!(TestExtract::i32_all(&batches_beta, "id"), vec![200]);
 }
 
 #[test]
@@ -276,11 +205,10 @@ fn test_merge_and_partition() {
     let input2 = temp_dir.path().join("input2.arrow");
     let output_template = temp_dir.path().join("{{name}}.parquet");
 
-    let schema = simple_schema();
-    let batch1 = create_batch(&schema, &[1, 2, 3], &["a", "b", "a"]);
-    let batch2 = create_batch(&schema, &[4, 5, 6], &["b", "c", "c"]);
-    write_arrow_file(&input1, &schema, vec![batch1]);
-    write_arrow_file(&input2, &schema, vec![batch2]);
+    let batch1 = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "a"]);
+    let batch2 = TestBatch::simple_with(&[4, 5, 6], &["b", "c", "c"]);
+    TestFile::write_arrow_batch(&input1, &batch1);
+    TestFile::write_arrow_batch(&input2, &batch2);
 
     cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
@@ -298,13 +226,22 @@ fn test_merge_and_partition() {
         .success();
 
     let output_a = temp_dir.path().join("a.parquet");
-    assert_eq!(extract_ids(&read_parquet_file(&output_a)), vec![1, 3]);
+    assert_eq!(
+        TestExtract::i32_all(&TestFile::read_parquet(&output_a), "id"),
+        vec![1, 3]
+    );
 
     let output_b = temp_dir.path().join("b.parquet");
-    assert_eq!(extract_ids(&read_parquet_file(&output_b)), vec![2, 4]);
+    assert_eq!(
+        TestExtract::i32_all(&TestFile::read_parquet(&output_b), "id"),
+        vec![2, 4]
+    );
 
     let output_c = temp_dir.path().join("c.parquet");
-    assert_eq!(extract_ids(&read_parquet_file(&output_c)), vec![5, 6]);
+    assert_eq!(
+        TestExtract::i32_all(&TestFile::read_parquet(&output_c), "id"),
+        vec![5, 6]
+    );
 }
 
 #[test]
@@ -313,9 +250,8 @@ fn test_sort_ascending() {
     let input = temp_dir.path().join("input.arrow");
     let output = temp_dir.path().join("output.arrow");
 
-    let schema = simple_schema();
-    let batch = create_batch(&schema, &[5, 2, 8, 1, 3], &["e", "b", "h", "a", "c"]);
-    write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[5, 2, 8, 1, 3], &["e", "b", "h", "a", "c"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
@@ -330,8 +266,8 @@ fn test_sort_ascending() {
         .assert()
         .success();
 
-    let batches = read_arrow_file(&output);
-    assert_eq!(extract_ids(&batches), vec![1, 2, 3, 5, 8]);
+    let batches = TestFile::read_arrow(&output);
+    assert_eq!(TestExtract::i32_all(&batches, "id"), vec![1, 2, 3, 5, 8]);
 }
 
 #[test]
@@ -340,9 +276,8 @@ fn test_sort_descending() {
     let input = temp_dir.path().join("input.arrow");
     let output = temp_dir.path().join("output.arrow");
 
-    let schema = simple_schema();
-    let batch = create_batch(&schema, &[5, 2, 8, 1, 3], &["e", "b", "h", "a", "c"]);
-    write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[5, 2, 8, 1, 3], &["e", "b", "h", "a", "c"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
@@ -357,8 +292,8 @@ fn test_sort_descending() {
         .assert()
         .success();
 
-    let batches = read_arrow_file(&output);
-    assert_eq!(extract_ids(&batches), vec![8, 5, 3, 2, 1]);
+    let batches = TestFile::read_arrow(&output);
+    assert_eq!(TestExtract::i32_all(&batches, "id"), vec![8, 5, 3, 2, 1]);
 }
 
 #[test]
@@ -367,13 +302,8 @@ fn test_sort_by_name() {
     let input = temp_dir.path().join("input.arrow");
     let output = temp_dir.path().join("output.arrow");
 
-    let schema = simple_schema();
-    let batch = create_batch(
-        &schema,
-        &[5, 2, 8, 1, 3],
-        &["zebra", "bear", "ant", "dog", "cat"],
-    );
-    write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[5, 2, 8, 1, 3], &["zebra", "bear", "ant", "dog", "cat"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
@@ -388,9 +318,9 @@ fn test_sort_by_name() {
         .assert()
         .success();
 
-    let batches = read_arrow_file(&output);
+    let batches = TestFile::read_arrow(&output);
     assert_eq!(
-        extract_names(&batches),
+        TestExtract::string_all(&batches, "name"),
         vec!["ant", "bear", "cat", "dog", "zebra"]
     );
 }
@@ -401,9 +331,8 @@ fn test_query_filter() {
     let input = temp_dir.path().join("input.arrow");
     let output = temp_dir.path().join("output.arrow");
 
-    let schema = simple_schema();
-    let batch = create_batch(&schema, &[1, 2, 3, 4, 5], &["a", "b", "c", "d", "e"]);
-    write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3, 4, 5], &["a", "b", "c", "d", "e"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
@@ -418,9 +347,9 @@ fn test_query_filter() {
         .assert()
         .success();
 
-    let batches = read_arrow_file(&output);
-    assert_eq!(extract_ids(&batches), vec![3, 4]);
-    assert_eq!(extract_names(&batches), vec!["c", "d"]);
+    let batches = TestFile::read_arrow(&output);
+    assert_eq!(TestExtract::i32_all(&batches, "id"), vec![3, 4]);
+    assert_eq!(TestExtract::string_all(&batches, "name"), vec!["c", "d"]);
 }
 
 #[test]
@@ -429,9 +358,8 @@ fn test_query_projection() {
     let input = temp_dir.path().join("input.arrow");
     let output = temp_dir.path().join("output.arrow");
 
-    let schema = simple_schema();
-    let batch = create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
@@ -446,9 +374,12 @@ fn test_query_projection() {
         .assert()
         .success();
 
-    let batches = read_arrow_file(&output);
+    let batches = TestFile::read_arrow(&output);
     assert_eq!(batches[0].num_columns(), 1);
-    assert_eq!(extract_names(&batches), vec!["a", "b", "c"]);
+    assert_eq!(
+        TestExtract::string_all(&batches, "name"),
+        vec!["a", "b", "c"]
+    );
 }
 
 #[test]
@@ -457,9 +388,8 @@ fn test_query_and_sort() {
     let input = temp_dir.path().join("input.arrow");
     let output = temp_dir.path().join("output.arrow");
 
-    let schema = simple_schema();
-    let batch = create_batch(&schema, &[5, 2, 8, 1, 3], &["e", "b", "h", "a", "c"]);
-    write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[5, 2, 8, 1, 3], &["e", "b", "h", "a", "c"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
@@ -476,8 +406,8 @@ fn test_query_and_sort() {
         .assert()
         .success();
 
-    let batches = read_arrow_file(&output);
-    assert_eq!(extract_ids(&batches), vec![5, 3, 2, 1]);
+    let batches = TestFile::read_arrow(&output);
+    assert_eq!(TestExtract::i32_all(&batches, "id"), vec![5, 3, 2, 1]);
 }
 
 #[test]
@@ -486,13 +416,8 @@ fn test_query_and_partition() {
     let input = temp_dir.path().join("input.arrow");
     let output_template = temp_dir.path().join("{{name}}.arrow");
 
-    let schema = simple_schema();
-    let batch = create_batch(
-        &schema,
-        &[1, 2, 3, 4, 5, 6],
-        &["a", "b", "a", "b", "c", "c"],
-    );
-    write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3, 4, 5, 6], &["a", "b", "a", "b", "c", "c"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
@@ -510,13 +435,22 @@ fn test_query_and_partition() {
         .success();
 
     let output_a = temp_dir.path().join("a.arrow");
-    assert_eq!(extract_ids(&read_arrow_file(&output_a)), vec![3]);
+    assert_eq!(
+        TestExtract::i32_all(&TestFile::read_arrow(&output_a), "id"),
+        vec![3]
+    );
 
     let output_b = temp_dir.path().join("b.arrow");
-    assert_eq!(extract_ids(&read_arrow_file(&output_b)), vec![4]);
+    assert_eq!(
+        TestExtract::i32_all(&TestFile::read_arrow(&output_b), "id"),
+        vec![4]
+    );
 
     let output_c = temp_dir.path().join("c.arrow");
-    assert_eq!(extract_ids(&read_arrow_file(&output_c)), vec![5, 6]);
+    assert_eq!(
+        TestExtract::i32_all(&TestFile::read_arrow(&output_c), "id"),
+        vec![5, 6]
+    );
 }
 
 #[test]
@@ -526,11 +460,10 @@ fn test_merge_and_sort() {
     let input2 = temp_dir.path().join("input2.arrow");
     let output = temp_dir.path().join("output.arrow");
 
-    let schema = simple_schema();
-    let batch1 = create_batch(&schema, &[5, 2], &["e", "b"]);
-    let batch2 = create_batch(&schema, &[8, 1, 3], &["h", "a", "c"]);
-    write_arrow_file(&input1, &schema, vec![batch1]);
-    write_arrow_file(&input2, &schema, vec![batch2]);
+    let batch1 = TestBatch::simple_with(&[5, 2], &["e", "b"]);
+    let batch2 = TestBatch::simple_with(&[8, 1, 3], &["h", "a", "c"]);
+    TestFile::write_arrow_batch(&input1, &batch1);
+    TestFile::write_arrow_batch(&input2, &batch2);
 
     cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
@@ -547,8 +480,8 @@ fn test_merge_and_sort() {
         .assert()
         .success();
 
-    let batches = read_arrow_file(&output);
-    assert_eq!(extract_ids(&batches), vec![1, 2, 3, 5, 8]);
+    let batches = TestFile::read_arrow(&output);
+    assert_eq!(TestExtract::i32_all(&batches, "id"), vec![1, 2, 3, 5, 8]);
 }
 
 #[test]
@@ -557,9 +490,8 @@ fn test_list_outputs_text() {
     let input = temp_dir.path().join("input.arrow");
     let output_template = temp_dir.path().join("{{name}}.arrow");
 
-    let schema = simple_schema();
-    let batch = create_batch(&schema, &[1, 2, 3], &["x", "y", "x"]);
-    write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["x", "y", "x"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     let output = cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
@@ -583,7 +515,7 @@ fn test_list_outputs_text() {
     assert!(stdout.contains("y.arrow"));
 
     let output_x = temp_dir.path().join("x.arrow");
-    assert_eq!(count_rows(&read_arrow_file(&output_x)), 2);
+    assert_eq!(count_rows(&TestFile::read_arrow(&output_x)), 2);
 }
 
 #[test]
@@ -592,9 +524,8 @@ fn test_list_outputs_json() {
     let input = temp_dir.path().join("input.arrow");
     let output_template = temp_dir.path().join("{{name}}.arrow");
 
-    let schema = simple_schema();
-    let batch = create_batch(&schema, &[1, 2], &["a", "b"]);
-    write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2], &["a", "b"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     let output = cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
@@ -637,9 +568,8 @@ fn test_empty_query_result() {
     let input = temp_dir.path().join("input.arrow");
     let output = temp_dir.path().join("output.arrow");
 
-    let schema = simple_schema();
-    let batch = create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
@@ -654,7 +584,7 @@ fn test_empty_query_result() {
         .assert()
         .success();
 
-    let batches = read_arrow_file(&output);
+    let batches = TestFile::read_arrow(&output);
     assert_eq!(count_rows(&batches), 0);
 }
 
@@ -664,9 +594,8 @@ fn test_single_row() {
     let input = temp_dir.path().join("input.arrow");
     let output = temp_dir.path().join("output.parquet");
 
-    let schema = simple_schema();
-    let batch = create_batch(&schema, &[42], &["single"]);
-    write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[42], &["single"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
@@ -679,8 +608,8 @@ fn test_single_row() {
         .assert()
         .success();
 
-    let batches = read_parquet_file(&output);
-    assert_eq!(extract_ids(&batches), vec![42]);
+    let batches = TestFile::read_parquet(&output);
+    assert_eq!(TestExtract::i32_all(&batches, "id"), vec![42]);
 }
 
 #[tokio::test]
@@ -689,9 +618,8 @@ async fn test_arrow_to_vortex() {
     let input = temp.path().join("input.arrow");
     let output = temp.path().join("output.vortex");
 
-    let schema = simple_schema();
-    let batch = create_batch(&schema, &[1, 2, 3], &["Alice", "Bob", "Charlie"]);
-    write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["Alice", "Bob", "Charlie"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
@@ -715,9 +643,8 @@ async fn test_vortex_to_arrow() {
     let vortex = temp.path().join("intermediate.vortex");
     let arrow2 = temp.path().join("output.arrow");
 
-    let schema = simple_schema();
-    let batch = create_batch(&schema, &[1, 2, 3], &["Alice", "Bob", "Charlie"]);
-    write_arrow_file(&arrow1, &schema, vec![batch.clone()]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["Alice", "Bob", "Charlie"]);
+    TestFile::write_arrow_batch(&arrow1, &batch);
 
     cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
@@ -741,7 +668,7 @@ async fn test_vortex_to_arrow() {
         .assert()
         .success();
 
-    let result_batches = read_arrow_file(&arrow2);
+    let result_batches = TestFile::read_arrow(&arrow2);
     assert_eq!(result_batches.len(), 1);
     assert_eq!(result_batches[0].num_rows(), 3);
     assert_eq!(result_batches[0].num_columns(), 2);
@@ -754,13 +681,12 @@ async fn test_vortex_round_trip() {
     let vortex_file = temp.path().join("data.vortex");
     let output = temp.path().join("output.arrow");
 
-    let schema = simple_schema();
     let batches = vec![
-        create_batch(&schema, &[1, 2], &["Alice", "Bob"]),
-        create_batch(&schema, &[3, 4], &["Charlie", "Diana"]),
-        create_batch(&schema, &[5], &["Eve"]),
+        TestBatch::simple_with(&[1, 2], &["Alice", "Bob"]),
+        TestBatch::simple_with(&[3, 4], &["Charlie", "Diana"]),
+        TestBatch::simple_with(&[5], &["Eve"]),
     ];
-    write_arrow_file(&input, &schema, batches);
+    TestFile::write_arrow(&input, &batches);
 
     cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
@@ -784,7 +710,7 @@ async fn test_vortex_round_trip() {
         .assert()
         .success();
 
-    let result_batches = read_arrow_file(&output);
+    let result_batches = TestFile::read_arrow(&output);
     let total_rows: usize = result_batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total_rows, 5);
 }
@@ -796,9 +722,8 @@ async fn test_vortex_with_query() {
     let vortex_file = temp.path().join("data.vortex");
     let output = temp.path().join("output.arrow");
 
-    let schema = simple_schema();
-    let batch = create_batch(&schema, &[1, 2, 3, 4, 5], &["A", "B", "C", "D", "E"]);
-    write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3, 4, 5], &["A", "B", "C", "D", "E"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
@@ -824,7 +749,7 @@ async fn test_vortex_with_query() {
         .assert()
         .success();
 
-    let result_batches = read_arrow_file(&output);
+    let result_batches = TestFile::read_arrow(&output);
     let total_rows: usize = result_batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total_rows, 3);
 }
@@ -836,9 +761,8 @@ async fn test_vortex_with_sort() {
     let vortex_file = temp.path().join("data.vortex");
     let output = temp.path().join("output.arrow");
 
-    let schema = simple_schema();
-    let batch = create_batch(&schema, &[3, 1, 2], &["C", "A", "B"]);
-    write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[3, 1, 2], &["C", "A", "B"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
@@ -864,7 +788,7 @@ async fn test_vortex_with_sort() {
         .assert()
         .success();
 
-    let result_batches = read_arrow_file(&output);
+    let result_batches = TestFile::read_arrow(&output);
     assert_eq!(result_batches.len(), 1);
     let id_array = result_batches[0]
         .column(0)
@@ -882,9 +806,8 @@ async fn test_vortex_with_batch_size() {
     let input = temp.path().join("input.arrow");
     let output = temp.path().join("output.vortex");
 
-    let schema = simple_schema();
-    let batch = create_batch(&schema, &[1, 2, 3, 4, 5], &["A", "B", "C", "D", "E"]);
-    write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3, 4, 5], &["A", "B", "C", "D", "E"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
@@ -922,7 +845,7 @@ async fn test_vortex_query_with_aggregates() {
         ],
     )
     .unwrap();
-    write_arrow_file(&input, &schema, vec![batch]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
@@ -948,7 +871,7 @@ async fn test_vortex_query_with_aggregates() {
         .assert()
         .success();
 
-    let result_batches = read_arrow_file(&output);
+    let result_batches = TestFile::read_arrow(&output);
     assert_eq!(result_batches.len(), 1);
     assert_eq!(result_batches[0].num_rows(), 2);
     assert_eq!(result_batches[0].num_columns(), 2);
@@ -978,7 +901,7 @@ async fn test_vortex_query_with_filter_and_projection() {
         ],
     )
     .unwrap();
-    write_arrow_file(&input, &schema, vec![batch]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
@@ -1004,7 +927,7 @@ async fn test_vortex_query_with_filter_and_projection() {
         .assert()
         .success();
 
-    let result_batches = read_arrow_file(&output);
+    let result_batches = TestFile::read_arrow(&output);
     assert_eq!(result_batches.len(), 1);
     assert_eq!(result_batches[0].num_rows(), 2);
     assert_eq!(result_batches[0].num_columns(), 2);
@@ -1030,7 +953,7 @@ async fn test_vortex_query_with_scalar_functions() {
         ],
     )
     .unwrap();
-    write_arrow_file(&input, &schema, vec![batch]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
@@ -1056,7 +979,7 @@ async fn test_vortex_query_with_scalar_functions() {
         .assert()
         .success();
 
-    let result_batches = read_arrow_file(&output);
+    let result_batches = TestFile::read_arrow(&output);
     assert_eq!(result_batches.len(), 1);
     assert_eq!(result_batches[0].num_rows(), 3);
     assert_eq!(result_batches[0].num_columns(), 2);
@@ -1088,7 +1011,7 @@ async fn test_vortex_query_with_count_and_avg() {
         ],
     )
     .unwrap();
-    write_arrow_file(&input, &schema, vec![batch]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
@@ -1114,14 +1037,14 @@ async fn test_vortex_query_with_count_and_avg() {
         .assert()
         .success();
 
-    let result_batches = read_arrow_file(&output);
+    let result_batches = TestFile::read_arrow(&output);
     assert_eq!(result_batches.len(), 1);
     assert_eq!(result_batches[0].num_rows(), 2);
     assert_eq!(result_batches[0].num_columns(), 3);
 }
 
 #[tokio::test]
-async fn test_parallel_parquet_row_order_preserved() {
+async fn test_parquet_row_order_preserved() {
     let temp = TempDir::new().unwrap();
     let input = temp.path().join("input.arrow");
     let output = temp.path().join("output.parquet");
@@ -1156,7 +1079,7 @@ async fn test_parallel_parquet_row_order_preserved() {
         batches.push(batch);
     }
 
-    write_arrow_file(&input, &schema, batches);
+    TestFile::write_arrow(&input, &batches);
 
     cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
@@ -1165,8 +1088,6 @@ async fn test_parallel_parquet_row_order_preserved() {
             input.to_str().unwrap(),
             "--to",
             output.to_str().unwrap(),
-            "--parquet-encoder",
-            "parallel",
             "--parquet-row-group-size",
             "100000",
         ])
