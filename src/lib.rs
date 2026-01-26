@@ -653,10 +653,6 @@ fn parse_bloom_filter_params(s: &str) -> Result<BloomFilterParams> {
         .collect::<Vec<&str>>();
 
     for part in parts {
-        if part.is_empty() {
-            return Err(anyhow!("Invalid bloom filter specification: {}", s));
-        }
-
         if let Some((key, value)) = part.split_once('=') {
             let key = key.trim();
             let value = value.trim();

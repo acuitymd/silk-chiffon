@@ -103,6 +103,18 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         }
     }
 
+    for disabled_col in &parquet_dictionary_column_off {
+        if parquet_dictionary_column
+            .iter()
+            .any(|c| &c.name == disabled_col)
+        {
+            anyhow::bail!(
+                "column '{}' specified in both --parquet-dictionary-column-off and --parquet-dictionary-column",
+                disabled_col
+            );
+        }
+    }
+
     let all_enabled = if parquet_bloom_all_off {
         None
     } else {
