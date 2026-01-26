@@ -51,7 +51,7 @@ pub fn parse_nonzero_byte_size(s: &str) -> Result<usize> {
 }
 
 #[derive(Parser, Debug)]
-#[command(version = concat!(env!("CARGO_PKG_VERSION"), "-", env!("GIT_HASH")), about, long_about = None)]
+#[command(version = env!("SILK_CHIFFON_VERSION"), about, long_about = None)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
