@@ -16,6 +16,8 @@ env:
 
 jobs:
   build:
+    env:
+      SILK_CHIFFON_WATCH_GIT_REF: "1"
     strategy:
       matrix:
         include:

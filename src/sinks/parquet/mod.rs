@@ -281,7 +281,7 @@ impl ParquetSink {
         runtimes: Arc<ParquetRuntimes>,
     ) -> Result<Self> {
         let mut writer_builder = WriterProperties::builder()
-            .set_created_by(format!("silk-chiffon v{}", env!("CARGO_PKG_VERSION")))
+            .set_created_by(format!("silk-chiffon v{}", env!("SILK_CHIFFON_VERSION")))
             .set_max_row_group_size(options.max_row_group_size)
             .set_compression(options.compression.into())
             .set_writer_version(options.writer_version.into())
