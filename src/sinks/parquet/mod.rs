@@ -295,9 +295,15 @@ impl ParquetSink {
             .set_write_page_header_statistics(options.page_header_statistics)
             .set_coerce_types(true);
 
+        let all_dictionary_columns: Vec<_> = options
+            .column_dictionary_always
+            .iter()
+            .chain(options.column_dictionary_analyze.iter())
+            .cloned()
+            .collect();
         Self::validate_column_dictionary(
             schema,
-            &options.column_dictionary_always,
+            &all_dictionary_columns,
             &options.column_no_dictionary,
         )?;
 
