@@ -1,85 +1,22 @@
-use anyhow::Result;
-use arrow::array::{Array, Int32Array, Int64Array, StringArray};
+use arrow::array::{Array, Int32Array, Int64Array, RecordBatch, StringArray};
+use arrow::datatypes::{DataType, Field, Schema};
 use camino::Utf8PathBuf;
 use silk_chiffon::{
-    AllColumnsBloomFilterConfig, ArrowCompression, ArrowIPCFormat, ColumnSpecificBloomFilterConfig,
-    DataFormat, ListOutputsFormat, ParquetCompression, ParquetEncoder, ParquetStatistics,
-    ParquetWriterVersion, PartitionStrategy, QueryDialect, SortColumn, SortDirection, SortSpec,
+    AllColumnsBloomFilterConfig, ArrowCompression, ArrowIPCFormat, ColumnDictionaryConfig,
+    ColumnSpecificBloomFilterConfig, DataFormat, DictionaryMode, ListOutputsFormat,
+    ParquetCompression, ParquetStatistics, ParquetWriterVersion, PartitionStrategy, QueryDialect,
+    SortColumn, SortDirection, SortSpec,
+    utils::test_data::{TestBatch, TestFile},
 };
+use std::path::Path;
+use std::sync::Arc;
 use tempfile::TempDir;
 
 mod test_helpers {
-    use super::*;
-    use arrow::array::RecordBatch;
-    use arrow::datatypes::{DataType, Field, Schema};
-    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    use camino::Utf8Path;
     use parquet::file::reader::FileReader;
+    use silk_chiffon::inspection::parquet::ParquetInspector;
     use std::path::Path;
-    use std::sync::Arc;
-
-    pub fn simple_schema() -> Arc<Schema> {
-        Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Int32, false),
-            Field::new("name", DataType::Utf8, false),
-        ]))
-    }
-
-    pub fn create_batch(schema: &Arc<Schema>, ids: &[i32], names: &[&str]) -> RecordBatch {
-        RecordBatch::try_new(
-            Arc::clone(schema),
-            vec![
-                Arc::new(Int32Array::from(ids.to_vec())),
-                Arc::new(StringArray::from(names.to_vec())),
-            ],
-        )
-        .unwrap()
-    }
-
-    pub fn write_arrow_file(path: &Path, schema: &Arc<Schema>, batches: Vec<RecordBatch>) {
-        use arrow::ipc::writer::FileWriter;
-        use std::fs::File;
-
-        let file = File::create(path).unwrap();
-        let mut writer = FileWriter::try_new(file, schema).unwrap();
-        for batch in batches {
-            writer.write(&batch).unwrap();
-        }
-        writer.finish().unwrap();
-    }
-
-    pub fn write_parquet_file(path: &Path, schema: &Arc<Schema>, batches: Vec<RecordBatch>) {
-        use parquet::arrow::ArrowWriter;
-        use std::fs::File;
-
-        let file = File::create(path).unwrap();
-        let mut writer = ArrowWriter::try_new(file, Arc::clone(schema), None).unwrap();
-        for batch in batches {
-            writer.write(&batch).unwrap();
-        }
-        writer.close().unwrap();
-    }
-
-    pub fn read_arrow_file(path: &Path) -> Vec<RecordBatch> {
-        use arrow::ipc::reader::{FileReader, StreamReader};
-        use std::fs::File;
-        let file = File::open(path).unwrap();
-
-        if let Ok(reader) = FileReader::try_new(file.try_clone().unwrap(), None) {
-            reader.collect::<Result<Vec<_>, _>>().unwrap()
-        } else {
-            let reader = StreamReader::try_new(file, None).unwrap();
-            reader.collect::<Result<Vec<_>, _>>().unwrap()
-        }
-    }
-
-    pub fn read_parquet_file(path: &Path) -> Vec<RecordBatch> {
-        let file = std::fs::File::open(path).unwrap();
-        let reader = ParquetRecordBatchReaderBuilder::try_new(file)
-            .unwrap()
-            .build()
-            .unwrap();
-        reader.collect::<Result<Vec<_>, _>>().unwrap()
-    }
 
     pub fn get_parquet_row_group_metadata(
         path: &Path,
@@ -89,12 +26,87 @@ mod test_helpers {
         let reader = parquet::file::serialized_reader::SerializedFileReader::new(file).unwrap();
         reader.metadata().row_group(idx).clone()
     }
-}
 
-use arrow::array::RecordBatch;
-use arrow::datatypes::{DataType, Field, Schema};
-use std::path::Path;
-use std::sync::Arc;
+    pub fn inspect(path: &Path) -> ParquetInspector {
+        ParquetInspector::open(Utf8Path::from_path(path).unwrap()).unwrap()
+    }
+
+    pub fn assert_has_dictionary(inspector: &ParquetInspector, col_name: &str) {
+        let col = inspector.column(col_name).unwrap_or_else(|| {
+            let available: Vec<_> = inspector.row_groups()[0]
+                .columns
+                .iter()
+                .map(|c| &c.name)
+                .collect();
+            panic!(
+                "column '{}' not found. available: {:?}",
+                col_name, available
+            )
+        });
+        assert!(
+            col.has_dictionary,
+            "expected {} to have dictionary",
+            col_name
+        );
+    }
+
+    pub fn assert_no_dictionary(inspector: &ParquetInspector, col_name: &str) {
+        let col = inspector.column(col_name).unwrap_or_else(|| {
+            let available: Vec<_> = inspector.row_groups()[0]
+                .columns
+                .iter()
+                .map(|c| &c.name)
+                .collect();
+            panic!(
+                "column '{}' not found. available: {:?}",
+                col_name, available
+            )
+        });
+        assert!(
+            !col.has_dictionary,
+            "expected {} to NOT have dictionary",
+            col_name
+        );
+    }
+
+    pub fn assert_has_bloom_filter(inspector: &ParquetInspector, col_name: &str) {
+        let col = inspector.column(col_name).unwrap_or_else(|| {
+            let available: Vec<_> = inspector.row_groups()[0]
+                .columns
+                .iter()
+                .map(|c| &c.name)
+                .collect();
+            panic!(
+                "column '{}' not found. available: {:?}",
+                col_name, available
+            )
+        });
+        assert!(
+            col.has_bloom_filter,
+            "expected {} to have bloom filter",
+            col_name
+        );
+    }
+
+    pub fn assert_no_bloom_filter(inspector: &ParquetInspector, col_name: &str) {
+        let col = inspector.column(col_name).unwrap_or_else(|| {
+            let available: Vec<_> = inspector.row_groups()[0]
+                .columns
+                .iter()
+                .map(|c| &c.name)
+                .collect();
+            panic!(
+                "column '{}' not found. available: {:?}",
+                col_name, available
+            )
+        });
+        assert!(
+            !col.has_bloom_filter,
+            "expected {} to NOT have bloom filter",
+            col_name
+        );
+    }
+}
 
 #[tokio::test]
 async fn test_transform_arrow_to_arrow_basic() {
@@ -102,62 +114,13 @@ async fn test_transform_arrow_to_arrow_basic() {
     let input = temp_dir.path().join("input.arrow");
     let output = temp_dir.path().join("output.arrow");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: Some(output.to_string_lossy().to_string()),
-        to_many: None,
-        by: None,
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
-        create_dirs: true,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
-        output_format: None,
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
@@ -173,68 +136,21 @@ async fn test_transform_arrow_to_parquet() {
     let input = temp_dir.path().join("input.arrow");
     let output = temp_dir.path().join("output.parquet");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: Some(output.to_string_lossy().to_string()),
-        to_many: None,
-        by: None,
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
-        create_dirs: true,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
         output_format: Some(DataFormat::Parquet),
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
         parquet_compression: Some(ParquetCompression::Snappy),
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
 
     assert!(output.exists());
-    let batches = test_helpers::read_parquet_file(&output);
+    let batches = TestFile::read_parquet(&output);
     assert_eq!(batches.len(), 1);
     assert_eq!(batches[0].num_rows(), 3);
 }
@@ -245,62 +161,14 @@ async fn test_transform_parquet_to_arrow() {
     let input = temp_dir.path().join("input.parquet");
     let output = temp_dir.path().join("output.arrow");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    test_helpers::write_parquet_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_parquet_batch(&input, &batch);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: Some(output.to_string_lossy().to_string()),
-        to_many: None,
-        by: None,
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
-        create_dirs: true,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
         output_format: Some(DataFormat::Arrow),
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
@@ -316,68 +184,20 @@ async fn test_transform_parquet_to_parquet() {
     let input = temp_dir.path().join("input.parquet");
     let output = temp_dir.path().join("output.parquet");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    test_helpers::write_parquet_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_parquet_batch(&input, &batch);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: Some(output.to_string_lossy().to_string()),
-        to_many: None,
-        by: None,
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
-        create_dirs: true,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
-        output_format: None,
         parquet_compression: Some(ParquetCompression::Zstd),
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
 
     assert!(output.exists());
-    let batches = test_helpers::read_parquet_file(&output);
+    let batches = TestFile::read_parquet(&output);
     assert_eq!(batches.len(), 1);
     assert_eq!(batches[0].num_rows(), 3);
 }
@@ -389,11 +209,10 @@ async fn test_transform_from_many_basic() {
     let input2 = temp_dir.path().join("input2.arrow");
     let output = temp_dir.path().join("output.arrow");
 
-    let schema = test_helpers::simple_schema();
-    let batch1 = test_helpers::create_batch(&schema, &[1, 2], &["a", "b"]);
-    let batch2 = test_helpers::create_batch(&schema, &[3, 4], &["c", "d"]);
-    test_helpers::write_arrow_file(&input1, &schema, vec![batch1]);
-    test_helpers::write_arrow_file(&input2, &schema, vec![batch2]);
+    let batch1 = TestBatch::simple_with(&[1, 2], &["a", "b"]);
+    let batch2 = TestBatch::simple_with(&[3, 4], &["c", "d"]);
+    TestFile::write_arrow_batch(&input1, &batch1);
+    TestFile::write_arrow_batch(&input2, &batch2);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: None,
@@ -402,60 +221,13 @@ async fn test_transform_from_many_basic() {
             input2.to_string_lossy().to_string(),
         ],
         to: Some(output.to_string_lossy().to_string()),
-        to_many: None,
-        by: None,
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
-        create_dirs: true,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
-        output_format: None,
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
 
     assert!(output.exists());
-    let batches = test_helpers::read_arrow_file(&output);
+    let batches = TestFile::read_arrow_auto(&output);
     assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 4);
 }
 
@@ -467,13 +239,12 @@ async fn test_transform_from_many_with_glob() {
     let input3 = temp_dir.path().join("other.parquet");
     let output = temp_dir.path().join("output.arrow");
 
-    let schema = test_helpers::simple_schema();
-    let batch1 = test_helpers::create_batch(&schema, &[1], &["a"]);
-    let batch2 = test_helpers::create_batch(&schema, &[2], &["b"]);
-    let batch3 = test_helpers::create_batch(&schema, &[3], &["c"]);
-    test_helpers::write_arrow_file(&input1, &schema, vec![batch1]);
-    test_helpers::write_arrow_file(&input2, &schema, vec![batch2]);
-    test_helpers::write_parquet_file(&input3, &schema, vec![batch3]);
+    let batch1 = TestBatch::simple_with(&[1], &["a"]);
+    let batch2 = TestBatch::simple_with(&[2], &["b"]);
+    let batch3 = TestBatch::simple_with(&[3], &["c"]);
+    TestFile::write_arrow_batch(&input1, &batch1);
+    TestFile::write_arrow_batch(&input2, &batch2);
+    TestFile::write_parquet_batch(&input3, &batch3);
 
     let glob_pattern = temp_dir.path().join("file*.arrow");
 
@@ -481,60 +252,13 @@ async fn test_transform_from_many_with_glob() {
         from: None,
         from_many: vec![glob_pattern.to_string_lossy().to_string()],
         to: Some(output.to_string_lossy().to_string()),
-        to_many: None,
-        by: None,
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
-        create_dirs: true,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
-        output_format: None,
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
 
     assert!(output.exists());
-    let batches = test_helpers::read_arrow_file(&output);
+    let batches = TestFile::read_arrow_auto(&output);
     assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 2);
 }
 
@@ -543,64 +267,18 @@ async fn test_transform_to_many_partitioned() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "a", "b"]);
-    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "a", "b"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     let template = temp_dir.path().join("{{name}}.arrow");
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("name".to_string()),
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
         create_dirs: false,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
-        output_format: None,
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
@@ -611,8 +289,8 @@ async fn test_transform_to_many_partitioned() {
     assert!(output_a.exists());
     assert!(output_b.exists());
 
-    let batches_a = test_helpers::read_arrow_file(&output_a);
-    let batches_b = test_helpers::read_arrow_file(&output_b);
+    let batches_a = TestFile::read_arrow_auto(&output_a);
+    let batches_b = TestFile::read_arrow_auto(&output_b);
 
     assert_eq!(batches_a.iter().map(|b| b.num_rows()).sum::<usize>(), 2);
     assert_eq!(batches_b.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
@@ -624,68 +302,20 @@ async fn test_transform_with_query() {
     let input = temp_dir.path().join("input.arrow");
     let output = temp_dir.path().join("output.arrow");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: Some(output.to_string_lossy().to_string()),
-        to_many: None,
-        by: None,
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
-        create_dirs: true,
-        overwrite: false,
         query: Some("SELECT * FROM data WHERE id > 1".to_string()),
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
-        output_format: None,
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
 
     assert!(output.exists());
-    let batches = test_helpers::read_arrow_file(&output);
+    let batches = TestFile::read_arrow_auto(&output);
     assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 2);
 }
 
@@ -695,73 +325,25 @@ async fn test_transform_with_sorting() {
     let input = temp_dir.path().join("input.arrow");
     let output = temp_dir.path().join("output.arrow");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[3, 1, 2], &["c", "a", "b"]);
-    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[3, 1, 2], &["c", "a", "b"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: Some(output.to_string_lossy().to_string()),
-        to_many: None,
-        by: None,
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
-        create_dirs: true,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
         sort_by: Some(SortSpec {
             columns: vec![silk_chiffon::SortColumn {
                 name: "id".to_string(),
                 direction: SortDirection::Ascending,
             }],
         }),
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
-        output_format: None,
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
 
     assert!(output.exists());
-    let batches = test_helpers::read_arrow_file(&output);
+    let batches = TestFile::read_arrow_auto(&output);
     let ids = batches[0]
         .column(0)
         .as_any()
@@ -778,62 +360,14 @@ async fn test_transform_with_arrow_compression() {
     let input = temp_dir.path().join("input.arrow");
     let output = temp_dir.path().join("output.arrow");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: Some(output.to_string_lossy().to_string()),
-        to_many: None,
-        by: None,
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
-        create_dirs: true,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
-        output_format: None,
         arrow_compression: Some(ArrowCompression::Zstd),
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
@@ -849,41 +383,16 @@ async fn test_transform_with_parquet_bloom_filters() {
     let input = temp_dir.path().join("input.arrow");
     let output = temp_dir.path().join("output.parquet");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(
-        &schema,
+    let batch = TestBatch::simple_with(
         &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
         &["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"],
     );
-    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: Some(output.to_string_lossy().to_string()),
-        to_many: None,
-        by: None,
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
-        create_dirs: true,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
         output_format: Some(DataFormat::Parquet),
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
         parquet_bloom_column: vec![ColumnSpecificBloomFilterConfig {
             name: "id".to_string(),
             config: silk_chiffon::ColumnBloomFilterConfig {
@@ -891,36 +400,13 @@ async fn test_transform_with_parquet_bloom_filters() {
                 ndv: None,
             },
         }],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
 
     assert!(output.exists());
-    let batches = test_helpers::read_parquet_file(&output);
+    let batches = TestFile::read_parquet(&output);
     assert_eq!(batches.len(), 1);
     assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 10);
 }
@@ -931,67 +417,21 @@ async fn test_transform_with_sorted_metadata() {
     let input = temp_dir.path().join("input.arrow");
     let output = temp_dir.path().join("output.parquet");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[3, 1, 2], &["c", "a", "b"]);
-    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[3, 1, 2], &["c", "a", "b"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: Some(output.to_string_lossy().to_string()),
-        to_many: None,
-        by: None,
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
-        create_dirs: true,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
         sort_by: Some(SortSpec {
             columns: vec![silk_chiffon::SortColumn {
                 name: "id".to_string(),
                 direction: SortDirection::Ascending,
             }],
         }),
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
         output_format: Some(DataFormat::Parquet),
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
         parquet_sorted_metadata: true,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
@@ -1009,64 +449,17 @@ async fn test_transform_partition_with_create_dirs() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2], &["a", "b"]);
-    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2], &["a", "b"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     let template = temp_dir.path().join("nested/{{name}}.arrow");
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("name".to_string()),
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
-        create_dirs: true,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
-        output_format: None,
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
@@ -1082,65 +475,19 @@ async fn test_transform_partition_with_overwrite() {
     let input = temp_dir.path().join("input.arrow");
     let existing = temp_dir.path().join("a.arrow");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2], &["a", "b"]);
-    test_helpers::write_arrow_file(&input, &schema, vec![batch.clone()]);
-    test_helpers::write_arrow_file(&existing, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2], &["a", "b"]);
+    TestFile::write_arrow_batch(&input, &batch);
+    TestFile::write_arrow_batch(&existing, &batch);
 
     let template = temp_dir.path().join("{{name}}.arrow");
 
     let result = silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("name".to_string()),
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
         create_dirs: false,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
-        output_format: None,
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await;
 
@@ -1149,56 +496,12 @@ async fn test_transform_partition_with_overwrite() {
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("name".to_string()),
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
         create_dirs: false,
         overwrite: true,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
-        output_format: None,
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
@@ -1215,54 +518,7 @@ async fn test_transform_from_many_empty_glob() {
         from: None,
         from_many: vec![glob_pattern.to_string_lossy().to_string()],
         to: Some(output.to_string_lossy().to_string()),
-        to_many: None,
-        by: None,
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
-        create_dirs: true,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
-        output_format: None,
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await;
 
@@ -1280,64 +536,19 @@ async fn test_transform_partition_exclude_columns() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2], &["a", "a"]);
-    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2], &["a", "a"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     let template = temp_dir.path().join("{{name}}.arrow");
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("name".to_string()),
-        partition_strategy: PartitionStrategy::SortSingle,
         exclude_columns: vec!["name".to_string()],
-        list_outputs: None,
-        list_outputs_file: None,
         create_dirs: false,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
-        output_format: None,
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
@@ -1345,7 +556,7 @@ async fn test_transform_partition_exclude_columns() {
     let output = temp_dir.path().join("a.arrow");
     assert!(output.exists());
 
-    let batches = test_helpers::read_arrow_file(&output);
+    let batches = TestFile::read_arrow_auto(&output);
     assert_eq!(batches[0].num_columns(), 1);
     assert_eq!(batches[0].schema().field(0).name(), "id");
 }
@@ -1356,68 +567,20 @@ async fn test_transform_with_projection_query() {
     let input = temp_dir.path().join("input.arrow");
     let output = temp_dir.path().join("output.arrow");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: Some(output.to_string_lossy().to_string()),
-        to_many: None,
-        by: None,
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
-        create_dirs: true,
-        overwrite: false,
         query: Some("SELECT id FROM data".to_string()),
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
-        output_format: None,
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
 
     assert!(output.exists());
-    let batches = test_helpers::read_arrow_file(&output);
+    let batches = TestFile::read_arrow_auto(&output);
     assert_eq!(batches[0].num_columns(), 1);
     assert_eq!(batches[0].schema().field(0).name(), "id");
 }
@@ -1428,68 +591,20 @@ async fn test_transform_with_aggregation_query() {
     let input = temp_dir.path().join("input.arrow");
     let output = temp_dir.path().join("output.arrow");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: Some(output.to_string_lossy().to_string()),
-        to_many: None,
-        by: None,
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
-        create_dirs: true,
-        overwrite: false,
         query: Some("SELECT COUNT(*) as count FROM data".to_string()),
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
-        output_format: None,
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
 
     assert!(output.exists());
-    let batches = test_helpers::read_arrow_file(&output);
+    let batches = TestFile::read_arrow_auto(&output);
     assert_eq!(batches[0].num_rows(), 1);
     let count = batches[0]
         .column(0)
@@ -1505,73 +620,26 @@ async fn test_transform_query_and_sort_combined() {
     let input = temp_dir.path().join("input.arrow");
     let output = temp_dir.path().join("output.arrow");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[3, 1, 2], &["c", "a", "b"]);
-    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[3, 1, 2], &["c", "a", "b"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: Some(output.to_string_lossy().to_string()),
-        to_many: None,
-        by: None,
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
-        create_dirs: true,
-        overwrite: false,
         query: Some("SELECT * FROM data WHERE id > 1".to_string()),
-        dialect: QueryDialect::default(),
         sort_by: Some(SortSpec {
             columns: vec![SortColumn {
                 name: "id".to_string(),
                 direction: SortDirection::Ascending,
             }],
         }),
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
-        output_format: None,
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
 
     assert!(output.exists());
-    let batches = test_helpers::read_arrow_file(&output);
+    let batches = TestFile::read_arrow_auto(&output);
     let ids = batches[0]
         .column(0)
         .as_any()
@@ -1600,24 +668,13 @@ async fn test_transform_multi_column_sort() {
         ],
     )
     .unwrap();
-    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     let output = temp_dir.path().join("output.arrow");
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: Some(output.to_string_lossy().to_string()),
-        to_many: None,
-        by: None,
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
-        create_dirs: true,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
         sort_by: Some(SortSpec {
             columns: vec![
                 SortColumn {
@@ -1630,49 +687,13 @@ async fn test_transform_multi_column_sort() {
                 },
             ],
         }),
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
-        output_format: None,
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
 
     assert!(output.exists());
-    let batches = test_helpers::read_arrow_file(&output);
+    let batches = TestFile::read_arrow_auto(&output);
     let categories = batches[0]
         .column(0)
         .as_any()
@@ -1700,73 +721,25 @@ async fn test_transform_sort_descending() {
     let input = temp_dir.path().join("input.arrow");
     let output = temp_dir.path().join("output.arrow");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: Some(output.to_string_lossy().to_string()),
-        to_many: None,
-        by: None,
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
-        create_dirs: true,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
         sort_by: Some(SortSpec {
             columns: vec![SortColumn {
                 name: "id".to_string(),
                 direction: SortDirection::Descending,
             }],
         }),
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
-        output_format: None,
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
 
     assert!(output.exists());
-    let batches = test_helpers::read_arrow_file(&output);
+    let batches = TestFile::read_arrow_auto(&output);
     let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total_rows, 3);
 
@@ -1794,68 +767,21 @@ async fn test_transform_parquet_compression_gzip() {
     let input = temp_dir.path().join("input.arrow");
     let output = temp_dir.path().join("output.parquet");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: Some(output.to_string_lossy().to_string()),
-        to_many: None,
-        by: None,
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
-        create_dirs: true,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
         output_format: Some(DataFormat::Parquet),
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
         parquet_compression: Some(ParquetCompression::Gzip),
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
 
     assert!(output.exists());
-    let batches = test_helpers::read_parquet_file(&output);
+    let batches = TestFile::read_parquet(&output);
     assert_eq!(batches.len(), 1);
     assert_eq!(batches[0].num_rows(), 3);
 }
@@ -1866,68 +792,21 @@ async fn test_transform_parquet_compression_lz4() {
     let input = temp_dir.path().join("input.arrow");
     let output = temp_dir.path().join("output.parquet");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: Some(output.to_string_lossy().to_string()),
-        to_many: None,
-        by: None,
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
-        create_dirs: true,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
         output_format: Some(DataFormat::Parquet),
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
         parquet_compression: Some(ParquetCompression::Lz4),
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
 
     assert!(output.exists());
-    let batches = test_helpers::read_parquet_file(&output);
+    let batches = TestFile::read_parquet(&output);
     assert_eq!(batches.len(), 1);
     assert_eq!(batches[0].num_rows(), 3);
 }
@@ -1938,71 +817,24 @@ async fn test_transform_parquet_bloom_all() {
     let input = temp_dir.path().join("input.arrow");
     let output = temp_dir.path().join("output.parquet");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: Some(output.to_string_lossy().to_string()),
-        to_many: None,
-        by: None,
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
-        create_dirs: true,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
         output_format: Some(DataFormat::Parquet),
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
         parquet_bloom_all: Some(AllColumnsBloomFilterConfig {
             fpp: 0.01,
             ndv: None,
         }),
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
 
     assert!(output.exists());
-    let batches = test_helpers::read_parquet_file(&output);
+    let batches = TestFile::read_parquet(&output);
     assert_eq!(batches.len(), 1);
 }
 
@@ -2012,68 +844,21 @@ async fn test_transform_parquet_statistics() {
     let input = temp_dir.path().join("input.arrow");
     let output = temp_dir.path().join("output.parquet");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: Some(output.to_string_lossy().to_string()),
-        to_many: None,
-        by: None,
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
-        create_dirs: true,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
         output_format: Some(DataFormat::Parquet),
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
         parquet_statistics: Some(ParquetStatistics::Chunk),
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
 
     assert!(output.exists());
-    let batches = test_helpers::read_parquet_file(&output);
+    let batches = TestFile::read_parquet(&output);
     assert_eq!(batches.len(), 1);
 }
 
@@ -2083,68 +868,21 @@ async fn test_transform_parquet_writer_version() {
     let input = temp_dir.path().join("input.arrow");
     let output = temp_dir.path().join("output.parquet");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: Some(output.to_string_lossy().to_string()),
-        to_many: None,
-        by: None,
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
-        create_dirs: true,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
         output_format: Some(DataFormat::Parquet),
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
         parquet_writer_version: Some(ParquetWriterVersion::V1),
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
 
     assert!(output.exists());
-    let batches = test_helpers::read_parquet_file(&output);
+    let batches = TestFile::read_parquet(&output);
     assert_eq!(batches.len(), 1);
 }
 
@@ -2154,68 +892,21 @@ async fn test_transform_parquet_dictionary_all_off() {
     let input = temp_dir.path().join("input.arrow");
     let output = temp_dir.path().join("output.parquet");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: Some(output.to_string_lossy().to_string()),
-        to_many: None,
-        by: None,
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
-        create_dirs: true,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
         output_format: Some(DataFormat::Parquet),
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
         parquet_dictionary_all_off: true,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
 
     assert!(output.exists());
-    let batches = test_helpers::read_parquet_file(&output);
+    let batches = TestFile::read_parquet(&output);
     assert_eq!(batches.len(), 1);
 }
 
@@ -2226,68 +917,21 @@ async fn test_transform_parquet_dictionary_column_off() {
     let input = temp_dir.path().join("input.arrow");
     let output = temp_dir.path().join("output.parquet");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: Some(output.to_string_lossy().to_string()),
-        to_many: None,
-        by: None,
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
-        create_dirs: true,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
         output_format: Some(DataFormat::Parquet),
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
         parquet_dictionary_column_off: vec!["id".to_string()],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
 
     assert!(output.exists());
-    let batches = test_helpers::read_parquet_file(&output);
+    let batches = TestFile::read_parquet(&output);
     assert_eq!(batches.len(), 1);
 }
 
@@ -2298,68 +942,25 @@ async fn test_transform_parquet_dictionary_column() {
     let input = temp_dir.path().join("input.arrow");
     let output = temp_dir.path().join("output.parquet");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: Some(output.to_string_lossy().to_string()),
-        to_many: None,
-        by: None,
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
-        create_dirs: true,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
         output_format: Some(DataFormat::Parquet),
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
         parquet_dictionary_all_off: true,
-        parquet_dictionary_column: vec!["name".to_string()],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        parquet_dictionary_column: vec![ColumnDictionaryConfig {
+            name: "name".to_string(),
+            mode: DictionaryMode::Always,
+        }],
+        ..Default::default()
     })
     .await
     .unwrap();
 
     assert!(output.exists());
-    let batches = test_helpers::read_parquet_file(&output);
+    let batches = TestFile::read_parquet(&output);
     assert_eq!(batches.len(), 1);
 }
 
@@ -2369,62 +970,14 @@ async fn test_transform_arrow_format_stream() {
     let input = temp_dir.path().join("input.arrow");
     let output = temp_dir.path().join("output.arrow");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: Some(output.to_string_lossy().to_string()),
-        to_many: None,
-        by: None,
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
-        create_dirs: true,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
-        output_format: None,
-        arrow_compression: None,
         arrow_format: Some(ArrowIPCFormat::Stream),
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
@@ -2440,68 +993,20 @@ async fn test_transform_arrow_record_batch_size() {
     let input = temp_dir.path().join("input.arrow");
     let output = temp_dir.path().join("output.arrow");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: Some(output.to_string_lossy().to_string()),
-        to_many: None,
-        by: None,
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
-        create_dirs: true,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
-        output_format: None,
-        arrow_compression: None,
-        arrow_format: None,
         arrow_record_batch_size: Some(1000),
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
 
     assert!(output.exists());
-    let batches = test_helpers::read_arrow_file(&output);
+    let batches = TestFile::read_arrow_auto(&output);
     assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 3);
 }
 
@@ -2511,68 +1016,21 @@ async fn test_transform_parquet_row_group_size() {
     let input = temp_dir.path().join("input.arrow");
     let output = temp_dir.path().join("output.parquet");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: Some(output.to_string_lossy().to_string()),
-        to_many: None,
-        by: None,
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
-        create_dirs: true,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
         output_format: Some(DataFormat::Parquet),
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
         parquet_row_group_size: Some(1000),
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
 
     assert!(output.exists());
-    let batches = test_helpers::read_parquet_file(&output);
+    let batches = TestFile::read_parquet(&output);
     assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 3);
 }
 
@@ -2581,64 +1039,20 @@ async fn test_transform_partition_to_parquet() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "a", "b"]);
-    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "a", "b"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     let template = temp_dir.path().join("{{name}}.parquet");
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("name".to_string()),
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
         create_dirs: false,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
         output_format: Some(DataFormat::Parquet),
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
         parquet_compression: Some(ParquetCompression::Snappy),
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
@@ -2649,8 +1063,8 @@ async fn test_transform_partition_to_parquet() {
     assert!(output_a.exists());
     assert!(output_b.exists());
 
-    let batches_a = test_helpers::read_parquet_file(&output_a);
-    let batches_b = test_helpers::read_parquet_file(&output_b);
+    let batches_a = TestFile::read_parquet(&output_a);
+    let batches_b = TestFile::read_parquet(&output_b);
 
     assert_eq!(batches_a.iter().map(|b| b.num_rows()).sum::<usize>(), 2);
     assert_eq!(batches_b.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
@@ -2663,7 +1077,7 @@ async fn test_transform_low_cardinality_partition() {
     let input = temp_dir.path().join("input.arrow");
 
     // create unsorted data - rows are interleaved by partition value
-    let schema = test_helpers::simple_schema();
+    let schema = TestBatch::simple_schema();
     let batch = RecordBatch::try_new(
         Arc::clone(&schema),
         vec![
@@ -2672,62 +1086,19 @@ async fn test_transform_low_cardinality_partition() {
         ],
     )
     .unwrap();
-    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     let template = temp_dir.path().join("{{name}}.parquet");
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("name".to_string()),
         partition_strategy: PartitionStrategy::NosortMulti,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
         create_dirs: false,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
         output_format: Some(DataFormat::Parquet),
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
@@ -2738,8 +1109,8 @@ async fn test_transform_low_cardinality_partition() {
     assert!(output_a.exists());
     assert!(output_b.exists());
 
-    let batches_a = test_helpers::read_parquet_file(&output_a);
-    let batches_b = test_helpers::read_parquet_file(&output_b);
+    let batches_a = TestFile::read_parquet(&output_a);
+    let batches_b = TestFile::read_parquet(&output_b);
 
     // each partition should have 2 rows
     assert_eq!(batches_a.iter().map(|b| b.num_rows()).sum::<usize>(), 2);
@@ -2786,62 +1157,16 @@ async fn test_transform_multi_column_partition() {
         ],
     )
     .unwrap();
-    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     let template = temp_dir.path().join("year={{year}}/month={{month}}.arrow");
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("year,month".to_string()),
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
-        create_dirs: true,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
-        output_format: None,
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
@@ -2857,11 +1182,10 @@ async fn test_transform_from_many_to_partitioned() {
     let input1 = temp_dir.path().join("input1.arrow");
     let input2 = temp_dir.path().join("input2.arrow");
 
-    let schema = test_helpers::simple_schema();
-    let batch1 = test_helpers::create_batch(&schema, &[1, 2], &["a", "b"]);
-    let batch2 = test_helpers::create_batch(&schema, &[3, 4], &["a", "c"]);
-    test_helpers::write_arrow_file(&input1, &schema, vec![batch1]);
-    test_helpers::write_arrow_file(&input2, &schema, vec![batch2]);
+    let batch1 = TestBatch::simple_with(&[1, 2], &["a", "b"]);
+    let batch2 = TestBatch::simple_with(&[3, 4], &["a", "c"]);
+    TestFile::write_arrow_batch(&input1, &batch1);
+    TestFile::write_arrow_batch(&input2, &batch2);
 
     let _ = std::fs::remove_file(temp_dir.path().join("a.arrow"));
     let _ = std::fs::remove_file(temp_dir.path().join("b.arrow"));
@@ -2878,52 +1202,9 @@ async fn test_transform_from_many_to_partitioned() {
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("name".to_string()),
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
         create_dirs: false,
         overwrite: true,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
-        output_format: None,
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
@@ -2936,9 +1217,9 @@ async fn test_transform_from_many_to_partitioned() {
     assert!(output_b.exists());
     assert!(output_c.exists());
 
-    let batches_a = test_helpers::read_arrow_file(&output_a);
-    let batches_b = test_helpers::read_arrow_file(&output_b);
-    let batches_c = test_helpers::read_arrow_file(&output_c);
+    let batches_a = TestFile::read_arrow_auto(&output_a);
+    let batches_b = TestFile::read_arrow_auto(&output_b);
+    let batches_c = TestFile::read_arrow_auto(&output_c);
 
     let rows_a: usize = batches_a.iter().map(|b| b.num_rows()).sum();
     let rows_b: usize = batches_b.iter().map(|b| b.num_rows()).sum();
@@ -2966,62 +1247,14 @@ async fn test_transform_invalid_query() {
     let input = temp_dir.path().join("input.arrow");
     let output = temp_dir.path().join("output.arrow");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     let result = silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: Some(output.to_string_lossy().to_string()),
-        to_many: None,
-        by: None,
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
-        create_dirs: true,
-        overwrite: false,
         query: Some("SELECT nonexistent FROM data".to_string()),
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
-        output_format: None,
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await;
 
@@ -3034,67 +1267,19 @@ async fn test_transform_empty_file() {
     let input = temp_dir.path().join("input.arrow");
     let output = temp_dir.path().join("output.arrow");
 
-    let schema = test_helpers::simple_schema();
-    test_helpers::write_arrow_file(&input, &schema, vec![]);
+    let schema = TestBatch::simple_schema();
+    TestFile::write_arrow_empty(&input, &schema);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: Some(output.to_string_lossy().to_string()),
-        to_many: None,
-        by: None,
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
-        create_dirs: true,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
-        output_format: None,
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
 
     assert!(output.exists());
-    let batches = test_helpers::read_arrow_file(&output);
+    let batches = TestFile::read_arrow_auto(&output);
     assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 0);
 }
 
@@ -3104,71 +1289,24 @@ async fn test_transform_bloom_filter_with_custom_ndv() {
     let input = temp_dir.path().join("input.arrow");
     let output = temp_dir.path().join("output.parquet");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2, 3, 4, 5], &["a", "b", "c", "d", "e"]);
-    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3, 4, 5], &["a", "b", "c", "d", "e"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: Some(output.to_string_lossy().to_string()),
-        to_many: None,
-        by: None,
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
-        create_dirs: true,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
         output_format: Some(DataFormat::Parquet),
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
         parquet_bloom_all: Some(AllColumnsBloomFilterConfig {
             fpp: 0.005,
             ndv: Some(1000),
         }),
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
 
     assert!(output.exists());
-    let batches = test_helpers::read_parquet_file(&output);
+    let batches = TestFile::read_parquet(&output);
     assert_eq!(batches[0].num_rows(), 5);
 }
 
@@ -3178,37 +1316,13 @@ async fn test_transform_bloom_filter_column_specific_with_ndv() {
     let input = temp_dir.path().join("input.arrow");
     let output = temp_dir.path().join("output.parquet");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: Some(output.to_string_lossy().to_string()),
-        to_many: None,
-        by: None,
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
-        create_dirs: true,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
         output_format: Some(DataFormat::Parquet),
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
         parquet_bloom_column: vec![ColumnSpecificBloomFilterConfig {
             name: "id".to_string(),
             config: silk_chiffon::ColumnBloomFilterConfig {
@@ -3216,36 +1330,13 @@ async fn test_transform_bloom_filter_column_specific_with_ndv() {
                 ndv: Some(5000),
             },
         }],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
 
     assert!(output.exists());
-    let batches = test_helpers::read_parquet_file(&output);
+    let batches = TestFile::read_parquet(&output);
     assert_eq!(batches[0].num_rows(), 3);
 }
 
@@ -3257,13 +1348,12 @@ async fn test_transform_mixed_parquet_and_arrow_inputs() {
     let parquet_input = temp_dir.path().join("data3.parquet");
     let output = temp_dir.path().join("output.parquet");
 
-    let schema = test_helpers::simple_schema();
-    let batch1 = test_helpers::create_batch(&schema, &[1, 2], &["a", "b"]);
-    let batch2 = test_helpers::create_batch(&schema, &[3, 4], &["c", "d"]);
-    let batch3 = test_helpers::create_batch(&schema, &[5, 6], &["e", "f"]);
-    test_helpers::write_arrow_file(&arrow_input1, &schema, vec![batch1]);
-    test_helpers::write_arrow_file(&arrow_input2, &schema, vec![batch2]);
-    test_helpers::write_parquet_file(&parquet_input, &schema, vec![batch3]);
+    let batch1 = TestBatch::simple_with(&[1, 2], &["a", "b"]);
+    let batch2 = TestBatch::simple_with(&[3, 4], &["c", "d"]);
+    let batch3 = TestBatch::simple_with(&[5, 6], &["e", "f"]);
+    TestFile::write_arrow_batch(&arrow_input1, &batch1);
+    TestFile::write_arrow_batch(&arrow_input2, &batch2);
+    TestFile::write_parquet_batch(&parquet_input, &batch3);
 
     let glob_pattern = temp_dir.path().join("data*.arrow");
 
@@ -3271,60 +1361,15 @@ async fn test_transform_mixed_parquet_and_arrow_inputs() {
         from: None,
         from_many: vec![glob_pattern.to_string_lossy().to_string()],
         to: Some(output.to_string_lossy().to_string()),
-        to_many: None,
-        by: None,
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
-        create_dirs: true,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
         output_format: Some(DataFormat::Parquet),
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
         parquet_compression: Some(ParquetCompression::Snappy),
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
 
     assert!(output.exists());
-    let batches = test_helpers::read_parquet_file(&output);
+    let batches = TestFile::read_parquet(&output);
     assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 4);
 }
 
@@ -3333,64 +1378,19 @@ async fn test_transform_partition_list_outputs_text() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "a", "b"]);
-    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "a", "b"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     let template = temp_dir.path().join("{{name}}.arrow");
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("name".to_string()),
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
         list_outputs: Some(ListOutputsFormat::Text),
-        list_outputs_file: None,
         create_dirs: false,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
-        output_format: None,
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
@@ -3407,64 +1407,19 @@ async fn test_transform_partition_list_outputs_json() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2], &["x", "y"]);
-    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2], &["x", "y"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     let template = temp_dir.path().join("{{name}}.arrow");
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("name".to_string()),
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
         list_outputs: Some(ListOutputsFormat::Json),
-        list_outputs_file: None,
         create_dirs: false,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
-        output_format: None,
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
@@ -3482,68 +1437,21 @@ async fn test_transform_explicit_input_format_arrow_to_parquet() {
     let input = temp_dir.path().join("input.arrow");
     let output = temp_dir.path().join("output.parquet");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: Some(output.to_string_lossy().to_string()),
-        to_many: None,
-        by: None,
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
-        create_dirs: true,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
         input_format: Some(DataFormat::Arrow),
         output_format: Some(DataFormat::Parquet),
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
 
     assert!(output.exists());
-    let batches = test_helpers::read_parquet_file(&output);
+    let batches = TestFile::read_parquet(&output);
     assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 3);
 }
 
@@ -3553,68 +1461,21 @@ async fn test_transform_explicit_output_format_parquet() {
     let input = temp_dir.path().join("input.parquet");
     let output = temp_dir.path().join("output.arrow");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    test_helpers::write_parquet_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_parquet_batch(&input, &batch);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: Some(output.to_string_lossy().to_string()),
-        to_many: None,
-        by: None,
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
-        create_dirs: true,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
         input_format: Some(DataFormat::Parquet),
         output_format: Some(DataFormat::Arrow),
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
 
     assert!(output.exists());
-    let batches = test_helpers::read_arrow_file(&output);
+    let batches = TestFile::read_arrow_auto(&output);
     assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 3);
 }
 
@@ -3624,62 +1485,14 @@ async fn test_transform_arrow_compression_lz4() {
     let input = temp_dir.path().join("input.arrow");
     let output = temp_dir.path().join("output.arrow");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: Some(output.to_string_lossy().to_string()),
-        to_many: None,
-        by: None,
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
-        create_dirs: true,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
-        output_format: None,
         arrow_compression: Some(ArrowCompression::Lz4),
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
@@ -3709,62 +1522,19 @@ async fn test_transform_query_with_partition() {
         ],
     )
     .unwrap();
-    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     let template = temp_dir.path().join("{{category}}.arrow");
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("category".to_string()),
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
         create_dirs: false,
         overwrite: true,
         query: Some("SELECT * FROM data WHERE value > 15".to_string()),
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
-        output_format: None,
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap_or_else(|e| panic!("Command failed with error: {:?}", e));
@@ -3779,11 +1549,11 @@ async fn test_transform_query_with_partition() {
 
     let mut total_rows = 0;
     if has_a {
-        let batches_a = test_helpers::read_arrow_file(&output_a);
+        let batches_a = TestFile::read_arrow_auto(&output_a);
         total_rows += batches_a.iter().map(|b| b.num_rows()).sum::<usize>();
     }
     if has_b {
-        let batches_b = test_helpers::read_arrow_file(&output_b);
+        let batches_b = TestFile::read_arrow_auto(&output_b);
         total_rows += batches_b.iter().map(|b| b.num_rows()).sum::<usize>();
     }
 
@@ -3800,68 +1570,21 @@ async fn test_transform_query_with_different_dialect() {
     let input = temp_dir.path().join("input.arrow");
     let output = temp_dir.path().join("output.arrow");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: Some(output.to_string_lossy().to_string()),
-        to_many: None,
-        by: None,
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
-        create_dirs: true,
-        overwrite: false,
         query: Some("SELECT * FROM data WHERE id >= 2".to_string()),
         dialect: QueryDialect::PostgreSQL,
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
-        output_format: None,
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
 
     assert!(output.exists());
-    let batches = test_helpers::read_arrow_file(&output);
+    let batches = TestFile::read_arrow_auto(&output);
     assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 2);
 }
 
@@ -3887,67 +1610,24 @@ async fn test_transform_partition_with_query_and_sort() {
         ],
     )
     .unwrap();
-    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     let template = temp_dir.path().join("{{region}}.arrow");
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("region".to_string()),
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
         create_dirs: false,
-        overwrite: false,
         query: Some("SELECT * FROM data WHERE score > 100".to_string()),
-        dialect: QueryDialect::default(),
         sort_by: Some(SortSpec {
             columns: vec![SortColumn {
                 name: "score".to_string(),
                 direction: SortDirection::Ascending,
             }],
         }),
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
-        output_format: None,
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
@@ -3958,8 +1638,8 @@ async fn test_transform_partition_with_query_and_sort() {
     assert!(output_us.exists());
     assert!(output_eu.exists());
 
-    let batches_us = test_helpers::read_arrow_file(&output_us);
-    let batches_eu = test_helpers::read_arrow_file(&output_eu);
+    let batches_us = TestFile::read_arrow_auto(&output_us);
+    let batches_eu = TestFile::read_arrow_auto(&output_eu);
 
     let us_rows: usize = batches_us.iter().map(|b| b.num_rows()).sum();
     let eu_rows: usize = batches_eu.iter().map(|b| b.num_rows()).sum();
@@ -4102,61 +1782,17 @@ async fn test_parquet_roundtrip_data_fidelity() {
     );
 
     // write the input arrow file with multiple batches
-    test_helpers::write_arrow_file(&input_arrow, &schema, input_batches_to_write);
+    TestFile::write_arrow(&input_arrow, &input_batches_to_write);
 
     // step 1: convert arrow to parquet with multiple row groups
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input_arrow.to_string_lossy().to_string()),
-        from_many: vec![],
         to: Some(intermediate_parquet.to_string_lossy().to_string()),
-        to_many: None,
-        by: None,
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
-        create_dirs: true,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
         preserve_input_order: true,
-        target_partitions: None,
-        input_format: None,
         output_format: Some(DataFormat::Parquet),
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
         parquet_compression: Some(ParquetCompression::Zstd),
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
         parquet_row_group_size: Some(parquet_row_group_size),
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
@@ -4177,56 +1813,12 @@ async fn test_parquet_roundtrip_data_fidelity() {
     // step 2: convert parquet back to arrow with specified batch size
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(intermediate_parquet.to_string_lossy().to_string()),
-        from_many: vec![],
         to: Some(output_arrow.to_string_lossy().to_string()),
-        to_many: None,
-        by: None,
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
-        create_dirs: true,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
         preserve_input_order: true,
-        target_partitions: None,
         input_format: Some(DataFormat::Parquet),
         output_format: Some(DataFormat::Arrow),
-        arrow_compression: None,
-        arrow_format: None,
         arrow_record_batch_size: Some(output_batch_size),
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
@@ -4234,8 +1826,8 @@ async fn test_parquet_roundtrip_data_fidelity() {
     assert!(output_arrow.exists());
 
     // step 3: read both files and compare directly
-    let input_batches = test_helpers::read_arrow_file(&input_arrow);
-    let output_batches = test_helpers::read_arrow_file(&output_arrow);
+    let input_batches = TestFile::read_arrow_auto(&input_arrow);
+    let output_batches = TestFile::read_arrow_auto(&output_arrow);
 
     // verify we have multiple batches in both files
     assert!(
@@ -4548,62 +2140,17 @@ async fn test_multi_column_partition_verifies_data_arrow() {
         ],
     )
     .unwrap();
-    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     let template = temp_dir.path().join("year={{year}}/month={{month}}.arrow");
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("year,month".to_string()),
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
-        create_dirs: true,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
-        output_format: Some(DataFormat::Arrow), // be explicit to ensure we are testing the correct format
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        output_format: Some(DataFormat::Arrow), // be explicit to ensure we are testing the correct format,
+        ..Default::default()
     })
     .await
     .unwrap();
@@ -4618,10 +2165,10 @@ async fn test_multi_column_partition_verifies_data_arrow() {
     assert!(file_2024_1.exists(), "2024/1 partition file should exist");
     assert!(file_2024_2.exists(), "2024/2 partition file should exist");
 
-    let batches_2023_1 = test_helpers::read_arrow_file(&file_2023_1);
-    let batches_2023_2 = test_helpers::read_arrow_file(&file_2023_2);
-    let batches_2024_1 = test_helpers::read_arrow_file(&file_2024_1);
-    let batches_2024_2 = test_helpers::read_arrow_file(&file_2024_2);
+    let batches_2023_1 = TestFile::read_arrow_auto(&file_2023_1);
+    let batches_2023_2 = TestFile::read_arrow_auto(&file_2023_2);
+    let batches_2024_1 = TestFile::read_arrow_auto(&file_2024_1);
+    let batches_2024_2 = TestFile::read_arrow_auto(&file_2024_2);
 
     verify_int32_partition_values(&batches_2023_1, 2023, 1, "2023/1");
     verify_int32_partition_values(&batches_2023_2, 2023, 2, "2023/2");
@@ -4670,7 +2217,7 @@ async fn test_multi_column_partition_verifies_data_parquet() {
         ],
     )
     .unwrap();
-    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     let template = temp_dir
         .path()
@@ -4678,56 +2225,11 @@ async fn test_multi_column_partition_verifies_data_parquet() {
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("year,month".to_string()),
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
-        create_dirs: true,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
         output_format: Some(DataFormat::Parquet),
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
@@ -4742,10 +2244,10 @@ async fn test_multi_column_partition_verifies_data_parquet() {
     assert!(file_2024_1.exists());
     assert!(file_2024_2.exists());
 
-    let batches_2023_1 = test_helpers::read_parquet_file(&file_2023_1);
-    let batches_2023_2 = test_helpers::read_parquet_file(&file_2023_2);
-    let batches_2024_1 = test_helpers::read_parquet_file(&file_2024_1);
-    let batches_2024_2 = test_helpers::read_parquet_file(&file_2024_2);
+    let batches_2023_1 = TestFile::read_parquet(&file_2023_1);
+    let batches_2023_2 = TestFile::read_parquet(&file_2023_2);
+    let batches_2024_1 = TestFile::read_parquet(&file_2024_1);
+    let batches_2024_2 = TestFile::read_parquet(&file_2024_2);
 
     verify_int32_partition_values(&batches_2023_1, 2023, 1, "2023/1");
     verify_int32_partition_values(&batches_2023_2, 2023, 2, "2023/2");
@@ -4781,7 +2283,7 @@ async fn test_multi_column_partition_three_columns_arrow() {
         ],
     )
     .unwrap();
-    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     let template = temp_dir
         .path()
@@ -4789,56 +2291,11 @@ async fn test_multi_column_partition_three_columns_arrow() {
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("year,month,day".to_string()),
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
-        create_dirs: true,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
         output_format: Some(DataFormat::Arrow),
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
@@ -4853,13 +2310,13 @@ async fn test_multi_column_partition_three_columns_arrow() {
     assert!(file_2024_1_10.exists(), "2024/1/10 should exist");
     assert!(file_2024_1_15.exists(), "2024/1/15 should exist");
 
-    let batches = test_helpers::read_arrow_file(&file_2023_1_10);
+    let batches = TestFile::read_arrow_auto(&file_2023_1_10);
     assert_eq!(count_rows(&batches), 1);
-    let batches = test_helpers::read_arrow_file(&file_2023_1_15);
+    let batches = TestFile::read_arrow_auto(&file_2023_1_15);
     assert_eq!(count_rows(&batches), 1);
-    let batches = test_helpers::read_arrow_file(&file_2024_1_10);
+    let batches = TestFile::read_arrow_auto(&file_2024_1_10);
     assert_eq!(count_rows(&batches), 1);
-    let batches = test_helpers::read_arrow_file(&file_2024_1_15);
+    let batches = TestFile::read_arrow_auto(&file_2024_1_15);
     assert_eq!(count_rows(&batches), 1);
 }
 
@@ -4885,7 +2342,7 @@ async fn test_multi_column_partition_three_columns_parquet() {
         ],
     )
     .unwrap();
-    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     let template = temp_dir
         .path()
@@ -4893,56 +2350,11 @@ async fn test_multi_column_partition_three_columns_parquet() {
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("year,month,day".to_string()),
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
-        create_dirs: true,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
         output_format: Some(DataFormat::Parquet),
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
@@ -4957,13 +2369,13 @@ async fn test_multi_column_partition_three_columns_parquet() {
     assert!(file_2024_1_10.exists(), "2024/1/10 should exist");
     assert!(file_2024_1_15.exists(), "2024/1/15 should exist");
 
-    let batches = test_helpers::read_parquet_file(&file_2023_1_10);
+    let batches = TestFile::read_parquet(&file_2023_1_10);
     assert_eq!(count_rows(&batches), 1);
-    let batches = test_helpers::read_parquet_file(&file_2023_1_15);
+    let batches = TestFile::read_parquet(&file_2023_1_15);
     assert_eq!(count_rows(&batches), 1);
-    let batches = test_helpers::read_parquet_file(&file_2024_1_10);
+    let batches = TestFile::read_parquet(&file_2024_1_10);
     assert_eq!(count_rows(&batches), 1);
-    let batches = test_helpers::read_parquet_file(&file_2024_1_15);
+    let batches = TestFile::read_parquet(&file_2024_1_15);
     assert_eq!(count_rows(&batches), 1);
 }
 
@@ -4989,7 +2401,7 @@ async fn test_multi_column_partition_mixed_types() {
         ],
     )
     .unwrap();
-    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     let template = temp_dir
         .path()
@@ -4997,56 +2409,11 @@ async fn test_multi_column_partition_mixed_types() {
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("region,year".to_string()),
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
-        create_dirs: true,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
         output_format: Some(DataFormat::Arrow),
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
@@ -5062,18 +2429,18 @@ async fn test_multi_column_partition_mixed_types() {
     assert!(file_us_2024.exists(), "us-west/2024 should exist");
 
     // ids 2, 6
-    assert_eq!(count_rows(&test_helpers::read_arrow_file(&file_eu_2023)), 2);
+    assert_eq!(count_rows(&TestFile::read_arrow_auto(&file_eu_2023)), 2);
     // id 4
-    assert_eq!(count_rows(&test_helpers::read_arrow_file(&file_eu_2024)), 1);
+    assert_eq!(count_rows(&TestFile::read_arrow_auto(&file_eu_2024)), 1);
     // id 3
-    assert_eq!(count_rows(&test_helpers::read_arrow_file(&file_us_2023)), 1);
+    assert_eq!(count_rows(&TestFile::read_arrow_auto(&file_us_2023)), 1);
     // ids 1, 5
-    assert_eq!(count_rows(&test_helpers::read_arrow_file(&file_us_2024)), 2);
+    assert_eq!(count_rows(&TestFile::read_arrow_auto(&file_us_2024)), 2);
 
-    let file_eu_2023_batches = test_helpers::read_arrow_file(&file_eu_2023);
-    let file_eu_2024_batches = test_helpers::read_arrow_file(&file_eu_2024);
-    let file_us_2023_batches = test_helpers::read_arrow_file(&file_us_2023);
-    let file_us_2024_batches = test_helpers::read_arrow_file(&file_us_2024);
+    let file_eu_2023_batches = TestFile::read_arrow_auto(&file_eu_2023);
+    let file_eu_2024_batches = TestFile::read_arrow_auto(&file_eu_2024);
+    let file_us_2023_batches = TestFile::read_arrow_auto(&file_us_2023);
+    let file_us_2024_batches = TestFile::read_arrow_auto(&file_us_2024);
 
     verify_string_partition_values(&file_eu_2023_batches, "eu-west", 2023, "eu-west/2023");
     verify_string_partition_values(&file_eu_2024_batches, "eu-west", 2024, "eu-west/2024");
@@ -5101,7 +2468,7 @@ async fn test_multi_column_partition_parquet_with_exclude() {
         ],
     )
     .unwrap();
-    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     let template = temp_dir
         .path()
@@ -5109,56 +2476,12 @@ async fn test_multi_column_partition_parquet_with_exclude() {
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("year,month".to_string()),
-        partition_strategy: PartitionStrategy::SortSingle,
         exclude_columns: vec!["year".to_string(), "month".to_string()],
-        list_outputs: None,
-        list_outputs_file: None,
-        create_dirs: true,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
         output_format: Some(DataFormat::Parquet),
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
@@ -5170,7 +2493,7 @@ async fn test_multi_column_partition_parquet_with_exclude() {
     assert!(file_2024.exists());
 
     // verify partition columns are excluded from file
-    let batches = test_helpers::read_parquet_file(&file_2023);
+    let batches = TestFile::read_parquet(&file_2023);
     assert_eq!(batches[0].num_columns(), 1, "only one column should remain");
     assert_eq!(
         batches[0].schema().field(0).name(),
@@ -5199,62 +2522,18 @@ async fn test_multi_column_partition_arrow_with_exclude() {
         ],
     )
     .unwrap();
-    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     let template = temp_dir.path().join("year={{year}}/month={{month}}.arrow");
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("year,month".to_string()),
-        partition_strategy: PartitionStrategy::SortSingle,
         exclude_columns: vec!["year".to_string(), "month".to_string()],
-        list_outputs: None,
-        list_outputs_file: None,
-        create_dirs: true,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
         output_format: Some(DataFormat::Arrow),
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
@@ -5265,7 +2544,7 @@ async fn test_multi_column_partition_arrow_with_exclude() {
     assert!(file_2023.exists());
     assert!(file_2024.exists());
 
-    let batches = test_helpers::read_arrow_file(&file_2023);
+    let batches = TestFile::read_arrow_auto(&file_2023);
     assert_eq!(batches[0].num_columns(), 1, "only one column should remain");
     assert_eq!(
         batches[0].schema().field(0).name(),
@@ -5296,7 +2575,7 @@ async fn test_multi_column_partition_verifies_output_paths_arrow() {
         ],
     )
     .unwrap();
-    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     let template = temp_dir
         .path()
@@ -5304,56 +2583,13 @@ async fn test_multi_column_partition_verifies_output_paths_arrow() {
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("year,month".to_string()),
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
         list_outputs: Some(ListOutputsFormat::Json),
         list_outputs_file: Some(Utf8PathBuf::from_path_buf(list_output.clone()).unwrap()),
-        create_dirs: true,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
         output_format: Some(DataFormat::Arrow),
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
@@ -5393,7 +2629,7 @@ async fn test_multi_column_partition_verifies_output_paths_arrow() {
             path
         );
 
-        let batches = test_helpers::read_arrow_file(Path::new(path));
+        let batches = TestFile::read_arrow_auto(Path::new(path));
         let expected_year = i32::try_from(year).unwrap();
         let expected_month = i32::try_from(month).unwrap();
         for batch in &batches {
@@ -5455,7 +2691,7 @@ async fn test_multi_column_partition_verifies_output_paths_parquet() {
         ],
     )
     .unwrap();
-    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     let template = temp_dir
         .path()
@@ -5463,56 +2699,13 @@ async fn test_multi_column_partition_verifies_output_paths_parquet() {
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("region,year".to_string()),
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
         list_outputs: Some(ListOutputsFormat::Json),
         list_outputs_file: Some(Utf8PathBuf::from_path_buf(list_output.clone()).unwrap()),
-        create_dirs: true,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
         output_format: Some(DataFormat::Parquet),
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
@@ -5552,7 +2745,7 @@ async fn test_multi_column_partition_verifies_output_paths_parquet() {
             path
         );
 
-        let batches = test_helpers::read_parquet_file(Path::new(path));
+        let batches = TestFile::read_parquet(Path::new(path));
         let expected_year = i32::try_from(year).unwrap();
         for batch in &batches {
             let regions = batch
@@ -5606,7 +2799,7 @@ async fn test_multi_column_partition_verifies_output_paths_parquet() {
         );
 
         // verify file contents match the path
-        let batches = test_helpers::read_parquet_file(&full_path);
+        let batches = TestFile::read_parquet(&full_path);
         for batch in &batches {
             let regions = batch
                 .column_by_name("region")
@@ -5664,7 +2857,7 @@ async fn test_partition_strategies_produce_same_output() {
         ],
     )
     .unwrap();
-    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     let high_card_dir = temp_dir.path().join("high_cardinality");
     let low_card_dir = temp_dir.path().join("low_cardinality");
@@ -5674,7 +2867,6 @@ async fn test_partition_strategies_produce_same_output() {
     // run high-cardinality partitioning (requires sort)
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: None,
         to_many: Some(
             high_card_dir
@@ -5683,52 +2875,9 @@ async fn test_partition_strategies_produce_same_output() {
                 .to_string(),
         ),
         by: Some("category".to_string()),
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
         create_dirs: false,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
         output_format: Some(DataFormat::Parquet),
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
@@ -5736,7 +2885,6 @@ async fn test_partition_strategies_produce_same_output() {
     // run low-cardinality partitioning (no global sort)
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: None,
         to_many: Some(
             low_card_dir
@@ -5746,51 +2894,9 @@ async fn test_partition_strategies_produce_same_output() {
         ),
         by: Some("category".to_string()),
         partition_strategy: PartitionStrategy::NosortMulti,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
         create_dirs: false,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
         output_format: Some(DataFormat::Parquet),
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_compression: None,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
@@ -5798,7 +2904,7 @@ async fn test_partition_strategies_produce_same_output() {
     // helper to extract sorted (id, value) pairs from a partition file
     fn extract_data(dir: &std::path::Path, filename: &str) -> Vec<(i32, i32)> {
         let path = dir.join(filename);
-        let batches = test_helpers::read_parquet_file(&path);
+        let batches = TestFile::read_parquet(&path);
         let mut data = Vec::new();
         for batch in &batches {
             let ids = batch
@@ -5861,68 +2967,146 @@ async fn test_transform_with_sequential_encoder() {
     let input = temp_dir.path().join("input.arrow");
     let output = temp_dir.path().join("output.parquet");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    test_helpers::write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
-        from_many: vec![],
         to: Some(output.to_string_lossy().to_string()),
-        to_many: None,
-        by: None,
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
-        create_dirs: true,
-        overwrite: false,
-        query: None,
-        dialect: QueryDialect::default(),
-        sort_by: None,
-        memory_limit: None,
-        target_partitions: None,
-        preserve_input_order: false,
-        input_format: None,
         output_format: Some(DataFormat::Parquet),
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
         parquet_compression: Some(ParquetCompression::Snappy),
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_row_group_size: None,
-        parquet_buffer_size: None,
-        parquet_column_encoding_threads: None,
-        parquet_io_threads: None,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_dictionary_all_off: false,
-        parquet_dictionary_column: vec![],
-        parquet_dictionary_column_off: vec![],
-        parquet_encoding: None,
-        parquet_column_encoding: vec![],
-        parquet_sorted_metadata: false,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::Sequential,
-        parquet_row_group_concurrency: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        vortex_record_batch_size: None,
-        threads: None,
+        ..Default::default()
     })
     .await
     .unwrap();
 
     assert!(output.exists());
-    let batches = test_helpers::read_parquet_file(&output);
+    let batches = TestFile::read_parquet(&output);
     assert_eq!(batches.len(), 1);
     assert_eq!(batches[0].num_rows(), 3);
+}
+
+#[tokio::test]
+async fn test_dictionary_prefix_matches_nested_columns() {
+    // "person" prefix should enable dictionary on person.name and person.age
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let output = temp_dir.path().join("output.parquet");
+
+    let batch = TestBatch::with_structs();
+    TestFile::write_arrow_batch(&input, &batch);
+
+    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+        from: Some(input.to_string_lossy().to_string()),
+        to: Some(output.to_string_lossy().to_string()),
+        output_format: Some(DataFormat::Parquet),
+        parquet_dictionary_all_off: true,
+        parquet_dictionary_column: vec![ColumnDictionaryConfig {
+            name: "person".to_string(),
+            mode: DictionaryMode::Always,
+        }],
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    let inspector = test_helpers::inspect(&output);
+    test_helpers::assert_no_dictionary(&inspector, "id");
+    test_helpers::assert_has_dictionary(&inspector, "person.name");
+    test_helpers::assert_has_dictionary(&inspector, "person.age");
+}
+
+#[tokio::test]
+async fn test_dictionary_specific_path_in_nested_column() {
+    // "person.name" should only enable dictionary on person.name, not person.age
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let output = temp_dir.path().join("output.parquet");
+
+    let batch = TestBatch::with_structs();
+    TestFile::write_arrow_batch(&input, &batch);
+
+    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+        from: Some(input.to_string_lossy().to_string()),
+        to: Some(output.to_string_lossy().to_string()),
+        output_format: Some(DataFormat::Parquet),
+        parquet_dictionary_all_off: true,
+        parquet_dictionary_column: vec![ColumnDictionaryConfig {
+            name: "person.name".to_string(),
+            mode: DictionaryMode::Always,
+        }],
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    let inspector = test_helpers::inspect(&output);
+    test_helpers::assert_no_dictionary(&inspector, "id");
+    test_helpers::assert_has_dictionary(&inspector, "person.name");
+    test_helpers::assert_no_dictionary(&inspector, "person.age");
+}
+
+#[tokio::test]
+async fn test_bloom_filter_prefix_matches_nested_columns() {
+    // "person" prefix should enable bloom filters on person.name and person.age
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let output = temp_dir.path().join("output.parquet");
+
+    let batch = TestBatch::with_structs();
+    TestFile::write_arrow_batch(&input, &batch);
+
+    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+        from: Some(input.to_string_lossy().to_string()),
+        to: Some(output.to_string_lossy().to_string()),
+        output_format: Some(DataFormat::Parquet),
+        parquet_bloom_column: vec![ColumnSpecificBloomFilterConfig {
+            name: "person".to_string(),
+            config: silk_chiffon::ColumnBloomFilterConfig {
+                fpp: 0.01,
+                ndv: Some(100),
+            },
+        }],
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    let inspector = test_helpers::inspect(&output);
+    test_helpers::assert_no_bloom_filter(&inspector, "id");
+    test_helpers::assert_has_bloom_filter(&inspector, "person.name");
+    test_helpers::assert_has_bloom_filter(&inspector, "person.age");
+}
+
+#[tokio::test]
+async fn test_bloom_filter_prefix_with_exclusion() {
+    // "person" enables bloom, but "person.age" is excluded
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let output = temp_dir.path().join("output.parquet");
+
+    let batch = TestBatch::with_structs();
+    TestFile::write_arrow_batch(&input, &batch);
+
+    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+        from: Some(input.to_string_lossy().to_string()),
+        to: Some(output.to_string_lossy().to_string()),
+        output_format: Some(DataFormat::Parquet),
+        parquet_bloom_column: vec![ColumnSpecificBloomFilterConfig {
+            name: "person".to_string(),
+            config: silk_chiffon::ColumnBloomFilterConfig {
+                fpp: 0.01,
+                ndv: Some(100),
+            },
+        }],
+        parquet_bloom_column_off: vec!["person.age".to_string()],
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    let inspector = test_helpers::inspect(&output);
+    test_helpers::assert_no_bloom_filter(&inspector, "id");
+    test_helpers::assert_has_bloom_filter(&inspector, "person.name");
+    test_helpers::assert_no_bloom_filter(&inspector, "person.age");
 }

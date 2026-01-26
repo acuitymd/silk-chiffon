@@ -6,7 +6,7 @@ use anyhow::Result;
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use super::{
+use crate::inspection::{
     arrow::ArrowInspector,
     inspectable::Inspectable,
     parquet::ParquetInspector,

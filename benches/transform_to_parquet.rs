@@ -14,7 +14,7 @@ use arrow::record_batch::RecordBatch;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
-use silk_chiffon::sinks::parquet::{ParallelParquetWriter, ParallelWriterConfig, ParquetPools};
+use silk_chiffon::sinks::parquet::{AdaptiveParquetWriter, AdaptiveWriterConfig, ParquetRuntimes};
 use tempfile::TempDir;
 use tokio::runtime::Runtime;
 
@@ -23,14 +23,14 @@ const DEFAULT_BUFFER_SIZE: usize = 8 * 1024 * 1024;
 #[derive(Clone, Copy, Debug)]
 enum WriterStrategy {
     Sequential,
-    Parallel,
+    Adaptive,
 }
 
 impl std::fmt::Display for WriterStrategy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             WriterStrategy::Sequential => write!(f, "seq"),
-            WriterStrategy::Parallel => write!(f, "parallel"),
+            WriterStrategy::Adaptive => write!(f, "adaptive"),
         }
     }
 }
@@ -200,7 +200,7 @@ fn bench_transform(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let temp_dir = TempDir::new().unwrap();
 
-    let pools = Arc::new(ParquetPools::default_pools().unwrap());
+    let runtimes = Arc::new(ParquetRuntimes::try_default().unwrap());
 
     // pre-create all Arrow files
     println!("Creating Arrow test files...");
@@ -223,13 +223,13 @@ fn bench_transform(c: &mut Criterion) {
         let total_bytes = row_size * config.rows as u64;
         group.throughput(Throughput::Bytes(total_bytes));
 
-        for strategy in [WriterStrategy::Sequential, WriterStrategy::Parallel] {
+        for strategy in [WriterStrategy::Sequential, WriterStrategy::Adaptive] {
             let bench_id = BenchmarkId::new(format!("{}", strategy), format!("{}", config));
 
             group.bench_with_input(
                 bench_id,
-                &(arrow_path, config, &pools),
-                |b, (arrow_path, config, pools)| {
+                &(arrow_path, config, &runtimes),
+                |b, (arrow_path, config, runtimes)| {
                     b.iter(|| {
                         // read Arrow file from disk each iteration
                         let file = File::open(arrow_path).unwrap();
@@ -258,21 +258,22 @@ fn bench_transform(c: &mut Criterion) {
                                 }
                                 writer.close().unwrap();
                             }
-                            WriterStrategy::Parallel => rt.block_on(async {
-                                let writer_config = ParallelWriterConfig {
+                            WriterStrategy::Adaptive => rt.block_on(async {
+                                let writer_config = AdaptiveWriterConfig {
                                     max_row_group_size: config.row_group_size,
                                     max_row_group_concurrency: 4,
                                     buffer_size: DEFAULT_BUFFER_SIZE,
-                                    encoding_batch_size: 122_880,
-                                    batch_channel_size: 16,
-                                    encoded_channel_size: 4,
+                                    ingestion_queue_size: 1,
+                                    encoding_queue_size: 4,
+                                    writing_queue_size: 4,
                                     skip_arrow_metadata: true,
+                                    ..Default::default()
                                 };
-                                let mut writer = ParallelParquetWriter::new(
+                                let mut writer = AdaptiveParquetWriter::new(
                                     &out_path,
                                     &schema,
                                     props,
-                                    Arc::clone(pools),
+                                    Arc::clone(runtimes),
                                     writer_config,
                                 );
 

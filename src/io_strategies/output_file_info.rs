@@ -5,7 +5,7 @@ use arrow::util::display::ArrayFormatter;
 use serde::Serialize;
 use serde_json::Value;
 
-use super::partitioner::PartitionValues;
+use crate::io_strategies::partitioner::PartitionValues;
 
 /// Information about a single output file from a partitioned write.
 #[derive(Debug, Clone, Serialize)]

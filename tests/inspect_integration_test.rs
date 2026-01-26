@@ -4,70 +4,12 @@
 
 use arrow::array::{Int32Array, RecordBatch, StringArray};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
-use arrow::ipc::writer::{FileWriter, StreamWriter};
 use assert_cmd::cargo::cargo_bin_cmd;
-use parquet::arrow::ArrowWriter;
 use predicates::prelude::*;
+use silk_chiffon::utils::test_data::{TestBatch, TestFile};
 use std::fs::File;
 use std::sync::Arc;
 use tempfile::TempDir;
-
-mod test_helpers {
-    use super::*;
-
-    pub fn simple_schema() -> SchemaRef {
-        Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Int32, false),
-            Field::new("name", DataType::Utf8, false),
-        ]))
-    }
-
-    pub fn create_batch(schema: &SchemaRef, ids: &[i32], names: &[&str]) -> RecordBatch {
-        RecordBatch::try_new(
-            Arc::clone(schema),
-            vec![
-                Arc::new(Int32Array::from(ids.to_vec())),
-                Arc::new(StringArray::from(names.to_vec())),
-            ],
-        )
-        .unwrap()
-    }
-
-    pub fn write_parquet_file(
-        path: &std::path::Path,
-        schema: &SchemaRef,
-        batches: Vec<RecordBatch>,
-    ) {
-        let file = File::create(path).unwrap();
-        let mut writer = ArrowWriter::try_new(file, Arc::clone(schema), None).unwrap();
-        for batch in batches {
-            writer.write(&batch).unwrap();
-        }
-        writer.close().unwrap();
-    }
-
-    pub fn write_arrow_file(path: &std::path::Path, schema: &SchemaRef, batches: Vec<RecordBatch>) {
-        let file = File::create(path).unwrap();
-        let mut writer = FileWriter::try_new(file, schema).unwrap();
-        for batch in batches {
-            writer.write(&batch).unwrap();
-        }
-        writer.finish().unwrap();
-    }
-
-    pub fn write_arrow_stream(
-        path: &std::path::Path,
-        schema: &SchemaRef,
-        batches: Vec<RecordBatch>,
-    ) {
-        let file = File::create(path).unwrap();
-        let mut writer = StreamWriter::try_new(file, schema).unwrap();
-        for batch in batches {
-            writer.write(&batch).unwrap();
-        }
-        writer.finish().unwrap();
-    }
-}
 
 // =============================================================================
 // Parquet inspection tests
@@ -78,9 +20,8 @@ fn test_inspect_parquet_default() {
     let temp_dir = TempDir::new().unwrap();
     let file = temp_dir.path().join("test.parquet");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    test_helpers::write_parquet_file(&file, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_parquet_batch(&file, &batch);
 
     let mut cmd = cargo_bin_cmd!("silk-chiffon");
     cmd.args(["inspect", "parquet", file.to_str().unwrap(), "-f", "text"])
@@ -96,9 +37,8 @@ fn test_inspect_parquet_schema() {
     let temp_dir = TempDir::new().unwrap();
     let file = temp_dir.path().join("test.parquet");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    test_helpers::write_parquet_file(&file, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_parquet_batch(&file, &batch);
 
     let mut cmd = cargo_bin_cmd!("silk-chiffon");
     cmd.args(["inspect", "parquet", file.to_str().unwrap(), "-f", "text"])
@@ -114,9 +54,8 @@ fn test_inspect_parquet_stats() {
     let temp_dir = TempDir::new().unwrap();
     let file = temp_dir.path().join("test.parquet");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    test_helpers::write_parquet_file(&file, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_parquet_batch(&file, &batch);
 
     let mut cmd = cargo_bin_cmd!("silk-chiffon");
     cmd.args(["inspect", "parquet", file.to_str().unwrap(), "-f", "text"])
@@ -130,9 +69,8 @@ fn test_inspect_parquet_row_groups() {
     let temp_dir = TempDir::new().unwrap();
     let file = temp_dir.path().join("test.parquet");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    test_helpers::write_parquet_file(&file, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_parquet_batch(&file, &batch);
 
     let mut cmd = cargo_bin_cmd!("silk-chiffon");
     cmd.args(["inspect", "parquet", file.to_str().unwrap(), "-f", "text"])
@@ -146,9 +84,8 @@ fn test_inspect_parquet_json() {
     let temp_dir = TempDir::new().unwrap();
     let file = temp_dir.path().join("test.parquet");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    test_helpers::write_parquet_file(&file, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_parquet_batch(&file, &batch);
 
     let mut cmd = cargo_bin_cmd!("silk-chiffon");
     cmd.args([
@@ -173,9 +110,8 @@ fn test_inspect_arrow_file_default() {
     let temp_dir = TempDir::new().unwrap();
     let file = temp_dir.path().join("test.arrow");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    test_helpers::write_arrow_file(&file, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_arrow_batch(&file, &batch);
 
     let mut cmd = cargo_bin_cmd!("silk-chiffon");
     cmd.args([
@@ -198,10 +134,9 @@ fn test_inspect_arrow_file_batches() {
     let temp_dir = TempDir::new().unwrap();
     let file = temp_dir.path().join("test.arrow");
 
-    let schema = test_helpers::simple_schema();
-    let batch1 = test_helpers::create_batch(&schema, &[1, 2], &["a", "b"]);
-    let batch2 = test_helpers::create_batch(&schema, &[3, 4], &["c", "d"]);
-    test_helpers::write_arrow_file(&file, &schema, vec![batch1, batch2]);
+    let batch1 = TestBatch::simple_with(&[1, 2], &["a", "b"]);
+    let batch2 = TestBatch::simple_with(&[3, 4], &["c", "d"]);
+    TestFile::write_arrow(&file, &[batch1, batch2]);
 
     let mut cmd = cargo_bin_cmd!("silk-chiffon");
     cmd.args([
@@ -222,9 +157,8 @@ fn test_inspect_arrow_file_json() {
     let temp_dir = TempDir::new().unwrap();
     let file = temp_dir.path().join("test.arrow");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    test_helpers::write_arrow_file(&file, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_arrow_batch(&file, &batch);
 
     let mut cmd = cargo_bin_cmd!("silk-chiffon");
     cmd.args([
@@ -249,9 +183,8 @@ fn test_inspect_arrow_stream_default() {
     let temp_dir = TempDir::new().unwrap();
     let file = temp_dir.path().join("test.stream.arrow");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    test_helpers::write_arrow_stream(&file, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_arrow_stream(&file, &[batch]);
 
     let mut cmd = cargo_bin_cmd!("silk-chiffon");
     cmd.args([
@@ -273,9 +206,8 @@ fn test_inspect_arrow_stream_row_count() {
     let temp_dir = TempDir::new().unwrap();
     let file = temp_dir.path().join("test.stream.arrow");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    test_helpers::write_arrow_stream(&file, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_arrow_stream(&file, &[batch]);
 
     let mut cmd = cargo_bin_cmd!("silk-chiffon");
     cmd.args([
@@ -296,9 +228,8 @@ fn test_inspect_arrow_stream_json() {
     let temp_dir = TempDir::new().unwrap();
     let file = temp_dir.path().join("test.stream.arrow");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    test_helpers::write_arrow_stream(&file, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_arrow_stream(&file, &[batch]);
 
     let mut cmd = cargo_bin_cmd!("silk-chiffon");
     cmd.args([
@@ -343,8 +274,8 @@ mod vortex_tests {
         let temp_dir = TempDir::new().unwrap();
         let file = temp_dir.path().join("test.vortex");
 
-        let schema = test_helpers::simple_schema();
-        let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
+        let schema = TestBatch::simple_schema();
+        let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
         write_vortex_file(&file, &schema, vec![batch]);
 
         let mut cmd = cargo_bin_cmd!("silk-chiffon");
@@ -367,8 +298,8 @@ mod vortex_tests {
         let temp_dir = TempDir::new().unwrap();
         let file = temp_dir.path().join("test.vortex");
 
-        let schema = test_helpers::simple_schema();
-        let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
+        let schema = TestBatch::simple_schema();
+        let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
         write_vortex_file(&file, &schema, vec![batch]);
 
         let mut cmd = cargo_bin_cmd!("silk-chiffon");
@@ -392,8 +323,8 @@ mod vortex_tests {
         let temp_dir = TempDir::new().unwrap();
         let file = temp_dir.path().join("test.vortex");
 
-        let schema = test_helpers::simple_schema();
-        let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
+        let schema = TestBatch::simple_schema();
+        let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
         write_vortex_file(&file, &schema, vec![batch]);
 
         let mut cmd = cargo_bin_cmd!("silk-chiffon");
@@ -420,9 +351,8 @@ fn test_inspect_identify_parquet() {
     let temp_dir = TempDir::new().unwrap();
     let file = temp_dir.path().join("test.parquet");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    test_helpers::write_parquet_file(&file, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_parquet_batch(&file, &batch);
 
     let mut cmd = cargo_bin_cmd!("silk-chiffon");
     cmd.args([
@@ -442,9 +372,8 @@ fn test_inspect_identify_arrow_file() {
     let temp_dir = TempDir::new().unwrap();
     let file = temp_dir.path().join("test.arrow");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    test_helpers::write_arrow_file(&file, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_arrow_batch(&file, &batch);
 
     let mut cmd = cargo_bin_cmd!("silk-chiffon");
     cmd.args([
@@ -465,9 +394,8 @@ fn test_inspect_identify_arrow_stream() {
     let temp_dir = TempDir::new().unwrap();
     let file = temp_dir.path().join("test.stream.arrow");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    test_helpers::write_arrow_stream(&file, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_arrow_stream(&file, &[batch]);
 
     let mut cmd = cargo_bin_cmd!("silk-chiffon");
     cmd.args([
@@ -488,8 +416,8 @@ fn test_inspect_identify_vortex_file() {
     let temp_dir = TempDir::new().unwrap();
     let file = temp_dir.path().join("test.vortex");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
+    let schema = TestBatch::simple_schema();
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
 
     use silk_chiffon::sinks::data_sink::DataSink;
     use silk_chiffon::sinks::vortex::{VortexSink, VortexSinkOptions};
@@ -521,9 +449,8 @@ fn test_inspect_identify_json_output() {
     let temp_dir = TempDir::new().unwrap();
     let file = temp_dir.path().join("test.parquet");
 
-    let schema = test_helpers::simple_schema();
-    let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    test_helpers::write_parquet_file(&file, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_parquet_batch(&file, &batch);
 
     let mut cmd = cargo_bin_cmd!("silk-chiffon");
     cmd.args([
@@ -632,9 +559,8 @@ mod parity_tests {
         let temp_dir = TempDir::new().unwrap();
         let file = temp_dir.path().join("test.parquet");
 
-        let schema = test_helpers::simple_schema();
-        let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-        test_helpers::write_parquet_file(&file, &schema, vec![batch]);
+        let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+        TestFile::write_parquet_batch(&file, &batch);
 
         let json = get_json_output(&[
             "inspect",
@@ -674,9 +600,8 @@ mod parity_tests {
         let temp_dir = TempDir::new().unwrap();
         let file = temp_dir.path().join("test.parquet");
 
-        let schema = test_helpers::simple_schema();
-        let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-        test_helpers::write_parquet_file(&file, &schema, vec![batch]);
+        let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+        TestFile::write_parquet_batch(&file, &batch);
 
         let json = get_json_output(&[
             "inspect",
@@ -709,9 +634,8 @@ mod parity_tests {
         let temp_dir = TempDir::new().unwrap();
         let file = temp_dir.path().join("test.arrow");
 
-        let schema = test_helpers::simple_schema();
-        let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-        test_helpers::write_arrow_file(&file, &schema, vec![batch]);
+        let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+        TestFile::write_arrow_batch(&file, &batch);
 
         let json = get_json_output(&[
             "inspect",
@@ -742,9 +666,8 @@ mod parity_tests {
         let temp_dir = TempDir::new().unwrap();
         let file = temp_dir.path().join("test.arrows");
 
-        let schema = test_helpers::simple_schema();
-        let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-        test_helpers::write_arrow_stream(&file, &schema, vec![batch]);
+        let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+        TestFile::write_arrow_stream(&file, &[batch]);
 
         let json = get_json_output(&[
             "inspect",
@@ -769,8 +692,8 @@ mod parity_tests {
         let temp_dir = TempDir::new().unwrap();
         let file = temp_dir.path().join("test.vortex");
 
-        let schema = test_helpers::simple_schema();
-        let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
+        let schema = TestBatch::simple_schema();
+        let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
@@ -806,9 +729,8 @@ mod parity_tests {
         let temp_dir = TempDir::new().unwrap();
         let file = temp_dir.path().join("test.parquet");
 
-        let schema = test_helpers::simple_schema();
-        let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-        test_helpers::write_parquet_file(&file, &schema, vec![batch]);
+        let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+        TestFile::write_parquet_batch(&file, &batch);
 
         let json = get_json_output(&[
             "inspect",
@@ -826,9 +748,8 @@ mod parity_tests {
         let temp_dir = TempDir::new().unwrap();
         let file = temp_dir.path().join("test.parquet");
 
-        let schema = test_helpers::simple_schema();
-        let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-        test_helpers::write_parquet_file(&file, &schema, vec![batch]);
+        let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+        TestFile::write_parquet_batch(&file, &batch);
 
         let json = get_json_output(&[
             "inspect",
@@ -852,9 +773,8 @@ mod parity_tests {
         let temp_dir = TempDir::new().unwrap();
         let file = temp_dir.path().join("test.parquet");
 
-        let schema = test_helpers::simple_schema();
-        let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-        test_helpers::write_parquet_file(&file, &schema, vec![batch]);
+        let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+        TestFile::write_parquet_batch(&file, &batch);
 
         let json = get_json_output(&[
             "inspect",
@@ -880,9 +800,8 @@ mod parity_tests {
         let temp_dir = TempDir::new().unwrap();
         let file = temp_dir.path().join("test.parquet");
 
-        let schema = test_helpers::simple_schema();
-        let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-        test_helpers::write_parquet_file(&file, &schema, vec![batch]);
+        let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+        TestFile::write_parquet_batch(&file, &batch);
 
         let json = get_json_output(&[
             "inspect",
@@ -912,10 +831,9 @@ mod parity_tests {
         let temp_dir = TempDir::new().unwrap();
         let file = temp_dir.path().join("test.arrow");
 
-        let schema = test_helpers::simple_schema();
-        let batch1 = test_helpers::create_batch(&schema, &[1, 2], &["a", "b"]);
-        let batch2 = test_helpers::create_batch(&schema, &[3, 4], &["c", "d"]);
-        test_helpers::write_arrow_file(&file, &schema, vec![batch1, batch2]);
+        let batch1 = TestBatch::simple_with(&[1, 2], &["a", "b"]);
+        let batch2 = TestBatch::simple_with(&[3, 4], &["c", "d"]);
+        TestFile::write_arrow(&file, &[batch1, batch2]);
 
         let json = get_json_output(&[
             "inspect",
@@ -942,9 +860,9 @@ mod parity_tests {
         let temp_dir = TempDir::new().unwrap();
         let file = temp_dir.path().join("test.parquet");
 
-        let schema = test_helpers::simple_schema();
-        let batch1 = test_helpers::create_batch(&schema, &[1, 2], &["a", "b"]);
-        let batch2 = test_helpers::create_batch(&schema, &[3, 4], &["c", "d"]);
+        let schema = TestBatch::simple_schema();
+        let batch1 = TestBatch::simple_with(&[1, 2], &["a", "b"]);
+        let batch2 = TestBatch::simple_with(&[3, 4], &["c", "d"]);
 
         // write with small row group size to force multiple row groups
         let props = WriterProperties::builder()
@@ -981,9 +899,8 @@ mod parity_tests {
         let temp_dir = TempDir::new().unwrap();
         let file = temp_dir.path().join("test.parquet");
 
-        let schema = test_helpers::simple_schema();
-        let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-        test_helpers::write_parquet_file(&file, &schema, vec![batch]);
+        let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+        TestFile::write_parquet_batch(&file, &batch);
 
         let json = get_json_output(&[
             "inspect",
@@ -1027,7 +944,7 @@ mod parity_tests {
         )
         .unwrap();
 
-        test_helpers::write_arrow_file(&file, &schema, vec![batch]);
+        TestFile::write_arrow_batch(&file, &batch);
 
         let json = get_json_output(&[
             "inspect",
@@ -1050,8 +967,8 @@ mod parity_tests {
         let temp_dir = TempDir::new().unwrap();
         let file = temp_dir.path().join("test.vortex");
 
-        let schema = test_helpers::simple_schema();
-        let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
+        let schema = TestBatch::simple_schema();
+        let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
@@ -1087,8 +1004,8 @@ mod parity_tests {
         let temp_dir = TempDir::new().unwrap();
         let file = temp_dir.path().join("test.vortex");
 
-        let schema = test_helpers::simple_schema();
-        let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
+        let schema = TestBatch::simple_schema();
+        let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
@@ -1126,9 +1043,8 @@ mod parity_tests {
         let temp_dir = TempDir::new().unwrap();
         let file = temp_dir.path().join("test.parquet");
 
-        let schema = test_helpers::simple_schema();
-        let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-        test_helpers::write_parquet_file(&file, &schema, vec![batch]);
+        let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+        TestFile::write_parquet_batch(&file, &batch);
 
         let json = get_json_output(&[
             "inspect",
@@ -1157,10 +1073,9 @@ mod parity_tests {
         let temp_dir = TempDir::new().unwrap();
         let file = temp_dir.path().join("test.arrow");
 
-        let schema = test_helpers::simple_schema();
-        let batch1 = test_helpers::create_batch(&schema, &[1, 2], &["a", "b"]);
-        let batch2 = test_helpers::create_batch(&schema, &[3, 4], &["c", "d"]);
-        test_helpers::write_arrow_file(&file, &schema, vec![batch1, batch2]);
+        let batch1 = TestBatch::simple_with(&[1, 2], &["a", "b"]);
+        let batch2 = TestBatch::simple_with(&[3, 4], &["c", "d"]);
+        TestFile::write_arrow(&file, &[batch1, batch2]);
 
         let json = get_json_output(&[
             "inspect",
@@ -1188,8 +1103,8 @@ mod parity_tests {
         let temp_dir = TempDir::new().unwrap();
         let file = temp_dir.path().join("test.vortex");
 
-        let schema = test_helpers::simple_schema();
-        let batch = test_helpers::create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
+        let schema = TestBatch::simple_schema();
+        let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {

@@ -173,27 +173,30 @@ silk-chiffon transform [OPTIONS]
 
 ### Bloom Filter Options
 
-Bloom filters are enabled for all columns by default (fpp=0.01, auto NDV). Use
-`--parquet-bloom-all-off` to disable globally, and `--parquet-bloom-column-off`
+Bloom filters are automatically enabled for columns that keep dictionary encoding
+(low cardinality columns). The NDV is determined by cardinality analysis. Use
+`--parquet-bloom-all-off` to disable globally, or `--parquet-bloom-column-off`
 to exclude specific columns.
 
-Customize bloom filters for all columns:
+Specifying NDV explicitly forces bloom filters ON regardless of dictionary state:
 
 ```bash
---parquet-bloom-all                     # Use defaults (fpp=0.01, auto NDV)
---parquet-bloom-all "fpp=0.001"         # Custom false positive probability
---parquet-bloom-all "ndv=10000"         # Custom distinct value count
---parquet-bloom-all "fpp=0.001,ndv=10000" # Both custom
+--parquet-bloom-all "ndv=10000"           # Force bloom on all columns with NDV=10000
+--parquet-bloom-all "fpp=0.001,ndv=10000" # Custom FPP and NDV
 ```
 
-Customize bloom filters for specific columns (overrides defaults):
+Just specifying FPP uses the automatic dictionary-based decision:
 
 ```bash
---parquet-bloom-column "user_id"                    # Defaults
---parquet-bloom-column "user_id:fpp=0.001"          # Custom FPP
---parquet-bloom-column "user_id:ndv=50000"          # Custom NDV
---parquet-bloom-column "user_id:fpp=0.001,ndv=50000" # Both
---parquet-bloom-all-off --parquet-bloom-column "user_id" # Only user_id
+--parquet-bloom-all "fpp=0.001" # Custom FPP, auto NDV from analysis
+```
+
+Per-column configuration (overrides defaults):
+
+```bash
+--parquet-bloom-column "user_id:ndv=50000"           # Force bloom on with NDV
+--parquet-bloom-column "user_id:fpp=0.001,ndv=50000" # Custom FPP and NDV
+--parquet-bloom-column-off "high_cardinality_col"    # Disable for specific column
 ```
 
 ### Other Options
@@ -260,12 +263,13 @@ silk-chiffon transform \
 ### Merge with Bloom Filters
 
 ```bash
+# force bloom filters on high-cardinality ID columns with explicit NDV
 silk-chiffon transform \
   --from-many 'logs/*.arrow' \
   --to optimized.parquet \
   --parquet-compression zstd \
-  --parquet-bloom-column "user_id:fpp=0.001" \
-  --parquet-bloom-column "session_id:fpp=0.001"
+  --parquet-bloom-column "user_id:fpp=0.001,ndv=1000000" \
+  --parquet-bloom-column "session_id:fpp=0.001,ndv=5000000"
 ```
 
 ### Complex Pipeline
@@ -278,7 +282,6 @@ silk-chiffon transform \
   --query "SELECT *, CASE WHEN amount > 1000 THEN 'high' ELSE 'low' END as tier FROM data WHERE timestamp > '2024-01-01'" \
   --sort-by timestamp:desc \
   --parquet-compression zstd \
-  --parquet-bloom-all "fpp=0.001" \
   --parquet-sorted-metadata \
   --list-outputs json
 ```
