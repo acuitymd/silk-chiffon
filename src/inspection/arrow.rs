@@ -14,8 +14,11 @@ use tabled::{
     settings::{Alignment, Modify, Remove, Style, object::Columns, object::Rows},
 };
 
-use super::{
-    inspectable::{Inspectable, format_bytes, format_number, render_schema_fields, schema_to_json},
+use crate::inspection::{
+    inspectable::{
+        Inspectable, format_bytes, format_number, render_schema_fields, schema_to_json,
+        truncate_chars,
+    },
     style::{apply_theme, dim, header},
 };
 
@@ -326,7 +329,7 @@ impl Inspectable for ArrowInspector {
             writeln!(out, "{}", header("File Metadata"))?;
             for (k, v) in &self.custom_metadata {
                 let truncated = if v.len() > 60 {
-                    format!("{}...", &v[..57])
+                    format!("{}...", truncate_chars(v, 57))
                 } else {
                     v.clone()
                 };

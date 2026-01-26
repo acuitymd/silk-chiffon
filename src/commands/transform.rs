@@ -2,16 +2,16 @@ use std::sync::Arc;
 
 use crate::{
     AllColumnsBloomFilterConfig, ArrowCompression, ArrowIPCFormat, BloomFilterConfig,
-    ColumnEncodingConfig, DEFAULT_BLOOM_FILTER_FPP, DataFormat, ListOutputsFormat,
-    ParquetCompression, ParquetEncoder, ParquetEncoding, ParquetStatistics, ParquetWriterVersion,
-    PartitionStrategy, SortSpec, TransformCommand,
+    ColumnDictionaryConfig, ColumnEncodingConfig, DEFAULT_BLOOM_FILTER_FPP, DataFormat,
+    DictionaryMode, ListOutputsFormat, ParquetCompression, ParquetEncoding, ParquetStatistics,
+    ParquetWriterVersion, PartitionStrategy, SortSpec, TransformCommand,
     io_strategies::{OutputFileInfo, output_strategy::SinkFactory, path_template::PathTemplate},
     operations::{query::QueryOperation, sort::SortOperation},
     pipeline::Pipeline,
     sinks::{
         arrow::{ArrowSink, ArrowSinkOptions},
         data_sink::DataSink,
-        parquet::{ParquetPools, ParquetSink, ParquetSinkOptions},
+        parquet::{ParquetRuntimes, ParquetSink, ParquetSinkOptions},
         vortex::{VortexSink, VortexSinkOptions},
     },
     sources::{
@@ -50,7 +50,6 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         arrow_compression,
         arrow_format,
         arrow_record_batch_size,
-        parquet_batch_channel_size,
         parquet_bloom_all,
         parquet_bloom_all_off,
         parquet_bloom_column,
@@ -61,8 +60,9 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         parquet_column_encoding_threads,
         parquet_dictionary_column_off,
         parquet_compression,
-        parquet_encoded_channel_size,
-        parquet_encoder,
+        parquet_ingestion_queue_size,
+        parquet_encoding_queue_size,
+        parquet_writing_queue_size,
         parquet_encoding,
         parquet_io_threads,
         parquet_dictionary_all_off,
@@ -76,6 +76,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         parquet_dictionary_page_size,
         parquet_write_batch_size,
         parquet_offset_index,
+        parquet_page_header_statistics,
         parquet_arrow_metadata,
         threads: _,
         vortex_record_batch_size,
@@ -84,10 +85,23 @@ pub async fn run(args: TransformCommand) -> Result<()> {
     let cpus = std::thread::available_parallelism()
         .map(|p| p.get())
         .unwrap_or(4);
-    let pools = Arc::new(ParquetPools::new(
+    let runtimes = Arc::new(ParquetRuntimes::try_new(
         parquet_column_encoding_threads.unwrap_or(cpus),
         parquet_io_threads.unwrap_or(1),
     )?);
+
+    if parquet_bloom_all_off && parquet_bloom_all.is_some() {
+        anyhow::bail!("--parquet-bloom-all-off conflicts with --parquet-bloom-all");
+    }
+
+    for disabled_col in &parquet_bloom_column_off {
+        if parquet_bloom_column.iter().any(|c| &c.name == disabled_col) {
+            anyhow::bail!(
+                "column '{}' specified in both --parquet-bloom-column-off and --parquet-bloom-column",
+                disabled_col
+            );
+        }
+    }
 
     let all_enabled = if parquet_bloom_all_off {
         None
@@ -100,12 +114,6 @@ pub async fn run(args: TransformCommand) -> Result<()> {
     let bloom_filter =
         BloomFilterConfig::try_new(all_enabled, parquet_bloom_column, parquet_bloom_column_off)
             .map_err(anyhow::Error::msg)?;
-
-    validate_encoding_version_compatibility(
-        parquet_writer_version,
-        parquet_encoding,
-        &parquet_column_encoding,
-    )?;
 
     if preserve_input_order && from.is_none() {
         anyhow::bail!("--preserve-input-order requires --from (single input file)");
@@ -161,7 +169,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
             expanded_paths.dedup();
 
             if expanded_paths.is_empty() {
-                anyhow::bail!("No input files found");
+                anyhow::bail!("No input files found matching patterns: {:?}", input_paths);
             }
 
             let mut sources: Vec<Box<dyn DataSource>> = Vec::new();
@@ -252,15 +260,15 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         arrow_compression,
         arrow_format,
         arrow_record_batch_size,
-        parquet_batch_channel_size,
         bloom_filter,
         parquet_buffer_size,
         parquet_dictionary_column,
         parquet_column_encoding,
         parquet_dictionary_column_off,
         parquet_compression,
-        parquet_encoded_channel_size,
-        parquet_encoder,
+        parquet_ingestion_queue_size,
+        parquet_encoding_queue_size,
+        parquet_writing_queue_size,
         parquet_encoding,
         parquet_dictionary_all_off,
         parquet_row_group_concurrency,
@@ -274,8 +282,9 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         parquet_write_batch_size,
         parquet_offset_index,
         parquet_arrow_metadata,
+        parquet_page_header_statistics,
         vortex_record_batch_size,
-        pools,
+        runtimes,
     )?;
 
     if let Some(output_path) = to {
@@ -452,58 +461,21 @@ fn detect_format(path: &str, explicit_format: Option<DataFormat>) -> Result<Data
     ))
 }
 
-fn validate_encoding_version_compatibility(
-    writer_version: Option<ParquetWriterVersion>,
-    default_encoding: Option<ParquetEncoding>,
-    column_encodings: &[ColumnEncodingConfig],
-) -> Result<()> {
-    // some encodings are only supported in v2
-    if !matches!(writer_version, Some(ParquetWriterVersion::V1)) {
-        return Ok(());
-    }
-
-    let mut v2_encodings = Vec::new();
-
-    if let Some(enc) = default_encoding
-        && enc.requires_v2()
-    {
-        v2_encodings.push(format!("default encoding '{}'", enc));
-    }
-
-    for col_enc in column_encodings {
-        if col_enc.encoding.requires_v2() {
-            v2_encodings.push(format!(
-                "column '{}' with encoding '{}'",
-                col_enc.name, col_enc.encoding
-            ));
-        }
-    }
-
-    if !v2_encodings.is_empty() {
-        anyhow::bail!(
-            "v2-only encodings cannot be used with parquet-writer-version=v1:\n  - {}",
-            v2_encodings.join("\n  - ")
-        );
-    }
-
-    Ok(())
-}
-
 #[allow(clippy::too_many_arguments)]
 fn create_sink_factory(
     output_format: Option<DataFormat>,
     arrow_compression: Option<ArrowCompression>,
     arrow_format: Option<ArrowIPCFormat>,
     arrow_record_batch_size: Option<usize>,
-    parquet_batch_channel_size: Option<usize>,
     parquet_bloom_filter: BloomFilterConfig,
     parquet_buffer_size: Option<usize>,
-    parquet_dictionary_column: Vec<String>,
+    parquet_dictionary_column: Vec<ColumnDictionaryConfig>,
     parquet_column_encoding: Vec<ColumnEncodingConfig>,
     parquet_dictionary_column_off: Vec<String>,
     parquet_compression: Option<ParquetCompression>,
-    parquet_encoded_channel_size: Option<usize>,
-    parquet_encoder: ParquetEncoder,
+    parquet_ingestion_queue_size: usize,
+    parquet_encoding_queue_size: usize,
+    parquet_writing_queue_size: usize,
     parquet_encoding: Option<ParquetEncoding>,
     parquet_dictionary_all_off: bool,
     parquet_row_group_concurrency: Option<usize>,
@@ -517,8 +489,9 @@ fn create_sink_factory(
     parquet_write_batch_size: Option<usize>,
     parquet_offset_index: bool,
     parquet_arrow_metadata: bool,
+    parquet_page_header_statistics: bool,
     vortex_record_batch_size: Option<usize>,
-    pools: Arc<ParquetPools>,
+    runtimes: Arc<ParquetRuntimes>,
 ) -> Result<SinkFactory> {
     Ok(Box::new(move |path: String, schema: SchemaRef| {
         let detected_format = detect_format(&path, output_format)?;
@@ -551,12 +524,10 @@ fn create_sink_factory(
                 if let Some(concurrency) = parquet_row_group_concurrency {
                     options = options.with_max_row_group_concurrency(concurrency);
                 }
-                if let Some(size) = parquet_batch_channel_size {
-                    options = options.with_batch_channel_size(size);
-                }
-                if let Some(size) = parquet_encoded_channel_size {
-                    options = options.with_encoded_channel_size(size);
-                }
+                options = options
+                    .with_ingestion_queue_size(parquet_ingestion_queue_size)
+                    .with_encoding_queue_size(parquet_encoding_queue_size)
+                    .with_writing_queue_size(parquet_writing_queue_size);
                 if let Some(stats) = parquet_statistics {
                     options = options.with_statistics(stats);
                 }
@@ -566,15 +537,30 @@ fn create_sink_factory(
                 if parquet_dictionary_all_off {
                     options = options.with_no_dictionary(true);
                 }
+
+                let mut column_dictionary_always = Vec::new();
+                let mut column_dictionary_analyze = Vec::new();
+                for config in &parquet_dictionary_column {
+                    match config.mode {
+                        DictionaryMode::Always => {
+                            column_dictionary_always.push(config.name.clone());
+                        }
+                        DictionaryMode::Analyze => {
+                            column_dictionary_analyze.push(config.name.clone());
+                        }
+                    }
+                }
+
                 options = options
-                    .with_column_dictionary(parquet_dictionary_column.clone())
+                    .with_column_dictionary_always(column_dictionary_always)
+                    .with_column_dictionary_analyze(column_dictionary_analyze)
                     .with_column_no_dictionary(parquet_dictionary_column_off.clone())
                     .with_encoding(parquet_encoding)
                     .with_column_encodings(parquet_column_encoding.clone())
                     .with_bloom_filters(parquet_bloom_filter.clone())
-                    .with_encoder(parquet_encoder)
                     .with_offset_index_enabled(parquet_offset_index)
-                    .with_skip_arrow_metadata(!parquet_arrow_metadata);
+                    .with_skip_arrow_metadata(!parquet_arrow_metadata)
+                    .with_page_header_statistics(parquet_page_header_statistics);
                 if let Some(size) = parquet_data_page_size {
                     options = options.with_data_page_size_limit(size);
                 }
@@ -594,7 +580,7 @@ fn create_sink_factory(
                     path.into(),
                     &schema,
                     &options,
-                    Arc::clone(&pools),
+                    Arc::clone(&runtimes),
                 )?)
             }
             DataFormat::Vortex => {

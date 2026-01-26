@@ -15,7 +15,7 @@ use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use silk_chiffon::commands::transform;
-use silk_chiffon::{ParquetEncoder, PartitionStrategy, TransformCommand};
+use silk_chiffon::{PartitionStrategy, TransformCommand};
 use tempfile::TempDir;
 use tokio::runtime::Runtime;
 
@@ -202,38 +202,7 @@ fn default_transform_command() -> TransformCommand {
         target_partitions: None,
         input_format: None,
         output_format: Some(silk_chiffon::DataFormat::Parquet),
-        arrow_compression: None,
-        arrow_format: None,
-        arrow_record_batch_size: None,
-        parquet_batch_channel_size: None,
-        parquet_bloom_all: None,
-        parquet_bloom_all_off: false,
-        parquet_bloom_column: vec![],
-        parquet_bloom_column_off: vec![],
-        parquet_buffer_size: None,
-        parquet_dictionary_column: vec![],
-        parquet_column_encoding: vec![],
-        parquet_column_encoding_threads: None,
-        parquet_dictionary_column_off: vec![],
-        parquet_compression: None,
-        parquet_encoded_channel_size: None,
-        parquet_encoder: ParquetEncoder::default(),
-        parquet_encoding: None,
-        parquet_io_threads: None,
-        parquet_dictionary_all_off: false,
-        parquet_row_group_concurrency: None,
-        parquet_row_group_size: None,
-        parquet_sorted_metadata: false,
-        parquet_statistics: None,
-        parquet_writer_version: None,
-        parquet_data_page_size: None,
-        parquet_data_page_row_limit: None,
-        parquet_dictionary_page_size: None,
-        parquet_write_batch_size: None,
-        parquet_offset_index: false,
-        parquet_arrow_metadata: false,
-        threads: None,
-        vortex_record_batch_size: None,
+        ..TransformCommand::default()
     }
 }
 

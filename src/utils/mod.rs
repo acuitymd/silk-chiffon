@@ -1,9 +1,8 @@
-pub mod cancellable_channel;
+pub mod blocking;
+pub mod channel_stream_provider;
 pub mod collections;
 pub mod filesystem;
-pub mod first_error;
-pub mod ordered_channel;
 pub mod parquet_inspection;
 pub mod projected_stream;
-pub mod rayon_bridge;
+pub mod test_data;
 pub mod test_helpers;

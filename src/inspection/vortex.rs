@@ -16,7 +16,7 @@ use crate::inspection::magic::magic_bytes_match_start;
 
 use tabled::Tabled;
 
-use super::{
+use crate::inspection::{
     inspectable::{Inspectable, format_bytes, format_number, render_schema_fields, schema_to_json},
     style::{dim, header, label, rounded_table, value},
 };

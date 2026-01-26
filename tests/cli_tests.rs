@@ -1,51 +1,12 @@
-use arrow::array::{Int32Array, RecordBatch, StringArray};
-use arrow::datatypes::{DataType, Field, Schema};
 use assert_cmd::cargo;
+use camino::Utf8Path;
 use predicates::prelude::*;
-use std::fs::File;
-use std::path::Path;
-use std::sync::Arc;
+use silk_chiffon::inspection::parquet::ParquetInspector;
+use silk_chiffon::utils::test_data::{TestBatch, TestFile};
 use tempfile::TempDir;
 
-// helper functions for creating test data
-fn simple_schema() -> Arc<Schema> {
-    Arc::new(Schema::new(vec![
-        Field::new("id", DataType::Int32, false),
-        Field::new("name", DataType::Utf8, false),
-    ]))
-}
-
-fn create_batch(schema: &Arc<Schema>, ids: &[i32], names: &[&str]) -> RecordBatch {
-    RecordBatch::try_new(
-        Arc::clone(schema),
-        vec![
-            Arc::new(Int32Array::from(ids.to_vec())),
-            Arc::new(StringArray::from(names.to_vec())),
-        ],
-    )
-    .unwrap()
-}
-
-fn write_arrow_file(path: &Path, schema: &Arc<Schema>, batches: Vec<RecordBatch>) {
-    use arrow::ipc::writer::FileWriter;
-
-    let file = File::create(path).unwrap();
-    let mut writer = FileWriter::try_new(file, schema).unwrap();
-    for batch in batches {
-        writer.write(&batch).unwrap();
-    }
-    writer.finish().unwrap();
-}
-
-fn write_parquet_file(path: &Path, schema: &Arc<Schema>, batches: Vec<RecordBatch>) {
-    use parquet::arrow::ArrowWriter;
-
-    let file = File::create(path).unwrap();
-    let mut writer = ArrowWriter::try_new(file, Arc::clone(schema), None).unwrap();
-    for batch in batches {
-        writer.write(&batch).unwrap();
-    }
-    writer.close().unwrap();
+fn inspect(path: &std::path::Path) -> ParquetInspector {
+    ParquetInspector::open(Utf8Path::from_path(path).unwrap()).unwrap()
 }
 
 #[test]
@@ -90,17 +51,14 @@ fn test_transform_from_many_missing_to() {
         .stderr(predicate::str::contains("required").or(predicate::str::contains("Usage:")));
 }
 
-// end-to-end CLI tests for transform command variations
-
 #[test]
 fn test_transform_from_to_arrow_to_arrow() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
     let output = temp_dir.path().join("output.arrow");
 
-    let schema = simple_schema();
-    let batch = create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
     cmd.args([
@@ -123,9 +81,8 @@ fn test_transform_from_to_arrow_to_parquet() {
     let input = temp_dir.path().join("input.arrow");
     let output = temp_dir.path().join("output.parquet");
 
-    let schema = simple_schema();
-    let batch = create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
     cmd.args([
@@ -148,9 +105,8 @@ fn test_transform_from_to_parquet_to_arrow() {
     let input = temp_dir.path().join("input.parquet");
     let output = temp_dir.path().join("output.arrow");
 
-    let schema = simple_schema();
-    let batch = create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    write_parquet_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_parquet_batch(&input, &batch);
 
     let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
     cmd.args([
@@ -173,9 +129,8 @@ fn test_transform_from_to_parquet_to_parquet() {
     let input = temp_dir.path().join("input.parquet");
     let output = temp_dir.path().join("output.parquet");
 
-    let schema = simple_schema();
-    let batch = create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    write_parquet_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_parquet_batch(&input, &batch);
 
     let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
     cmd.args([
@@ -199,11 +154,10 @@ fn test_transform_from_many_to_arrow() {
     let input2 = temp_dir.path().join("input2.arrow");
     let output = temp_dir.path().join("output.arrow");
 
-    let schema = simple_schema();
-    let batch1 = create_batch(&schema, &[1, 2], &["a", "b"]);
-    let batch2 = create_batch(&schema, &[3, 4], &["c", "d"]);
-    write_arrow_file(&input1, &schema, vec![batch1]);
-    write_arrow_file(&input2, &schema, vec![batch2]);
+    let batch1 = TestBatch::simple_with(&[1, 2], &["a", "b"]);
+    let batch2 = TestBatch::simple_with(&[3, 4], &["c", "d"]);
+    TestFile::write_arrow_batch(&input1, &batch1);
+    TestFile::write_arrow_batch(&input2, &batch2);
 
     let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
     cmd.args([
@@ -229,11 +183,10 @@ fn test_transform_from_many_to_parquet() {
     let input2 = temp_dir.path().join("input2.arrow");
     let output = temp_dir.path().join("output.parquet");
 
-    let schema = simple_schema();
-    let batch1 = create_batch(&schema, &[1, 2], &["a", "b"]);
-    let batch2 = create_batch(&schema, &[3, 4], &["c", "d"]);
-    write_arrow_file(&input1, &schema, vec![batch1]);
-    write_arrow_file(&input2, &schema, vec![batch2]);
+    let batch1 = TestBatch::simple_with(&[1, 2], &["a", "b"]);
+    let batch2 = TestBatch::simple_with(&[3, 4], &["c", "d"]);
+    TestFile::write_arrow_batch(&input1, &batch1);
+    TestFile::write_arrow_batch(&input2, &batch2);
 
     let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
     cmd.args([
@@ -259,11 +212,10 @@ fn test_transform_from_many_glob_to_arrow() {
     let input2 = temp_dir.path().join("input2.arrow");
     let output = temp_dir.path().join("output.arrow");
 
-    let schema = simple_schema();
-    let batch1 = create_batch(&schema, &[1, 2], &["a", "b"]);
-    let batch2 = create_batch(&schema, &[3, 4], &["c", "d"]);
-    write_arrow_file(&input1, &schema, vec![batch1]);
-    write_arrow_file(&input2, &schema, vec![batch2]);
+    let batch1 = TestBatch::simple_with(&[1, 2], &["a", "b"]);
+    let batch2 = TestBatch::simple_with(&[3, 4], &["c", "d"]);
+    TestFile::write_arrow_batch(&input1, &batch1);
+    TestFile::write_arrow_batch(&input2, &batch2);
 
     let glob_pattern = temp_dir.path().join("*.arrow");
 
@@ -288,9 +240,8 @@ fn test_transform_from_to_many_arrow_partitioned() {
     let input = temp_dir.path().join("input.arrow");
     let output_template = temp_dir.path().join("{{name}}.arrow");
 
-    let schema = simple_schema();
-    let batch = create_batch(&schema, &[1, 2, 3], &["a", "b", "a"]);
-    write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "a"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
     cmd.args([
@@ -318,9 +269,8 @@ fn test_transform_from_to_many_parquet_partitioned() {
     let input = temp_dir.path().join("input.arrow");
     let output_template = temp_dir.path().join("{{name}}.parquet");
 
-    let schema = simple_schema();
-    let batch = create_batch(&schema, &[1, 2, 3], &["a", "b", "a"]);
-    write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "a"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
     cmd.args([
@@ -349,11 +299,10 @@ fn test_transform_from_many_to_many_partitioned() {
     let input2 = temp_dir.path().join("input2.arrow");
     let output_template = temp_dir.path().join("{{name}}.parquet");
 
-    let schema = simple_schema();
-    let batch1 = create_batch(&schema, &[1, 2], &["a", "b"]);
-    let batch2 = create_batch(&schema, &[3, 4], &["a", "c"]);
-    write_arrow_file(&input1, &schema, vec![batch1]);
-    write_arrow_file(&input2, &schema, vec![batch2]);
+    let batch1 = TestBatch::simple_with(&[1, 2], &["a", "b"]);
+    let batch2 = TestBatch::simple_with(&[3, 4], &["a", "c"]);
+    TestFile::write_arrow_batch(&input1, &batch1);
+    TestFile::write_arrow_batch(&input2, &batch2);
 
     let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
     cmd.args([
@@ -385,9 +334,8 @@ fn test_transform_with_query() {
     let input = temp_dir.path().join("input.arrow");
     let output = temp_dir.path().join("output.arrow");
 
-    let schema = simple_schema();
-    let batch = create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
     cmd.args([
@@ -411,9 +359,8 @@ fn test_transform_with_sort() {
     let input = temp_dir.path().join("input.arrow");
     let output = temp_dir.path().join("output.arrow");
 
-    let schema = simple_schema();
-    let batch = create_batch(&schema, &[3, 1, 2], &["c", "a", "b"]);
-    write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[3, 1, 2], &["c", "a", "b"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
     cmd.args([
@@ -437,9 +384,8 @@ fn test_transform_with_arrow_compression() {
     let input = temp_dir.path().join("input.arrow");
     let output = temp_dir.path().join("output.arrow");
 
-    let schema = simple_schema();
-    let batch = create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
     cmd.args([
@@ -463,9 +409,8 @@ fn test_transform_with_parquet_compression() {
     let input = temp_dir.path().join("input.arrow");
     let output = temp_dir.path().join("output.parquet");
 
-    let schema = simple_schema();
-    let batch = create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
     cmd.args([
@@ -489,9 +434,8 @@ fn test_transform_explicit_formats() {
     let input = temp_dir.path().join("input.data");
     let output = temp_dir.path().join("output.data");
 
-    let schema = simple_schema();
-    let batch = create_batch(&schema, &[1, 2, 3], &["a", "b", "c"]);
-    write_arrow_file(&input, &schema, vec![batch]);
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_arrow_batch(&input, &batch);
 
     let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
     cmd.args([
@@ -509,4 +453,157 @@ fn test_transform_explicit_formats() {
     .success();
 
     assert!(output.exists());
+}
+
+#[test]
+fn test_cli_dictionary_prefix_matches_nested_columns() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let output = temp_dir.path().join("output.parquet");
+
+    let batch = TestBatch::with_structs();
+    TestFile::write_arrow_batch(&input, &batch);
+
+    let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
+    cmd.args([
+        "transform",
+        "--from",
+        input.to_str().unwrap(),
+        "--to",
+        output.to_str().unwrap(),
+        "--parquet-dictionary-all-off",
+        "--parquet-dictionary-column",
+        "person:always",
+    ])
+    .assert()
+    .success();
+
+    let inspector = inspect(&output);
+    let id_col = inspector.column("id").unwrap();
+    let name_col = inspector.column("person.name").unwrap();
+    let age_col = inspector.column("person.age").unwrap();
+
+    assert!(!id_col.has_dictionary, "id should NOT have dictionary");
+    assert!(
+        name_col.has_dictionary,
+        "person.name should have dictionary"
+    );
+    assert!(age_col.has_dictionary, "person.age should have dictionary");
+}
+
+#[test]
+fn test_cli_dictionary_specific_nested_path() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let output = temp_dir.path().join("output.parquet");
+
+    let batch = TestBatch::with_structs();
+    TestFile::write_arrow_batch(&input, &batch);
+
+    let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
+    cmd.args([
+        "transform",
+        "--from",
+        input.to_str().unwrap(),
+        "--to",
+        output.to_str().unwrap(),
+        "--parquet-dictionary-all-off",
+        "--parquet-dictionary-column",
+        "person.name:always",
+    ])
+    .assert()
+    .success();
+
+    let inspector = inspect(&output);
+    let id_col = inspector.column("id").unwrap();
+    let name_col = inspector.column("person.name").unwrap();
+    let age_col = inspector.column("person.age").unwrap();
+
+    assert!(!id_col.has_dictionary, "id should NOT have dictionary");
+    assert!(
+        name_col.has_dictionary,
+        "person.name should have dictionary"
+    );
+    assert!(
+        !age_col.has_dictionary,
+        "person.age should NOT have dictionary"
+    );
+}
+
+#[test]
+fn test_cli_bloom_filter_prefix_matches_nested_columns() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let output = temp_dir.path().join("output.parquet");
+
+    let batch = TestBatch::with_structs();
+    TestFile::write_arrow_batch(&input, &batch);
+
+    let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
+    cmd.args([
+        "transform",
+        "--from",
+        input.to_str().unwrap(),
+        "--to",
+        output.to_str().unwrap(),
+        "--parquet-bloom-column",
+        "person:ndv=100",
+    ])
+    .assert()
+    .success();
+
+    let inspector = inspect(&output);
+    let id_col = inspector.column("id").unwrap();
+    let name_col = inspector.column("person.name").unwrap();
+    let age_col = inspector.column("person.age").unwrap();
+
+    assert!(!id_col.has_bloom_filter, "id should NOT have bloom filter");
+    assert!(
+        name_col.has_bloom_filter,
+        "person.name should have bloom filter"
+    );
+    assert!(
+        age_col.has_bloom_filter,
+        "person.age should have bloom filter"
+    );
+}
+
+#[test]
+fn test_cli_bloom_filter_prefix_with_exclusion() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let output = temp_dir.path().join("output.parquet");
+
+    let batch = TestBatch::with_structs();
+    TestFile::write_arrow_batch(&input, &batch);
+
+    let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
+    cmd.args([
+        "transform",
+        "--from",
+        input.to_str().unwrap(),
+        "--to",
+        output.to_str().unwrap(),
+        "--parquet-bloom-column",
+        "person:ndv=100",
+        "--parquet-bloom-column-off",
+        "person.age",
+    ])
+    .assert()
+    .success();
+
+    let inspector = inspect(&output);
+    let id_col = inspector.column("id").unwrap();
+    let name_col = inspector.column("person.name").unwrap();
+    let age_col = inspector.column("person.age").unwrap();
+
+    assert!(!id_col.has_bloom_filter, "id should NOT have bloom filter");
+    assert!(
+        name_col.has_bloom_filter,
+        "person.name should have bloom filter"
+    );
+    assert!(
+        !age_col.has_bloom_filter,
+        "person.age should NOT have bloom filter"
+    );
 }

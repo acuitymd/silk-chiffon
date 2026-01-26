@@ -9,13 +9,16 @@ Monitor a command's CPU and memory usage over time.
 Usage:
     uv run scripts/bench_monitor.py -- ./target/release/silk_chiffon transform input.arrow output.parquet
     uv run scripts/bench_monitor.py --interval 0.1 -- command args...
+    uv run scripts/bench_monitor.py --csv timeseries.csv -- command args...
 """
 
 import argparse
+import csv
 import subprocess
 import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 import psutil
 
@@ -44,16 +47,33 @@ def monitor_process(cmd: list[str], interval: float = 0.05) -> tuple[int, list[S
         try:
             mem = ps.memory_info()
             cpu = ps.cpu_percent()
-            samples.append(Sample(
-                timestamp=time.perf_counter() - start,
-                rss_mb=mem.rss / 1024 / 1024,
-                cpu_percent=cpu,
-            ))
+            samples.append(
+                Sample(
+                    timestamp=time.perf_counter() - start,
+                    rss_mb=mem.rss / 1024 / 1024,
+                    cpu_percent=cpu,
+                )
+            )
         except psutil.NoSuchProcess:
             break
         time.sleep(interval)
 
     return proc.returncode or 0, samples
+
+
+def write_csv(samples: list[Sample], path: Path) -> None:
+    """Write samples to a CSV file."""
+    with open(path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["elapsed_s", "cpu_percent", "rss_mb"])
+        for s in samples:
+            writer.writerow(
+                [
+                    f"{s.timestamp:.3f}",
+                    f"{s.cpu_percent:.1f}",
+                    f"{s.rss_mb:.1f}",
+                ]
+            )
 
 
 def print_results(samples: list[Sample], exit_code: int) -> None:
@@ -83,8 +103,21 @@ def print_results(samples: list[Sample], exit_code: int) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Monitor command CPU/memory usage")
-    parser.add_argument("--interval", type=float, default=0.05, help="Sample interval in seconds")
-    parser.add_argument("cmd", nargs=argparse.REMAINDER, help="Command to run (after --)")
+    parser.add_argument(
+        "--interval", type=float, default=0.05, help="Sample interval in seconds"
+    )
+    parser.add_argument(
+        "--csv", type=Path, metavar="PATH", help="Write time-series data to CSV file"
+    )
+    parser.add_argument(
+        "--quiet",
+        "-q",
+        action="store_true",
+        help="Suppress console output (only write CSV)",
+    )
+    parser.add_argument(
+        "cmd", nargs=argparse.REMAINDER, help="Command to run (after --)"
+    )
 
     args = parser.parse_args()
 
@@ -96,11 +129,19 @@ def main() -> int:
         parser.print_help()
         return 1
 
-    print(f"Running: {' '.join(cmd)}")
-    print(f"Sampling every {args.interval}s...")
+    if not args.quiet:
+        print(f"Running: {' '.join(cmd)}")
+        print(f"Sampling every {args.interval}s...")
 
     exit_code, samples = monitor_process(cmd, args.interval)
-    print_results(samples, exit_code)
+
+    if args.csv:
+        write_csv(samples, args.csv)
+        if not args.quiet:
+            print(f"Wrote {len(samples)} samples to {args.csv}")
+
+    if not args.quiet:
+        print_results(samples, exit_code)
 
     return exit_code
 
