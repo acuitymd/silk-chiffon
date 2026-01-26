@@ -27,23 +27,20 @@ fn main() {
     if let Some(head_path) = git_output(&["rev-parse", "--git-path", "HEAD"]) {
         println!("cargo:rerun-if-changed={head_path}");
 
-        if let Ok(head_contents) = fs::read_to_string(&head_path) {
-            if let Some(ref_path) = head_contents.trim().strip_prefix("ref: ") {
-                if let Some(ref_git_path) =
-                    git_output(&["rev-parse", "--git-path", ref_path.trim()])
-                {
-                    println!("cargo:rerun-if-changed={ref_git_path}");
-                }
-            }
+        if let Ok(head_contents) = fs::read_to_string(&head_path)
+            && let Some(ref_path) = head_contents.trim().strip_prefix("ref: ")
+            && let Some(ref_git_path) = git_output(&["rev-parse", "--git-path", ref_path])
+        {
+            println!("cargo:rerun-if-changed={ref_git_path}");
         }
     } else if Path::new(".git/HEAD").exists() {
         println!("cargo:rerun-if-changed=.git/HEAD");
 
-        if let Ok(head_contents) = fs::read_to_string(".git/HEAD") {
-            if let Some(ref_path) = head_contents.trim().strip_prefix("ref: ") {
-                let ref_path = format!(".git/{}", ref_path.trim());
-                println!("cargo:rerun-if-changed={ref_path}");
-            }
+        if let Ok(head_contents) = fs::read_to_string(".git/HEAD")
+            && let Some(ref_path) = head_contents.trim().strip_prefix("ref: ")
+        {
+            let ref_path = format!(".git/{}", ref_path);
+            println!("cargo:rerun-if-changed={ref_path}");
         }
     }
 }
