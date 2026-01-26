@@ -90,10 +90,6 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         parquet_io_threads.unwrap_or(1),
     )?);
 
-    if parquet_bloom_all_off && parquet_bloom_all.is_some() {
-        anyhow::bail!("--parquet-bloom-all-off conflicts with --parquet-bloom-all");
-    }
-
     for disabled_col in &parquet_bloom_column_off {
         if parquet_bloom_column.iter().any(|c| &c.name == disabled_col) {
             anyhow::bail!(
