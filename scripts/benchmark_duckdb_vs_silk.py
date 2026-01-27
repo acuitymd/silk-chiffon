@@ -134,6 +134,8 @@ COPY (
         (i % 32767)::SMALLINT as int16_col,
         (i % 2147483647)::INTEGER as int32_col,
         i::BIGINT as int64_col,
+        (i % 1000000000)::BIGINT as npi,
+        ((i * 37) % 1000000000)::BIGINT as target_npi,
         (i * 1.5)::DOUBLE as float64_col,
         '2020-01-01'::TIMESTAMP + INTERVAL (i % 1000000) SECOND as ts_col,
         (i % 2 = 0)::BOOLEAN as bool_col,
