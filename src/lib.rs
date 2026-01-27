@@ -1064,6 +1064,26 @@ pub struct TransformCommand {
     #[arg(long, help_heading = "Execution", value_parser = parse_nonzero_byte_size)]
     pub memory_budget: Option<usize>,
 
+    /// Target thread budget for parallel work. Best-effort, not a hard limit.
+    ///
+    /// Split between encoding and query execution based on workload. Thread pools
+    /// intentionally overcommit since not all threads are active simultaneously.
+    ///
+    /// Default: CPU cores minus 2 (minimum 2), to leave headroom for system processes.
+    #[arg(long, short = 't', help_heading = "Execution", value_parser = parse_at_least_one)]
+    pub thread_budget: Option<usize>,
+
+    /// Number of partitions for query execution parallelism.
+    ///
+    /// Controls how DataFusion partitions data during queries (aggregations, joins, sorts).
+    /// Higher values increase parallelism but use more memory.
+    ///
+    /// Default: auto-detected based on workload. With sorting (--sort-by or --by): 75%
+    /// of usable cores. Without sorting: DataFusion default. Usable cores = total - 2
+    /// (minimum 2) to leave headroom for system processes.
+    #[arg(long, help_heading = "Execution", value_parser = parse_at_least_one)]
+    pub target_partitions: Option<usize>,
+
     /// Directory for spilling intermediate data when memory limit is exceeded.
     ///
     /// When DataFusion operators (sort, group by, aggregation) exceed the memory
@@ -1091,26 +1111,6 @@ pub struct TransformCommand {
         help_heading = "Execution"
     )]
     pub preserve_input_order: bool,
-
-    /// Number of partitions for query execution parallelism.
-    ///
-    /// Controls how DataFusion partitions data during queries (aggregations, joins, sorts).
-    /// Higher values increase parallelism but use more memory.
-    ///
-    /// Default: auto-detected based on workload. With sorting (--sort-by or --by): 75%
-    /// of usable cores. Without sorting: DataFusion default. Usable cores = total - 2
-    /// (minimum 2) to leave headroom for system processes.
-    #[arg(long, help_heading = "Execution", value_parser = parse_at_least_one)]
-    pub target_partitions: Option<usize>,
-
-    /// Target thread budget for parallel work. Best-effort, not a hard limit.
-    ///
-    /// Split between encoding and query execution based on workload. Thread pools
-    /// intentionally overcommit since not all threads are active simultaneously.
-    ///
-    /// Default: CPU cores minus 2 (minimum 2), to leave headroom for system processes.
-    #[arg(long, short = 't', help_heading = "Execution", value_parser = parse_at_least_one)]
-    pub thread_budget: Option<usize>,
 
     //
     // ─── Partitioning ──────────────────────────────────────────────────────────────────
