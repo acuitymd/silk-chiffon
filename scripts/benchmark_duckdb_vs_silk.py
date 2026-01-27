@@ -191,7 +191,7 @@ LOAD nanoarrow;
 SET threads = {threads};
 SET memory_limit = '{memory_limit_mib} MiB';
 
-COPY (SELECT * FROM '{arrow_file}')
+COPY (SELECT * FROM '{arrow_file}' ORDER BY npi, target_npi)
 TO '{output_file}'
 (FORMAT 'parquet', COMPRESSION 'lz4_raw', ROW_GROUP_SIZE 1048576, PARQUET_VERSION 'V2', PRESERVE_ORDER true);
 """
@@ -204,7 +204,7 @@ LOAD nanoarrow;
 SET threads = {threads};
 SET memory_limit = '{memory_limit_mib} MiB';
 
-COPY (SELECT * FROM '{arrow_file}')
+COPY (SELECT * FROM '{arrow_file}' ORDER BY npi, target_npi)
 TO '{warmup_output}'
 (FORMAT 'parquet', COMPRESSION 'lz4_raw', ROW_GROUP_SIZE 1048576, PARQUET_VERSION 'V2', PRESERVE_ORDER true);
 """
@@ -258,7 +258,6 @@ def run_silk_conversion(
     silk_cmd: list[str],
     arrow_file: Path,
     output_file: Path,
-    threads: int,
 ) -> BenchmarkResult:
     """Run silk-chiffon Arrow-to-Parquet conversion with monitoring."""
     print("\n[4/5] Running silk-chiffon conversion...")
@@ -278,8 +277,8 @@ def run_silk_conversion(
         "1048576",
         "--parquet-writer-version",
         "v2",
-        "--parquet-column-encoding-threads",
-        str(threads),
+        "--sort-by",
+        "npi, target_npi",
         "--overwrite",
     ]
     start = time.perf_counter()
@@ -305,8 +304,8 @@ def run_silk_conversion(
         "1048576",
         "--parquet-writer-version",
         "v2",
-        "--parquet-column-encoding-threads",
-        str(threads),
+        "--sort-by",
+        "npi, target_npi",
         "--overwrite",
     ]
     exit_code, wall_time, samples = monitor_process(full_cmd)
@@ -625,8 +624,8 @@ def main() -> int:
     parser.add_argument(
         "--memory-limit",
         type=int,
-        default=34816,
-        help="Memory limit in MiB for DuckDB (default: 34816)",
+        default=None,
+        help="Memory limit in MiB for DuckDB (default: 75%% of available RAM)",
     )
     parser.add_argument(
         "--rows",
@@ -658,13 +657,29 @@ def main() -> int:
         action="store_true",
         help="Skip generating test data (reuse existing)",
     )
+    parser.add_argument(
+        "--silk-only",
+        action="store_true",
+        help="Run only silk-chiffon benchmark (skip DuckDB)",
+    )
 
     args = parser.parse_args()
 
-    check_duckdb_cli()
+    # auto-detect memory limit if not specified (75% of available RAM)
+    if args.memory_limit is None:
+        available_mib = psutil.virtual_memory().available // (1024 * 1024)
+        args.memory_limit = int(available_mib * 0.75)
 
     project_root = Path(__file__).parent.parent
     output_dir = args.output_dir.absolute()
+
+    # duckdb needed for benchmark or for generating test data
+    needs_duckdb = not args.silk_only or (
+        not args.input
+        and not (args.skip_generate and (output_dir / "test_data.arrow").exists())
+    )
+    if needs_duckdb:
+        check_duckdb_cli()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print("=" * 60)
@@ -711,18 +726,29 @@ def main() -> int:
     else:
         arrow_file = generate_test_data(output_dir, args.rows, args.threads)
 
+    silk_output = output_dir / "silk_output.parquet"
+    silk_result = run_silk_conversion(silk_cmd, arrow_file, silk_output)
+    write_timeseries_csv(silk_result.samples, output_dir / "silk_timeseries.csv")
+
+    if args.silk_only:
+        print("\n" + "=" * 60)
+        print("BENCHMARK COMPLETE (silk-only)")
+        print("=" * 60)
+        print("\nResults:")
+        print(
+            f"  silk-chiffon: {silk_result.wall_time:.2f}s, {silk_result.peak_rss_mb:.0f} MB peak"
+        )
+        print(f"\nOutput: {output_dir}")
+        return 0
+
     duckdb_output = output_dir / "duckdb_output.parquet"
     duckdb_result = run_duckdb_conversion(
         arrow_file, duckdb_output, args.threads, args.memory_limit
     )
 
-    silk_output = output_dir / "silk_output.parquet"
-    silk_result = run_silk_conversion(silk_cmd, arrow_file, silk_output, args.threads)
-
     comparison = compare_outputs(silk_cmd, duckdb_output, silk_output)
 
     write_timeseries_csv(duckdb_result.samples, output_dir / "duckdb_timeseries.csv")
-    write_timeseries_csv(silk_result.samples, output_dir / "silk_timeseries.csv")
 
     config = {
         "rows": args.rows,
