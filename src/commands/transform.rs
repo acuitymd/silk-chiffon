@@ -96,8 +96,9 @@ pub async fn run(args: TransformCommand) -> Result<()> {
     // allocate threads based on workload:
     // - sorting is CPU-intensive in DataFusion, so give encoding fewer threads
     // - without sorting, encoding is the bottleneck, so give it more threads
-    // NOTE: output partitioning (--by) also requires sorting by partition columns
-    let has_sort = sort_by.is_some() || by.is_some();
+    // NOTE: output partitioning with sort-single strategy requires sorting by partition columns
+    let has_sort =
+        sort_by.is_some() || (by.is_some() && partition_strategy == PartitionStrategy::SortSingle);
     let default_encoding_threads = if has_sort {
         quarter_cpus
     } else {
