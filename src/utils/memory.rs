@@ -14,8 +14,8 @@ use sysinfo::System;
 pub fn available_memory() -> usize {
     // try cgroup detection on Linux (supports both v1 and v2)
     #[cfg(target_os = "linux")]
-    if let Ok(available) = cgroup_memory::memory_available() {
-        return available;
+    if let Ok(Some(available)) = cgroup_memory::memory_available() {
+        return available as usize;
     }
 
     // fall back to system memory (macOS, bare metal, or no cgroup limits)
