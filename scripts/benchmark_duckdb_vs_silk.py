@@ -710,7 +710,8 @@ def main() -> int:
     print("Benchmark: DuckDB vs silk-chiffon (Arrow → Parquet)")
     print("=" * 60)
     print(f"Threads:      {args.threads}")
-    print(f"Memory limit: {args.memory_limit} MiB")
+    if not args.silk_only:
+        print(f"Memory limit: {args.memory_limit} MiB (DuckDB only)")
     if args.input:
         print(f"Input file:   {args.input}")
     else:
