@@ -678,6 +678,11 @@ def main() -> int:
         action="store_true",
         help="Run only silk-chiffon benchmark (skip DuckDB)",
     )
+    parser.add_argument(
+        "--duckdb-only",
+        action="store_true",
+        help="Run only DuckDB benchmark (skip silk-chiffon)",
+    )
 
     args = parser.parse_args()
 
@@ -690,12 +695,15 @@ def main() -> int:
     output_dir = args.output_dir.absolute()
 
     # duckdb needed for benchmark or for generating test data
-    needs_duckdb = not args.silk_only or (
-        not args.input
+    needs_duckdb = (
+        not args.silk_only
+        or not args.input
         and not (args.skip_generate and (output_dir / "test_data.arrow").exists())
     )
     if needs_duckdb:
         check_duckdb_cli()
+
+    needs_silk = not args.duckdb_only
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print("=" * 60)
@@ -710,21 +718,25 @@ def main() -> int:
     print(f"Output dir:   {output_dir}")
     print("=" * 60)
 
-    if args.cargo_run:
-        silk_cmd = ["cargo", "run", "--"]
-        print("\n[1/5] Using cargo run for silk-chiffon")
-    elif args.skip_build:
-        profile = "release" if args.release else "native"
-        silk_binary = project_root / "target" / profile / "silk-chiffon"
-        if not silk_binary.exists():
-            print(f"Binary not found at {silk_binary}, building...")
-            silk_binary = build_release(project_root) if args.release else build_native(project_root)
+    silk_cmd = None
+    if needs_silk:
+        if args.cargo_run:
+            silk_cmd = ["cargo", "run", "--"]
+            print("\n[1/5] Using cargo run for silk-chiffon")
+        elif args.skip_build:
+            profile = "release" if args.release else "native"
+            silk_binary = project_root / "target" / profile / "silk-chiffon"
+            if not silk_binary.exists():
+                print(f"Binary not found at {silk_binary}, building...")
+                silk_binary = build_release(project_root) if args.release else build_native(project_root)
+            else:
+                print(f"\n[1/5] Using existing binary: {silk_binary}")
+            silk_cmd = [str(silk_binary)]
         else:
-            print(f"\n[1/5] Using existing binary: {silk_binary}")
-        silk_cmd = [str(silk_binary)]
+            silk_binary = build_release(project_root) if args.release else build_native(project_root)
+            silk_cmd = [str(silk_binary)]
     else:
-        silk_binary = build_release(project_root) if args.release else build_native(project_root)
-        silk_cmd = [str(silk_binary)]
+        print("\n[1/5] Skipping silk-chiffon build (--duckdb-only)")
 
     if args.input:
         arrow_file = args.input.absolute()
@@ -744,55 +756,59 @@ def main() -> int:
         arrow_file = generate_test_data(output_dir, args.rows, args.threads)
 
     silk_output = output_dir / "silk_output.parquet"
-    silk_result = run_silk_conversion(silk_cmd, arrow_file, silk_output)
-    write_timeseries_csv(silk_result.samples, output_dir / "silk_timeseries.csv")
+    duckdb_output = output_dir / "duckdb_output.parquet"
 
+    silk_result = None
+    if needs_silk and silk_cmd:
+        silk_result = run_silk_conversion(silk_cmd, arrow_file, silk_output)
+        write_timeseries_csv(silk_result.samples, output_dir / "silk_timeseries.csv")
+
+    duckdb_result = None
+    if not args.silk_only:
+        duckdb_result = run_duckdb_conversion(
+            arrow_file, duckdb_output, args.threads, args.memory_limit
+        )
+        write_timeseries_csv(duckdb_result.samples, output_dir / "duckdb_timeseries.csv")
+
+    print("\n" + "=" * 60)
     if args.silk_only:
-        print("\n" + "=" * 60)
         print("BENCHMARK COMPLETE (silk-only)")
-        print("=" * 60)
-        print("\nResults:")
+    elif args.duckdb_only:
+        print("BENCHMARK COMPLETE (duckdb-only)")
+    else:
+        print("BENCHMARK COMPLETE")
+    print("=" * 60)
+    print("\nResults:")
+
+    if duckdb_result:
+        print(
+            f"  DuckDB:       {duckdb_result.wall_time:.2f}s, {duckdb_result.peak_rss_mb:.0f} MB peak"
+        )
+    if silk_result:
         print(
             f"  silk-chiffon: {silk_result.wall_time:.2f}s, {silk_result.peak_rss_mb:.0f} MB peak"
         )
-        print(f"\nOutput: {output_dir}")
-        return 0
 
-    duckdb_output = output_dir / "duckdb_output.parquet"
-    duckdb_result = run_duckdb_conversion(
-        arrow_file, duckdb_output, args.threads, args.memory_limit
-    )
+    if silk_result and duckdb_result and silk_cmd:
+        speedup = duckdb_result.wall_time / silk_result.wall_time
+        if speedup >= 1:
+            print(f"\n  silk-chiffon is {speedup:.2f}x faster")
+        else:
+            print(f"\n  DuckDB is {1 / speedup:.2f}x faster")
 
-    comparison = compare_outputs(silk_cmd, duckdb_output, silk_output)
+        assert silk_cmd is not None
+        comparison = compare_outputs(silk_cmd, duckdb_output, silk_output)
+        config = {
+            "rows": args.rows,
+            "threads": args.threads,
+            "memory_limit_mib": args.memory_limit,
+            "input_file": str(arrow_file) if args.input else None,
+        }
+        report_path = generate_report(
+            output_dir, duckdb_result, silk_result, comparison, config
+        )
+        print(f"\nReport: {report_path}")
 
-    write_timeseries_csv(duckdb_result.samples, output_dir / "duckdb_timeseries.csv")
-
-    config = {
-        "rows": args.rows,
-        "threads": args.threads,
-        "memory_limit_mib": args.memory_limit,
-        "input_file": str(arrow_file) if args.input else None,
-    }
-    report_path = generate_report(
-        output_dir, duckdb_result, silk_result, comparison, config
-    )
-
-    print("\n" + "=" * 60)
-    print("BENCHMARK COMPLETE")
-    print("=" * 60)
-    print("\nResults:")
-    print(
-        f"  DuckDB:       {duckdb_result.wall_time:.2f}s, {duckdb_result.peak_rss_mb:.0f} MB peak"
-    )
-    print(
-        f"  silk-chiffon: {silk_result.wall_time:.2f}s, {silk_result.peak_rss_mb:.0f} MB peak"
-    )
-    speedup = duckdb_result.wall_time / silk_result.wall_time
-    if speedup >= 1:
-        print(f"\n  silk-chiffon is {speedup:.2f}x faster")
-    else:
-        print(f"\n  DuckDB is {1 / speedup:.2f}x faster")
-    print(f"\nReport: {report_path}")
     print(f"Output: {output_dir}")
 
     return 0
