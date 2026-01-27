@@ -814,12 +814,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
-name = "cgroup-memory"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb85e16e53334163a739fa942d9f73d625cc24d54213d1d395034d0e290da6d7"
-
-[[package]]
 name = "chrono"
 version = "0.4.43"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3680,7 +3674,6 @@ dependencies = [
  "async-trait",
  "bytesize",
  "camino",
- "cgroup-memory",
  "chrono",
  "clap",
  "clap_complete",
