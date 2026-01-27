@@ -4,3 +4,5 @@
 *.arrow
 *.arrows
 *.parquet
+*.vortex
+/benchmark_output

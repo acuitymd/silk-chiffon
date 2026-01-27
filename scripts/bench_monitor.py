@@ -8,7 +8,7 @@ Monitor a command's CPU and memory usage over time.
 
 Usage:
     uv run scripts/bench_monitor.py -- ./target/release/silk_chiffon transform input.arrow output.parquet
-    uv run scripts/bench_monitor.py --interval 0.1 -- command args...
+    uv run scripts/bench_monitor.py --interval 1 -- command args...
     uv run scripts/bench_monitor.py --csv timeseries.csv -- command args...
 """
 
@@ -30,7 +30,7 @@ class Sample:
     cpu_percent: float
 
 
-def monitor_process(cmd: list[str], interval: float = 0.05) -> tuple[int, list[Sample]]:
+def monitor_process(cmd: list[str], interval: float = 1) -> tuple[int, list[Sample]]:
     samples: list[Sample] = []
     start = time.perf_counter()
 
@@ -104,7 +104,7 @@ def print_results(samples: list[Sample], exit_code: int) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Monitor command CPU/memory usage")
     parser.add_argument(
-        "--interval", type=float, default=0.05, help="Sample interval in seconds"
+        "--interval", type=float, default=1, help="Sample interval in seconds"
     )
     parser.add_argument(
         "--csv", type=Path, metavar="PATH", help="Write time-series data to CSV file"

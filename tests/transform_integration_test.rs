@@ -143,7 +143,7 @@ async fn test_transform_arrow_to_parquet() {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
         output_format: Some(DataFormat::Parquet),
-        parquet_compression: Some(ParquetCompression::Snappy),
+        parquet_compression: ParquetCompression::Snappy,
         ..Default::default()
     })
     .await
@@ -190,7 +190,7 @@ async fn test_transform_parquet_to_parquet() {
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        parquet_compression: Some(ParquetCompression::Zstd),
+        parquet_compression: ParquetCompression::Zstd,
         ..Default::default()
     })
     .await
@@ -366,7 +366,7 @@ async fn test_transform_with_arrow_compression() {
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        arrow_compression: Some(ArrowCompression::Zstd),
+        arrow_compression: ArrowCompression::Zstd,
         ..Default::default()
     })
     .await
@@ -774,7 +774,7 @@ async fn test_transform_parquet_compression_gzip() {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
         output_format: Some(DataFormat::Parquet),
-        parquet_compression: Some(ParquetCompression::Gzip),
+        parquet_compression: ParquetCompression::Gzip,
         ..Default::default()
     })
     .await
@@ -799,7 +799,7 @@ async fn test_transform_parquet_compression_lz4() {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
         output_format: Some(DataFormat::Parquet),
-        parquet_compression: Some(ParquetCompression::Lz4),
+        parquet_compression: ParquetCompression::Lz4,
         ..Default::default()
     })
     .await
@@ -851,7 +851,7 @@ async fn test_transform_parquet_statistics() {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
         output_format: Some(DataFormat::Parquet),
-        parquet_statistics: Some(ParquetStatistics::Chunk),
+        parquet_statistics: ParquetStatistics::Chunk,
         ..Default::default()
     })
     .await
@@ -875,7 +875,7 @@ async fn test_transform_parquet_writer_version() {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
         output_format: Some(DataFormat::Parquet),
-        parquet_writer_version: Some(ParquetWriterVersion::V1),
+        parquet_writer_version: ParquetWriterVersion::V1,
         ..Default::default()
     })
     .await
@@ -976,7 +976,7 @@ async fn test_transform_arrow_format_stream() {
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        arrow_format: Some(ArrowIPCFormat::Stream),
+        arrow_format: ArrowIPCFormat::Stream,
         ..Default::default()
     })
     .await
@@ -999,7 +999,7 @@ async fn test_transform_arrow_record_batch_size() {
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        arrow_record_batch_size: Some(1000),
+        arrow_record_batch_size: 1000,
         ..Default::default()
     })
     .await
@@ -1051,7 +1051,7 @@ async fn test_transform_partition_to_parquet() {
         by: Some("name".to_string()),
         create_dirs: false,
         output_format: Some(DataFormat::Parquet),
-        parquet_compression: Some(ParquetCompression::Snappy),
+        parquet_compression: ParquetCompression::Snappy,
         ..Default::default()
     })
     .await
@@ -1362,7 +1362,7 @@ async fn test_transform_mixed_parquet_and_arrow_inputs() {
         from_many: vec![glob_pattern.to_string_lossy().to_string()],
         to: Some(output.to_string_lossy().to_string()),
         output_format: Some(DataFormat::Parquet),
-        parquet_compression: Some(ParquetCompression::Snappy),
+        parquet_compression: ParquetCompression::Snappy,
         ..Default::default()
     })
     .await
@@ -1491,7 +1491,7 @@ async fn test_transform_arrow_compression_lz4() {
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        arrow_compression: Some(ArrowCompression::Lz4),
+        arrow_compression: ArrowCompression::Lz4,
         ..Default::default()
     })
     .await
@@ -1790,7 +1790,7 @@ async fn test_parquet_roundtrip_data_fidelity() {
         to: Some(intermediate_parquet.to_string_lossy().to_string()),
         preserve_input_order: true,
         output_format: Some(DataFormat::Parquet),
-        parquet_compression: Some(ParquetCompression::Zstd),
+        parquet_compression: ParquetCompression::Zstd,
         parquet_row_group_size: Some(parquet_row_group_size),
         ..Default::default()
     })
@@ -1817,7 +1817,7 @@ async fn test_parquet_roundtrip_data_fidelity() {
         preserve_input_order: true,
         input_format: Some(DataFormat::Parquet),
         output_format: Some(DataFormat::Arrow),
-        arrow_record_batch_size: Some(output_batch_size),
+        arrow_record_batch_size: output_batch_size,
         ..Default::default()
     })
     .await
@@ -2974,7 +2974,7 @@ async fn test_transform_with_sequential_encoder() {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
         output_format: Some(DataFormat::Parquet),
-        parquet_compression: Some(ParquetCompression::Snappy),
+        parquet_compression: ParquetCompression::Snappy,
         ..Default::default()
     })
     .await

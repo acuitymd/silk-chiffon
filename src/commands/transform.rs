@@ -4,7 +4,7 @@ use crate::{
     AllColumnsBloomFilterConfig, ArrowCompression, ArrowIPCFormat, BloomFilterConfig,
     ColumnDictionaryConfig, ColumnEncodingConfig, DEFAULT_BLOOM_FILTER_FPP, DataFormat,
     DictionaryMode, ListOutputsFormat, ParquetCompression, ParquetEncoding, ParquetStatistics,
-    ParquetWriterVersion, PartitionStrategy, SortSpec, TransformCommand,
+    ParquetWriterVersion, PartitionStrategy, SortSpec, TransformCommand, default_thread_budget,
     io_strategies::{OutputFileInfo, output_strategy::SinkFactory, path_template::PathTemplate},
     operations::{query::QueryOperation, sort::SortOperation},
     pipeline::Pipeline,
@@ -42,7 +42,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         query,
         dialect,
         sort_by,
-        memory_limit,
+        memory_budget,
         preserve_input_order,
         target_partitions,
         input_format,
@@ -50,6 +50,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         arrow_compression,
         arrow_format,
         arrow_record_batch_size,
+        arrow_writing_queue_size,
         parquet_bloom_all,
         parquet_bloom_all_off,
         parquet_bloom_column,
@@ -78,15 +79,29 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         parquet_offset_index,
         parquet_page_header_statistics,
         parquet_arrow_metadata,
-        threads: _,
+        thread_budget,
+        spill_dir,
+        spill_compression,
         vortex_record_batch_size,
     } = args;
 
-    let cpus = std::thread::available_parallelism()
-        .map(|p| p.get())
-        .unwrap_or(4);
+    let usable_cpus = thread_budget.unwrap_or_else(default_thread_budget);
+    let quarter_cpus = (usable_cpus / 4).max(1);
+    let three_quarter_cpus = (usable_cpus * 3 / 4).max(1);
+
+    // allocate threads based on workload:
+    // - sorting is CPU-intensive in DataFusion, so give encoding fewer threads
+    // - without sorting, encoding is the bottleneck, so give it more threads
+    // NOTE: output partitioning with sort-single strategy requires sorting by partition columns
+    let has_sort =
+        sort_by.is_some() || (by.is_some() && partition_strategy == PartitionStrategy::SortSingle);
+    let default_encoding_threads = if has_sort {
+        quarter_cpus
+    } else {
+        three_quarter_cpus
+    };
     let runtimes = Arc::new(ParquetRuntimes::try_new(
-        parquet_column_encoding_threads.unwrap_or(cpus),
+        parquet_column_encoding_threads.unwrap_or(default_encoding_threads),
         parquet_io_threads.unwrap_or(1),
     )?);
 
@@ -129,14 +144,33 @@ pub async fn run(args: TransformCommand) -> Result<()> {
 
     let effective_target_partitions = if preserve_input_order {
         Some(1)
-    } else {
+    } else if target_partitions.is_some() {
         target_partitions
+    } else if has_sort {
+        Some(three_quarter_cpus)
+    } else {
+        None
+    };
+
+    // memory budget split: DataFusion gets a portion based on workload
+    let total_budget = memory_budget.unwrap_or_else(|| {
+        let available = crate::utils::memory::available_memory();
+        available * 3 / 4
+    });
+    let effective_memory_limit = if has_sort {
+        // sorting needs more DataFusion memory, leave 40% for encoding/queues
+        Some(total_budget * 60 / 100)
+    } else {
+        // no sorting: DataFusion just needs query overhead, give more to encoding
+        Some(total_budget * 20 / 100)
     };
 
     let mut pipeline = Pipeline::new()
         .with_query_dialect(dialect)
-        .with_memory_limit(memory_limit)
-        .with_target_partitions(effective_target_partitions);
+        .with_memory_limit(effective_memory_limit)
+        .with_target_partitions(effective_target_partitions)
+        .with_spill_dir(spill_dir)
+        .with_spill_compression(spill_compression);
 
     let (input_paths, should_glob) = if let Some(single_input) = from {
         (vec![single_input], false)
@@ -268,6 +302,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         arrow_compression,
         arrow_format,
         arrow_record_batch_size,
+        arrow_writing_queue_size,
         bloom_filter,
         parquet_buffer_size,
         parquet_dictionary_column,
@@ -472,15 +507,16 @@ fn detect_format(path: &str, explicit_format: Option<DataFormat>) -> Result<Data
 #[allow(clippy::too_many_arguments)]
 fn create_sink_factory(
     output_format: Option<DataFormat>,
-    arrow_compression: Option<ArrowCompression>,
-    arrow_format: Option<ArrowIPCFormat>,
-    arrow_record_batch_size: Option<usize>,
+    arrow_compression: ArrowCompression,
+    arrow_format: ArrowIPCFormat,
+    arrow_record_batch_size: usize,
+    arrow_writing_queue_size: usize,
     parquet_bloom_filter: BloomFilterConfig,
     parquet_buffer_size: Option<usize>,
     parquet_dictionary_column: Vec<ColumnDictionaryConfig>,
     parquet_column_encoding: Vec<ColumnEncodingConfig>,
     parquet_dictionary_column_off: Vec<String>,
-    parquet_compression: Option<ParquetCompression>,
+    parquet_compression: ParquetCompression,
     parquet_ingestion_queue_size: usize,
     parquet_encoding_queue_size: usize,
     parquet_writing_queue_size: usize,
@@ -489,8 +525,8 @@ fn create_sink_factory(
     parquet_row_group_concurrency: Option<usize>,
     parquet_row_group_size: Option<usize>,
     parquet_sort_spec: Option<SortSpec>,
-    parquet_statistics: Option<ParquetStatistics>,
-    parquet_writer_version: Option<ParquetWriterVersion>,
+    parquet_statistics: ParquetStatistics,
+    parquet_writer_version: ParquetWriterVersion,
     parquet_data_page_size: Option<usize>,
     parquet_data_page_row_limit: Option<usize>,
     parquet_dictionary_page_size: Option<usize>,
@@ -506,23 +542,21 @@ fn create_sink_factory(
 
         let sink: Box<dyn DataSink> = match detected_format {
             DataFormat::Arrow => {
-                let mut options = ArrowSinkOptions::new();
-                if let Some(compression) = arrow_compression {
-                    options = options.with_compression(compression);
-                }
-                if let Some(format) = arrow_format.clone() {
-                    options = options.with_format(format);
-                }
-                if let Some(batch_size) = arrow_record_batch_size {
-                    options = options.with_record_batch_size(batch_size);
-                }
+                let options = ArrowSinkOptions::new()
+                    .with_compression(arrow_compression)
+                    .with_format(arrow_format)
+                    .with_record_batch_size(arrow_record_batch_size)
+                    .with_queue_depth(arrow_writing_queue_size);
                 Box::new(ArrowSink::create(path.into(), &schema, options)?)
             }
             DataFormat::Parquet => {
-                let mut options = ParquetSinkOptions::new();
-                if let Some(compression) = parquet_compression {
-                    options = options.with_compression(compression);
-                }
+                let mut options = ParquetSinkOptions::new()
+                    .with_compression(parquet_compression)
+                    .with_statistics(parquet_statistics)
+                    .with_writer_version(parquet_writer_version)
+                    .with_ingestion_queue_size(parquet_ingestion_queue_size)
+                    .with_encoding_queue_size(parquet_encoding_queue_size)
+                    .with_writing_queue_size(parquet_writing_queue_size);
                 if let Some(row_group_size) = parquet_row_group_size {
                     options = options.with_max_row_group_size(row_group_size);
                 }
@@ -531,16 +565,6 @@ fn create_sink_factory(
                 }
                 if let Some(concurrency) = parquet_row_group_concurrency {
                     options = options.with_max_row_group_concurrency(concurrency);
-                }
-                options = options
-                    .with_ingestion_queue_size(parquet_ingestion_queue_size)
-                    .with_encoding_queue_size(parquet_encoding_queue_size)
-                    .with_writing_queue_size(parquet_writing_queue_size);
-                if let Some(stats) = parquet_statistics {
-                    options = options.with_statistics(stats);
-                }
-                if let Some(version) = parquet_writer_version {
-                    options = options.with_writer_version(version);
                 }
                 if parquet_dictionary_all_off {
                     options = options.with_no_dictionary(true);
