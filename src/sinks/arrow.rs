@@ -89,9 +89,7 @@ impl ArrowSink {
         let (tx, rx) = mpsc::channel::<RecordBatch>(options.queue_depth);
 
         let schema = Arc::clone(schema);
-        let handle = tokio::task::spawn_blocking(move || {
-            writer_task(path, &schema, options, rx)
-        });
+        let handle = tokio::task::spawn_blocking(move || writer_task(path, &schema, options, rx));
 
         Ok(Self {
             tx: Some(tx),
