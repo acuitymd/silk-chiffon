@@ -27,24 +27,46 @@ pub fn available_memory() -> usize {
     }
 }
 
-/// Reads cgroup v2 memory limit and calculates available memory.
+/// Reads cgroup memory limit and calculates available memory.
 ///
-/// Returns None if not running in a cgroup or if there's no memory limit.
+/// Tries cgroup v2 first, then v1. Returns None if not in a cgroup or unlimited.
+#[cfg(target_os = "linux")]
+fn cgroup_available_memory() -> Option<usize> {
+    cgroup_v2_available().or_else(cgroup_v1_available)
+}
+
 #[cfg(target_os = "linux")]
 #[allow(clippy::cast_possible_truncation)]
-fn cgroup_available_memory() -> Option<usize> {
+fn cgroup_v2_available() -> Option<usize> {
     use std::fs;
-
-    const MEMORY_MAX: &str = "/sys/fs/cgroup/memory.max";
-    const MEMORY_STAT: &str = "/sys/fs/cgroup/memory.stat";
-
-    let max_content = fs::read_to_string(MEMORY_MAX).ok()?;
+    let max_content = fs::read_to_string("/sys/fs/cgroup/memory.max").ok()?;
     let memory_max = parse_memory_max(&max_content)?;
-
-    let stat_content = fs::read_to_string(MEMORY_STAT).ok()?;
+    let stat_content = fs::read_to_string("/sys/fs/cgroup/memory.stat").ok()?;
     let net_used = parse_memory_stat_net_used(&stat_content)?;
-
     Some(memory_max.saturating_sub(net_used) as usize)
+}
+
+#[cfg(target_os = "linux")]
+#[allow(clippy::cast_possible_truncation)]
+fn cgroup_v1_available() -> Option<usize> {
+    use std::fs;
+    let limit = fs::read_to_string("/sys/fs/cgroup/memory/memory.limit_in_bytes").ok()?;
+    let limit = parse_cgroup_v1_limit(&limit)?;
+    let usage = fs::read_to_string("/sys/fs/cgroup/memory/memory.usage_in_bytes").ok()?;
+    let usage: u64 = usage.trim().parse().ok()?;
+    Some(limit.saturating_sub(usage) as usize)
+}
+
+/// Parses cgroup v1 limit. Returns None if unlimited (value >= 1 PB).
+#[cfg(any(target_os = "linux", test))]
+fn parse_cgroup_v1_limit(content: &str) -> Option<u64> {
+    const ONE_PETABYTE: u64 = 1_125_899_906_842_624;
+    let limit: u64 = content.trim().parse().ok()?;
+    // v1 uses a huge number for unlimited (near PAGE_COUNTER_MAX)
+    if limit >= ONE_PETABYTE {
+        return None;
+    }
+    Some(limit)
 }
 
 /// Parses memory.max content. Returns None if "max" (unlimited) or unparseable.
@@ -218,5 +240,23 @@ also_bad
 kernel 500";
         let net_used = parse_memory_stat_net_used(content).unwrap();
         assert_eq!(net_used, 3500);
+    }
+
+    #[test]
+    fn test_parse_cgroup_v1_limit() {
+        assert_eq!(parse_cgroup_v1_limit("1073741824\n"), Some(1073741824));
+        assert_eq!(parse_cgroup_v1_limit("8589934592"), Some(8589934592)); // 8 GB
+    }
+
+    #[test]
+    fn test_parse_cgroup_v1_limit_unlimited() {
+        assert_eq!(parse_cgroup_v1_limit("9223372036854771712"), None);
+        assert_eq!(parse_cgroup_v1_limit("9223372036854775807"), None);
+    }
+
+    #[test]
+    fn test_parse_cgroup_v1_limit_invalid() {
+        assert_eq!(parse_cgroup_v1_limit(""), None);
+        assert_eq!(parse_cgroup_v1_limit("max"), None);
     }
 }
