@@ -1,7 +1,6 @@
-use futures::stream::StreamExt;
 use std::{collections::HashMap, fs::File, io::BufWriter, path::PathBuf, sync::Arc};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use arrow::{
     array::{RecordBatch, RecordBatchWriter},
     compute::BatchCoalescer,
@@ -11,7 +10,8 @@ use arrow::{
 };
 use async_trait::async_trait;
 use datafusion::execution::SendableRecordBatchStream;
-use tokio::sync::Mutex;
+use futures::stream::StreamExt;
+use tokio::{sync::mpsc, task::JoinHandle};
 
 use crate::{
     ArrowCompression, ArrowIPCFormat,
@@ -23,6 +23,7 @@ pub struct ArrowSinkOptions {
     record_batch_size: usize,
     compression: ArrowCompression,
     metadata: HashMap<String, String>,
+    queue_depth: usize,
 }
 
 impl Default for ArrowSinkOptions {
@@ -38,6 +39,7 @@ impl ArrowSinkOptions {
             record_batch_size: 122_880,
             compression: ArrowCompression::None,
             metadata: HashMap::new(),
+            queue_depth: 16,
         }
     }
 
@@ -65,59 +67,92 @@ impl ArrowSinkOptions {
         self.metadata = metadata;
         self
     }
+
+    pub fn with_queue_depth(mut self, queue_depth: usize) -> Self {
+        self.queue_depth = queue_depth;
+        self
+    }
 }
 
-pub struct ArrowSinkInner {
+struct WriterResult {
     path: PathBuf,
     rows_written: u64,
-    writer: Box<dyn ArrowRecordBatchWriter>,
-    coalescer: BatchCoalescer,
 }
 
 pub struct ArrowSink {
-    inner: Mutex<ArrowSinkInner>,
+    tx: Option<mpsc::Sender<RecordBatch>>,
+    handle: Option<JoinHandle<Result<WriterResult>>>,
 }
 
 impl ArrowSink {
     pub fn create(path: PathBuf, schema: &SchemaRef, options: ArrowSinkOptions) -> Result<Self> {
-        let file = BufWriter::new(File::create(&path)?);
-        let write_options = match options.compression {
-            ArrowCompression::Zstd | ArrowCompression::Lz4 => {
-                IpcWriteOptions::default().try_with_compression(options.compression.into())?
-            }
-            ArrowCompression::None => IpcWriteOptions::default(),
-        };
+        let (tx, rx) = mpsc::channel::<RecordBatch>(options.queue_depth);
 
-        let mut writer: Box<dyn ArrowRecordBatchWriter> = match options.format {
-            ArrowIPCFormat::File => Box::new(FileWriter::try_new_with_options(
-                file,
-                schema,
-                write_options,
-            )?),
-            ArrowIPCFormat::Stream => Box::new(StreamWriter::try_new_with_options(
-                file,
-                schema,
-                write_options,
-            )?),
-        };
-
-        for (key, value) in options.metadata {
-            writer.write_metadata(&key, &value);
-        }
-
-        let coalescer = BatchCoalescer::new(Arc::clone(schema), options.record_batch_size);
-
-        let inner = ArrowSinkInner {
-            path,
-            rows_written: 0,
-            writer,
-            coalescer,
-        };
+        let schema = Arc::clone(schema);
+        let handle = tokio::task::spawn_blocking(move || {
+            writer_task(path, &schema, options, rx)
+        });
 
         Ok(Self {
-            inner: Mutex::new(inner),
+            tx: Some(tx),
+            handle: Some(handle),
         })
     }
+}
+
+fn writer_task(
+    path: PathBuf,
+    schema: &SchemaRef,
+    options: ArrowSinkOptions,
+    mut rx: mpsc::Receiver<RecordBatch>,
+) -> Result<WriterResult> {
+    let file = BufWriter::new(File::create(&path)?);
+    let write_options = match options.compression {
+        ArrowCompression::Zstd | ArrowCompression::Lz4 => {
+            IpcWriteOptions::default().try_with_compression(options.compression.into())?
+        }
+        ArrowCompression::None => IpcWriteOptions::default(),
+    };
+
+    let mut writer: Box<dyn ArrowRecordBatchWriter> = match options.format {
+        ArrowIPCFormat::File => Box::new(FileWriter::try_new_with_options(
+            file,
+            schema,
+            write_options,
+        )?),
+        ArrowIPCFormat::Stream => Box::new(StreamWriter::try_new_with_options(
+            file,
+            schema,
+            write_options,
+        )?),
+    };
+
+    for (key, value) in options.metadata {
+        writer.write_metadata(&key, &value);
+    }
+
+    let mut coalescer = BatchCoalescer::new(Arc::clone(schema), options.record_batch_size);
+    let mut rows_written = 0u64;
+
+    while let Some(batch) = rx.blocking_recv() {
+        coalescer.push_batch(batch)?;
+
+        while let Some(completed_batch) = coalescer.next_completed_batch() {
+            writer.write(&completed_batch)?;
+            rows_written += completed_batch.num_rows() as u64;
+        }
+    }
+
+    // flush remaining
+    coalescer.finish_buffered_batch()?;
+    if let Some(final_batch) = coalescer.next_completed_batch() {
+        writer.write(&final_batch)?;
+        rows_written += final_batch.num_rows() as u64;
+    }
+
+    writer.finish()?;
+
+    Ok(WriterResult { path, rows_written })
 }
 
 #[async_trait]
@@ -132,32 +167,21 @@ impl DataSink for ArrowSink {
     }
 
     async fn write_batch(&mut self, batch: RecordBatch) -> Result<()> {
-        let mut inner = self.inner.lock().await;
-
-        inner.coalescer.push_batch(batch)?;
-
-        while let Some(completed_batch) = inner.coalescer.next_completed_batch() {
-            inner.writer.write(&completed_batch)?;
-            inner.rows_written += completed_batch.num_rows() as u64;
-        }
-
+        let tx = self.tx.as_ref().context("sink already finished")?;
+        tx.send(batch).await.context("writer task died")?;
         Ok(())
     }
 
     async fn finish(&mut self) -> Result<SinkResult> {
-        let mut inner = self.inner.lock().await;
-        inner.coalescer.finish_buffered_batch()?;
+        // drop sender to signal EOF
+        self.tx.take();
 
-        if let Some(final_batch) = inner.coalescer.next_completed_batch() {
-            inner.writer.write(&final_batch)?;
-            inner.rows_written += final_batch.num_rows() as u64;
-        }
-
-        inner.writer.finish()?;
+        let handle = self.handle.take().context("sink already finished")?;
+        let result = handle.await.context("writer task panicked")??;
 
         Ok(SinkResult {
-            files_written: vec![inner.path.clone()],
-            rows_written: inner.rows_written,
+            files_written: vec![result.path],
+            rows_written: result.rows_written,
         })
     }
 }

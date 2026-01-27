@@ -50,6 +50,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         arrow_compression,
         arrow_format,
         arrow_record_batch_size,
+        arrow_writing_queue_size,
         parquet_bloom_all,
         parquet_bloom_all_off,
         parquet_bloom_column,
@@ -306,6 +307,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         arrow_compression,
         arrow_format,
         arrow_record_batch_size,
+        arrow_writing_queue_size,
         bloom_filter,
         parquet_buffer_size,
         parquet_dictionary_column,
@@ -513,6 +515,7 @@ fn create_sink_factory(
     arrow_compression: ArrowCompression,
     arrow_format: ArrowIPCFormat,
     arrow_record_batch_size: usize,
+    arrow_writing_queue_size: usize,
     parquet_bloom_filter: BloomFilterConfig,
     parquet_buffer_size: Option<usize>,
     parquet_dictionary_column: Vec<ColumnDictionaryConfig>,
@@ -547,7 +550,8 @@ fn create_sink_factory(
                 let options = ArrowSinkOptions::new()
                     .with_compression(arrow_compression)
                     .with_format(arrow_format)
-                    .with_record_batch_size(arrow_record_batch_size);
+                    .with_record_batch_size(arrow_record_batch_size)
+                    .with_queue_depth(arrow_writing_queue_size);
                 Box::new(ArrowSink::create(path.into(), &schema, options)?)
             }
             DataFormat::Parquet => {

@@ -1172,6 +1172,10 @@ pub struct TransformCommand {
     #[arg(long, default_value_t = 122_880, help_heading = "Arrow Options")]
     pub arrow_record_batch_size: usize,
 
+    /// Arrow writer queue size (number of batches buffered before backpressure).
+    #[arg(long, default_value_t = 16, help_heading = "Arrow Options")]
+    pub arrow_writing_queue_size: usize,
+
     //
     // ─── Parquet Options ───────────────────────────────────────────────────────────────
     //
@@ -1606,6 +1610,7 @@ impl TransformCommand {
             arrow_compression: ArrowCompression::default(),
             arrow_format: ArrowIPCFormat::default(),
             arrow_record_batch_size: 122_880,
+            arrow_writing_queue_size: 16,
             parquet_bloom_all: None,
             parquet_bloom_all_off: false,
             parquet_bloom_column: vec![],
