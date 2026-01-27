@@ -80,7 +80,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         parquet_page_header_statistics,
         parquet_arrow_metadata,
         thread_budget,
-        spill_dir,
+        spill_path,
         spill_compression,
         vortex_record_batch_size,
     } = args;
@@ -169,7 +169,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         .with_query_dialect(dialect)
         .with_memory_limit(effective_memory_limit)
         .with_target_partitions(effective_target_partitions)
-        .with_spill_dir(spill_dir)
+        .with_spill_path(spill_path)
         .with_spill_compression(spill_compression);
 
     let (input_paths, should_glob) = if let Some(single_input) = from {

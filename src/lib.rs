@@ -1095,9 +1095,9 @@ pub struct TransformCommand {
     /// Directory for spilling intermediate data when memory limit is exceeded.
     ///
     /// When DataFusion operators (sort, group by, aggregation) exceed the memory
-    /// limit, they spill to this directory. Default: system temp directory.
+    /// limit, they spill to this path. Default: system temp directory.
     #[arg(long, help_heading = "Execution")]
-    pub spill_dir: Option<std::path::PathBuf>,
+    pub spill_path: Option<Utf8PathBuf>,
 
     /// Compression for spilled intermediate data.
     ///
@@ -1648,7 +1648,7 @@ impl TransformCommand {
             parquet_page_header_statistics: false,
             parquet_arrow_metadata: false,
             vortex_record_batch_size: None,
-            spill_dir: None,
+            spill_path: None,
             spill_compression: SpillCompression::default(),
         }
     }

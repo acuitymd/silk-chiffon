@@ -1,6 +1,7 @@
 use crate::utils::memory::available_memory;
 use anyhow::{Result, anyhow};
 use bytesize::ByteSize;
+use camino::Utf8PathBuf;
 use datafusion::{
     execution::memory_pool::FairSpillPool,
     prelude::{SessionConfig, SessionContext},
@@ -25,7 +26,7 @@ pub struct PipelineConfig {
     pub query_dialect: QueryDialect,
     pub memory_limit: Option<usize>,
     pub target_partitions: Option<usize>,
-    pub spill_dir: Option<std::path::PathBuf>,
+    pub spill_path: Option<Utf8PathBuf>,
     pub spill_compression: SpillCompression,
 }
 
@@ -36,7 +37,7 @@ pub struct Pipeline {
     output_strategy: Option<OutputStrategy>,
     config: PipelineConfig,
     /// temp directory for spilling when memory_limit is set - kept alive until Pipeline drops
-    spill_dir: Option<TempDir>,
+    spill_path: Option<TempDir>,
 }
 
 impl Pipeline {
@@ -152,8 +153,8 @@ impl Pipeline {
         self
     }
 
-    pub fn with_spill_dir(mut self, spill_dir: Option<std::path::PathBuf>) -> Self {
-        self.config.spill_dir = spill_dir;
+    pub fn with_spill_path(mut self, spill_path: Option<Utf8PathBuf>) -> Self {
+        self.config.spill_path = spill_path;
         self
     }
 
@@ -222,16 +223,16 @@ impl Pipeline {
             .memory_limit
             .unwrap_or_else(default_memory_limit);
 
-        // use user-provided spill dir or create a temp one
-        let spill_path = if let Some(ref user_dir) = self.config.spill_dir {
-            user_dir.clone()
+        // use user-provided spill path or create a temp one
+        let spill_path = if let Some(ref user_path) = self.config.spill_path {
+            user_path.clone()
         } else {
-            let spill_dir = tempfile::Builder::new()
+            let spill_path = tempfile::Builder::new()
                 .prefix("silk-chiffon-spill-")
                 .tempdir()?;
-            let path = spill_dir.path().to_path_buf();
-            self.spill_dir = Some(spill_dir);
-            path
+            let path = spill_path.path().to_path_buf();
+            self.spill_path = Some(spill_path);
+            path.try_into()?
         };
 
         let pool = FairSpillPool::new(memory_limit);
