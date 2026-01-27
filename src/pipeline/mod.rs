@@ -1,12 +1,14 @@
+use crate::utils::memory::available_memory;
 use anyhow::{Result, anyhow};
 use bytesize::ByteSize;
 use datafusion::{
     execution::memory_pool::FairSpillPool,
     prelude::{SessionConfig, SessionContext},
 };
+use tempfile::TempDir;
 
 use crate::{
-    ListOutputsFormat, QueryDialect,
+    ListOutputsFormat, QueryDialect, SpillCompression,
     io_strategies::{
         OutputFileInfo,
         input_strategy::InputStrategy,
@@ -23,6 +25,8 @@ pub struct PipelineConfig {
     pub query_dialect: QueryDialect,
     pub memory_limit: Option<usize>,
     pub target_partitions: Option<usize>,
+    pub spill_dir: Option<std::path::PathBuf>,
+    pub spill_compression: SpillCompression,
 }
 
 #[derive(Default)]
@@ -31,6 +35,8 @@ pub struct Pipeline {
     operations: Vec<Box<dyn DataOperation>>,
     output_strategy: Option<OutputStrategy>,
     config: PipelineConfig,
+    /// temp directory for spilling when memory_limit is set - kept alive until Pipeline drops
+    spill_dir: Option<TempDir>,
 }
 
 impl Pipeline {
@@ -146,6 +152,16 @@ impl Pipeline {
         self
     }
 
+    pub fn with_spill_dir(mut self, spill_dir: Option<std::path::PathBuf>) -> Self {
+        self.config.spill_dir = spill_dir;
+        self
+    }
+
+    pub fn with_spill_compression(mut self, spill_compression: SpillCompression) -> Self {
+        self.config.spill_compression = spill_compression;
+        self
+    }
+
     pub async fn execute(&mut self) -> Result<Vec<OutputFileInfo>> {
         let mut ctx = self.build_session_context()?;
         self.execute_with_session_context(&mut ctx).await
@@ -186,7 +202,7 @@ impl Pipeline {
         Ok(files)
     }
 
-    pub fn build_session_context(&self) -> Result<SessionContext> {
+    pub fn build_session_context(&mut self) -> Result<SessionContext> {
         let mut cfg = SessionConfig::new();
 
         // DuckDB doesn't like joining Datatype::Utf8View to Datatype::Utf8, so we disable
@@ -195,25 +211,46 @@ impl Pipeline {
         cfg.options_mut().sql_parser.map_string_types_to_utf8view = false;
 
         cfg.options_mut().sql_parser.dialect = self.config.query_dialect.into();
+        cfg.options_mut().execution.spill_compression = self.config.spill_compression.into();
 
         if let Some(target_partitions) = self.config.target_partitions {
             cfg = cfg.with_target_partitions(target_partitions);
         }
 
-        if let Some(bytes) = self.config.memory_limit {
-            // use FairSpillPool which allows spilling to disk when memory is exceeded
-            let pool = FairSpillPool::new(bytes);
-            let runtime = datafusion::execution::runtime_env::RuntimeEnvBuilder::default()
-                .with_memory_pool(std::sync::Arc::new(pool))
-                .build()?;
-            return Ok(SessionContext::new_with_config_rt(
-                cfg,
-                std::sync::Arc::new(runtime),
-            ));
-        }
+        let memory_limit = self
+            .config
+            .memory_limit
+            .unwrap_or_else(default_memory_limit);
 
-        Ok(SessionContext::new_with_config(cfg))
+        // use user-provided spill dir or create a temp one
+        let spill_path = if let Some(ref user_dir) = self.config.spill_dir {
+            user_dir.clone()
+        } else {
+            let spill_dir = tempfile::Builder::new()
+                .prefix("silk-chiffon-spill-")
+                .tempdir()?;
+            let path = spill_dir.path().to_path_buf();
+            self.spill_dir = Some(spill_dir);
+            path
+        };
+
+        let pool = FairSpillPool::new(memory_limit);
+        let runtime = datafusion::execution::runtime_env::RuntimeEnvBuilder::default()
+            .with_temp_file_path(&spill_path)
+            .with_memory_pool(std::sync::Arc::new(pool))
+            .build()?;
+
+        Ok(SessionContext::new_with_config_rt(
+            cfg,
+            std::sync::Arc::new(runtime),
+        ))
     }
+}
+
+/// Returns 75% of available system memory as the default memory limit for DataFusion operations.
+/// Uses container-aware detection (cgroups) when running in Docker/Kubernetes.
+fn default_memory_limit() -> usize {
+    available_memory() * 3 / 4
 }
 
 /// Parse a human-readable byte size string (e.g., "512MB", "2GB", "1GiB") into bytes.

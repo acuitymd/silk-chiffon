@@ -208,6 +208,29 @@ impl From<ParquetCompression> for Compression {
     }
 }
 
+/// Compression codec for spilled intermediate data.
+#[derive(ValueEnum, Clone, Copy, Debug, Default)]
+#[value(rename_all = "lowercase")]
+pub enum SpillCompression {
+    /// No compression (fastest, largest files)
+    None,
+    /// LZ4 frame compression (fast, good compression)
+    #[default]
+    Lz4,
+    /// Zstd compression (slower, best compression)
+    Zstd,
+}
+
+impl From<SpillCompression> for datafusion::config::SpillCompression {
+    fn from(compression: SpillCompression) -> Self {
+        match compression {
+            SpillCompression::None => datafusion::config::SpillCompression::Uncompressed,
+            SpillCompression::Lz4 => datafusion::config::SpillCompression::Lz4Frame,
+            SpillCompression::Zstd => datafusion::config::SpillCompression::Zstd,
+        }
+    }
+}
+
 #[derive(ValueEnum, Clone, Copy, Debug, Default)]
 #[value(rename_all = "lowercase")]
 pub enum ParquetStatistics {
@@ -1037,9 +1060,28 @@ pub struct TransformCommand {
     /// Limits memory used by DataFusion for buffering operators (sort, group by,
     /// aggregation). When exceeded, operators spill to disk. Only tracks large
     /// allocations, not streaming data. Supports suffixes: B, KB, MB, GB, TB
-    /// (or KiB, MiB, GiB, TiB for binary). Default: unlimited.
+    /// (or KiB, MiB, GiB, TiB for binary).
+    ///
+    /// Default: auto-detected based on workload and available system memory.
+    /// With sorting (--sort-by or --by): 45% of available memory.
+    /// Without sorting: 15% of available memory.
+    /// Container-aware on Linux (respects cgroup limits).
     #[arg(long, help_heading = "Execution", value_parser = parse_nonzero_byte_size)]
     pub memory_limit: Option<usize>,
+
+    /// Directory for spilling intermediate data when memory limit is exceeded.
+    ///
+    /// When DataFusion operators (sort, group by, aggregation) exceed the memory
+    /// limit, they spill to this directory. Default: system temp directory.
+    #[arg(long, help_heading = "Execution")]
+    pub spill_dir: Option<std::path::PathBuf>,
+
+    /// Compression for spilled intermediate data.
+    ///
+    /// Controls compression when DataFusion spills to disk. Lz4 is faster but
+    /// produces larger files; zstd achieves better compression but is slower.
+    #[arg(long, value_enum, default_value_t = SpillCompression::default(), help_heading = "Execution")]
+    pub spill_compression: SpillCompression,
 
     /// Preserve the row order from the input file in the output.
     ///
@@ -1058,8 +1100,11 @@ pub struct TransformCommand {
     /// Number of partitions for query execution parallelism.
     ///
     /// Controls how DataFusion partitions data during queries (aggregations, joins, sorts).
-    /// Higher values increase parallelism but use more memory. These tasks run on the
-    /// tokio thread pool (--threads). Defaults to CPU cores.
+    /// Higher values increase parallelism but use more memory.
+    ///
+    /// Default: auto-detected based on workload. With sorting (--sort-by or --by): 75%
+    /// of usable cores. Without sorting: DataFusion default. Usable cores = total - 2
+    /// (minimum 2) to leave headroom for system processes.
     #[arg(long, help_heading = "Execution", value_parser = parse_at_least_one)]
     pub target_partitions: Option<usize>,
 
@@ -1119,16 +1164,16 @@ pub struct TransformCommand {
     // ─── Arrow Options ─────────────────────────────────────────────────────────────────
     //
     /// Arrow IPC compression codec.
-    #[arg(long, value_enum, help_heading = "Arrow Options")]
-    pub arrow_compression: Option<ArrowCompression>,
+    #[arg(long, value_enum, default_value_t = ArrowCompression::default(), help_heading = "Arrow Options")]
+    pub arrow_compression: ArrowCompression,
 
     /// Arrow IPC format (file or stream).
-    #[arg(long, value_enum, help_heading = "Arrow Options")]
-    pub arrow_format: Option<ArrowIPCFormat>,
+    #[arg(long, value_enum, default_value_t = ArrowIPCFormat::default(), help_heading = "Arrow Options")]
+    pub arrow_format: ArrowIPCFormat,
 
     /// Arrow record batch size.
-    #[arg(long, help_heading = "Arrow Options")]
-    pub arrow_record_batch_size: Option<usize>,
+    #[arg(long, default_value_t = 122_880, help_heading = "Arrow Options")]
+    pub arrow_record_batch_size: usize,
 
     //
     // ─── Parquet Options ───────────────────────────────────────────────────────────────
@@ -1344,7 +1389,10 @@ pub struct TransformCommand {
     ///
     /// Controls the rayon thread pool size for encoding columns within row groups.
     /// Column encoding is CPU-intensive and benefits from parallelism.
-    /// Defaults to the number of CPU cores.
+    ///
+    /// Default: auto-detected based on workload. With sorting (--sort-by or --by): 25%
+    /// of usable cores. Without sorting: 75% of usable cores. Usable cores = total - 2
+    /// (minimum 2) to leave headroom for system processes.
     #[arg(long, help_heading = "Parquet Tuning Options", value_parser = parse_at_least_one)]
     pub parquet_column_encoding_threads: Option<usize>,
 
@@ -1393,8 +1441,8 @@ pub struct TransformCommand {
     pub parquet_dictionary_column_off: Vec<String>,
 
     /// Parquet compression codec.
-    #[arg(long, value_enum, help_heading = "Parquet Options")]
-    pub parquet_compression: Option<ParquetCompression>,
+    #[arg(long, value_enum, default_value_t = ParquetCompression::default(), help_heading = "Parquet Options")]
+    pub parquet_compression: ParquetCompression,
 
     /// Data page encoding for Parquet columns.
     ///
@@ -1461,12 +1509,12 @@ pub struct TransformCommand {
     pub parquet_sorted_metadata: bool,
 
     /// Parquet column statistics level.
-    #[arg(long, value_enum, help_heading = "Parquet Options")]
-    pub parquet_statistics: Option<ParquetStatistics>,
+    #[arg(long, value_enum, default_value_t = ParquetStatistics::default(), help_heading = "Parquet Options")]
+    pub parquet_statistics: ParquetStatistics,
 
     /// Parquet writer version.
-    #[arg(long, value_enum, help_heading = "Parquet Options")]
-    pub parquet_writer_version: Option<ParquetWriterVersion>,
+    #[arg(long, value_enum, default_value_t = ParquetWriterVersion::default(), help_heading = "Parquet Options")]
+    pub parquet_writer_version: ParquetWriterVersion,
 
     /// Maximum data page size in bytes.
     ///
@@ -1558,9 +1606,9 @@ impl TransformCommand {
             list_outputs_file: None,
             create_dirs: true,
             overwrite: false,
-            arrow_compression: None,
-            arrow_format: None,
-            arrow_record_batch_size: None,
+            arrow_compression: ArrowCompression::default(),
+            arrow_format: ArrowIPCFormat::default(),
+            arrow_record_batch_size: 122_880,
             parquet_bloom_all: None,
             parquet_bloom_all_off: false,
             parquet_bloom_column: vec![],
@@ -1573,15 +1621,15 @@ impl TransformCommand {
             parquet_encoding_queue_size: 4,
             parquet_writing_queue_size: 4,
             parquet_dictionary_column_off: vec![],
-            parquet_compression: None,
+            parquet_compression: ParquetCompression::default(),
             parquet_encoding: None,
             parquet_io_threads: None,
             parquet_dictionary_all_off: false,
             parquet_row_group_concurrency: None,
             parquet_row_group_size: None,
             parquet_sorted_metadata: false,
-            parquet_statistics: None,
-            parquet_writer_version: None,
+            parquet_statistics: ParquetStatistics::default(),
+            parquet_writer_version: ParquetWriterVersion::default(),
             parquet_data_page_size: None,
             parquet_data_page_row_limit: None,
             parquet_dictionary_page_size: None,
@@ -1590,6 +1638,8 @@ impl TransformCommand {
             parquet_page_header_statistics: false,
             parquet_arrow_metadata: false,
             vortex_record_batch_size: None,
+            spill_dir: None,
+            spill_compression: SpillCompression::default(),
         }
     }
 }
@@ -1718,7 +1768,7 @@ pub enum DataFormat {
     Vortex,
 }
 
-#[derive(ValueEnum, PartialEq, Clone, Debug, Default)]
+#[derive(ValueEnum, PartialEq, Clone, Copy, Debug, Default)]
 pub enum ArrowIPCFormat {
     #[default]
     #[value(name = "file")]
