@@ -4,7 +4,7 @@ use crate::{
     AllColumnsBloomFilterConfig, ArrowCompression, ArrowIPCFormat, BloomFilterConfig,
     ColumnDictionaryConfig, ColumnEncodingConfig, DEFAULT_BLOOM_FILTER_FPP, DataFormat,
     DictionaryMode, ListOutputsFormat, ParquetCompression, ParquetEncoding, ParquetStatistics,
-    ParquetWriterVersion, PartitionStrategy, SortSpec, TransformCommand,
+    ParquetWriterVersion, PartitionStrategy, SortSpec, TransformCommand, default_thread_budget,
     io_strategies::{OutputFileInfo, output_strategy::SinkFactory, path_template::PathTemplate},
     operations::{query::QueryOperation, sort::SortOperation},
     pipeline::Pipeline,
@@ -85,12 +85,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         vortex_record_batch_size,
     } = args;
 
-    let usable_cpus = thread_budget.unwrap_or_else(|| {
-        let cpus = std::thread::available_parallelism()
-            .map(|p| p.get())
-            .unwrap_or(4);
-        cpus.saturating_sub(2).max(2)
-    });
+    let usable_cpus = thread_budget.unwrap_or_else(default_thread_budget);
     let quarter_cpus = (usable_cpus / 4).max(1);
     let three_quarter_cpus = (usable_cpus * 3 / 4).max(1);
 

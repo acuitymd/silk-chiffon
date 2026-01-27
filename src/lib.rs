@@ -50,6 +50,14 @@ pub fn parse_nonzero_byte_size(s: &str) -> Result<usize> {
     Ok(bytes)
 }
 
+/// Default thread budget: available CPUs minus 2 (for OS/other work), minimum 2.
+pub fn default_thread_budget() -> usize {
+    let cpus = std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(4);
+    cpus.saturating_sub(2).max(2)
+}
+
 #[derive(Parser, Debug)]
 #[command(version = env!("SILK_CHIFFON_VERSION"), about, long_about = None)]
 pub struct Cli {
@@ -1173,7 +1181,7 @@ pub struct TransformCommand {
     pub arrow_record_batch_size: usize,
 
     /// Arrow writer queue size (number of batches buffered before backpressure).
-    #[arg(long, default_value_t = 16, help_heading = "Arrow Options")]
+    #[arg(long, default_value = "16", value_parser = parse_at_least_one, help_heading = "Arrow Options")]
     pub arrow_writing_queue_size: usize,
 
     //

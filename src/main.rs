@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
-use silk_chiffon::{Cli, Commands, commands};
+use silk_chiffon::{Cli, Commands, commands, default_thread_budget};
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -11,12 +11,7 @@ fn main() -> Result<()> {
     }
 
     let thread_budget = match &cli.command {
-        Commands::Transform(args) => args.thread_budget.unwrap_or_else(|| {
-            let cpus = std::thread::available_parallelism()
-                .map(|p| p.get())
-                .unwrap_or(4);
-            cpus.saturating_sub(2).max(2)
-        }),
+        Commands::Transform(args) => args.thread_budget.unwrap_or_else(default_thread_budget),
         _ => std::thread::available_parallelism()
             .map(|p| p.get())
             .unwrap_or(4),

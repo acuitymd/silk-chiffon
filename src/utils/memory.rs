@@ -19,7 +19,16 @@ pub fn available_memory() -> usize {
     }
 
     // fall back to system memory (macOS, bare metal, or no cgroup limits)
-    System::new_all().available_memory() as usize
+    let sys = System::new_all();
+    let available = sys.available_memory() as usize;
+
+    // sysinfo can return 0 on some systems (known macOS issue); fall back to total
+    if available > 0 {
+        available
+    } else {
+        // conservative: assume 50% of total is available
+        sys.total_memory() as usize / 2
+    }
 }
 
 #[cfg(test)]
