@@ -42,7 +42,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         query,
         dialect,
         sort_by,
-        memory_limit,
+        memory_budget,
         preserve_input_order,
         target_partitions,
         input_format,
@@ -78,18 +78,18 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         parquet_offset_index,
         parquet_page_header_statistics,
         parquet_arrow_metadata,
-        threads: _,
+        thread_budget,
         spill_dir,
         spill_compression,
         vortex_record_batch_size,
     } = args;
 
-    let cpus = std::thread::available_parallelism()
-        .map(|p| p.get())
-        .unwrap_or(4);
-
-    // reserve 2 cores for system overhead, with minimum 2 usable cores
-    let usable_cpus = cpus.saturating_sub(2).max(2);
+    let usable_cpus = thread_budget.unwrap_or_else(|| {
+        let cpus = std::thread::available_parallelism()
+            .map(|p| p.get())
+            .unwrap_or(4);
+        cpus.saturating_sub(2).max(2)
+    });
     let quarter_cpus = (usable_cpus / 4).max(1);
     let three_quarter_cpus = (usable_cpus * 3 / 4).max(1);
 
@@ -155,19 +155,18 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         None
     };
 
-    // memory budget: when not explicitly set, allocate based on workload
-    // leave headroom for encoding queues, buffers, and I/O
-    let effective_memory_limit = memory_limit.or_else(|| {
+    // memory budget split: DataFusion gets a portion based on workload
+    let total_budget = memory_budget.unwrap_or_else(|| {
         let available = crate::utils::memory::available_memory();
-        let total_budget = available * 3 / 4; // 75% of available as total budget
-        if has_sort {
-            // sorting needs more DataFusion memory, but leave 40% for encoding/queues
-            Some(total_budget * 60 / 100)
-        } else {
-            // no sorting: DataFusion just needs query overhead, give more to encoding
-            Some(total_budget * 20 / 100)
-        }
+        available * 3 / 4
     });
+    let effective_memory_limit = if has_sort {
+        // sorting needs more DataFusion memory, leave 40% for encoding/queues
+        Some(total_budget * 60 / 100)
+    } else {
+        // no sorting: DataFusion just needs query overhead, give more to encoding
+        Some(total_budget * 20 / 100)
+    };
 
     let mut pipeline = Pipeline::new()
         .with_query_dialect(dialect)

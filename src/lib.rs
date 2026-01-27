@@ -1055,19 +1055,14 @@ pub struct TransformCommand {
     //
     // ─── Execution ─────────────────────────────────────────────────────────────────────
     //
-    /// Memory limit for query execution (e.g., "512MB", "2GB").
+    /// Target memory budget (e.g., "8GB"). Best-effort, not a hard limit.
     ///
-    /// Limits memory used by DataFusion for buffering operators (sort, group by,
-    /// aggregation). When exceeded, operators spill to disk. Only tracks large
-    /// allocations, not streaming data. Supports suffixes: B, KB, MB, GB, TB
-    /// (or KiB, MiB, GiB, TiB for binary).
+    /// Split between DataFusion (sorting/aggregation) and encoding based on
+    /// workload. Supports suffixes: KB, MB, GB (or KiB, MiB, GiB).
     ///
-    /// Default: auto-detected based on workload and available system memory.
-    /// With sorting (--sort-by or --by): 45% of available memory.
-    /// Without sorting: 15% of available memory.
-    /// Container-aware on Linux (respects cgroup limits).
+    /// Default: 75% of available memory, container-aware on Linux.
     #[arg(long, help_heading = "Execution", value_parser = parse_nonzero_byte_size)]
-    pub memory_limit: Option<usize>,
+    pub memory_budget: Option<usize>,
 
     /// Directory for spilling intermediate data when memory limit is exceeded.
     ///
@@ -1108,12 +1103,14 @@ pub struct TransformCommand {
     #[arg(long, help_heading = "Execution", value_parser = parse_at_least_one)]
     pub target_partitions: Option<usize>,
 
-    /// Maximum worker threads for the tokio async runtime.
+    /// Target thread budget for parallel work. Best-effort, not a hard limit.
     ///
-    /// Controls the thread pool size for async operations including I/O and DataFusion
-    /// query execution. Defaults to the number of CPU cores.
+    /// Split between encoding and query execution based on workload. Thread pools
+    /// intentionally overcommit since not all threads are active simultaneously.
+    ///
+    /// Default: CPU cores minus 2 (minimum 2), to leave headroom for system processes.
     #[arg(long, short = 't', help_heading = "Execution", value_parser = parse_at_least_one)]
-    pub threads: Option<usize>,
+    pub thread_budget: Option<usize>,
 
     //
     // ─── Partitioning ──────────────────────────────────────────────────────────────────
@@ -1596,10 +1593,10 @@ impl TransformCommand {
             exclude_columns: vec![],
             query: None,
             sort_by: None,
-            memory_limit: None,
+            memory_budget: None,
             preserve_input_order: false,
             target_partitions: None,
-            threads: None,
+            thread_budget: None,
             by: None,
             partition_strategy: PartitionStrategy::default(),
             list_outputs: None,

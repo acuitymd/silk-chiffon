@@ -5,22 +5,26 @@ use silk_chiffon::{Cli, Commands, commands};
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // handle completions before anything else since it writes to stdout
     if let Commands::Completions { shell } = &cli.command {
         Commands::generate_completions(*shell);
         return Ok(());
     }
 
-    let threads = match &cli.command {
-        Commands::Transform(args) => args.threads,
-        _ => None,
+    let thread_budget = match &cli.command {
+        Commands::Transform(args) => args.thread_budget.unwrap_or_else(|| {
+            let cpus = std::thread::available_parallelism()
+                .map(|p| p.get())
+                .unwrap_or(4);
+            cpus.saturating_sub(2).max(2)
+        }),
+        _ => std::thread::available_parallelism()
+            .map(|p| p.get())
+            .unwrap_or(4),
     };
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.enable_all();
-    if let Some(threads) = threads {
-        builder.worker_threads(threads);
-    }
+    builder.worker_threads(thread_budget);
     let runtime = builder.build()?;
 
     runtime.block_on(async {

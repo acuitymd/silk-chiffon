@@ -106,6 +106,17 @@ def build_native(project_root: Path) -> Path:
     return binary
 
 
+def build_release(project_root: Path) -> Path:
+    """Build silk-chiffon with release profile."""
+    print("\n[1/5] Building silk-chiffon with release profile...")
+    run_command(["just", "build"], "cargo build --release", capture=True)
+    binary = project_root / "target" / "release" / "silk-chiffon"
+    if not binary.exists():
+        print(f"Binary not found at {binary}")
+        sys.exit(1)
+    return binary
+
+
 def generate_test_data(output_dir: Path, rows: int, threads: int) -> Path:
     """Generate an Arrow IPC stream file with diverse column types via DuckDB."""
     print(f"\n[2/5] Generating test data ({rows:,} rows)...")
@@ -648,6 +659,11 @@ def main() -> int:
         "--skip-build", action="store_true", help="Skip building silk-chiffon"
     )
     parser.add_argument(
+        "--release",
+        action="store_true",
+        help="Use release build instead of native (target/release vs target/native)",
+    )
+    parser.add_argument(
         "--cargo-run",
         action="store_true",
         help="Use 'cargo run --' instead of native binary (for quick testing)",
@@ -698,15 +714,16 @@ def main() -> int:
         silk_cmd = ["cargo", "run", "--"]
         print("\n[1/5] Using cargo run for silk-chiffon")
     elif args.skip_build:
-        silk_binary = project_root / "target" / "native" / "silk-chiffon"
+        profile = "release" if args.release else "native"
+        silk_binary = project_root / "target" / profile / "silk-chiffon"
         if not silk_binary.exists():
             print(f"Binary not found at {silk_binary}, building...")
-            silk_binary = build_native(project_root)
+            silk_binary = build_release(project_root) if args.release else build_native(project_root)
         else:
             print(f"\n[1/5] Using existing binary: {silk_binary}")
         silk_cmd = [str(silk_binary)]
     else:
-        silk_binary = build_native(project_root)
+        silk_binary = build_release(project_root) if args.release else build_native(project_root)
         silk_cmd = [str(silk_binary)]
 
     if args.input:
