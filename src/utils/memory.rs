@@ -31,6 +31,7 @@ pub fn available_memory() -> usize {
 ///
 /// Returns None if not running in a cgroup or if there's no memory limit.
 #[cfg(target_os = "linux")]
+#[allow(clippy::cast_possible_truncation)]
 fn cgroup_available_memory() -> Option<usize> {
     use std::fs;
 
