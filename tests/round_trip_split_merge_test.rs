@@ -77,7 +77,11 @@ fn make_schema() -> SchemaRef {
 /// - `metric_e`: i32, 0..150k, ~2% null
 /// - `metric_f`: i32, 0..120k, ~2% null
 /// - `event_date`: Date32, 19000..20000, ~2% null
-#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::similar_names
+)]
 fn generate_batch(
     rng: &mut impl Rng,
     start_row: usize,
