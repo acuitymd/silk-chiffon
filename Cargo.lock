@@ -3688,6 +3688,7 @@ dependencies = [
  "parquet",
  "percent-encoding",
  "predicates",
+ "rand",
  "serde",
  "serde_json",
  "strum_macros",
