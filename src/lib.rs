@@ -1068,6 +1068,10 @@ pub struct TransformCommand {
     /// Split between DataFusion (sorting/aggregation) and encoding based on
     /// workload. Supports suffixes: KB, MB, GB (or KiB, MiB, GiB).
     ///
+    /// Setting this too low may cause out-of-memory errors, since some
+    /// internal buffers cannot spill to disk. The minimum depends on schema
+    /// width, batch size, and parallelism — there is no fixed floor.
+    ///
     /// Default: 75% of available memory, container-aware on Linux.
     #[arg(long, help_heading = "Execution", value_parser = parse_nonzero_byte_size)]
     pub memory_budget: Option<usize>,
