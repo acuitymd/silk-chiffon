@@ -1,0 +1,7 @@
+[test-groups.memory-intensive]
+max-threads = 1
+
+[[profile.default.overrides]]
+filter = "test(round_trip_split_and_merge)"
+test-group = "memory-intensive"
+threads-required = "num-cpus"
