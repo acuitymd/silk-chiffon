@@ -1207,8 +1207,8 @@ pub struct TransformCommand {
     ///
     /// Accepts a byte size (e.g. "8GB"), "total[:pct]" for a percentage of total RAM,
     /// "available[:pct]" for a percentage of free RAM, or "reserve:<size>" to use
-    /// total RAM minus a reserved amount. Any mode except "fixed" supports an optional
-    /// minimum: "total:80:min:4GB". Examples: "total:90", "available:60%",
+    /// total RAM minus a reserved amount. All keyword modes (total, available, reserve)
+    /// support an optional minimum: "total:80:min:4GB". Examples: "total:90", "available:60%",
     /// "reserve:2GB:min:1GB", "4GB".
     ///
     /// Setting this too low may cause out-of-memory errors, since some
