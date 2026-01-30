@@ -3,8 +3,9 @@ use std::sync::Arc;
 use crate::{
     AllColumnsBloomFilterConfig, ArrowCompression, ArrowIPCFormat, BloomFilterConfig,
     ColumnDictionaryConfig, ColumnEncodingConfig, DEFAULT_BLOOM_FILTER_FPP, DataFormat,
-    DictionaryMode, ListOutputsFormat, ParquetCompression, ParquetEncoding, ParquetStatistics,
-    ParquetWriterVersion, PartitionStrategy, SortSpec, TransformCommand, default_thread_budget,
+    DictionaryMode, ListOutputsFormat, MemoryBudgetSpec, ParquetCompression, ParquetEncoding,
+    ParquetStatistics, ParquetWriterVersion, PartitionStrategy, SortSpec, TransformCommand,
+    default_thread_budget,
     io_strategies::{OutputFileInfo, output_strategy::SinkFactory, path_template::PathTemplate},
     operations::{query::QueryOperation, sort::SortOperation},
     pipeline::Pipeline,
@@ -18,6 +19,7 @@ use crate::{
         arrow::ArrowDataSource, data_source::DataSource, parquet::ParquetDataSource,
         vortex::VortexDataSource,
     },
+    utils::memory,
 };
 use anyhow::{Result, anyhow};
 use arrow::datatypes::SchemaRef;
@@ -85,7 +87,9 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         vortex_record_batch_size,
     } = args;
 
-    let usable_cpus = thread_budget.unwrap_or_else(default_thread_budget);
+    let usable_cpus = thread_budget
+        .map(|spec| spec.resolve())
+        .unwrap_or_else(default_thread_budget);
     let quarter_cpus = (usable_cpus / 4).max(1);
     let three_quarter_cpus = (usable_cpus * 3 / 4).max(1);
 
@@ -152,11 +156,22 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         None
     };
 
-    // memory budget split: DataFusion gets a portion based on workload
-    let total_budget = memory_budget.unwrap_or_else(|| {
-        let available = crate::utils::memory::available_memory();
-        available * 3 / 4
-    });
+    let total_budget = match memory_budget {
+        MemoryBudgetSpec::Total { pct, min } => {
+            let budget = memory::total_memory() * usize::from(pct) / 100;
+            budget.max(min.unwrap_or(0))
+        }
+        MemoryBudgetSpec::Available { pct, min } => {
+            let budget = memory::available_memory() * usize::from(pct) / 100;
+            budget.max(min.unwrap_or(0))
+        }
+        MemoryBudgetSpec::Fixed(n) => n,
+        MemoryBudgetSpec::Reserve { reserve, min } => {
+            let budget = memory::total_memory().saturating_sub(reserve);
+            budget.max(min.unwrap_or(1))
+        }
+    };
+
     let effective_memory_limit = if has_sort {
         // sorting needs more DataFusion memory, leave 40% for encoding/queues
         Some(total_budget * 60 / 100)

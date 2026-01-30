@@ -15,7 +15,7 @@ use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use silk_chiffon::commands::transform;
-use silk_chiffon::{PartitionStrategy, TransformCommand};
+use silk_chiffon::{DataFormat, MemoryBudgetSpec, PartitionStrategy, TransformCommand};
 use tempfile::TempDir;
 use tokio::runtime::Runtime;
 
@@ -197,11 +197,11 @@ fn default_transform_command() -> TransformCommand {
         query: None,
         dialect: Default::default(),
         sort_by: None,
-        memory_budget: None,
+        memory_budget: MemoryBudgetSpec::Total { pct: 80, min: None },
         preserve_input_order: false,
         target_partitions: None,
         input_format: None,
-        output_format: Some(silk_chiffon::DataFormat::Parquet),
+        output_format: Some(DataFormat::Parquet),
         ..TransformCommand::default()
     }
 }

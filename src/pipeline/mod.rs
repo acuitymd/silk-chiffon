@@ -1,4 +1,4 @@
-use crate::utils::memory::available_memory;
+use crate::utils::memory::total_memory;
 use anyhow::{Result, anyhow};
 use bytesize::ByteSize;
 use camino::Utf8PathBuf;
@@ -248,10 +248,10 @@ impl Pipeline {
     }
 }
 
-/// Returns 75% of available system memory as the default memory limit for DataFusion operations.
+/// Returns 80% of total system memory as the default memory limit for DataFusion operations.
 /// Uses container-aware detection (cgroups) when running in Docker/Kubernetes.
 fn default_memory_limit() -> usize {
-    available_memory() * 3 / 4
+    total_memory() * 4 / 5
 }
 
 /// Parse a human-readable byte size string (e.g., "512MB", "2GB", "1GiB") into bytes.
