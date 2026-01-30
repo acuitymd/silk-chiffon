@@ -129,6 +129,26 @@ pub enum MemoryBudgetSpec {
     Reserve { reserve: usize, min: Option<usize> },
 }
 
+impl MemoryBudgetSpec {
+    pub fn resolve(&self) -> usize {
+        match self {
+            MemoryBudgetSpec::Total { pct, min } => {
+                let budget = utils::memory::total_memory() * usize::from(*pct) / 100;
+                budget.max(min.unwrap_or(0))
+            }
+            MemoryBudgetSpec::Available { pct, min } => {
+                let budget = utils::memory::available_memory() * usize::from(*pct) / 100;
+                budget.max(min.unwrap_or(0))
+            }
+            MemoryBudgetSpec::Fixed(n) => *n,
+            MemoryBudgetSpec::Reserve { reserve, min } => {
+                let budget = utils::memory::total_memory().saturating_sub(*reserve);
+                budget.max(min.unwrap_or(0))
+            }
+        }
+    }
+}
+
 impl FromStr for MemoryBudgetSpec {
     type Err = anyhow::Error;
 
