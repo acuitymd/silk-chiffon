@@ -158,6 +158,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         MemoryBudgetSpec::Total(pct) => memory::total_memory() * usize::from(pct) / 100,
         MemoryBudgetSpec::Available(pct) => memory::available_memory() * usize::from(pct) / 100,
         MemoryBudgetSpec::Fixed(n) => n,
+        MemoryBudgetSpec::Reserve(n) => memory::total_memory().saturating_sub(n).max(1),
     };
 
     let effective_memory_limit = if has_sort {

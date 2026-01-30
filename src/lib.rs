@@ -66,6 +66,8 @@ pub enum MemoryBudgetSpec {
     Available(u8),
     /// Use a fixed byte amount.
     Fixed(usize),
+    /// Use total memory minus a reserved byte amount.
+    Reserve(usize),
 }
 
 impl FromStr for MemoryBudgetSpec {
@@ -80,10 +82,15 @@ impl FromStr for MemoryBudgetSpec {
         match keyword.to_ascii_lowercase().as_str() {
             "total" => Ok(MemoryBudgetSpec::Total(parse_percent(pct_str, 80)?)),
             "available" => Ok(MemoryBudgetSpec::Available(parse_percent(pct_str, 80)?)),
+            "reserve" => {
+                let val = pct_str
+                    .ok_or_else(|| anyhow!("reserve requires a byte size, e.g. 'reserve:2GB'"))?;
+                parse_nonzero_byte_size(val).map(MemoryBudgetSpec::Reserve)
+            }
             _ => {
                 if pct_str.is_some() {
                     anyhow::bail!(
-                        "unknown keyword '{keyword}': expected 'total', 'available', or a byte size"
+                        "unknown keyword '{keyword}': expected 'total', 'available', 'reserve', or a byte size"
                     );
                 }
                 parse_nonzero_byte_size(s).map(MemoryBudgetSpec::Fixed)
@@ -1116,8 +1123,9 @@ pub struct TransformCommand {
     /// Target memory budget. Best-effort, not a hard limit.
     ///
     /// Accepts a byte size (e.g. "8GB"), "total[:pct]" for a percentage of total RAM,
-    /// or "available[:pct]" for a percentage of free RAM. Examples: "total:90",
-    /// "available:60%", "available", "4GB".
+    /// "available[:pct]" for a percentage of free RAM, or "reserve:<size>" to use
+    /// total RAM minus a reserved amount. Examples: "total:90", "available:60%",
+    /// "reserve:2GB", "4GB".
     ///
     /// Setting this too low may cause out-of-memory errors, since some
     /// internal buffers cannot spill to disk. The minimum depends on schema
@@ -1946,6 +1954,23 @@ mod tests {
             assert!(
                 matches!("8GB".parse::<MemoryBudgetSpec>().unwrap(), MemoryBudgetSpec::Fixed(n) if n == 8_000_000_000)
             );
+        }
+
+        #[test]
+        fn test_reserve_byte_size() {
+            assert!(
+                matches!("reserve:2GB".parse::<MemoryBudgetSpec>().unwrap(), MemoryBudgetSpec::Reserve(n) if n == 2_000_000_000)
+            );
+        }
+
+        #[test]
+        fn test_reserve_requires_value() {
+            assert!(MemoryBudgetSpec::from_str("reserve").is_err());
+        }
+
+        #[test]
+        fn test_reserve_rejects_zero() {
+            assert!(MemoryBudgetSpec::from_str("reserve:0").is_err());
         }
 
         #[test]
