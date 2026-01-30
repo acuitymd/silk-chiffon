@@ -1142,8 +1142,7 @@ pub struct TransformCommand {
     /// Higher values increase parallelism but use more memory.
     ///
     /// Default: auto-detected based on workload. With sorting (--sort-by or --by): 75%
-    /// of usable cores. Without sorting: DataFusion default. Usable cores = total - 2
-    /// (minimum 2) to leave headroom for system processes.
+    /// of available CPU cores. Without sorting: DataFusion default.
     #[arg(long, help_heading = "Execution", value_parser = parse_at_least_one)]
     pub target_partitions: Option<usize>,
 
@@ -1455,8 +1454,7 @@ pub struct TransformCommand {
     /// Column encoding is CPU-intensive and benefits from parallelism.
     ///
     /// Default: auto-detected based on workload. With sorting (--sort-by or --by): 25%
-    /// of usable cores. Without sorting: 75% of usable cores. Usable cores = total - 2
-    /// (minimum 2) to leave headroom for system processes.
+    /// of available CPU cores. Without sorting: 75% of available CPU cores.
     #[arg(long, help_heading = "Parquet Tuning Options", value_parser = parse_at_least_one)]
     pub parquet_column_encoding_threads: Option<usize>,
 
