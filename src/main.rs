@@ -11,7 +11,11 @@ fn main() -> Result<()> {
     }
 
     let thread_budget = match &cli.command {
-        Commands::Transform(args) => args.thread_budget.unwrap_or_else(default_thread_budget),
+        Commands::Transform(args) => args
+            .thread_budget
+            .as_ref()
+            .map(|spec| spec.resolve())
+            .unwrap_or_else(default_thread_budget),
         _ => std::thread::available_parallelism()
             .map(|p| p.get())
             .unwrap_or(4),

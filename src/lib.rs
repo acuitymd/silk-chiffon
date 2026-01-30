@@ -57,38 +57,107 @@ pub fn default_thread_budget() -> usize {
         .unwrap_or(4)
 }
 
+/// Specifies how to determine the thread budget.
+#[derive(Debug, Clone)]
+pub enum ThreadBudgetSpec {
+    /// Use a fixed thread count.
+    Fixed(usize),
+    /// Use all CPUs minus a reserved count, with an optional minimum.
+    Reserve { reserve: usize, min: usize },
+}
+
+impl ThreadBudgetSpec {
+    pub fn resolve(&self) -> usize {
+        match self {
+            ThreadBudgetSpec::Fixed(n) => *n,
+            ThreadBudgetSpec::Reserve { reserve, min } => {
+                default_thread_budget().saturating_sub(*reserve).max(*min)
+            }
+        }
+    }
+}
+
+impl FromStr for ThreadBudgetSpec {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // plain number
+        if let Ok(n) = s.parse::<usize>() {
+            if n == 0 {
+                anyhow::bail!("thread budget must be at least 1");
+            }
+            return Ok(ThreadBudgetSpec::Fixed(n));
+        }
+
+        let parts: Vec<&str> = s.split(':').collect();
+        match parts.as_slice() {
+            // reserve:N
+            ["reserve", n] => {
+                let reserve: usize = n
+                    .parse()
+                    .map_err(|_| anyhow!("invalid reserve count '{n}'"))?;
+                Ok(ThreadBudgetSpec::Reserve { reserve, min: 1 })
+            }
+            // reserve:N:min:M
+            ["reserve", n, "min", m] => {
+                let reserve: usize = n
+                    .parse()
+                    .map_err(|_| anyhow!("invalid reserve count '{n}'"))?;
+                let min: usize = m.parse().map_err(|_| anyhow!("invalid minimum '{m}'"))?;
+                if min == 0 {
+                    anyhow::bail!("minimum must be at least 1");
+                }
+                Ok(ThreadBudgetSpec::Reserve { reserve, min })
+            }
+            _ => anyhow::bail!(
+                "invalid thread budget '{s}': expected a number, 'reserve:N', or 'reserve:N:min:M'"
+            ),
+        }
+    }
+}
+
 /// Specifies how to determine the memory budget.
 #[derive(Debug, Clone)]
 pub enum MemoryBudgetSpec {
-    /// Use a percentage of total system memory.
-    Total(u8),
-    /// Use a percentage of currently available (free) memory.
-    Available(u8),
+    /// Use a percentage of total system memory, with optional minimum bytes.
+    Total { pct: u8, min: Option<usize> },
+    /// Use a percentage of currently available (free) memory, with optional minimum bytes.
+    Available { pct: u8, min: Option<usize> },
     /// Use a fixed byte amount.
     Fixed(usize),
-    /// Use total memory minus a reserved byte amount.
-    Reserve(usize),
+    /// Use total memory minus a reserved byte amount, with optional minimum bytes.
+    Reserve { reserve: usize, min: Option<usize> },
 }
 
 impl FromStr for MemoryBudgetSpec {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let (keyword, pct_str) = match s.split_once(':') {
-            Some((k, v)) => (k, Some(v)),
-            None => (s, None),
-        };
+        let parts: Vec<&str> = s.split(':').collect();
 
-        match keyword.to_ascii_lowercase().as_str() {
-            "total" => Ok(MemoryBudgetSpec::Total(parse_percent(pct_str, 80)?)),
-            "available" => Ok(MemoryBudgetSpec::Available(parse_percent(pct_str, 80)?)),
+        let keyword = parts[0].to_ascii_lowercase();
+        match keyword.as_str() {
+            "total" | "available" => {
+                let pct_str = parts.get(1).copied();
+                let pct = parse_percent(pct_str, 80)?;
+                let min = parse_optional_min(&parts, 2)?;
+
+                if keyword == "total" {
+                    Ok(MemoryBudgetSpec::Total { pct, min })
+                } else {
+                    Ok(MemoryBudgetSpec::Available { pct, min })
+                }
+            }
             "reserve" => {
-                let val = pct_str
+                let val = parts
+                    .get(1)
                     .ok_or_else(|| anyhow!("reserve requires a byte size, e.g. 'reserve:2GB'"))?;
-                parse_nonzero_byte_size(val).map(MemoryBudgetSpec::Reserve)
+                let reserve = parse_nonzero_byte_size(val)?;
+                let min = parse_optional_min(&parts, 2)?;
+                Ok(MemoryBudgetSpec::Reserve { reserve, min })
             }
             _ => {
-                if pct_str.is_some() {
+                if parts.len() > 1 {
                     anyhow::bail!(
                         "unknown keyword '{keyword}': expected 'total', 'available', 'reserve', or a byte size"
                     );
@@ -96,6 +165,20 @@ impl FromStr for MemoryBudgetSpec {
                 parse_nonzero_byte_size(s).map(MemoryBudgetSpec::Fixed)
             }
         }
+    }
+}
+
+/// Parses an optional `:min:<size>` suffix from a split parts array starting at `offset`.
+fn parse_optional_min(parts: &[&str], offset: usize) -> Result<Option<usize>> {
+    match parts.get(offset) {
+        None => Ok(None),
+        Some(&"min") => {
+            let val = parts
+                .get(offset + 1)
+                .ok_or_else(|| anyhow!("min requires a byte size, e.g. 'min:4GB'"))?;
+            Ok(Some(parse_nonzero_byte_size(val)?))
+        }
+        Some(other) => anyhow::bail!("unexpected segment '{other}': expected 'min'"),
     }
 }
 
@@ -1124,8 +1207,9 @@ pub struct TransformCommand {
     ///
     /// Accepts a byte size (e.g. "8GB"), "total[:pct]" for a percentage of total RAM,
     /// "available[:pct]" for a percentage of free RAM, or "reserve:<size>" to use
-    /// total RAM minus a reserved amount. Examples: "total:90", "available:60%",
-    /// "reserve:2GB", "4GB".
+    /// total RAM minus a reserved amount. Any mode except "fixed" supports an optional
+    /// minimum: "total:80:min:4GB". Examples: "total:90", "available:60%",
+    /// "reserve:2GB:min:1GB", "4GB".
     ///
     /// Setting this too low may cause out-of-memory errors, since some
     /// internal buffers cannot spill to disk. The minimum depends on schema
@@ -1137,12 +1221,16 @@ pub struct TransformCommand {
 
     /// Target thread budget for parallel work. Best-effort, not a hard limit.
     ///
+    /// Accepts a number (e.g. "8"), "reserve:N" to use all CPUs minus N (minimum 1),
+    /// or "reserve:N:min:M" for a custom minimum. Examples: "8", "reserve:2",
+    /// "reserve:2:min:4".
+    ///
     /// Split between encoding and query execution based on workload. Thread pools
     /// intentionally overcommit since not all threads are active simultaneously.
     ///
     /// Default: all CPU cores.
-    #[arg(long, short = 't', help_heading = "Execution", value_parser = parse_at_least_one)]
-    pub thread_budget: Option<usize>,
+    #[arg(long, short = 't', help_heading = "Execution", value_parser = ThreadBudgetSpec::from_str)]
+    pub thread_budget: Option<ThreadBudgetSpec>,
 
     /// Number of partitions for query execution parallelism.
     ///
@@ -1666,7 +1754,7 @@ impl TransformCommand {
             exclude_columns: vec![],
             query: None,
             sort_by: None,
-            memory_budget: MemoryBudgetSpec::Total(80),
+            memory_budget: MemoryBudgetSpec::Total { pct: 80, min: None },
             preserve_input_order: false,
             target_partitions: None,
             thread_budget: None,
@@ -1898,14 +1986,70 @@ mod tests {
         );
     }
 
+    mod thread_budget_spec_tests {
+        use super::*;
+
+        #[test]
+        fn test_fixed() {
+            let spec = ThreadBudgetSpec::from_str("8").unwrap();
+            assert!(matches!(spec, ThreadBudgetSpec::Fixed(8)));
+            assert_eq!(spec.resolve(), 8);
+        }
+
+        #[test]
+        fn test_reserve() {
+            let spec = ThreadBudgetSpec::from_str("reserve:2").unwrap();
+            assert!(matches!(
+                spec,
+                ThreadBudgetSpec::Reserve { reserve: 2, min: 1 }
+            ));
+        }
+
+        #[test]
+        fn test_reserve_with_min() {
+            let spec = ThreadBudgetSpec::from_str("reserve:2:min:4").unwrap();
+            assert!(matches!(
+                spec,
+                ThreadBudgetSpec::Reserve { reserve: 2, min: 4 }
+            ));
+        }
+
+        #[test]
+        fn test_reserve_resolve_respects_min() {
+            let spec = ThreadBudgetSpec::Reserve {
+                reserve: 1000,
+                min: 2,
+            };
+            assert_eq!(spec.resolve(), 2);
+        }
+
+        #[test]
+        fn test_zero_rejected() {
+            assert!(ThreadBudgetSpec::from_str("0").is_err());
+        }
+
+        #[test]
+        fn test_min_zero_rejected() {
+            assert!(ThreadBudgetSpec::from_str("reserve:2:min:0").is_err());
+        }
+
+        #[test]
+        fn test_invalid_format_rejected() {
+            assert!(ThreadBudgetSpec::from_str("reserve").is_err());
+            assert!(ThreadBudgetSpec::from_str("garbage:2").is_err());
+            assert!(ThreadBudgetSpec::from_str("reserve:abc").is_err());
+        }
+    }
+
     mod memory_budget_spec_tests {
         use super::*;
+        use std::str::FromStr;
 
         #[test]
         fn test_total_default_percent() {
             assert!(matches!(
                 "total".parse::<MemoryBudgetSpec>().unwrap(),
-                MemoryBudgetSpec::Total(80)
+                MemoryBudgetSpec::Total { pct: 80, min: None }
             ));
         }
 
@@ -1913,7 +2057,7 @@ mod tests {
         fn test_total_explicit_percent() {
             assert!(matches!(
                 "total:90".parse::<MemoryBudgetSpec>().unwrap(),
-                MemoryBudgetSpec::Total(90)
+                MemoryBudgetSpec::Total { pct: 90, min: None }
             ));
         }
 
@@ -1921,7 +2065,15 @@ mod tests {
         fn test_total_percent_with_symbol() {
             assert!(matches!(
                 "total:90%".parse::<MemoryBudgetSpec>().unwrap(),
-                MemoryBudgetSpec::Total(90)
+                MemoryBudgetSpec::Total { pct: 90, min: None }
+            ));
+        }
+
+        #[test]
+        fn test_total_with_min() {
+            assert!(matches!(
+                "total:80:min:4GB".parse::<MemoryBudgetSpec>().unwrap(),
+                MemoryBudgetSpec::Total { pct: 80, min: Some(n) } if n == 4_000_000_000
             ));
         }
 
@@ -1929,7 +2081,7 @@ mod tests {
         fn test_available_default_percent() {
             assert!(matches!(
                 "available".parse::<MemoryBudgetSpec>().unwrap(),
-                MemoryBudgetSpec::Available(80)
+                MemoryBudgetSpec::Available { pct: 80, min: None }
             ));
         }
 
@@ -1937,7 +2089,7 @@ mod tests {
         fn test_available_explicit_percent() {
             assert!(matches!(
                 "available:60".parse::<MemoryBudgetSpec>().unwrap(),
-                MemoryBudgetSpec::Available(60)
+                MemoryBudgetSpec::Available { pct: 60, min: None }
             ));
         }
 
@@ -1945,7 +2097,15 @@ mod tests {
         fn test_available_percent_with_symbol() {
             assert!(matches!(
                 "available:60%".parse::<MemoryBudgetSpec>().unwrap(),
-                MemoryBudgetSpec::Available(60)
+                MemoryBudgetSpec::Available { pct: 60, min: None }
+            ));
+        }
+
+        #[test]
+        fn test_available_with_min() {
+            assert!(matches!(
+                "available:60:min:2GB".parse::<MemoryBudgetSpec>().unwrap(),
+                MemoryBudgetSpec::Available { pct: 60, min: Some(n) } if n == 2_000_000_000
             ));
         }
 
@@ -1958,9 +2118,18 @@ mod tests {
 
         #[test]
         fn test_reserve_byte_size() {
-            assert!(
-                matches!("reserve:2GB".parse::<MemoryBudgetSpec>().unwrap(), MemoryBudgetSpec::Reserve(n) if n == 2_000_000_000)
-            );
+            assert!(matches!(
+                "reserve:2GB".parse::<MemoryBudgetSpec>().unwrap(),
+                MemoryBudgetSpec::Reserve { reserve, min: None } if reserve == 2_000_000_000
+            ));
+        }
+
+        #[test]
+        fn test_reserve_with_min() {
+            assert!(matches!(
+                "reserve:2GB:min:1GB".parse::<MemoryBudgetSpec>().unwrap(),
+                MemoryBudgetSpec::Reserve { reserve, min: Some(m) } if reserve == 2_000_000_000 && m == 1_000_000_000
+            ));
         }
 
         #[test]
@@ -1974,14 +2143,24 @@ mod tests {
         }
 
         #[test]
+        fn test_min_rejects_zero() {
+            assert!(MemoryBudgetSpec::from_str("total:80:min:0").is_err());
+        }
+
+        #[test]
+        fn test_min_requires_value() {
+            assert!(MemoryBudgetSpec::from_str("total:80:min").is_err());
+        }
+
+        #[test]
         fn test_case_insensitive() {
             assert!(matches!(
                 "Total:50".parse::<MemoryBudgetSpec>().unwrap(),
-                MemoryBudgetSpec::Total(50)
+                MemoryBudgetSpec::Total { pct: 50, min: None }
             ));
             assert!(matches!(
                 "AVAILABLE".parse::<MemoryBudgetSpec>().unwrap(),
-                MemoryBudgetSpec::Available(80)
+                MemoryBudgetSpec::Available { pct: 80, min: None }
             ));
         }
 
@@ -2008,6 +2187,11 @@ mod tests {
         #[test]
         fn test_zero_bytes_rejected() {
             assert!(MemoryBudgetSpec::from_str("0").is_err());
+        }
+
+        #[test]
+        fn test_unexpected_segment_rejected() {
+            assert!(MemoryBudgetSpec::from_str("total:80:foo:bar").is_err());
         }
     }
 

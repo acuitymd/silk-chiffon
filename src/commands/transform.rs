@@ -87,7 +87,9 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         vortex_record_batch_size,
     } = args;
 
-    let usable_cpus = thread_budget.unwrap_or_else(default_thread_budget);
+    let usable_cpus = thread_budget
+        .map(|spec| spec.resolve())
+        .unwrap_or_else(default_thread_budget);
     let quarter_cpus = (usable_cpus / 4).max(1);
     let three_quarter_cpus = (usable_cpus * 3 / 4).max(1);
 
@@ -155,10 +157,19 @@ pub async fn run(args: TransformCommand) -> Result<()> {
     };
 
     let total_budget = match memory_budget {
-        MemoryBudgetSpec::Total(pct) => memory::total_memory() * usize::from(pct) / 100,
-        MemoryBudgetSpec::Available(pct) => memory::available_memory() * usize::from(pct) / 100,
+        MemoryBudgetSpec::Total { pct, min } => {
+            let budget = memory::total_memory() * usize::from(pct) / 100;
+            budget.max(min.unwrap_or(0))
+        }
+        MemoryBudgetSpec::Available { pct, min } => {
+            let budget = memory::available_memory() * usize::from(pct) / 100;
+            budget.max(min.unwrap_or(0))
+        }
         MemoryBudgetSpec::Fixed(n) => n,
-        MemoryBudgetSpec::Reserve(n) => memory::total_memory().saturating_sub(n).max(1),
+        MemoryBudgetSpec::Reserve { reserve, min } => {
+            let budget = memory::total_memory().saturating_sub(reserve);
+            budget.max(min.unwrap_or(1))
+        }
     };
 
     let effective_memory_limit = if has_sort {

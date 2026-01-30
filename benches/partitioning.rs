@@ -197,7 +197,7 @@ fn default_transform_command() -> TransformCommand {
         query: None,
         dialect: Default::default(),
         sort_by: None,
-        memory_budget: MemoryBudgetSpec::Total(80),
+        memory_budget: MemoryBudgetSpec::Total { pct: 80, min: None },
         preserve_input_order: false,
         target_partitions: None,
         input_format: None,
