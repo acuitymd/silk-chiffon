@@ -50,12 +50,62 @@ pub fn parse_nonzero_byte_size(s: &str) -> Result<usize> {
     Ok(bytes)
 }
 
-/// Default thread budget: available CPUs minus 2 (for OS/other work), minimum 2.
+/// Default thread budget: all available CPUs.
 pub fn default_thread_budget() -> usize {
-    let cpus = std::thread::available_parallelism()
+    std::thread::available_parallelism()
         .map(|p| p.get())
-        .unwrap_or(4);
-    cpus.saturating_sub(2).max(2)
+        .unwrap_or(4)
+}
+
+/// Specifies how to determine the memory budget.
+#[derive(Debug, Clone)]
+pub enum MemoryBudgetSpec {
+    /// Use a percentage of total system memory.
+    Total(u8),
+    /// Use a percentage of currently available (free) memory.
+    Available(u8),
+    /// Use a fixed byte amount.
+    Fixed(usize),
+}
+
+impl FromStr for MemoryBudgetSpec {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (keyword, pct_str) = match s.split_once(':') {
+            Some((k, v)) => (k, Some(v)),
+            None => (s, None),
+        };
+
+        match keyword.to_ascii_lowercase().as_str() {
+            "total" => Ok(MemoryBudgetSpec::Total(parse_percent(pct_str, 80)?)),
+            "available" => Ok(MemoryBudgetSpec::Available(parse_percent(pct_str, 80)?)),
+            _ => {
+                if pct_str.is_some() {
+                    anyhow::bail!(
+                        "unknown keyword '{keyword}': expected 'total', 'available', or a byte size"
+                    );
+                }
+                parse_nonzero_byte_size(s).map(MemoryBudgetSpec::Fixed)
+            }
+        }
+    }
+}
+
+fn parse_percent(s: Option<&str>, default: u8) -> Result<u8> {
+    let Some(s) = s else { return Ok(default) };
+
+    let s = s.strip_suffix('%').unwrap_or(s);
+
+    let pct: u8 = s
+        .parse()
+        .map_err(|_| anyhow!("invalid percentage '{s}': expected 1-100"))?;
+
+    if pct == 0 || pct > 100 {
+        anyhow::bail!("percentage must be between 1 and 100, got {pct}");
+    }
+
+    Ok(pct)
 }
 
 #[derive(Parser, Debug)]
@@ -1063,25 +1113,26 @@ pub struct TransformCommand {
     //
     // ─── Execution ─────────────────────────────────────────────────────────────────────
     //
-    /// Target memory budget (e.g., "8GB"). Best-effort, not a hard limit.
+    /// Target memory budget. Best-effort, not a hard limit.
     ///
-    /// Split between DataFusion (sorting/aggregation) and encoding based on
-    /// workload. Supports suffixes: KB, MB, GB (or KiB, MiB, GiB).
+    /// Accepts a byte size (e.g. "8GB"), "total[:pct]" for a percentage of total RAM,
+    /// or "available[:pct]" for a percentage of free RAM. Examples: "total:90",
+    /// "available:60%", "available", "4GB".
     ///
     /// Setting this too low may cause out-of-memory errors, since some
     /// internal buffers cannot spill to disk. The minimum depends on schema
     /// width, batch size, and parallelism — there is no fixed floor.
     ///
-    /// Default: 75% of available memory, container-aware on Linux.
-    #[arg(long, help_heading = "Execution", value_parser = parse_nonzero_byte_size)]
-    pub memory_budget: Option<usize>,
+    /// Default: 80% of total memory, container-aware on Linux.
+    #[arg(long, help_heading = "Execution", value_parser = MemoryBudgetSpec::from_str, default_value = "total:80%")]
+    pub memory_budget: MemoryBudgetSpec,
 
     /// Target thread budget for parallel work. Best-effort, not a hard limit.
     ///
     /// Split between encoding and query execution based on workload. Thread pools
     /// intentionally overcommit since not all threads are active simultaneously.
     ///
-    /// Default: CPU cores minus 2 (minimum 2), to leave headroom for system processes.
+    /// Default: all CPU cores.
     #[arg(long, short = 't', help_heading = "Execution", value_parser = parse_at_least_one)]
     pub thread_budget: Option<usize>,
 
@@ -1609,7 +1660,7 @@ impl TransformCommand {
             exclude_columns: vec![],
             query: None,
             sort_by: None,
-            memory_budget: None,
+            memory_budget: MemoryBudgetSpec::Total(80),
             preserve_input_order: false,
             target_partitions: None,
             thread_budget: None,
@@ -1839,6 +1890,102 @@ mod tests {
             QueryDialect::from_str("sqlite", true),
             Ok(QueryDialect::SQLite)
         );
+    }
+
+    mod memory_budget_spec_tests {
+        use super::*;
+
+        #[test]
+        fn test_total_default_percent() {
+            assert!(matches!(
+                "total".parse::<MemoryBudgetSpec>().unwrap(),
+                MemoryBudgetSpec::Total(80)
+            ));
+        }
+
+        #[test]
+        fn test_total_explicit_percent() {
+            assert!(matches!(
+                "total:90".parse::<MemoryBudgetSpec>().unwrap(),
+                MemoryBudgetSpec::Total(90)
+            ));
+        }
+
+        #[test]
+        fn test_total_percent_with_symbol() {
+            assert!(matches!(
+                "total:90%".parse::<MemoryBudgetSpec>().unwrap(),
+                MemoryBudgetSpec::Total(90)
+            ));
+        }
+
+        #[test]
+        fn test_available_default_percent() {
+            assert!(matches!(
+                "available".parse::<MemoryBudgetSpec>().unwrap(),
+                MemoryBudgetSpec::Available(80)
+            ));
+        }
+
+        #[test]
+        fn test_available_explicit_percent() {
+            assert!(matches!(
+                "available:60".parse::<MemoryBudgetSpec>().unwrap(),
+                MemoryBudgetSpec::Available(60)
+            ));
+        }
+
+        #[test]
+        fn test_available_percent_with_symbol() {
+            assert!(matches!(
+                "available:60%".parse::<MemoryBudgetSpec>().unwrap(),
+                MemoryBudgetSpec::Available(60)
+            ));
+        }
+
+        #[test]
+        fn test_fixed_byte_size() {
+            assert!(
+                matches!("8GB".parse::<MemoryBudgetSpec>().unwrap(), MemoryBudgetSpec::Fixed(n) if n == 8_000_000_000)
+            );
+        }
+
+        #[test]
+        fn test_case_insensitive() {
+            assert!(matches!(
+                "Total:50".parse::<MemoryBudgetSpec>().unwrap(),
+                MemoryBudgetSpec::Total(50)
+            ));
+            assert!(matches!(
+                "AVAILABLE".parse::<MemoryBudgetSpec>().unwrap(),
+                MemoryBudgetSpec::Available(80)
+            ));
+        }
+
+        #[test]
+        fn test_percent_zero_rejected() {
+            assert!(MemoryBudgetSpec::from_str("total:0").is_err());
+        }
+
+        #[test]
+        fn test_percent_over_100_rejected() {
+            assert!(MemoryBudgetSpec::from_str("total:101").is_err());
+        }
+
+        #[test]
+        fn test_unknown_keyword_with_colon_rejected() {
+            assert!(MemoryBudgetSpec::from_str("garbage:80").is_err());
+        }
+
+        #[test]
+        fn test_invalid_percent_rejected() {
+            assert!(MemoryBudgetSpec::from_str("total:abc").is_err());
+        }
+
+        #[test]
+        fn test_zero_bytes_rejected() {
+            assert!(MemoryBudgetSpec::from_str("0").is_err());
+        }
     }
 
     mod parquet_encoding_tests {

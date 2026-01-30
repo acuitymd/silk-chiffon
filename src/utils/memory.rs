@@ -5,6 +5,22 @@
 
 use sysinfo::System;
 
+/// Returns total memory in bytes, respecting container cgroup limits.
+///
+/// In containerized environments (Docker, Kubernetes), this returns the cgroup memory
+/// limit. On macOS, bare metal Linux, or when cgroup limits aren't set, falls back to
+/// system total memory.
+#[allow(clippy::cast_possible_truncation)]
+pub fn total_memory() -> usize {
+    #[cfg(target_os = "linux")]
+    if let Some(limit) = cgroup_total_memory() {
+        return limit;
+    }
+
+    let sys = System::new_all();
+    sys.total_memory() as usize
+}
+
 /// Returns available memory in bytes, respecting container cgroup limits.
 ///
 /// In containerized environments (Docker, Kubernetes), this returns the available
@@ -25,6 +41,26 @@ pub fn available_memory() -> usize {
     } else {
         sys.total_memory() as usize / 2
     }
+}
+
+/// Returns cgroup memory limit. Tries v2 first, then v1.
+#[cfg(target_os = "linux")]
+#[allow(clippy::cast_possible_truncation)]
+fn cgroup_total_memory() -> Option<usize> {
+    use std::fs;
+
+    let v2 = fs::read_to_string("/sys/fs/cgroup/memory.max")
+        .ok()
+        .and_then(|c| parse_memory_max(&c))
+        .map(|v| v as usize);
+    if v2.is_some() {
+        return v2;
+    }
+
+    fs::read_to_string("/sys/fs/cgroup/memory/memory.limit_in_bytes")
+        .ok()
+        .and_then(|c| parse_cgroup_v1_limit(&c))
+        .map(|v| v as usize)
 }
 
 /// Reads cgroup memory limit and calculates available memory.
@@ -133,9 +169,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_total_memory_returns_nonzero() {
+        let mem = total_memory();
+        assert!(mem > 0, "total memory should be > 0");
+    }
+
+    #[test]
     fn test_available_memory_returns_nonzero() {
         let mem = available_memory();
         assert!(mem > 0, "available memory should be > 0");
+    }
+
+    #[test]
+    fn test_total_at_least_available() {
+        let total = total_memory();
+        let available = available_memory();
+        assert!(
+            total >= available,
+            "total ({total}) should be >= available ({available})"
+        );
     }
 
     #[test]
