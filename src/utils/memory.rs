@@ -3,6 +3,7 @@
 //! Uses cgroup limits when running in a container (Linux), falls back to system
 //! memory on macOS or when not containerized.
 
+use arrow::datatypes::{DataType, Schema};
 use sysinfo::System;
 
 /// Returns total memory in bytes, respecting container cgroup limits.
@@ -164,6 +165,47 @@ fn parse_memory_stat_net_used(content: &str) -> Option<u64> {
     Some(total.saturating_sub(slab_reclaimable))
 }
 
+/// Returns the exact byte size for fixed-width Arrow types, or `None` for variable-width types.
+#[allow(clippy::cast_sign_loss)]
+pub fn estimate_fixed_type_bytes(dt: &DataType) -> Option<usize> {
+    match dt {
+        DataType::Boolean => Some(1),
+        DataType::Int8 | DataType::UInt8 => Some(1),
+        DataType::Int16 | DataType::UInt16 | DataType::Float16 => Some(2),
+        DataType::Int32 | DataType::UInt32 | DataType::Float32 | DataType::Date32 => Some(4),
+        DataType::Int64
+        | DataType::UInt64
+        | DataType::Float64
+        | DataType::Date64
+        | DataType::Time64(_)
+        | DataType::Timestamp(_, _)
+        | DataType::Duration(_) => Some(8),
+        DataType::Interval(arrow::datatypes::IntervalUnit::YearMonth) => Some(4),
+        DataType::Interval(arrow::datatypes::IntervalUnit::DayTime) => Some(8),
+        DataType::Interval(arrow::datatypes::IntervalUnit::MonthDayNano) => Some(16),
+        DataType::Time32(_) => Some(4),
+        DataType::Decimal128(_, _) => Some(16),
+        DataType::Decimal256(_, _) => Some(32),
+        DataType::FixedSizeBinary(n) => Some((*n).max(0) as usize),
+        DataType::FixedSizeList(f, n) => {
+            estimate_fixed_type_bytes(f.data_type()).map(|size| size * (*n).max(0) as usize)
+        }
+        _ => None,
+    }
+}
+
+/// Estimate bytes per row for a given Arrow schema.
+///
+/// Fixed-width types use their exact byte size. Variable-width types (Utf8, Binary, List, etc.)
+/// use a conservative 16-byte estimate per value.
+pub fn estimate_row_bytes(schema: &Schema) -> usize {
+    schema
+        .fields()
+        .iter()
+        .map(|f| estimate_fixed_type_bytes(f.data_type()).unwrap_or(16))
+        .sum()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -310,5 +352,36 @@ kernel 500";
     fn test_parse_cgroup_v1_limit_invalid() {
         assert_eq!(parse_cgroup_v1_limit(""), None);
         assert_eq!(parse_cgroup_v1_limit("max"), None);
+    }
+
+    #[test]
+    fn test_estimate_row_bytes_fixed_width() {
+        use arrow::datatypes::Field;
+        // 3 × Int32 + 1 × Int16 + 1 × Date32 = 12 + 2 + 4 = 18
+        let schema = Schema::new(vec![
+            Field::new("a", DataType::Int32, false),
+            Field::new("b", DataType::Int32, true),
+            Field::new("c", DataType::Int32, false),
+            Field::new("d", DataType::Int16, false),
+            Field::new("e", DataType::Date32, false),
+        ]);
+        assert_eq!(estimate_row_bytes(&schema), 18);
+    }
+
+    #[test]
+    fn test_estimate_row_bytes_variable_width() {
+        use arrow::datatypes::Field;
+        // Utf8 = 16 (estimate), Int32 = 4
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("name", DataType::Utf8, false),
+        ]);
+        assert_eq!(estimate_row_bytes(&schema), 20);
+    }
+
+    #[test]
+    fn test_estimate_row_bytes_empty_schema() {
+        let schema = Schema::empty();
+        assert_eq!(estimate_row_bytes(&schema), 0);
     }
 }

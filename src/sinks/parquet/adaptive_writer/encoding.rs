@@ -10,6 +10,8 @@ use arrow::datatypes::{DataType, SchemaRef};
 use parquet::file::properties::{WriterProperties, WriterPropertiesBuilder, WriterPropertiesPtr};
 use parquet::schema::types::ColumnPath;
 
+use crate::utils::memory::estimate_fixed_type_bytes;
+
 use super::analysis::ColumnAnalysis;
 use super::config::{
     AdaptiveWriterConfig, ResolvedBloomFilterMode, ResolvedColumnConfigs, ResolvedDictionaryMode,
@@ -222,33 +224,23 @@ pub fn should_use_dictionary(
 pub fn estimate_dictionary_size(analysis: &ColumnAnalysis, data_type: &DataType) -> usize {
     let cardinality = analysis.approx_distinct as usize;
 
-    let value_size = match data_type {
-        DataType::Boolean => 1,
-        DataType::Int8 | DataType::UInt8 => 1,
-        DataType::Int16 | DataType::UInt16 => 2,
-        DataType::Int32 | DataType::UInt32 | DataType::Float32 | DataType::Date32 => 4,
-        DataType::Int64
-        | DataType::UInt64
-        | DataType::Float64
-        | DataType::Date64
-        | DataType::Time64(_)
-        | DataType::Timestamp(_, _) => 8,
-        DataType::Time32(_) => 4,
-        DataType::Decimal128(_, _) => 16,
-        DataType::Decimal256(_, _) => 32,
-        DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => analysis
-            .avg_value_size
-            .map(|s| s.round().max(0.0) as usize)
-            .unwrap_or(32),
-        DataType::Binary | DataType::LargeBinary | DataType::BinaryView => analysis
-            .avg_value_size
-            .map(|s| s.round().max(0.0) as usize)
-            .unwrap_or(64),
-        DataType::FixedSizeBinary(size) => (*size).max(0) as usize,
-        DataType::Dictionary(_, value_type) => {
-            return estimate_dictionary_size(analysis, value_type);
+    let value_size = if let Some(fixed) = estimate_fixed_type_bytes(data_type) {
+        fixed
+    } else {
+        match data_type {
+            DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => analysis
+                .avg_value_size
+                .map(|s| s.round().max(0.0) as usize)
+                .unwrap_or(32),
+            DataType::Binary | DataType::LargeBinary | DataType::BinaryView => analysis
+                .avg_value_size
+                .map(|s| s.round().max(0.0) as usize)
+                .unwrap_or(64),
+            DataType::Dictionary(_, value_type) => {
+                return estimate_dictionary_size(analysis, value_type);
+            }
+            _ => 16,
         }
-        _ => 16,
     };
 
     cardinality * value_size
