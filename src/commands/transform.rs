@@ -61,6 +61,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         parquet_column_encoding_threads,
         parquet_dictionary_column_off,
         parquet_compression,
+        parquet_compression_level,
         parquet_ingestion_queue_size,
         parquet_encoding_queue_size,
         parquet_writing_queue_size,
@@ -308,6 +309,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         parquet_column_encoding,
         parquet_dictionary_column_off,
         parquet_compression,
+        parquet_compression_level,
         parquet_ingestion_queue_size,
         parquet_encoding_queue_size,
         parquet_writing_queue_size,
@@ -516,6 +518,7 @@ fn create_sink_factory(
     parquet_column_encoding: Vec<ColumnEncodingConfig>,
     parquet_dictionary_column_off: Vec<String>,
     parquet_compression: ParquetCompression,
+    parquet_compression_level: Option<i32>,
     parquet_ingestion_queue_size: usize,
     parquet_encoding_queue_size: usize,
     parquet_writing_queue_size: usize,
@@ -549,8 +552,9 @@ fn create_sink_factory(
                 Box::new(ArrowSink::create(path.into(), &schema, options)?)
             }
             DataFormat::Parquet => {
+                let compression = parquet_compression.to_compression(parquet_compression_level)?;
                 let mut options = ParquetSinkOptions::new()
-                    .with_compression(parquet_compression)
+                    .with_compression(compression)
                     .with_statistics(parquet_statistics)
                     .with_writer_version(parquet_writer_version)
                     .with_ingestion_queue_size(parquet_ingestion_queue_size)
