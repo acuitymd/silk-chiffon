@@ -429,6 +429,60 @@ fn test_transform_with_parquet_compression() {
 }
 
 #[test]
+fn test_transform_with_compression_levels() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+
+    // repetitive data so compression has something to work with
+    let ids: Vec<i32> = (0..10_000).map(|i| i % 100).collect();
+    let names: Vec<&str> = (0..10_000)
+        .map(|_| "hello world this is a test string for compression")
+        .collect();
+    let batch = TestBatch::simple_with(&ids, &names);
+    TestFile::write_arrow_batch(&input, &batch);
+
+    let output_low = temp_dir.path().join("low.parquet");
+    let output_high = temp_dir.path().join("high.parquet");
+
+    let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
+    cmd.args([
+        "transform",
+        "--parquet-compression",
+        "zstd",
+        "--parquet-compression-level",
+        "1",
+        "--from",
+        input.to_str().unwrap(),
+        "--to",
+        output_low.to_str().unwrap(),
+    ])
+    .assert()
+    .success();
+
+    let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
+    cmd.args([
+        "transform",
+        "--parquet-compression",
+        "zstd",
+        "--parquet-compression-level",
+        "22",
+        "--from",
+        input.to_str().unwrap(),
+        "--to",
+        output_high.to_str().unwrap(),
+    ])
+    .assert()
+    .success();
+
+    let size_low = std::fs::metadata(&output_low).unwrap().len();
+    let size_high = std::fs::metadata(&output_high).unwrap().len();
+    assert!(
+        size_high < size_low,
+        "zstd level 22 ({size_high} bytes) should be smaller than level 1 ({size_low} bytes)"
+    );
+}
+
+#[test]
 fn test_transform_explicit_formats() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.data");

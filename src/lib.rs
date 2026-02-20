@@ -15,7 +15,7 @@ use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum, builder::ValueHi
 use clap_complete::Shell;
 use datafusion::config::Dialect;
 use parquet::{
-    basic::{Compression, Encoding, GzipLevel, ZstdLevel},
+    basic::{BrotliLevel, Compression, Encoding, GzipLevel, ZstdLevel},
     file::properties::{EnabledStatistics, WriterVersion},
 };
 use std::{
@@ -359,19 +359,61 @@ pub enum ParquetCompression {
     Zstd,
     Snappy,
     Gzip,
+    Brotli,
     Lz4,
     #[default]
     None,
 }
 
-impl From<ParquetCompression> for Compression {
-    fn from(compression: ParquetCompression) -> Self {
-        match compression {
-            ParquetCompression::Zstd => Compression::ZSTD(ZstdLevel::default()),
-            ParquetCompression::Snappy => Compression::SNAPPY,
-            ParquetCompression::Gzip => Compression::GZIP(GzipLevel::default()),
-            ParquetCompression::Lz4 => Compression::LZ4_RAW,
-            ParquetCompression::None => Compression::UNCOMPRESSED,
+impl ParquetCompression {
+    pub fn to_compression(self, level: Option<i32>) -> Result<Compression> {
+        match self {
+            Self::Zstd => {
+                let lvl = match level {
+                    Some(l) => ZstdLevel::try_new(l)?,
+                    None => ZstdLevel::default(),
+                };
+                Ok(Compression::ZSTD(lvl))
+            }
+            Self::Gzip => {
+                let lvl = match level {
+                    Some(l) => GzipLevel::try_new(
+                        u32::try_from(l)
+                            .map_err(|_| anyhow!("gzip compression level must be non-negative"))?,
+                    )?,
+                    None => GzipLevel::default(),
+                };
+                Ok(Compression::GZIP(lvl))
+            }
+            Self::Brotli => {
+                let lvl =
+                    match level {
+                        Some(l) => BrotliLevel::try_new(u32::try_from(l).map_err(|_| {
+                            anyhow!("brotli compression level must be non-negative")
+                        })?)?,
+                        None => BrotliLevel::default(),
+                    };
+                Ok(Compression::BROTLI(lvl))
+            }
+            Self::Snappy | Self::Lz4 | Self::None => {
+                if level.is_some() {
+                    anyhow::bail!(
+                        "compression level is not supported for {}",
+                        match self {
+                            Self::Snappy => "snappy",
+                            Self::Lz4 => "lz4",
+                            Self::None => "uncompressed",
+                            _ => unreachable!(),
+                        }
+                    );
+                }
+                Ok(match self {
+                    Self::Snappy => Compression::SNAPPY,
+                    Self::Lz4 => Compression::LZ4_RAW,
+                    Self::None => Compression::UNCOMPRESSED,
+                    _ => unreachable!(),
+                })
+            }
         }
     }
 }
@@ -1622,6 +1664,13 @@ pub struct TransformCommand {
     #[arg(long, value_enum, default_value_t = ParquetCompression::default(), help_heading = "Parquet Options")]
     pub parquet_compression: ParquetCompression,
 
+    /// Compression level for the chosen codec.
+    ///
+    /// Only applies to gzip (0-9, default 6), brotli (0-11, default 1),
+    /// and zstd (1-22, default 1). Not supported for snappy, lz4, or none.
+    #[arg(long, help_heading = "Parquet Options")]
+    pub parquet_compression_level: Option<i32>,
+
     /// Data page encoding for Parquet columns.
     ///
     /// This encoding is used for column data pages. Its role depends on dictionary encoding:
@@ -1801,6 +1850,7 @@ impl TransformCommand {
             parquet_writing_queue_size: 4,
             parquet_dictionary_column_off: vec![],
             parquet_compression: ParquetCompression::default(),
+            parquet_compression_level: None,
             parquet_encoding: None,
             parquet_io_threads: None,
             parquet_dictionary_all_off: false,

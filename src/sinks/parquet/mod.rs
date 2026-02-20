@@ -14,6 +14,7 @@ pub const DEFAULT_DATA_PAGE_SIZE_LIMIT: usize = 100 * 1024 * 1024; // 100MiB (Du
 pub const DEFAULT_DICTIONARY_PAGE_SIZE_LIMIT: usize = 1024 * 1024 * 1024; // 1GiB (DuckDB MAX_UNCOMPRESSED_DICT_PAGE_SIZE)
 
 use parquet::{
+    basic::Compression,
     file::{
         metadata::{KeyValue, SortingColumn},
         properties::{WriterProperties, WriterPropertiesBuilder},
@@ -31,8 +32,8 @@ use arrow::{
 use async_trait::async_trait;
 
 use crate::{
-    BloomFilterConfig, ColumnEncodingConfig, ParquetCompression, ParquetEncoding,
-    ParquetStatistics, ParquetWriterVersion, SortDirection, SortSpec,
+    BloomFilterConfig, ColumnEncodingConfig, ParquetEncoding, ParquetStatistics,
+    ParquetWriterVersion, SortDirection, SortSpec,
     sinks::data_sink::{DataSink, SinkResult},
     utils::memory::estimate_row_bytes,
 };
@@ -51,7 +52,7 @@ pub struct ParquetSinkOptions {
     pub encoding_queue_size: Option<usize>,
     pub writing_queue_size: Option<usize>,
     pub sort_spec: SortSpec,
-    pub compression: ParquetCompression,
+    pub compression: Compression,
     pub bloom_filters: BloomFilterConfig,
     pub statistics: ParquetStatistics,
     /// Disable dictionary encoding globally.
@@ -100,7 +101,7 @@ impl ParquetSinkOptions {
             encoding_queue_size: None,
             writing_queue_size: None,
             sort_spec: SortSpec::default(),
-            compression: ParquetCompression::default(),
+            compression: Compression::UNCOMPRESSED,
             bloom_filters: BloomFilterConfig::default(),
             statistics: ParquetStatistics::default(),
             no_dictionary: false,
@@ -158,7 +159,7 @@ impl ParquetSinkOptions {
         self
     }
 
-    pub fn with_compression(mut self, compression: ParquetCompression) -> Self {
+    pub fn with_compression(mut self, compression: Compression) -> Self {
         self.compression = compression;
         self
     }
@@ -337,7 +338,7 @@ impl ParquetSink {
         let mut writer_builder = WriterProperties::builder()
             .set_created_by(format!("silk-chiffon v{}", env!("SILK_CHIFFON_VERSION")))
             .set_max_row_group_size(options.max_row_group_size)
-            .set_compression(options.compression.into())
+            .set_compression(options.compression)
             .set_writer_version(options.writer_version.into())
             .set_statistics_enabled(options.statistics.into())
             .set_dictionary_enabled(!options.no_dictionary)
@@ -880,10 +881,11 @@ mod tests {
         #[tokio::test(flavor = "multi_thread")]
         async fn test_sink_with_compression() {
             for compression in [
-                ParquetCompression::Zstd,
-                ParquetCompression::Snappy,
-                ParquetCompression::Gzip,
-                ParquetCompression::Lz4,
+                Compression::ZSTD(Default::default()),
+                Compression::SNAPPY,
+                Compression::GZIP(Default::default()),
+                Compression::BROTLI(Default::default()),
+                Compression::LZ4_RAW,
             ] {
                 let temp_dir = tempdir().unwrap();
                 let output_path = temp_dir.path().join("output.parquet");
@@ -1983,7 +1985,7 @@ mod tests {
         fn test_default_options() {
             let options = ParquetSinkOptions::default();
             assert_eq!(options.max_row_group_size, DEFAULT_MAX_ROW_GROUP_SIZE);
-            assert!(matches!(options.compression, ParquetCompression::None));
+            assert!(matches!(options.compression, Compression::UNCOMPRESSED));
             assert!(!options.bloom_filters.is_configured());
             assert!(matches!(options.statistics, ParquetStatistics::Chunk));
             assert!(!options.no_dictionary);
@@ -2014,7 +2016,7 @@ mod tests {
             let options = ParquetSinkOptions::new()
                 .with_max_row_group_size(5000)
                 .with_sort_spec(sort_spec.clone())
-                .with_compression(ParquetCompression::Zstd)
+                .with_compression(Compression::ZSTD(Default::default()))
                 .with_bloom_filters(bloom_filters)
                 .with_statistics(ParquetStatistics::None)
                 .with_no_dictionary(true)
@@ -2023,7 +2025,7 @@ mod tests {
 
             assert_eq!(options.max_row_group_size, 5000);
             assert_eq!(options.sort_spec.columns.len(), 1);
-            assert!(matches!(options.compression, ParquetCompression::Zstd));
+            assert!(matches!(options.compression, Compression::ZSTD(_)));
             assert!(options.bloom_filters.is_configured());
             assert!(matches!(options.statistics, ParquetStatistics::None));
             assert!(options.no_dictionary);
