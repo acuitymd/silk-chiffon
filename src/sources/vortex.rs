@@ -1,7 +1,8 @@
 use std::any::Any;
+use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use arrow::array::{RecordBatch, StructArray};
@@ -28,11 +29,15 @@ use crate::sources::data_source::DataSource;
 
 pub struct VortexDataSource {
     path: String,
+    variable_col_cache: Mutex<HashMap<String, usize>>,
 }
 
 impl VortexDataSource {
     pub fn new(path: String) -> Self {
-        Self { path }
+        Self {
+            path,
+            variable_col_cache: Mutex::new(HashMap::new()),
+        }
     }
 }
 
@@ -67,6 +72,26 @@ impl DataSource for VortexDataSource {
             path: self.path.clone(),
             schema: self.schema()?,
         }))
+    }
+
+    fn row_count(&self) -> Result<usize> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let session = VortexSession::default();
+                let vortex_file = session
+                    .open_options()
+                    .open(self.path.as_str())
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to open Vortex file: {}", e))?;
+
+                #[allow(clippy::cast_possible_truncation)]
+                Ok(vortex_file.row_count() as usize)
+            })
+        })
+    }
+
+    fn variable_column_size_cache(&self) -> Option<&Mutex<HashMap<String, usize>>> {
+        Some(&self.variable_col_cache)
     }
 
     fn supports_table_provider(&self) -> bool {

@@ -6,7 +6,7 @@ use silk_chiffon::{
     ColumnSpecificBloomFilterConfig, DataFormat, DictionaryMode, ListOutputsFormat,
     ParquetCompression, ParquetStatistics, ParquetWriterVersion, PartitionStrategy, QueryDialect,
     SortColumn, SortDirection, SortSpec,
-    utils::test_data::{TestBatch, TestFile},
+    utils::test_data::{TestBatch, TestFile, count_rows},
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -108,7 +108,7 @@ mod test_helpers {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_transform_arrow_to_arrow_basic() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
@@ -130,7 +130,7 @@ async fn test_transform_arrow_to_arrow_basic() {
     assert!(file_size > 0);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_transform_arrow_to_parquet() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
@@ -155,7 +155,7 @@ async fn test_transform_arrow_to_parquet() {
     assert_eq!(batches[0].num_rows(), 3);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_transform_parquet_to_arrow() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.parquet");
@@ -178,7 +178,7 @@ async fn test_transform_parquet_to_arrow() {
     assert!(file_size > 0);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_transform_parquet_to_parquet() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.parquet");
@@ -202,7 +202,7 @@ async fn test_transform_parquet_to_parquet() {
     assert_eq!(batches[0].num_rows(), 3);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_transform_from_many_basic() {
     let temp_dir = TempDir::new().unwrap();
     let input1 = temp_dir.path().join("input1.arrow");
@@ -231,7 +231,7 @@ async fn test_transform_from_many_basic() {
     assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 4);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_transform_from_many_with_glob() {
     let temp_dir = TempDir::new().unwrap();
     let input1 = temp_dir.path().join("file1.arrow");
@@ -262,7 +262,7 @@ async fn test_transform_from_many_with_glob() {
     assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 2);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_transform_to_many_partitioned() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
@@ -296,7 +296,7 @@ async fn test_transform_to_many_partitioned() {
     assert_eq!(batches_b.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_transform_with_query() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
@@ -319,7 +319,7 @@ async fn test_transform_with_query() {
     assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 2);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_transform_with_sorting() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
@@ -354,7 +354,7 @@ async fn test_transform_with_sorting() {
     assert_eq!(ids.value(2), 3);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_transform_with_arrow_compression() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
@@ -377,7 +377,7 @@ async fn test_transform_with_arrow_compression() {
     assert!(file_size > 0);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_transform_with_parquet_bloom_filters() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
@@ -411,7 +411,7 @@ async fn test_transform_with_parquet_bloom_filters() {
     assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 10);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_transform_with_sorted_metadata() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
@@ -444,7 +444,7 @@ async fn test_transform_with_sorted_metadata() {
     assert_eq!(sorting_cols[0].column_idx, 0);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_transform_partition_with_create_dirs() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
@@ -469,7 +469,7 @@ async fn test_transform_partition_with_create_dirs() {
     assert!(temp_dir.path().join("nested/b.arrow").exists());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_transform_partition_with_overwrite() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
@@ -507,7 +507,7 @@ async fn test_transform_partition_with_overwrite() {
     .unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_transform_from_many_empty_glob() {
     let temp_dir = TempDir::new().unwrap();
     let output = temp_dir.path().join("output.arrow");
@@ -531,7 +531,7 @@ async fn test_transform_from_many_empty_glob() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_transform_partition_exclude_columns() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
@@ -561,7 +561,7 @@ async fn test_transform_partition_exclude_columns() {
     assert_eq!(batches[0].schema().field(0).name(), "id");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_transform_with_projection_query() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
@@ -585,7 +585,7 @@ async fn test_transform_with_projection_query() {
     assert_eq!(batches[0].schema().field(0).name(), "id");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_transform_with_aggregation_query() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
@@ -614,7 +614,7 @@ async fn test_transform_with_aggregation_query() {
     assert_eq!(count.value(0), 3);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_transform_query_and_sort_combined() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
@@ -650,7 +650,7 @@ async fn test_transform_query_and_sort_combined() {
     assert_eq!(ids.value(1), 3);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_transform_multi_column_sort() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
@@ -715,7 +715,7 @@ async fn test_transform_multi_column_sort() {
     assert_eq!(values.value(3), 4);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_transform_sort_descending() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
@@ -761,7 +761,7 @@ async fn test_transform_sort_descending() {
     assert_eq!(all_ids, sorted);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_transform_parquet_compression_gzip() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
@@ -786,7 +786,7 @@ async fn test_transform_parquet_compression_gzip() {
     assert_eq!(batches[0].num_rows(), 3);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_transform_parquet_compression_lz4() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
@@ -811,7 +811,7 @@ async fn test_transform_parquet_compression_lz4() {
     assert_eq!(batches[0].num_rows(), 3);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_transform_parquet_bloom_all() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
@@ -838,7 +838,7 @@ async fn test_transform_parquet_bloom_all() {
     assert_eq!(batches.len(), 1);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_transform_parquet_statistics() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
@@ -862,7 +862,7 @@ async fn test_transform_parquet_statistics() {
     assert_eq!(batches.len(), 1);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_transform_parquet_writer_version() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
@@ -886,7 +886,7 @@ async fn test_transform_parquet_writer_version() {
     assert_eq!(batches.len(), 1);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_transform_parquet_dictionary_all_off() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
@@ -910,7 +910,7 @@ async fn test_transform_parquet_dictionary_all_off() {
     assert_eq!(batches.len(), 1);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_transform_parquet_dictionary_column_off() {
     // dictionary globally enabled (default), but disabled for specific column
     let temp_dir = TempDir::new().unwrap();
@@ -935,7 +935,7 @@ async fn test_transform_parquet_dictionary_column_off() {
     assert_eq!(batches.len(), 1);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_transform_parquet_dictionary_column() {
     // dictionary globally disabled, but enabled for specific column
     let temp_dir = TempDir::new().unwrap();
@@ -964,7 +964,7 @@ async fn test_transform_parquet_dictionary_column() {
     assert_eq!(batches.len(), 1);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_transform_arrow_format_stream() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
@@ -987,7 +987,7 @@ async fn test_transform_arrow_format_stream() {
     assert!(file_size > 0);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_transform_arrow_record_batch_size() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
@@ -1010,7 +1010,7 @@ async fn test_transform_arrow_record_batch_size() {
     assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 3);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_transform_parquet_row_group_size() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
@@ -1034,7 +1034,7 @@ async fn test_transform_parquet_row_group_size() {
     assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 3);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_transform_partition_to_parquet() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
@@ -1070,7 +1070,7 @@ async fn test_transform_partition_to_parquet() {
     assert_eq!(batches_b.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_transform_low_cardinality_partition() {
     // test low-cardinality partitioning which doesn't require sorted input
     let temp_dir = TempDir::new().unwrap();
@@ -1137,7 +1137,7 @@ async fn test_transform_low_cardinality_partition() {
     assert_eq!(ids_b, vec![2, 4]);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_transform_multi_column_partition() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
@@ -1176,7 +1176,7 @@ async fn test_transform_multi_column_partition() {
     assert!(temp_dir.path().join("year=2024/month=1.arrow").exists());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_transform_from_many_to_partitioned() {
     let temp_dir = TempDir::new().unwrap();
     let input1 = temp_dir.path().join("input1.arrow");
@@ -1241,7 +1241,7 @@ async fn test_transform_from_many_to_partitioned() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_transform_invalid_query() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
@@ -1261,7 +1261,7 @@ async fn test_transform_invalid_query() {
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_transform_empty_file() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
@@ -1283,7 +1283,7 @@ async fn test_transform_empty_file() {
     assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 0);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_transform_bloom_filter_with_custom_ndv() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
@@ -1310,7 +1310,7 @@ async fn test_transform_bloom_filter_with_custom_ndv() {
     assert_eq!(batches[0].num_rows(), 5);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_transform_bloom_filter_column_specific_with_ndv() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
@@ -1340,7 +1340,7 @@ async fn test_transform_bloom_filter_column_specific_with_ndv() {
     assert_eq!(batches[0].num_rows(), 3);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_transform_mixed_parquet_and_arrow_inputs() {
     let temp_dir = TempDir::new().unwrap();
     let arrow_input1 = temp_dir.path().join("data1.arrow");
@@ -1373,7 +1373,7 @@ async fn test_transform_mixed_parquet_and_arrow_inputs() {
     assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 4);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_transform_partition_list_outputs_text() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
@@ -1402,7 +1402,7 @@ async fn test_transform_partition_list_outputs_text() {
     assert!(output_b.exists());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_transform_partition_list_outputs_json() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
@@ -1431,7 +1431,7 @@ async fn test_transform_partition_list_outputs_json() {
     assert!(output_y.exists());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_transform_explicit_input_format_arrow_to_parquet() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
@@ -1455,7 +1455,7 @@ async fn test_transform_explicit_input_format_arrow_to_parquet() {
     assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 3);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_transform_explicit_output_format_parquet() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.parquet");
@@ -1479,7 +1479,7 @@ async fn test_transform_explicit_output_format_parquet() {
     assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 3);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_transform_arrow_compression_lz4() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
@@ -1502,7 +1502,7 @@ async fn test_transform_arrow_compression_lz4() {
     assert!(file_size > 0);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_transform_query_with_partition() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
@@ -1564,7 +1564,7 @@ async fn test_transform_query_with_partition() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_transform_query_with_different_dialect() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
@@ -1588,7 +1588,7 @@ async fn test_transform_query_with_different_dialect() {
     assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 2);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_transform_partition_with_query_and_sort() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
@@ -1672,7 +1672,7 @@ async fn test_transform_partition_with_query_and_sort() {
 }
 
 /// round-trip test: arrow -> parquet -> arrow, verify data is identical
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 #[allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
@@ -2104,11 +2104,7 @@ fn verify_string_partition_values(
     }
 }
 
-fn count_rows(batches: &[RecordBatch]) -> usize {
-    batches.iter().map(|b| b.num_rows()).sum()
-}
-
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_multi_column_partition_verifies_data_arrow() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
@@ -2194,7 +2190,7 @@ async fn test_multi_column_partition_verifies_data_arrow() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_multi_column_partition_verifies_data_parquet() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
@@ -2260,7 +2256,7 @@ async fn test_multi_column_partition_verifies_data_parquet() {
     assert_eq!(count_rows(&batches_2024_2), 2);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_multi_column_partition_three_columns_arrow() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
@@ -2320,7 +2316,7 @@ async fn test_multi_column_partition_three_columns_arrow() {
     assert_eq!(count_rows(&batches), 1);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_multi_column_partition_three_columns_parquet() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
@@ -2379,7 +2375,7 @@ async fn test_multi_column_partition_three_columns_parquet() {
     assert_eq!(count_rows(&batches), 1);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_multi_column_partition_mixed_types() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
@@ -2448,7 +2444,7 @@ async fn test_multi_column_partition_mixed_types() {
     verify_string_partition_values(&file_us_2024_batches, "us-west", 2024, "us-west/2024");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_multi_column_partition_parquet_with_exclude() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
@@ -2502,7 +2498,7 @@ async fn test_multi_column_partition_parquet_with_exclude() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_multi_column_partition_arrow_with_exclude() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
@@ -2553,7 +2549,7 @@ async fn test_multi_column_partition_arrow_with_exclude() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_multi_column_partition_verifies_output_paths_arrow() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
@@ -2668,7 +2664,7 @@ async fn test_multi_column_partition_verifies_output_paths_arrow() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_multi_column_partition_verifies_output_paths_parquet() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
@@ -2836,7 +2832,7 @@ async fn test_multi_column_partition_verifies_output_paths_parquet() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_partition_strategies_produce_same_output() {
     // both high-cardinality (with sort) and low-cardinality should produce identical results
     let temp_dir = TempDir::new().unwrap();
@@ -2961,7 +2957,7 @@ async fn test_partition_strategies_produce_same_output() {
     assert_eq!(extract_data(&high_card_dir, "z.parquet"), vec![(5, 50)]);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_transform_with_sequential_encoder() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
@@ -2986,7 +2982,7 @@ async fn test_transform_with_sequential_encoder() {
     assert_eq!(batches[0].num_rows(), 3);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_dictionary_prefix_matches_nested_columns() {
     // "person" prefix should enable dictionary on person.name and person.age
     let temp_dir = TempDir::new().unwrap();
@@ -3016,7 +3012,7 @@ async fn test_dictionary_prefix_matches_nested_columns() {
     test_helpers::assert_has_dictionary(&inspector, "person.age");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_dictionary_specific_path_in_nested_column() {
     // "person.name" should only enable dictionary on person.name, not person.age
     let temp_dir = TempDir::new().unwrap();
@@ -3046,7 +3042,7 @@ async fn test_dictionary_specific_path_in_nested_column() {
     test_helpers::assert_no_dictionary(&inspector, "person.age");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_bloom_filter_prefix_matches_nested_columns() {
     // "person" prefix should enable bloom filters on person.name and person.age
     let temp_dir = TempDir::new().unwrap();
@@ -3078,7 +3074,7 @@ async fn test_bloom_filter_prefix_matches_nested_columns() {
     test_helpers::assert_has_bloom_filter(&inspector, "person.age");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_bloom_filter_prefix_with_exclusion() {
     // "person" enables bloom, but "person.age" is excluded
     let temp_dir = TempDir::new().unwrap();

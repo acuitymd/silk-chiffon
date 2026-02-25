@@ -15,10 +15,14 @@ use tokio::{sync::mpsc, task::JoinHandle};
 
 use crate::{
     ArrowCompression, ArrowIPCFormat,
-    sinks::data_sink::{DataSink, SinkResult},
+    sinks::{
+        DEFAULT_RECORD_BATCH_SIZE,
+        data_sink::{DataSink, SinkResult},
+    },
     utils::memory::estimate_row_bytes,
 };
 
+#[derive(Clone)]
 pub struct ArrowSinkOptions {
     format: ArrowIPCFormat,
     record_batch_size: usize,
@@ -26,6 +30,7 @@ pub struct ArrowSinkOptions {
     metadata: HashMap<String, String>,
     queue_depth: Option<usize>,
     memory_budget: Option<usize>,
+    row_bytes: Option<usize>,
 }
 
 impl Default for ArrowSinkOptions {
@@ -38,11 +43,12 @@ impl ArrowSinkOptions {
     pub fn new() -> Self {
         Self {
             format: ArrowIPCFormat::default(),
-            record_batch_size: 122_880,
+            record_batch_size: DEFAULT_RECORD_BATCH_SIZE,
             compression: ArrowCompression::None,
             metadata: HashMap::new(),
             queue_depth: None,
             memory_budget: None,
+            row_bytes: None,
         }
     }
 
@@ -80,6 +86,11 @@ impl ArrowSinkOptions {
         self.memory_budget = budget;
         self
     }
+
+    pub fn with_row_bytes(mut self, row_bytes: Option<usize>) -> Self {
+        self.row_bytes = row_bytes;
+        self
+    }
 }
 
 struct WriterResult {
@@ -94,28 +105,40 @@ pub struct ArrowSink {
 
 const DEFAULT_QUEUE_DEPTH: usize = 16;
 
-fn resolve_arrow_queue_depth(options: &ArrowSinkOptions, schema: &SchemaRef) -> usize {
-    if let Some(explicit) = options.queue_depth {
-        return explicit;
+impl ArrowSinkOptions {
+    pub fn estimate_sink_needs(&self, row_bytes: usize) -> usize {
+        self.record_batch_size.saturating_mul(row_bytes)
     }
 
-    if let Some(budget) = options.memory_budget {
-        let row_bytes = estimate_row_bytes(schema).max(1);
-        let batch_bytes = options.record_batch_size * row_bytes;
-        let derived = if batch_bytes > 0 {
-            (budget / batch_bytes).max(1)
-        } else {
-            DEFAULT_QUEUE_DEPTH
-        };
-        return derived;
-    }
+    fn resolve_queue_depth(&self, schema: &SchemaRef) -> usize {
+        if let Some(explicit) = self.queue_depth {
+            return explicit;
+        }
 
-    DEFAULT_QUEUE_DEPTH
+        if let Some(budget) = self.memory_budget {
+            let row_bytes = self
+                .row_bytes
+                .unwrap_or_else(|| estimate_row_bytes(schema))
+                .max(1);
+            let batch_bytes = self.record_batch_size * row_bytes;
+            let derived = (budget / batch_bytes).max(1);
+            tracing::debug!(
+                budget,
+                row_bytes,
+                batch_bytes,
+                queue_depth = derived,
+                "arrow queue depth (budget-derived)"
+            );
+            return derived;
+        }
+
+        DEFAULT_QUEUE_DEPTH
+    }
 }
 
 impl ArrowSink {
     pub fn create(path: PathBuf, schema: &SchemaRef, options: ArrowSinkOptions) -> Result<Self> {
-        let queue_depth = resolve_arrow_queue_depth(&options, schema);
+        let queue_depth = options.resolve_queue_depth(schema);
         let (tx, rx) = mpsc::channel::<RecordBatch>(queue_depth);
 
         let schema = Arc::clone(schema);
@@ -171,7 +194,6 @@ fn writer_task(
         }
     }
 
-    // flush remaining
     coalescer.finish_buffered_batch()?;
     if let Some(final_batch) = coalescer.next_completed_batch() {
         writer.write(&final_batch)?;
@@ -201,7 +223,6 @@ impl DataSink for ArrowSink {
     }
 
     async fn finish(&mut self) -> Result<SinkResult> {
-        // drop sender to signal EOF
         self.tx.take();
 
         let handle = self.handle.take().context("sink already finished")?;
@@ -499,7 +520,7 @@ mod tests {
         #[test]
         fn test_default_options() {
             let options = ArrowSinkOptions::default();
-            assert_eq!(options.record_batch_size, 122_880);
+            assert_eq!(options.record_batch_size, DEFAULT_RECORD_BATCH_SIZE);
             assert!(matches!(options.compression, ArrowCompression::None));
             assert!(options.metadata.is_empty());
         }
@@ -547,7 +568,7 @@ mod tests {
         fn test_no_budget_uses_default_queue_depth() {
             let schema = Arc::new(Schema::new(vec![Field::new("a", DataType::Int32, false)]));
             let options = ArrowSinkOptions::new();
-            assert_eq!(resolve_arrow_queue_depth(&options, &schema), 16);
+            assert_eq!(ArrowSinkOptions::resolve_queue_depth(&options, &schema), 16);
         }
 
         #[test]
@@ -556,7 +577,7 @@ mod tests {
             let options = ArrowSinkOptions::new()
                 .with_queue_depth(42)
                 .with_memory_budget(Some(1024 * 1024 * 1024));
-            assert_eq!(resolve_arrow_queue_depth(&options, &schema), 42);
+            assert_eq!(ArrowSinkOptions::resolve_queue_depth(&options, &schema), 42);
         }
 
         #[test]
@@ -565,7 +586,7 @@ mod tests {
             // 4 bytes/row, batch size = 122880 rows → ~491520 bytes/batch
             // budget 10MB = 10485760 → 10485760 / 491520 = 21
             let options = ArrowSinkOptions::new().with_memory_budget(Some(10 * 1024 * 1024));
-            let depth = resolve_arrow_queue_depth(&options, &schema);
+            let depth = ArrowSinkOptions::resolve_queue_depth(&options, &schema);
             assert_eq!(depth, 21);
         }
 
@@ -573,7 +594,51 @@ mod tests {
         fn test_tiny_budget_clamps_to_one() {
             let schema = Arc::new(Schema::new(vec![Field::new("a", DataType::Int32, false)]));
             let options = ArrowSinkOptions::new().with_memory_budget(Some(1));
-            assert_eq!(resolve_arrow_queue_depth(&options, &schema), 1);
+            assert_eq!(ArrowSinkOptions::resolve_queue_depth(&options, &schema), 1);
+        }
+
+        #[test]
+        fn test_budget_derived_fits_within_budget() {
+            let schemas: Vec<(&str, SchemaRef)> = vec![
+                (
+                    "narrow",
+                    Arc::new(Schema::new(vec![
+                        Field::new("id", DataType::Int32, false),
+                        Field::new("name", DataType::Utf8, false),
+                    ])),
+                ),
+                (
+                    "wide",
+                    Arc::new(Schema::new(
+                        (0..20)
+                            .map(|i| Field::new(format!("col_{i}"), DataType::Int64, false))
+                            .collect::<Vec<_>>(),
+                    )),
+                ),
+            ];
+
+            let budgets = [
+                10 * 1024 * 1024,   // 10MB
+                100 * 1024 * 1024,  // 100MB
+                1024 * 1024 * 1024, // 1GB
+            ];
+
+            for (schema_name, schema) in &schemas {
+                for &budget in &budgets {
+                    let options = ArrowSinkOptions::new().with_memory_budget(Some(budget));
+                    let depth = ArrowSinkOptions::resolve_queue_depth(&options, schema);
+                    let row_bytes = crate::utils::memory::estimate_row_bytes(schema).max(1);
+                    let batch_bytes = options.record_batch_size * row_bytes;
+                    let estimated_usage = depth * batch_bytes;
+
+                    assert!(
+                        estimated_usage <= budget + batch_bytes,
+                        "{schema_name} schema with {budget} budget: \
+                         estimated_usage={estimated_usage} > budget + one batch, \
+                         depth={depth} batch_bytes={batch_bytes}",
+                    );
+                }
+            }
         }
     }
 }

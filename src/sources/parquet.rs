@@ -1,4 +1,6 @@
-use std::{fs::File, sync::Arc};
+use std::collections::HashMap;
+use std::fs::File;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use arrow::datatypes::SchemaRef;
@@ -12,14 +14,25 @@ use uuid::Uuid;
 
 use crate::sources::data_source::DataSource;
 
-#[derive(Debug)]
 pub struct ParquetDataSource {
     path: String,
+    variable_col_cache: Mutex<HashMap<String, usize>>,
+}
+
+impl std::fmt::Debug for ParquetDataSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ParquetDataSource")
+            .field("path", &self.path)
+            .finish()
+    }
 }
 
 impl ParquetDataSource {
     pub fn new(path: String) -> Self {
-        Self { path }
+        Self {
+            path,
+            variable_col_cache: Mutex::new(HashMap::new()),
+        }
     }
 }
 
@@ -33,6 +46,19 @@ impl DataSource for ParquetDataSource {
         let file = File::open(&self.path)?;
         let reader = ParquetRecordBatchReaderBuilder::try_new(file)?;
         Ok(Arc::clone(reader.schema()))
+    }
+
+    fn row_count(&self) -> Result<usize> {
+        let file = File::open(&self.path)?;
+        let reader = ParquetRecordBatchReaderBuilder::try_new(file)?;
+        let metadata = reader.metadata();
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let count = metadata.file_metadata().num_rows() as usize;
+        Ok(count)
+    }
+
+    fn variable_column_size_cache(&self) -> Option<&Mutex<HashMap<String, usize>>> {
+        Some(&self.variable_col_cache)
     }
 
     async fn as_table_provider(&self, ctx: &mut SessionContext) -> Result<Arc<dyn TableProvider>> {
@@ -66,6 +92,20 @@ mod tests {
     fn test_name() {
         let source = ParquetDataSource::new(TEST_PARQUET_PATH.to_string());
         assert_eq!(source.name(), "parquet");
+    }
+
+    #[test]
+    fn test_row_count() {
+        let source = ParquetDataSource::new(TEST_PARQUET_PATH.to_string());
+        let count = source.row_count().unwrap();
+        assert!(count > 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_row_size() {
+        let source = ParquetDataSource::new(TEST_PARQUET_PATH.to_string());
+        let size = source.row_size().unwrap();
+        assert!(size > 0);
     }
 
     #[tokio::test]

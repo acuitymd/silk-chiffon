@@ -35,7 +35,7 @@ use crate::{
     BloomFilterConfig, ColumnEncodingConfig, ParquetEncoding, ParquetStatistics,
     ParquetWriterVersion, SortDirection, SortSpec,
     sinks::data_sink::{DataSink, SinkResult},
-    utils::memory::estimate_row_bytes,
+    utils::memory::{ENCODING_OVERHEAD_PCT, estimate_row_bytes},
 };
 
 /// Options for configuring Parquet file output.
@@ -83,6 +83,7 @@ pub struct ParquetSinkOptions {
     pub skip_arrow_metadata: bool,
     pub page_header_statistics: bool,
     pub memory_budget: Option<usize>,
+    pub row_bytes: Option<usize>,
 }
 
 impl Default for ParquetSinkOptions {
@@ -121,6 +122,7 @@ impl ParquetSinkOptions {
             skip_arrow_metadata: true,
             page_header_statistics: false,
             memory_budget: None,
+            row_bytes: None,
         }
     }
 
@@ -263,6 +265,11 @@ impl ParquetSinkOptions {
         self.memory_budget = budget;
         self
     }
+
+    pub fn with_row_bytes(mut self, row_bytes: Option<usize>) -> Self {
+        self.row_bytes = row_bytes;
+        self
+    }
 }
 
 struct ParquetSinkInner {
@@ -287,45 +294,115 @@ const DEFAULT_ENCODING: usize = 4;
 const DEFAULT_WRITING: usize = 4;
 const DEFAULT_CONCURRENCY: usize = 4;
 
-fn resolve_parquet_queue_sizes(
-    options: &ParquetSinkOptions,
-    schema: &SchemaRef,
-) -> (usize, usize, usize, usize) {
-    if options.memory_budget.is_none() {
-        return (
-            options.ingestion_queue_size.unwrap_or(DEFAULT_INGESTION),
-            options.encoding_queue_size.unwrap_or(DEFAULT_ENCODING),
-            options.writing_queue_size.unwrap_or(DEFAULT_WRITING),
-            options
-                .max_row_group_concurrency
-                .unwrap_or(DEFAULT_CONCURRENCY),
-        );
+struct ResolvedParquetSizing {
+    ingestion: usize,
+    encoding: usize,
+    writing: usize,
+    concurrency: usize,
+    max_row_group_size: usize,
+    buffer_size: usize,
+}
+
+impl ParquetSinkOptions {
+    pub fn estimate_sink_needs(&self, row_bytes: usize) -> usize {
+        let row_group_bytes = self.max_row_group_size.saturating_mul(row_bytes);
+        // 4 slots: ingestion(1) + encoding(1) + writing(1) + concurrency(1) at minimum
+        row_group_bytes
+            .saturating_mul(4)
+            .saturating_mul(ENCODING_OVERHEAD_PCT)
+            .saturating_div(100)
+            .saturating_add(self.buffer_size)
     }
 
-    let budget = options.memory_budget.unwrap();
-    let row_bytes = estimate_row_bytes(schema).max(1);
-    let row_group_bytes = options.max_row_group_size * row_bytes;
+    fn resolve_sizing(&self, schema: &SchemaRef) -> ResolvedParquetSizing {
+        let Some(budget) = self.memory_budget else {
+            let sizing = ResolvedParquetSizing {
+                ingestion: self.ingestion_queue_size.unwrap_or(DEFAULT_INGESTION),
+                encoding: self.encoding_queue_size.unwrap_or(DEFAULT_ENCODING),
+                writing: self.writing_queue_size.unwrap_or(DEFAULT_WRITING),
+                concurrency: self
+                    .max_row_group_concurrency
+                    .unwrap_or(DEFAULT_CONCURRENCY),
+                max_row_group_size: self.max_row_group_size,
+                buffer_size: self.buffer_size,
+            };
+            tracing::debug!(
+                ingestion = sizing.ingestion,
+                encoding = sizing.encoding,
+                writing = sizing.writing,
+                concurrency = sizing.concurrency,
+                "parquet queue sizes (no budget)"
+            );
+            return sizing;
+        };
 
-    let available = budget.saturating_sub(options.buffer_size);
-    let total_slots = if row_group_bytes > 0 {
-        available / row_group_bytes
-    } else {
-        DEFAULT_CONCURRENCY + DEFAULT_ENCODING + DEFAULT_WRITING
-    };
+        let row_bytes = self
+            .row_bytes
+            .unwrap_or_else(|| estimate_row_bytes(schema))
+            .max(1);
 
-    // distribute: ~40% concurrency, ~25% encoding queue, ~25% writing queue, ingestion stays 1
-    let concurrency = options
-        .max_row_group_concurrency
-        .unwrap_or((total_slots * 40 / 100).max(1));
-    let encoding = options
-        .encoding_queue_size
-        .unwrap_or((total_slots * 25 / 100).max(1));
-    let writing = options
-        .writing_queue_size
-        .unwrap_or((total_slots * 25 / 100).max(1));
-    let ingestion = options.ingestion_queue_size.unwrap_or(DEFAULT_INGESTION);
+        let buffer_size = self.buffer_size.min(budget / 4);
+        let available = budget.saturating_sub(buffer_size);
 
-    (ingestion, encoding, writing, concurrency)
+        let row_group_bytes = self.max_row_group_size.saturating_mul(row_bytes);
+        let effective_rg_bytes = row_group_bytes.saturating_mul(ENCODING_OVERHEAD_PCT) / 100;
+
+        let total_slots = if effective_rg_bytes > 0 {
+            available / effective_rg_bytes
+        } else {
+            DEFAULT_CONCURRENCY + DEFAULT_ENCODING + DEFAULT_WRITING
+        };
+
+        // distribute: ~40% concurrency, ~25% encoding queue, ~25% writing queue, ingestion stays 1
+        // when total_slots < MIN_SLOTS, each gets minimum 1 — this may exceed the budget,
+        // but row_group_size is a user-specified output setting we won't silently change.
+        // the system may have swap space and we minimize usage by keeping queues at 1 each.
+        let concurrency = self
+            .max_row_group_concurrency
+            .unwrap_or((total_slots * 40 / 100).max(1));
+        let encoding = self
+            .encoding_queue_size
+            .unwrap_or((total_slots * 25 / 100).max(1));
+        let writing = self
+            .writing_queue_size
+            .unwrap_or((total_slots * 25 / 100).max(1));
+        let ingestion = self.ingestion_queue_size.unwrap_or(DEFAULT_INGESTION);
+
+        let actual_slots = ingestion + encoding + writing + concurrency;
+        let estimated_usage = actual_slots * effective_rg_bytes + buffer_size;
+        if estimated_usage > budget {
+            tracing::warn!(
+                budget,
+                estimated_usage,
+                row_group_size = self.max_row_group_size,
+                actual_slots,
+                "parquet sink estimated usage exceeds memory budget; proceeding with minimum queues"
+            );
+        }
+
+        tracing::debug!(
+            budget,
+            row_bytes,
+            row_group_size = self.max_row_group_size,
+            row_group_bytes,
+            buffer_size,
+            total_slots,
+            ingestion,
+            encoding,
+            writing,
+            concurrency,
+            "parquet queue sizes (budget-derived)"
+        );
+
+        ResolvedParquetSizing {
+            ingestion,
+            encoding,
+            writing,
+            concurrency,
+            max_row_group_size: self.max_row_group_size,
+            buffer_size,
+        }
+    }
 }
 
 impl ParquetSink {
@@ -388,20 +465,15 @@ impl ParquetSink {
 
         let props = writer_builder.build();
 
-        let (
-            ingestion_queue_size,
-            encoding_queue_size,
-            writing_queue_size,
-            max_row_group_concurrency,
-        ) = resolve_parquet_queue_sizes(options, schema);
+        let sizing = options.resolve_sizing(schema);
 
         let config = AdaptiveWriterConfig {
-            max_row_group_size: options.max_row_group_size,
-            max_row_group_concurrency,
-            buffer_size: options.buffer_size,
-            ingestion_queue_size,
-            encoding_queue_size,
-            writing_queue_size,
+            max_row_group_size: sizing.max_row_group_size,
+            max_row_group_concurrency: sizing.concurrency,
+            buffer_size: sizing.buffer_size,
+            ingestion_queue_size: sizing.ingestion,
+            encoding_queue_size: sizing.encoding,
+            writing_queue_size: sizing.writing,
             skip_arrow_metadata: options.skip_arrow_metadata,
             dictionary_page_size_limit: options.dictionary_page_size_limit,
             dictionary_enabled_default: !options.no_dictionary,
@@ -631,6 +703,8 @@ impl DataSink for ParquetSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use arrow::datatypes::{Field, Schema};
 
     use crate::{
         AllColumnsBloomFilterConfig, ColumnBloomFilterConfig, ColumnSpecificBloomFilterConfig,
@@ -2081,65 +2155,177 @@ mod tests {
 
         #[test]
         fn test_no_budget_uses_defaults() {
-            use arrow::datatypes::{Field, Schema};
             let schema = Arc::new(Schema::new(vec![
                 Field::new("a", DataType::Int32, false),
                 Field::new("b", DataType::Int32, false),
             ]));
             let options = ParquetSinkOptions::new();
-            let (ing, enc, wrt, conc) = resolve_parquet_queue_sizes(&options, &schema);
-            assert_eq!(ing, 1);
-            assert_eq!(enc, 4);
-            assert_eq!(wrt, 4);
-            assert_eq!(conc, 4);
+            let s = ParquetSinkOptions::resolve_sizing(&options, &schema);
+            assert_eq!(s.ingestion, 1);
+            assert_eq!(s.encoding, 4);
+            assert_eq!(s.writing, 4);
+            assert_eq!(s.concurrency, 4);
+            assert_eq!(s.max_row_group_size, DEFAULT_MAX_ROW_GROUP_SIZE);
+            assert_eq!(s.buffer_size, DEFAULT_BUFFER_SIZE);
         }
 
         #[test]
         fn test_budget_derives_sizes() {
-            use arrow::datatypes::{Field, Schema};
             // 2 × Int32 = 8 bytes/row, row_group = 1M rows = 8MB per row group
-            // budget 100MB - 32MB buffer = 68MB available, 68/8 = 8 slots
-            // concurrency = 8*40/100 = 3, encoding = 8*25/100 = 2, writing = 2
+            // buffer = min(32MB, 25MB) = 25MB, available = 75MB
+            // effective = 8MB * 1.2 = 9.6MB, total_slots = 75/9.6 = 7
+            // concurrency = 7*40/100 = 2, encoding = 7*25/100 = 1, writing = 1
             let schema = Arc::new(Schema::new(vec![
                 Field::new("a", DataType::Int32, false),
                 Field::new("b", DataType::Int32, false),
             ]));
             let options = ParquetSinkOptions::new().with_memory_budget(Some(100 * 1024 * 1024));
-            let (ing, enc, wrt, conc) = resolve_parquet_queue_sizes(&options, &schema);
-            assert_eq!(ing, 1);
-            assert!(enc >= 1);
-            assert!(wrt >= 1);
-            assert!(conc >= 1);
-            // with 8 total slots: conc=3, enc=2, wrt=2
-            assert_eq!(conc, 3);
-            assert_eq!(enc, 2);
-            assert_eq!(wrt, 2);
+            let s = ParquetSinkOptions::resolve_sizing(&options, &schema);
+            assert_eq!(s.ingestion, 1);
+            assert_eq!(s.concurrency, 2);
+            assert_eq!(s.encoding, 1);
+            assert_eq!(s.writing, 1);
         }
 
         #[test]
         fn test_explicit_overrides_budget() {
-            use arrow::datatypes::{Field, Schema};
             let schema = Arc::new(Schema::new(vec![Field::new("a", DataType::Int32, false)]));
             let options = ParquetSinkOptions::new()
                 .with_memory_budget(Some(100 * 1024 * 1024))
                 .with_encoding_queue_size(10)
                 .with_max_row_group_concurrency(7);
-            let (_, enc, _, conc) = resolve_parquet_queue_sizes(&options, &schema);
-            assert_eq!(enc, 10);
-            assert_eq!(conc, 7);
+            let s = ParquetSinkOptions::resolve_sizing(&options, &schema);
+            assert_eq!(s.encoding, 10);
+            assert_eq!(s.concurrency, 7);
         }
 
         #[test]
         fn test_tiny_budget_uses_minimums() {
-            use arrow::datatypes::{Field, Schema};
             let schema = Arc::new(Schema::new(vec![Field::new("a", DataType::Int32, false)]));
-            // budget smaller than buffer_size → 0 available → 0 slots → all minimums (1)
             let options = ParquetSinkOptions::new().with_memory_budget(Some(1024));
-            let (ing, enc, wrt, conc) = resolve_parquet_queue_sizes(&options, &schema);
-            assert_eq!(ing, 1);
-            assert_eq!(enc, 1);
-            assert_eq!(wrt, 1);
-            assert_eq!(conc, 1);
+            let s = ParquetSinkOptions::resolve_sizing(&options, &schema);
+            assert_eq!(s.ingestion, 1);
+            assert_eq!(s.encoding, 1);
+            assert_eq!(s.writing, 1);
+            assert_eq!(s.concurrency, 1);
+        }
+
+        #[test]
+        fn test_budget_scales_slots_with_budget() {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("id", DataType::Int32, false),
+                Field::new("name", DataType::Utf8, false),
+            ]));
+
+            let small = ParquetSinkOptions::new().with_memory_budget(Some(100 * 1024 * 1024));
+            let large = ParquetSinkOptions::new().with_memory_budget(Some(1024 * 1024 * 1024));
+
+            let ss = ParquetSinkOptions::resolve_sizing(&small, &schema);
+            let ls = ParquetSinkOptions::resolve_sizing(&large, &schema);
+
+            let small_total = ss.ingestion + ss.encoding + ss.writing + ss.concurrency;
+            let large_total = ls.ingestion + ls.encoding + ls.writing + ls.concurrency;
+
+            assert!(
+                large_total > small_total,
+                "larger budget should yield more slots: large={large_total} small={small_total}"
+            );
+        }
+
+        #[test]
+        fn test_budget_respects_proportions() {
+            let schema = Arc::new(Schema::new(
+                (0..20)
+                    .map(|i| Field::new(format!("col_{i}"), DataType::Int64, false))
+                    .collect::<Vec<_>>(),
+            ));
+            let options =
+                ParquetSinkOptions::new().with_memory_budget(Some(2 * 1024 * 1024 * 1024));
+            let s = ParquetSinkOptions::resolve_sizing(&options, &schema);
+
+            assert!(
+                s.concurrency > s.encoding,
+                "concurrency ({}) should exceed encoding ({})",
+                s.concurrency,
+                s.encoding
+            );
+            assert!(
+                s.concurrency > s.writing,
+                "concurrency ({}) should exceed writing ({})",
+                s.concurrency,
+                s.writing
+            );
+            assert_eq!(s.ingestion, 1, "ingestion should stay at 1");
+        }
+
+        #[test]
+        fn test_budget_derived_with_small_row_groups() {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("id", DataType::Int32, false),
+                Field::new("name", DataType::Utf8, false),
+            ]));
+
+            let options = ParquetSinkOptions::new()
+                .with_memory_budget(Some(100 * 1024 * 1024))
+                .with_max_row_group_size(10_000);
+
+            let s = ParquetSinkOptions::resolve_sizing(&options, &schema);
+
+            let row_bytes = estimate_row_bytes(&schema).max(1);
+            let row_group_bytes = s.max_row_group_size * row_bytes;
+            let total_slots = s.ingestion + s.encoding + s.writing + s.concurrency;
+
+            assert!(
+                total_slots > 10,
+                "expected many slots with small row groups, got {total_slots}"
+            );
+
+            let estimated_usage =
+                total_slots * (row_group_bytes * ENCODING_OVERHEAD_PCT / 100) + s.buffer_size;
+            assert!(
+                estimated_usage <= 100 * 1024 * 1024 * 2,
+                "estimated_usage={estimated_usage} exceeds 2x budget"
+            );
+        }
+
+        #[test]
+        fn test_tight_budget_preserves_row_group_size() {
+            // narrow schema: 2 × i32 = 8 bytes/row, default 1M rows = 8MB per row group
+            // 20MB budget can't fit 4 min slots × 8MB, but we don't change the user's
+            // row group size — we proceed with minimum queues and accept the overcommit
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("a", DataType::Int32, false),
+                Field::new("b", DataType::Int32, false),
+            ]));
+            let options = ParquetSinkOptions::new().with_memory_budget(Some(20 * 1024 * 1024));
+            let s = ParquetSinkOptions::resolve_sizing(&options, &schema);
+
+            assert_eq!(
+                s.max_row_group_size, DEFAULT_MAX_ROW_GROUP_SIZE,
+                "row group size must not be changed"
+            );
+            // all queues at minimum
+            assert_eq!(s.ingestion, 1);
+            assert_eq!(s.encoding, 1);
+            assert_eq!(s.writing, 1);
+            assert_eq!(s.concurrency, 1);
+        }
+
+        #[test]
+        fn test_budget_scales_down_buffer_for_small_budgets() {
+            let schema = Arc::new(Schema::new(vec![Field::new("a", DataType::Int32, false)]));
+            let options = ParquetSinkOptions::new().with_memory_budget(Some(4 * 1024 * 1024));
+            let s = ParquetSinkOptions::resolve_sizing(&options, &schema);
+
+            assert!(
+                s.buffer_size < DEFAULT_BUFFER_SIZE,
+                "buffer should be reduced for 4MB budget, got {}",
+                s.buffer_size
+            );
+            assert!(
+                s.buffer_size <= 4 * 1024 * 1024 / 4,
+                "buffer should be at most 1/4 of budget"
+            );
         }
     }
 

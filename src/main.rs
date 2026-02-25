@@ -1,8 +1,16 @@
 use anyhow::Result;
 use clap::Parser;
 use silk_chiffon::{Cli, Commands, commands, default_thread_budget};
+use tracing_subscriber::EnvFilter;
 
 fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_env("SILK_CHIFFON_LOG").unwrap_or_else(|_| EnvFilter::new("off")),
+        )
+        .with_writer(std::io::stderr)
+        .init();
+
     let cli = Cli::parse();
 
     if let Commands::Completions { shell } = &cli.command {

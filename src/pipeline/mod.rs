@@ -1,11 +1,11 @@
-use crate::utils::memory::total_memory;
 use anyhow::{Result, anyhow};
 use bytesize::ByteSize;
 use camino::Utf8PathBuf;
 use datafusion::{
-    execution::memory_pool::FairSpillPool,
+    execution::memory_pool::{GreedyMemoryPool, TrackConsumersPool, UnboundedMemoryPool},
     prelude::{SessionConfig, SessionContext},
 };
+use std::num::NonZero;
 use tempfile::TempDir;
 
 use crate::{
@@ -20,6 +20,9 @@ use crate::{
     sources::data_source::DataSource,
 };
 
+/// Top-N memory consumers to include in OOM error messages
+const TRACK_TOP_CONSUMERS: NonZero<usize> = NonZero::new(5).unwrap();
+
 #[derive(Default)]
 pub struct PipelineConfig {
     pub working_directory: Option<String>,
@@ -28,6 +31,10 @@ pub struct PipelineConfig {
     pub target_partitions: Option<usize>,
     pub spill_path: Option<Utf8PathBuf>,
     pub spill_compression: SpillCompression,
+    /// Override for DataFusion's sort_spill_reservation_bytes, computed from
+    /// the schema and sort column types to account for RowConverter encoding
+    /// overhead during the merge phase.
+    pub sort_spill_reservation: Option<usize>,
 }
 
 #[derive(Default)]
@@ -36,7 +43,7 @@ pub struct Pipeline {
     operations: Vec<Box<dyn DataOperation>>,
     output_strategy: Option<OutputStrategy>,
     config: PipelineConfig,
-    /// temp directory for spilling when memory_limit is set - kept alive until Pipeline drops
+    /// temp directory for spilling — kept alive until Pipeline drops
     spill_path: Option<TempDir>,
 }
 
@@ -163,6 +170,11 @@ impl Pipeline {
         self
     }
 
+    pub fn with_sort_spill_reservation(mut self, reservation: Option<usize>) -> Self {
+        self.config.sort_spill_reservation = reservation;
+        self
+    }
+
     pub async fn execute(&mut self) -> Result<Vec<OutputFileInfo>> {
         let mut ctx = self.build_session_context()?;
         self.execute_with_session_context(&mut ctx).await
@@ -214,14 +226,13 @@ impl Pipeline {
         cfg.options_mut().sql_parser.dialect = self.config.query_dialect.into();
         cfg.options_mut().execution.spill_compression = self.config.spill_compression.into();
 
+        if let Some(reservation) = self.config.sort_spill_reservation {
+            cfg.options_mut().execution.sort_spill_reservation_bytes = reservation;
+        }
+
         if let Some(target_partitions) = self.config.target_partitions {
             cfg = cfg.with_target_partitions(target_partitions);
         }
-
-        let memory_limit = self
-            .config
-            .memory_limit
-            .unwrap_or_else(default_memory_limit);
 
         // use user-provided spill path or create a temp one
         let spill_path = if let Some(ref user_path) = self.config.spill_path {
@@ -235,23 +246,29 @@ impl Pipeline {
             path.try_into()?
         };
 
-        let pool = FairSpillPool::new(memory_limit);
-        let runtime = datafusion::execution::runtime_env::RuntimeEnvBuilder::default()
-            .with_temp_file_path(&spill_path)
-            .with_memory_pool(std::sync::Arc::new(pool))
-            .build()?;
+        let mut runtime_builder = datafusion::execution::runtime_env::RuntimeEnvBuilder::default();
+        runtime_builder = runtime_builder.with_temp_file_path(&spill_path);
+
+        if let Some(memory_limit) = self.config.memory_limit {
+            // GreedyMemoryPool: any consumer can use all available memory. FairSpillPool
+            // is unsuitable because ExternalSorterMerge is non-spillable (can_spill=false)
+            // and gets starved when spillable consumers hold the fair-share allocation.
+            // TrackConsumersPool wrapper adds consumer names to OOM error messages.
+            let pool =
+                TrackConsumersPool::new(GreedyMemoryPool::new(memory_limit), TRACK_TOP_CONSUMERS);
+            runtime_builder = runtime_builder.with_memory_pool(std::sync::Arc::new(pool));
+        } else {
+            runtime_builder = runtime_builder
+                .with_memory_pool(std::sync::Arc::new(UnboundedMemoryPool::default()));
+        }
+
+        let runtime = runtime_builder.build()?;
 
         Ok(SessionContext::new_with_config_rt(
             cfg,
             std::sync::Arc::new(runtime),
         ))
     }
-}
-
-/// Returns 80% of total system memory as the default memory limit for DataFusion operations.
-/// Uses container-aware detection (cgroups) when running in Docker/Kubernetes.
-fn default_memory_limit() -> usize {
-    total_memory() * 4 / 5
 }
 
 /// Parse a human-readable byte size string (e.g., "512MB", "2GB", "1GiB") into bytes.

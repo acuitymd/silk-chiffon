@@ -22,8 +22,9 @@ use arrow::ipc::{
 };
 use arrow::{
     array::{
-        Array, ArrayRef, BooleanArray, Date32Array, Float32Array, Float64Array, Int32Array,
-        Int64Array, ListArray, RecordBatch, StringArray, StructArray, TimestampMicrosecondArray,
+        Array, ArrayRef, BinaryArray, BooleanArray, Date32Array, Float32Array, Float64Array,
+        Int32Array, Int64Array, LargeBinaryArray, LargeStringArray, ListArray, RecordBatch,
+        StringArray, StructArray, TimestampMicrosecondArray,
     },
     buffer::OffsetBuffer,
     datatypes::{DataType, Field, Schema, SchemaRef},
@@ -87,6 +88,29 @@ impl TestBatchBuilder {
     pub fn column_string_nullable(mut self, name: &str, values: &[Option<&str>]) -> Self {
         let array: ArrayRef = Arc::new(StringArray::from(values.to_vec()));
         self.columns.push((name.to_string(), array, true));
+        self
+    }
+
+    pub fn column_large_string(mut self, name: &str, values: &[&str]) -> Self {
+        let array: ArrayRef = Arc::new(LargeStringArray::from(values.to_vec()));
+        self.columns.push((name.to_string(), array, false));
+        self
+    }
+
+    pub fn column_binary(mut self, name: &str, values: &[&[u8]]) -> Self {
+        let array: ArrayRef = Arc::new(BinaryArray::from(values.to_vec()));
+        self.columns.push((name.to_string(), array, false));
+        self
+    }
+
+    pub fn column_large_binary(mut self, name: &str, values: &[&[u8]]) -> Self {
+        let array: ArrayRef = Arc::new(LargeBinaryArray::from(values.to_vec()));
+        self.columns.push((name.to_string(), array, false));
+        self
+    }
+
+    pub fn column_array(mut self, name: &str, array: ArrayRef) -> Self {
+        self.columns.push((name.to_string(), array, false));
         self
     }
 
@@ -339,6 +363,54 @@ impl TestBatch {
             .build()
     }
 
+    /// Narrow schema: id (i32) + name (utf8, fixed 32-byte strings).
+    /// ~36 bytes/row estimated (4 int + 32 utf8 estimate).
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    pub fn narrow(row_count: usize) -> RecordBatch {
+        let ids: Vec<i32> = (0..row_count).map(|i| i as i32).collect();
+        // fixed-length 32-byte strings for predictable sizing
+        let names: Vec<String> = (0..row_count).map(|i| format!("{:0>32}", i)).collect();
+        let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        TestBatchBuilder::new()
+            .column_i32("id", &ids)
+            .column_string("name", &name_refs)
+            .build()
+    }
+
+    /// Wide schema: 20+ columns of mixed types.
+    /// ~260 bytes/row estimated (20+40+40 fixed + 5×32 utf8).
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        clippy::cast_precision_loss
+    )]
+    pub fn wide(row_count: usize) -> RecordBatch {
+        let ints: Vec<i32> = (0..row_count).map(|i| i as i32).collect();
+        let longs: Vec<i64> = (0..row_count).map(|i| i as i64 * 1000).collect();
+        let floats: Vec<f64> = (0..row_count).map(|i| i as f64 * 1.5).collect();
+        let strings: Vec<String> = (0..row_count).map(|i| format!("{:0>32}", i)).collect();
+        let string_refs: Vec<&str> = strings.iter().map(String::as_str).collect();
+
+        let mut builder = TestBatchBuilder::new();
+        // 5 × i32 = 20 bytes
+        for col in 0..5 {
+            builder = builder.column_i32(&format!("i32_{col}"), &ints);
+        }
+        // 5 × i64 = 40 bytes
+        for col in 0..5 {
+            builder = builder.column_i64(&format!("i64_{col}"), &longs);
+        }
+        // 5 × f64 = 40 bytes
+        for col in 0..5 {
+            builder = builder.column_f64(&format!("f64_{col}"), &floats);
+        }
+        // 5 × utf8 = 160 bytes estimated (32 each), ~180 actual (36 each w/ offset)
+        for col in 0..5 {
+            builder = builder.column_string(&format!("str_{col}"), &string_refs);
+        }
+        builder.build()
+    }
+
     pub fn into_stream(
         batch: RecordBatch,
     ) -> BoxStream<'static, Result<RecordBatch, arrow::error::ArrowError>> {
@@ -404,6 +476,48 @@ impl TestFile {
         Self::write_parquet(path, std::slice::from_ref(batch));
     }
 
+    pub fn write_vortex(path: &Path, batches: &[RecordBatch]) {
+        assert!(!batches.is_empty(), "need at least one batch");
+        let schema = batches[0].schema();
+        let vortex_arrays: Vec<vortex::array::ArrayRef> = batches
+            .iter()
+            .map(|b| vortex::array::arrow::FromArrowArray::from_arrow(b.clone(), false))
+            .collect();
+
+        let write_fut = async {
+            let file = tokio::fs::File::create(path)
+                .await
+                .expect("failed to create vortex file");
+            let session = vortex::session::VortexSession::default();
+            let dtype = vortex::dtype::arrow::FromArrowType::from_arrow(schema);
+
+            let array_stream = vortex::array::stream::ArrayStreamAdapter::new(
+                dtype,
+                futures::stream::iter(vortex_arrays.into_iter().map(Ok)),
+            );
+
+            use vortex::VortexSessionDefault;
+            use vortex::file::WriteOptionsSessionExt;
+            session
+                .write_options()
+                .write(file, array_stream)
+                .await
+                .expect("failed to write vortex file");
+        };
+
+        // if already inside a tokio runtime (e.g. #[tokio::test]), use block_in_place.
+        // otherwise, create a new runtime.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            tokio::task::block_in_place(|| handle.block_on(write_fut));
+        } else {
+            tokio::runtime::Runtime::new().unwrap().block_on(write_fut);
+        }
+    }
+
+    pub fn write_vortex_batch(path: &Path, batch: &RecordBatch) {
+        Self::write_vortex(path, std::slice::from_ref(batch));
+    }
+
     pub fn read_arrow(path: &Path) -> Vec<RecordBatch> {
         let file = File::open(path).expect("failed to open file");
         let reader = ArrowFileReader::try_new(file, None).expect("failed to create reader");
@@ -444,6 +558,28 @@ impl TestFile {
                 .collect::<Result<Vec<_>, _>>()
                 .expect("failed to read batches")
         }
+    }
+}
+
+pub fn count_rows(batches: &[RecordBatch]) -> usize {
+    batches.iter().map(|b| b.num_rows()).sum()
+}
+
+pub fn sort_asc(col: &str) -> crate::SortSpec {
+    crate::SortSpec {
+        columns: vec![crate::SortColumn {
+            name: col.to_string(),
+            direction: crate::SortDirection::Ascending,
+        }],
+    }
+}
+
+pub fn sort_desc(col: &str) -> crate::SortSpec {
+    crate::SortSpec {
+        columns: vec![crate::SortColumn {
+            name: col.to_string(),
+            direction: crate::SortDirection::Descending,
+        }],
     }
 }
 

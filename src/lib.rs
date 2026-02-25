@@ -7,7 +7,6 @@ pub mod sinks;
 pub mod sources;
 pub mod utils;
 
-use crate::utils::collections::{uniq, uniq_by};
 use anyhow::{Result, anyhow};
 use arrow::ipc::CompressionType;
 use camino::Utf8PathBuf;
@@ -24,6 +23,9 @@ use std::{
     str::FromStr,
 };
 use strum_macros::Display;
+
+use crate::sinks::DEFAULT_RECORD_BATCH_SIZE;
+use crate::utils::collections::{uniq, uniq_by};
 
 /// Parse a usize that must be at least 1.
 pub fn parse_at_least_one(s: &str) -> Result<usize> {
@@ -127,24 +129,27 @@ pub enum MemoryBudgetSpec {
     Fixed(usize),
     /// Use total memory minus a reserved byte amount, with optional minimum bytes.
     Reserve { reserve: usize, min: Option<usize> },
+    /// No memory budget — DataFusion uses an unbounded pool with no tracking or limits.
+    Unlimited,
 }
 
 impl MemoryBudgetSpec {
-    pub fn resolve(&self) -> usize {
+    pub fn resolve(&self) -> Option<usize> {
         match self {
             MemoryBudgetSpec::Total { pct, min } => {
                 let budget = utils::memory::total_memory() * usize::from(*pct) / 100;
-                budget.max(min.unwrap_or(0))
+                Some(budget.max(min.unwrap_or(0)))
             }
             MemoryBudgetSpec::Available { pct, min } => {
                 let budget = utils::memory::available_memory() * usize::from(*pct) / 100;
-                budget.max(min.unwrap_or(0))
+                Some(budget.max(min.unwrap_or(0)))
             }
-            MemoryBudgetSpec::Fixed(n) => *n,
+            MemoryBudgetSpec::Fixed(n) => Some(*n),
             MemoryBudgetSpec::Reserve { reserve, min } => {
                 let budget = utils::memory::total_memory().saturating_sub(*reserve);
-                budget.max(min.unwrap_or(0))
+                Some(budget.max(min.unwrap_or(0)))
             }
+            MemoryBudgetSpec::Unlimited => None,
         }
     }
 }
@@ -157,6 +162,7 @@ impl FromStr for MemoryBudgetSpec {
 
         let keyword = parts[0].to_ascii_lowercase();
         match keyword.as_str() {
+            "none" => Ok(MemoryBudgetSpec::Unlimited),
             "total" | "available" => {
                 let pct_str = parts.get(1).copied();
                 let pct = parse_percent(pct_str, 80)?;
@@ -1268,10 +1274,14 @@ pub struct TransformCommand {
     /// Target memory budget. Best-effort, not a hard limit.
     ///
     /// Accepts a byte size (e.g. "8GB"), "total[:pct]" for a percentage of total RAM,
-    /// "available[:pct]" for a percentage of free RAM, or "reserve:<size>" to use
-    /// total RAM minus a reserved amount. All keyword modes (total, available, reserve)
-    /// support an optional minimum: "total:80:min:4GB". Examples: "total:90", "available:60%",
-    /// "reserve:2GB:min:1GB", "4GB".
+    /// "available[:pct]" for a percentage of free RAM, "reserve:<size>" to use
+    /// total RAM minus a reserved amount, or "none" for no memory limit.
+    /// All keyword modes (total, available, reserve) support an optional minimum:
+    /// "total:80:min:4GB". Examples: "total:90", "available:60%",
+    /// "reserve:2GB:min:1GB", "4GB", "none".
+    ///
+    /// "none" disables the memory pool entirely — DataFusion will use all available
+    /// memory with no tracking or spill triggers. Useful for benchmarking.
     ///
     /// Setting this too low may cause out-of-memory errors, since some
     /// internal buffers cannot spill to disk. The minimum depends on schema
@@ -1389,12 +1399,13 @@ pub struct TransformCommand {
     pub arrow_format: ArrowIPCFormat,
 
     /// Arrow record batch size.
-    #[arg(long, default_value_t = 122_880, help_heading = "Arrow Options")]
+    #[arg(long, default_value_t = DEFAULT_RECORD_BATCH_SIZE, help_heading = "Arrow Options")]
     pub arrow_record_batch_size: usize,
 
     /// Arrow writer queue size (number of batches buffered before backpressure).
-    #[arg(long, default_value = "16", value_parser = parse_at_least_one, help_heading = "Arrow Options")]
-    pub arrow_writing_queue_size: usize,
+    /// When omitted and a memory budget is set, queue depth is derived from the budget.
+    #[arg(long, value_parser = parse_at_least_one, help_heading = "Arrow Options")]
+    pub arrow_writing_queue_size: Option<usize>,
 
     //
     // ─── Parquet Options ───────────────────────────────────────────────────────────────
@@ -1620,22 +1631,25 @@ pub struct TransformCommand {
     ///
     /// Controls backpressure between the data source and ingestion stage. Higher
     /// values allow the source to stay ahead of row group assembly.
-    #[arg(long, help_heading = "Parquet Tuning Options", default_value = "1", value_parser = parse_at_least_one)]
-    pub parquet_ingestion_queue_size: usize,
+    /// When omitted and a memory budget is set, queue depth is derived from the budget.
+    #[arg(long, help_heading = "Parquet Tuning Options", value_parser = parse_at_least_one)]
+    pub parquet_ingestion_queue_size: Option<usize>,
 
     /// Queue size for row groups waiting to be encoded.
     ///
     /// Controls backpressure between ingestion and encoding stages. Higher values
     /// allow more row groups to be assembled while encoders are busy.
-    #[arg(long, help_heading = "Parquet Tuning Options", default_value = "4", value_parser = parse_at_least_one)]
-    pub parquet_encoding_queue_size: usize,
+    /// When omitted and a memory budget is set, queue depth is derived from the budget.
+    #[arg(long, help_heading = "Parquet Tuning Options", value_parser = parse_at_least_one)]
+    pub parquet_encoding_queue_size: Option<usize>,
 
     /// Queue size for encoded row groups waiting to be written to disk.
     ///
     /// Controls backpressure between encoding and I/O stages. Higher values allow
     /// more encoding to proceed while I/O is in progress.
-    #[arg(long, help_heading = "Parquet Tuning Options", default_value = "4", value_parser = parse_at_least_one)]
-    pub parquet_writing_queue_size: usize,
+    /// When omitted and a memory budget is set, queue depth is derived from the budget.
+    #[arg(long, help_heading = "Parquet Tuning Options", value_parser = parse_at_least_one)]
+    pub parquet_writing_queue_size: Option<usize>,
 
     /// Disable dictionary encoding for specific columns. Can be specified multiple times.
     ///
@@ -1835,8 +1849,8 @@ impl TransformCommand {
             overwrite: false,
             arrow_compression: ArrowCompression::default(),
             arrow_format: ArrowIPCFormat::default(),
-            arrow_record_batch_size: 122_880,
-            arrow_writing_queue_size: 16,
+            arrow_record_batch_size: DEFAULT_RECORD_BATCH_SIZE,
+            arrow_writing_queue_size: None,
             parquet_bloom_all: None,
             parquet_bloom_all_off: false,
             parquet_bloom_column: vec![],
@@ -1845,9 +1859,9 @@ impl TransformCommand {
             parquet_dictionary_column: vec![],
             parquet_column_encoding: vec![],
             parquet_column_encoding_threads: None,
-            parquet_ingestion_queue_size: 1,
-            parquet_encoding_queue_size: 4,
-            parquet_writing_queue_size: 4,
+            parquet_ingestion_queue_size: None,
+            parquet_encoding_queue_size: None,
+            parquet_writing_queue_size: None,
             parquet_dictionary_column_off: vec![],
             parquet_compression: ParquetCompression::default(),
             parquet_compression_level: None,
@@ -1995,6 +2009,16 @@ pub enum DataFormat {
     Arrow,
     Parquet,
     Vortex,
+}
+
+impl DataFormat {
+    pub fn into_datasource(self, path: String) -> Box<dyn sources::data_source::DataSource> {
+        match self {
+            DataFormat::Arrow => Box::new(sources::arrow::ArrowDataSource::new(path)),
+            DataFormat::Parquet => Box::new(sources::parquet::ParquetDataSource::new(path)),
+            DataFormat::Vortex => Box::new(sources::vortex::VortexDataSource::new(path)),
+        }
+    }
 }
 
 #[derive(ValueEnum, PartialEq, Clone, Copy, Debug, Default)]
@@ -2262,6 +2286,31 @@ mod tests {
         #[test]
         fn test_unexpected_segment_rejected() {
             assert!(MemoryBudgetSpec::from_str("total:80:foo:bar").is_err());
+        }
+
+        #[test]
+        fn test_none() {
+            assert!(matches!(
+                "none".parse::<MemoryBudgetSpec>().unwrap(),
+                MemoryBudgetSpec::Unlimited
+            ));
+        }
+
+        #[test]
+        fn test_none_case_insensitive() {
+            assert!(matches!(
+                "None".parse::<MemoryBudgetSpec>().unwrap(),
+                MemoryBudgetSpec::Unlimited
+            ));
+            assert!(matches!(
+                "NONE".parse::<MemoryBudgetSpec>().unwrap(),
+                MemoryBudgetSpec::Unlimited
+            ));
+        }
+
+        #[test]
+        fn test_none_resolve() {
+            assert_eq!(MemoryBudgetSpec::Unlimited.resolve(), None);
         }
     }
 

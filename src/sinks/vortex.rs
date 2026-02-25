@@ -18,23 +18,66 @@ use vortex::dtype::arrow::FromArrowType;
 use vortex::file::WriteOptionsSessionExt;
 use vortex::session::VortexSession;
 
-use crate::sinks::data_sink::{DataSink, SinkResult};
+use crate::sinks::{
+    DEFAULT_RECORD_BATCH_SIZE,
+    data_sink::{DataSink, SinkResult},
+};
+use crate::utils::memory::estimate_row_bytes;
 
 #[derive(Clone, Copy)]
 pub struct VortexSinkOptions {
     record_batch_size: usize,
+    memory_budget: Option<usize>,
+    row_bytes: Option<usize>,
 }
 
 impl VortexSinkOptions {
     pub fn new() -> Self {
         Self {
-            record_batch_size: 122_880,
+            record_batch_size: DEFAULT_RECORD_BATCH_SIZE,
+            memory_budget: None,
+            row_bytes: None,
         }
     }
 
     pub fn with_record_batch_size(mut self, record_batch_size: usize) -> Self {
         self.record_batch_size = record_batch_size;
         self
+    }
+
+    pub fn with_memory_budget(mut self, budget: Option<usize>) -> Self {
+        self.memory_budget = budget;
+        self
+    }
+
+    pub fn with_row_bytes(mut self, row_bytes: Option<usize>) -> Self {
+        self.row_bytes = row_bytes;
+        self
+    }
+
+    pub fn estimate_sink_needs(&self, row_bytes: usize) -> usize {
+        self.record_batch_size.saturating_mul(row_bytes)
+    }
+
+    fn resolve_queue_depth(&self, schema: &SchemaRef) -> usize {
+        if let Some(budget) = self.memory_budget {
+            let row_bytes = self
+                .row_bytes
+                .unwrap_or_else(|| estimate_row_bytes(schema))
+                .max(1);
+            let batch_bytes = self.record_batch_size * row_bytes;
+            let derived = (budget / batch_bytes).max(1);
+            tracing::debug!(
+                budget,
+                row_bytes,
+                batch_bytes,
+                queue_depth = derived,
+                "vortex queue depth (budget-derived)"
+            );
+            return derived;
+        }
+
+        DEFAULT_QUEUE_DEPTH
     }
 }
 
@@ -43,6 +86,8 @@ impl Default for VortexSinkOptions {
         Self::new()
     }
 }
+
+const DEFAULT_QUEUE_DEPTH: usize = 16;
 
 struct VortexSinkInner {
     rows_written: u64,
@@ -86,8 +131,9 @@ pub struct VortexSink {
 
 impl VortexSink {
     pub fn create(path: PathBuf, schema: &SchemaRef, options: VortexSinkOptions) -> Result<Self> {
+        let queue_depth = options.resolve_queue_depth(schema);
         let coalescer = BatchCoalescer::new(Arc::clone(schema), options.record_batch_size);
-        let (sender, receiver) = mpsc::channel(16);
+        let (sender, receiver) = mpsc::channel(queue_depth);
 
         let path_clone = path.clone();
         let schema_clone = Arc::clone(schema);

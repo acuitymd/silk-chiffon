@@ -1,10 +1,9 @@
 use std::sync::Arc;
 
 use crate::{
-    AllColumnsBloomFilterConfig, ArrowCompression, ArrowIPCFormat, BloomFilterConfig,
-    ColumnDictionaryConfig, ColumnEncodingConfig, DEFAULT_BLOOM_FILTER_FPP, DataFormat,
-    DictionaryMode, ListOutputsFormat, ParquetCompression, ParquetEncoding, ParquetStatistics,
-    ParquetWriterVersion, PartitionStrategy, SortSpec, TransformCommand, default_thread_budget,
+    AllColumnsBloomFilterConfig, BloomFilterConfig, DEFAULT_BLOOM_FILTER_FPP, DataFormat,
+    DictionaryMode, ListOutputsFormat, PartitionStrategy, SortSpec, TransformCommand,
+    default_thread_budget,
     io_strategies::{OutputFileInfo, output_strategy::SinkFactory, path_template::PathTemplate},
     operations::{query::QueryOperation, sort::SortOperation},
     pipeline::Pipeline,
@@ -14,12 +13,13 @@ use crate::{
         parquet::{ParquetRuntimes, ParquetSink, ParquetSinkOptions},
         vortex::{VortexSink, VortexSinkOptions},
     },
-    sources::{
-        arrow::ArrowDataSource, data_source::DataSource, parquet::ParquetDataSource,
-        vortex::VortexDataSource,
+    sources::data_source::{DataSource, TARGET_SAMPLE_ROWS},
+    utils::memory::{
+        BudgetPlan, WorkloadKind, compute_sort_spill_reservation, estimate_max_sort_partitions,
+        sort_merge_row_overhead,
     },
 };
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use arrow::datatypes::SchemaRef;
 use camino::Utf8Path;
 use glob::glob;
@@ -145,50 +145,186 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         anyhow::bail!("--preserve-input-order requires --from (single input file)");
     }
 
-    let effective_target_partitions = if preserve_input_order {
-        Some(1)
-    } else if target_partitions.is_some() {
-        target_partitions
-    } else if has_sort {
-        Some(three_quarter_cpus)
-    } else {
-        None
-    };
-
-    let total_budget = memory_budget.resolve();
-
-    let effective_memory_limit = if has_sort {
-        // sorting needs more DataFusion memory, leave 40% for encoding/queues
-        Some(total_budget * 60 / 100)
-    } else {
-        // no sorting: DataFusion just needs query overhead, give more to encoding
-        Some(total_budget * 20 / 100)
-    };
-
-    let mut pipeline = Pipeline::new()
-        .with_query_dialect(dialect)
-        .with_memory_limit(effective_memory_limit)
-        .with_target_partitions(effective_target_partitions)
-        .with_spill_path(spill_path)
-        .with_spill_compression(spill_compression);
-
     let (input_paths, should_glob) = if let Some(single_input) = from {
         (vec![single_input], false)
     } else {
         (from_many, true)
     };
 
+    let first_source = open_first_source(&input_paths, should_glob, input_format)?;
+    let input_schema = first_source.schema()?;
+
+    let output_path_for_format = to.as_deref().or(to_many.as_deref());
+    let detected_output_format = output_path_for_format
+        .map(|p| detect_format(p, output_format))
+        .transpose()?
+        .or(output_format);
+
+    let mut arrow_options = ArrowSinkOptions::new()
+        .with_compression(arrow_compression)
+        .with_format(arrow_format)
+        .with_record_batch_size(arrow_record_batch_size);
+    if let Some(queue_size) = arrow_writing_queue_size {
+        arrow_options = arrow_options.with_queue_depth(queue_size);
+    }
+
+    let compression = parquet_compression.to_compression(parquet_compression_level)?;
+    let mut parquet_options = ParquetSinkOptions::new()
+        .with_compression(compression)
+        .with_statistics(parquet_statistics)
+        .with_writer_version(parquet_writer_version);
+    if let Some(size) = parquet_ingestion_queue_size {
+        parquet_options = parquet_options.with_ingestion_queue_size(size);
+    }
+    if let Some(size) = parquet_encoding_queue_size {
+        parquet_options = parquet_options.with_encoding_queue_size(size);
+    }
+    if let Some(size) = parquet_writing_queue_size {
+        parquet_options = parquet_options.with_writing_queue_size(size);
+    }
+    parquet_options = parquet_options
+        .with_encoding(parquet_encoding)
+        .with_column_encodings(parquet_column_encoding)
+        .with_bloom_filters(bloom_filter)
+        .with_offset_index_enabled(parquet_offset_index)
+        .with_skip_arrow_metadata(!parquet_arrow_metadata)
+        .with_page_header_statistics(parquet_page_header_statistics);
+    if let Some(row_group_size) = parquet_row_group_size {
+        parquet_options = parquet_options.with_max_row_group_size(row_group_size);
+    }
+    if let Some(buffer_size) = parquet_buffer_size {
+        parquet_options = parquet_options.with_buffer_size(buffer_size);
+    }
+    if let Some(concurrency) = parquet_row_group_concurrency {
+        parquet_options = parquet_options.with_max_row_group_concurrency(concurrency);
+    }
+    if parquet_dictionary_all_off {
+        parquet_options = parquet_options.with_no_dictionary(true);
+    }
+    {
+        let mut column_dictionary_always = Vec::new();
+        let mut column_dictionary_analyze = Vec::new();
+        for config in &parquet_dictionary_column {
+            match config.mode {
+                DictionaryMode::Always => column_dictionary_always.push(config.name.clone()),
+                DictionaryMode::Analyze => column_dictionary_analyze.push(config.name.clone()),
+            }
+        }
+        parquet_options = parquet_options
+            .with_column_dictionary_always(column_dictionary_always)
+            .with_column_dictionary_analyze(column_dictionary_analyze)
+            .with_column_no_dictionary(parquet_dictionary_column_off);
+    }
+    if let Some(size) = parquet_data_page_size {
+        parquet_options = parquet_options.with_data_page_size_limit(size);
+    }
+    if let Some(limit) = parquet_data_page_row_limit {
+        parquet_options = parquet_options.with_data_page_row_count_limit(limit);
+    }
+    if let Some(size) = parquet_dictionary_page_size {
+        parquet_options = parquet_options.with_dictionary_page_size_limit(size);
+    }
+    if let Some(size) = parquet_write_batch_size {
+        parquet_options = parquet_options.with_write_batch_size(size);
+    }
+
+    let mut vortex_options = VortexSinkOptions::new();
+    if let Some(batch_size) = vortex_record_batch_size {
+        vortex_options = vortex_options.with_record_batch_size(batch_size);
+    }
+
+    let workload = WorkloadKind::new(has_sort, query.is_some());
+    let resolved_budget = memory_budget.resolve();
+
+    // only sample row sizes when a budget is active — row_size() opens the file
+    // and streams up to TARGET_SAMPLE_ROWS rows, which is wasted I/O otherwise
+    let (budget, row_bytes) = if let Some(total) = resolved_budget {
+        let rb = first_source
+            .row_size()
+            .context("failed to sample row sizes from input")?;
+        let sink_needs = match detected_output_format {
+            Some(DataFormat::Parquet) | None => parquet_options.estimate_sink_needs(rb),
+            Some(DataFormat::Arrow) => arrow_options.estimate_sink_needs(rb),
+            Some(DataFormat::Vortex) => vortex_options.estimate_sink_needs(rb),
+        };
+        let plan = BudgetPlan::new(total, workload, rb, sink_needs);
+        tracing::info!("memory budget: {plan}");
+        (Some(plan), Some(rb))
+    } else {
+        tracing::info!("memory budget: unlimited (no pool)");
+        (None, None)
+    };
+
+    let effective_target_partitions = if preserve_input_order {
+        Some(1)
+    } else if target_partitions.is_some() {
+        target_partitions
+    } else if let Some(ref budget) = budget {
+        if has_sort {
+            let max_sort = estimate_max_sort_partitions(budget.datafusion_pool);
+            let capped = three_quarter_cpus.min(max_sort);
+            tracing::info!(
+                "sort partition scaling: max_sort={max_sort}, cpu_default={three_quarter_cpus}, effective={capped}"
+            );
+            Some(capped)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // the merge phase tracks both batch data and RowConverter Rows encoding,
+    // so the reservation must hold back enough pool space for the encoding overhead.
+    // covers both explicit --sort-by and partition-driven sorts (sort-single strategy)
+    let sort_col_names: Option<Vec<String>> = if let Some(sort_spec) = &sort_by {
+        Some(sort_spec.columns.iter().map(|c| c.name.clone()).collect())
+    } else if by.is_some() && partition_strategy == PartitionStrategy::SortSingle {
+        by.as_ref().map(|col| vec![col.clone()])
+    } else {
+        None
+    };
+    let sort_spill_reservation = if let (Some(budget), Some(col_names)) = (&budget, &sort_col_names)
+    {
+        let avg_sizes = first_source.estimate_column_sizes(col_names, TARGET_SAMPLE_ROWS)?;
+        let (data_bytes, encoding_bytes) =
+            sort_merge_row_overhead(&input_schema, col_names, &avg_sizes);
+        let reservation =
+            compute_sort_spill_reservation(budget.datafusion_pool, data_bytes, encoding_bytes);
+        tracing::info!(
+            "sort spill reservation: {}, data_bytes/row={data_bytes}, encoding_bytes/row={encoding_bytes}",
+            humansize::format_size(reservation, humansize::BINARY),
+        );
+        Some(reservation)
+    } else {
+        None
+    };
+
+    let sink_budget = budget.as_ref().map(|b| b.sink_budget);
+    arrow_options = arrow_options
+        .with_memory_budget(sink_budget)
+        .with_row_bytes(row_bytes);
+    parquet_options = parquet_options
+        .with_memory_budget(sink_budget)
+        .with_row_bytes(row_bytes);
+    vortex_options = vortex_options
+        .with_memory_budget(sink_budget)
+        .with_row_bytes(row_bytes);
+
+    let mut pipeline = Pipeline::new()
+        .with_query_dialect(dialect)
+        .with_memory_limit(budget.map(|b| b.datafusion_pool))
+        .with_target_partitions(effective_target_partitions)
+        .with_sort_spill_reservation(sort_spill_reservation)
+        .with_spill_path(spill_path)
+        .with_spill_compression(spill_compression);
+
     let setup_result: Result<()> = {
         if !should_glob && input_paths.len() == 1 {
             let input_path = &input_paths[0];
             let detected_input_format = detect_format(input_path, input_format)?;
 
-            let source: Box<dyn DataSource> = match detected_input_format {
-                DataFormat::Arrow => Box::new(ArrowDataSource::new(input_path.clone())),
-                DataFormat::Parquet => Box::new(ParquetDataSource::new(input_path.clone())),
-                DataFormat::Vortex => Box::new(VortexDataSource::new(input_path.clone())),
-            };
-
+            let source = detected_input_format.into_datasource(input_path.clone());
             pipeline = pipeline.with_input_strategy_with_single_source(source);
             Ok(())
         } else {
@@ -218,11 +354,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
             let mut schema: Option<SchemaRef> = None;
             for input_path in expanded_paths {
                 let detected_input_format = detect_format(&input_path, input_format)?;
-                let source: Box<dyn DataSource> = match detected_input_format {
-                    DataFormat::Arrow => Box::new(ArrowDataSource::new(input_path.clone())),
-                    DataFormat::Parquet => Box::new(ParquetDataSource::new(input_path.clone())),
-                    DataFormat::Vortex => Box::new(VortexDataSource::new(input_path.clone())),
-                };
+                let source = detected_input_format.into_datasource(input_path.clone());
                 if let Some(ref schema) = schema {
                     let source_schema = source.schema()?;
                     if *schema != source_schema {
@@ -287,47 +419,19 @@ pub async fn run(args: TransformCommand) -> Result<()> {
     let user_sort_spec_without_partition_cols =
         user_sort_spec.without_columns_named(&partition_columns);
 
-    let parquet_sort_spec =
-        if parquet_sorted_metadata && !user_sort_spec_without_partition_cols.is_empty() {
-            Some(user_sort_spec_without_partition_cols.clone())
-        } else {
-            None
-        };
-
     let mut full_sort_spec = partition_sort_spec.clone();
     full_sort_spec.extend(&user_sort_spec_without_partition_cols);
 
+    if parquet_sorted_metadata && !user_sort_spec_without_partition_cols.is_empty() {
+        parquet_options =
+            parquet_options.with_sort_spec(user_sort_spec_without_partition_cols.clone());
+    }
+
     let sink_factory = create_sink_factory(
         output_format,
-        arrow_compression,
-        arrow_format,
-        arrow_record_batch_size,
-        arrow_writing_queue_size,
-        bloom_filter,
-        parquet_buffer_size,
-        parquet_dictionary_column,
-        parquet_column_encoding,
-        parquet_dictionary_column_off,
-        parquet_compression,
-        parquet_compression_level,
-        parquet_ingestion_queue_size,
-        parquet_encoding_queue_size,
-        parquet_writing_queue_size,
-        parquet_encoding,
-        parquet_dictionary_all_off,
-        parquet_row_group_concurrency,
-        parquet_row_group_size,
-        parquet_sort_spec,
-        parquet_statistics,
-        parquet_writer_version,
-        parquet_data_page_size,
-        parquet_data_page_row_limit,
-        parquet_dictionary_page_size,
-        parquet_write_batch_size,
-        parquet_offset_index,
-        parquet_arrow_metadata,
-        parquet_page_header_statistics,
-        vortex_record_batch_size,
+        arrow_options,
+        parquet_options,
+        vortex_options,
         runtimes,
     )?;
 
@@ -505,128 +609,55 @@ fn detect_format(path: &str, explicit_format: Option<DataFormat>) -> Result<Data
     ))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn create_sink_factory(
     output_format: Option<DataFormat>,
-    arrow_compression: ArrowCompression,
-    arrow_format: ArrowIPCFormat,
-    arrow_record_batch_size: usize,
-    arrow_writing_queue_size: usize,
-    parquet_bloom_filter: BloomFilterConfig,
-    parquet_buffer_size: Option<usize>,
-    parquet_dictionary_column: Vec<ColumnDictionaryConfig>,
-    parquet_column_encoding: Vec<ColumnEncodingConfig>,
-    parquet_dictionary_column_off: Vec<String>,
-    parquet_compression: ParquetCompression,
-    parquet_compression_level: Option<i32>,
-    parquet_ingestion_queue_size: usize,
-    parquet_encoding_queue_size: usize,
-    parquet_writing_queue_size: usize,
-    parquet_encoding: Option<ParquetEncoding>,
-    parquet_dictionary_all_off: bool,
-    parquet_row_group_concurrency: Option<usize>,
-    parquet_row_group_size: Option<usize>,
-    parquet_sort_spec: Option<SortSpec>,
-    parquet_statistics: ParquetStatistics,
-    parquet_writer_version: ParquetWriterVersion,
-    parquet_data_page_size: Option<usize>,
-    parquet_data_page_row_limit: Option<usize>,
-    parquet_dictionary_page_size: Option<usize>,
-    parquet_write_batch_size: Option<usize>,
-    parquet_offset_index: bool,
-    parquet_arrow_metadata: bool,
-    parquet_page_header_statistics: bool,
-    vortex_record_batch_size: Option<usize>,
+    arrow_options: ArrowSinkOptions,
+    parquet_options: ParquetSinkOptions,
+    vortex_options: VortexSinkOptions,
     runtimes: Arc<ParquetRuntimes>,
 ) -> Result<SinkFactory> {
     Ok(Box::new(move |path: String, schema: SchemaRef| {
         let detected_format = detect_format(&path, output_format)?;
 
         let sink: Box<dyn DataSink> = match detected_format {
-            DataFormat::Arrow => {
-                let options = ArrowSinkOptions::new()
-                    .with_compression(arrow_compression)
-                    .with_format(arrow_format)
-                    .with_record_batch_size(arrow_record_batch_size)
-                    .with_queue_depth(arrow_writing_queue_size);
-                Box::new(ArrowSink::create(path.into(), &schema, options)?)
-            }
-            DataFormat::Parquet => {
-                let compression = parquet_compression.to_compression(parquet_compression_level)?;
-                let mut options = ParquetSinkOptions::new()
-                    .with_compression(compression)
-                    .with_statistics(parquet_statistics)
-                    .with_writer_version(parquet_writer_version)
-                    .with_ingestion_queue_size(parquet_ingestion_queue_size)
-                    .with_encoding_queue_size(parquet_encoding_queue_size)
-                    .with_writing_queue_size(parquet_writing_queue_size);
-                if let Some(row_group_size) = parquet_row_group_size {
-                    options = options.with_max_row_group_size(row_group_size);
-                }
-                if let Some(buffer_size) = parquet_buffer_size {
-                    options = options.with_buffer_size(buffer_size);
-                }
-                if let Some(concurrency) = parquet_row_group_concurrency {
-                    options = options.with_max_row_group_concurrency(concurrency);
-                }
-                if parquet_dictionary_all_off {
-                    options = options.with_no_dictionary(true);
-                }
-
-                let mut column_dictionary_always = Vec::new();
-                let mut column_dictionary_analyze = Vec::new();
-                for config in &parquet_dictionary_column {
-                    match config.mode {
-                        DictionaryMode::Always => {
-                            column_dictionary_always.push(config.name.clone());
-                        }
-                        DictionaryMode::Analyze => {
-                            column_dictionary_analyze.push(config.name.clone());
-                        }
-                    }
-                }
-
-                options = options
-                    .with_column_dictionary_always(column_dictionary_always)
-                    .with_column_dictionary_analyze(column_dictionary_analyze)
-                    .with_column_no_dictionary(parquet_dictionary_column_off.clone())
-                    .with_encoding(parquet_encoding)
-                    .with_column_encodings(parquet_column_encoding.clone())
-                    .with_bloom_filters(parquet_bloom_filter.clone())
-                    .with_offset_index_enabled(parquet_offset_index)
-                    .with_skip_arrow_metadata(!parquet_arrow_metadata)
-                    .with_page_header_statistics(parquet_page_header_statistics);
-                if let Some(size) = parquet_data_page_size {
-                    options = options.with_data_page_size_limit(size);
-                }
-                if let Some(limit) = parquet_data_page_row_limit {
-                    options = options.with_data_page_row_count_limit(limit);
-                }
-                if let Some(size) = parquet_dictionary_page_size {
-                    options = options.with_dictionary_page_size_limit(size);
-                }
-                if let Some(size) = parquet_write_batch_size {
-                    options = options.with_write_batch_size(size);
-                }
-                if let Some(sort_spec) = parquet_sort_spec.clone() {
-                    options = options.with_sort_spec(sort_spec);
-                }
-                Box::new(ParquetSink::create(
-                    path.into(),
-                    &schema,
-                    &options,
-                    Arc::clone(&runtimes),
-                )?)
-            }
+            DataFormat::Arrow => Box::new(ArrowSink::create(
+                path.into(),
+                &schema,
+                arrow_options.clone(),
+            )?),
+            DataFormat::Parquet => Box::new(ParquetSink::create(
+                path.into(),
+                &schema,
+                &parquet_options,
+                Arc::clone(&runtimes),
+            )?),
             DataFormat::Vortex => {
-                let mut options = VortexSinkOptions::new();
-                if let Some(batch_size) = vortex_record_batch_size {
-                    options = options.with_record_batch_size(batch_size);
-                }
-                Box::new(VortexSink::create(path.into(), &schema, options)?)
+                Box::new(VortexSink::create(path.into(), &schema, vortex_options)?)
             }
         };
 
         Ok(sink)
     }))
+}
+
+fn open_first_source(
+    paths: &[String],
+    should_glob: bool,
+    input_format: Option<DataFormat>,
+) -> Result<Box<dyn DataSource>> {
+    let first_path = if should_glob {
+        paths
+            .iter()
+            .find_map(|pattern| glob(pattern).ok().and_then(|mut g| g.next()))
+            .ok_or_else(|| anyhow!("No input files found matching patterns: {:?}", paths))?
+            .map_err(|e| anyhow!("Error decoding file path: {}", e))?
+            .to_string_lossy()
+            .to_string()
+    } else {
+        paths
+            .first()
+            .cloned()
+            .ok_or_else(|| anyhow!("No input files provided"))?
+    };
+    Ok(detect_format(&first_path, input_format)?.into_datasource(first_path))
 }

@@ -2,13 +2,9 @@ use arrow::array::{Array, Int32Array, Int64Array, RecordBatch, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use assert_cmd::cargo;
 use datafusion::prelude::*;
-use silk_chiffon::utils::test_data::{TestBatch, TestExtract, TestFile};
+use silk_chiffon::utils::test_data::{TestBatch, TestExtract, TestFile, count_rows};
 use std::sync::Arc;
 use tempfile::TempDir;
-
-fn count_rows(batches: &[RecordBatch]) -> usize {
-    batches.iter().map(|b| b.num_rows()).sum()
-}
 
 #[test]
 fn test_arrow_to_arrow() {
