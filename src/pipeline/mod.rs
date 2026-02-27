@@ -1,3 +1,5 @@
+use std::num::NonZero;
+
 use anyhow::{Result, anyhow};
 use bytesize::ByteSize;
 use camino::Utf8PathBuf;
@@ -5,7 +7,6 @@ use datafusion::{
     execution::memory_pool::{GreedyMemoryPool, TrackConsumersPool, UnboundedMemoryPool},
     prelude::{SessionConfig, SessionContext},
 };
-use std::num::NonZero;
 use tempfile::TempDir;
 
 use crate::{
@@ -20,7 +21,7 @@ use crate::{
     sources::data_source::DataSource,
 };
 
-/// Top-N memory consumers to include in OOM error messages
+// top-N memory consumers to include in OOM error messages
 const TRACK_TOP_CONSUMERS: NonZero<usize> = NonZero::new(5).unwrap();
 
 #[derive(Default)]

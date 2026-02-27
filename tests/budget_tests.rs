@@ -1,3 +1,5 @@
+//! Integration tests for memory budget planning and budget-aware sink queue sizing.
+
 use std::path::PathBuf;
 
 use arrow::array::{Array, AsArray};

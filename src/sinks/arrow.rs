@@ -1,3 +1,5 @@
+//! Arrow IPC sink for writing record batches to Arrow file format.
+
 use std::{collections::HashMap, fs::File, io::BufWriter, path::PathBuf, sync::Arc};
 
 use anyhow::{Context, Result};
@@ -120,7 +122,7 @@ impl ArrowSinkOptions {
                 .row_bytes
                 .unwrap_or_else(|| estimate_row_bytes(schema))
                 .max(1);
-            let batch_bytes = self.record_batch_size * row_bytes;
+            let batch_bytes = self.record_batch_size.saturating_mul(row_bytes);
             let derived = (budget / batch_bytes).max(1);
             tracing::debug!(
                 budget,

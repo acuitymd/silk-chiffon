@@ -276,13 +276,24 @@ pub async fn run(args: TransformCommand) -> Result<()> {
 
     // the merge phase tracks both batch data and RowConverter Rows encoding,
     // so the reservation must hold back enough pool space for the encoding overhead.
-    // covers both explicit --sort-by and partition-driven sorts (sort-single strategy)
-    let sort_col_names: Option<Vec<String>> = if let Some(sort_spec) = &sort_by {
-        Some(sort_spec.columns.iter().map(|c| c.name.clone()).collect())
-    } else if by.is_some() && partition_strategy == PartitionStrategy::SortSingle {
-        by.as_ref().map(|col| vec![col.clone()])
-    } else {
-        None
+    // covers both explicit --sort-by and partition-driven sorts (sort-single strategy).
+    // must include all sorted columns (partition + user sort) since DataFusion's
+    // RowConverter encodes every column in the sort key during the merge phase.
+    let sort_col_names: Option<Vec<String>> = {
+        let mut cols = Vec::new();
+        if partition_strategy == PartitionStrategy::SortSingle
+            && let Some(ref by_val) = by
+        {
+            cols.extend(by_val.split(',').map(|s| s.trim().to_string()));
+        }
+        if let Some(sort_spec) = &sort_by {
+            for c in &sort_spec.columns {
+                if !cols.contains(&c.name) {
+                    cols.push(c.name.clone());
+                }
+            }
+        }
+        if cols.is_empty() { None } else { Some(cols) }
     };
     let sort_spill_reservation = if let (Some(budget), Some(col_names)) = (&budget, &sort_col_names)
     {

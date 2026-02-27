@@ -1,3 +1,8 @@
+//! Data source trait and helpers for reading input files.
+//!
+//! Defines the [`DataSource`] trait that all input formats (Arrow, Parquet, Vortex)
+//! implement, plus utilities for estimating row sizes and column sizes via sampling.
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -33,7 +38,7 @@ pub trait DataSource: Send + Sync {
     ///
     /// # Panics
     ///
-    /// Uses `block_in_place` internally — requires a multi-threaded tokio runtime.
+    /// Panics if called from a single-threaded (`current_thread`) tokio runtime.
     fn row_size(&self) -> Result<usize> {
         let schema = self.schema()?;
         let all_cols: Vec<String> = schema.fields().iter().map(|f| f.name().clone()).collect();
@@ -143,7 +148,7 @@ pub trait DataSource: Send + Sync {
     ///
     /// # Panics
     ///
-    /// Uses `block_in_place` internally — requires a multi-threaded tokio runtime.
+    /// Panics if called from a single-threaded (`current_thread`) tokio runtime.
     fn estimate_variable_column_sizes(
         &self,
         _schema: &SchemaRef,
@@ -237,10 +242,12 @@ fn sample_variable_column_sizes_from_stream(
                 }
                 total_rows += n;
 
+                // a column is satisfied when we have enough non-null samples, or
+                // when we've read enough rows to be confident it's truly all-null
+                // (not just null-prefixed from sorted/partitioned data)
                 let all_satisfied = col_non_nulls
                     .iter()
-                    .enumerate()
-                    .all(|(i, &nn)| nn >= max_sample_rows || col_bytes[i] == 0);
+                    .all(|&nn| nn >= max_sample_rows || (total_rows >= max_sample_rows && nn == 0));
                 if all_satisfied || total_rows >= max_total_rows {
                     break;
                 }

@@ -1,3 +1,5 @@
+//! Vortex data source for reading Vortex compressed columnar files.
+
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt;

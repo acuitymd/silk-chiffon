@@ -162,7 +162,12 @@ impl FromStr for MemoryBudgetSpec {
 
         let keyword = parts[0].to_ascii_lowercase();
         match keyword.as_str() {
-            "none" => Ok(MemoryBudgetSpec::Unlimited),
+            "none" => {
+                if parts.len() > 1 {
+                    anyhow::bail!("'none' does not accept parameters, got: {s}");
+                }
+                Ok(MemoryBudgetSpec::Unlimited)
+            }
             "total" | "available" => {
                 let pct_str = parts.get(1).copied();
                 let pct = parse_percent(pct_str, 80)?;
@@ -2294,6 +2299,12 @@ mod tests {
                 "none".parse::<MemoryBudgetSpec>().unwrap(),
                 MemoryBudgetSpec::Unlimited
             ));
+        }
+
+        #[test]
+        fn test_none_rejects_extra_segments() {
+            assert!(MemoryBudgetSpec::from_str("none:80").is_err());
+            assert!(MemoryBudgetSpec::from_str("none:foo").is_err());
         }
 
         #[test]

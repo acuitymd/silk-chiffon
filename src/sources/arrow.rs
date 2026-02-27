@@ -1,3 +1,5 @@
+//! Arrow IPC data source for reading file and stream format Arrow files.
+
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};

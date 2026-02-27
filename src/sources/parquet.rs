@@ -1,3 +1,5 @@
+//! Parquet data source for reading Apache Parquet files.
+
 use std::collections::HashMap;
 use std::fs::File;
 use std::sync::{Arc, Mutex};

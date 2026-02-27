@@ -1,3 +1,5 @@
+//! Vortex sink for writing record batches to Vortex compressed columnar format.
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -65,7 +67,7 @@ impl VortexSinkOptions {
                 .row_bytes
                 .unwrap_or_else(|| estimate_row_bytes(schema))
                 .max(1);
-            let batch_bytes = self.record_batch_size * row_bytes;
+            let batch_bytes = self.record_batch_size.saturating_mul(row_bytes);
             let derived = (budget / batch_bytes).max(1);
             tracing::debug!(
                 budget,

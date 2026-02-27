@@ -354,7 +354,7 @@ impl ParquetSinkOptions {
         };
 
         // distribute: ~40% concurrency, ~25% encoding queue, ~25% writing queue, ingestion stays 1
-        // when total_slots < MIN_SLOTS, each gets minimum 1 — this may exceed the budget,
+        // when total_slots < 4, each queue gets minimum 1 — this may exceed the budget,
         // but row_group_size is a user-specified output setting we won't silently change.
         // the system may have swap space and we minimize usage by keeping queues at 1 each.
         let concurrency = self

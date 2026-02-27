@@ -232,11 +232,7 @@ pub fn sort_merge_row_overhead(
     sort_columns: &[String],
     avg_variable_sizes: &HashMap<String, usize>,
 ) -> (usize, usize) {
-    let data_bytes: usize = schema
-        .fields()
-        .iter()
-        .map(|f| estimate_fixed_type_bytes(f.data_type()).unwrap_or(32))
-        .sum();
+    let data_bytes = estimate_row_bytes(schema);
 
     // per-row offset in the Rows struct: one usize per row
     let mut encoding_bytes: usize = std::mem::size_of::<usize>();
@@ -429,7 +425,12 @@ impl fmt::Display for BudgetPlan {
             format_size(self.overhead_reserve, BINARY),
             format_size(self.datafusion_pool, BINARY),
             format_size(self.sink_budget, BINARY),
-        )
+        )?;
+        let committed = self.overhead_reserve + self.datafusion_pool + self.sink_budget;
+        if committed > self.total {
+            write!(f, " (overcommit)")?;
+        }
+        Ok(())
     }
 }
 
@@ -813,5 +814,106 @@ kernel 500";
         let pool = 2 * 1024 * 1024 * 1024; // 2GB
         let max = estimate_max_sort_partitions(pool);
         assert_eq!(max, 8);
+    }
+
+    // -- arrow_row_variable_encoded_len tests --
+
+    #[test]
+    fn test_arrow_row_encoded_len_zero() {
+        // 0 bytes: 1 header + ceil(0/8) * 9 = 1
+        assert_eq!(arrow_row_variable_encoded_len(0), 1);
+    }
+
+    #[test]
+    fn test_arrow_row_encoded_len_small() {
+        // 8 bytes: 1 header + ceil(8/8) * 9 = 10
+        assert_eq!(arrow_row_variable_encoded_len(8), 10);
+    }
+
+    #[test]
+    fn test_arrow_row_encoded_len_boundary() {
+        // 32 bytes (exactly BLOCK_SIZE): mini-block path
+        // 1 + ceil(32/8) * 9 = 1 + 4*9 = 37
+        assert_eq!(arrow_row_variable_encoded_len(32), 37);
+    }
+
+    #[test]
+    fn test_arrow_row_encoded_len_above_boundary() {
+        // 33 bytes: full-block path
+        // 4 + ceil(33/32) * 33 = 4 + 2*33 = 70
+        assert_eq!(arrow_row_variable_encoded_len(33), 70);
+    }
+
+    #[test]
+    fn test_arrow_row_encoded_len_large() {
+        // 64 bytes: 4 + ceil(64/32) * 33 = 4 + 2*33 = 70
+        assert_eq!(arrow_row_variable_encoded_len(64), 70);
+    }
+
+    // -- sort_merge_row_overhead tests --
+
+    #[test]
+    fn test_sort_merge_overhead_fixed_only() {
+        use arrow::datatypes::Field;
+        let schema = Schema::new(vec![
+            Field::new("a", DataType::Int32, false),
+            Field::new("b", DataType::Int64, false),
+        ]);
+        let (data, encoding) = sort_merge_row_overhead(&schema, &["a".into()], &HashMap::new());
+        assert_eq!(data, 12); // 4 + 8
+        // encoding: 8 (usize offset) + 1 (null) + 4 (i32) = 13
+        assert_eq!(encoding, 13);
+    }
+
+    #[test]
+    fn test_sort_merge_overhead_boolean() {
+        use arrow::datatypes::Field;
+        let schema = Schema::new(vec![Field::new("flag", DataType::Boolean, false)]);
+        let (_, encoding) = sort_merge_row_overhead(&schema, &["flag".into()], &HashMap::new());
+        // 8 (usize) + 2 (bool: 1 null + 1 data) = 10
+        assert_eq!(encoding, 10);
+    }
+
+    #[test]
+    fn test_sort_merge_overhead_variable_with_sizes() {
+        use arrow::datatypes::Field;
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("name", DataType::Utf8, false),
+        ]);
+        let mut sizes = HashMap::new();
+        sizes.insert("name".to_string(), 10usize);
+        let (data, encoding) = sort_merge_row_overhead(&schema, &["name".into()], &sizes);
+        assert_eq!(data, 36); // 4 + 32
+        // encoding: 8 (usize) + arrow_row_variable_encoded_len(10)
+        // 10 bytes: 1 + ceil(10/8) * 9 = 1 + 2*9 = 19
+        assert_eq!(encoding, 8 + 19);
+    }
+
+    // -- compute_sort_spill_reservation tests --
+
+    #[test]
+    fn test_spill_reservation_zero_inputs() {
+        assert_eq!(compute_sort_spill_reservation(1_000_000, 0, 100), 0);
+        assert_eq!(compute_sort_spill_reservation(1_000_000, 100, 0), 0);
+        assert_eq!(compute_sort_spill_reservation(0, 100, 50), 0);
+    }
+
+    #[test]
+    fn test_spill_reservation_normal() {
+        // pool=1GB, data=100, encoding=50 → fraction = 50/150 = 1/3 × 1.1 = 36.67%
+        let pool = 1024 * 1024 * 1024;
+        let reservation = compute_sort_spill_reservation(pool, 100, 50);
+        let expected = (pool as u128 * 50 * 110 / (150 * 100)) as usize;
+        assert_eq!(reservation, expected);
+        assert!(reservation < pool * 80 / 100);
+    }
+
+    #[test]
+    fn test_spill_reservation_caps_at_80_pct() {
+        // encoding >> data → fraction approaches 100%, should cap at 80%
+        let pool = 100 * 1024 * 1024;
+        let reservation = compute_sort_spill_reservation(pool, 1, 10000);
+        assert_eq!(reservation, pool * 80 / 100);
     }
 }
