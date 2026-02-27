@@ -370,18 +370,19 @@ async fn test_estimation_parquet_all_variable_width_types() {
     let cols = variable_col_names();
     let estimates = source.estimate_column_sizes(&cols, 100_000).unwrap();
 
-    // reads through DataFusion which coerces Utf8→Utf8View, Binary→BinaryView
+    // reads through DataFusion which coerces Utf8→Utf8View (16-byte views),
+    // Binary→BinaryView — estimates are higher than raw Arrow IPC
     check_estimates(
         &estimates,
         "parquet",
         &[
-            ("utf8_col", 8, 55),
-            ("large_utf8_col", 8, 55),
-            ("binary_col", 14, 65),
-            ("large_binary_col", 14, 65),
-            ("list_i32_col", 8, 50),
-            ("list_utf8_col", 8, 65),
-            ("dict_col", 1, 30),
+            ("utf8_col", 10, 35),
+            ("large_utf8_col", 10, 35),
+            ("binary_col", 16, 40),
+            ("large_binary_col", 16, 40),
+            ("list_i32_col", 10, 30),
+            ("list_utf8_col", 10, 40),
+            ("dict_col", 1, 20),
         ],
     );
 }

@@ -98,11 +98,18 @@ pub trait DataSource: Send + Sync {
         }
 
         if let Some(cache) = self.variable_column_size_cache() {
-            let cached = cache.lock().unwrap();
+            let cached = cache
+                .lock()
+                .map_err(|e| anyhow::anyhow!("column size cache lock poisoned: {e}"))?;
             if !cached.is_empty() {
                 for (col_name, _) in &variable_cols {
                     if let Some(&size) = cached.get(col_name) {
                         result.insert(col_name.clone(), size);
+                    } else {
+                        debug_assert!(
+                            false,
+                            "variable column {col_name} missing from non-empty cache"
+                        );
                     }
                 }
                 return Ok(result);
@@ -121,7 +128,6 @@ pub trait DataSource: Send + Sync {
 
         let mut all_sizes = HashMap::with_capacity(all_variable_cols.len());
         self.estimate_variable_column_sizes(
-            &schema,
             &all_variable_cols,
             max_sample_rows,
             &mut all_sizes,
@@ -134,7 +140,9 @@ pub trait DataSource: Send + Sync {
         }
 
         if let Some(cache) = self.variable_column_size_cache() {
-            *cache.lock().unwrap() = all_sizes;
+            *cache
+                .lock()
+                .map_err(|e| anyhow::anyhow!("column size cache lock poisoned: {e}"))? = all_sizes;
         }
 
         Ok(result)
@@ -151,7 +159,6 @@ pub trait DataSource: Send + Sync {
     /// Panics if called from a single-threaded (`current_thread`) tokio runtime.
     fn estimate_variable_column_sizes(
         &self,
-        _schema: &SchemaRef,
         variable_cols: &[(String, usize)],
         max_sample_rows: usize,
         result: &mut HashMap<String, usize>,
@@ -265,8 +272,7 @@ fn sample_variable_column_sizes_from_stream(
                     // all null — essentially 0 data bytes per row (just bitmap)
                     0
                 } else {
-                    let avg_non_null = col_bytes[i] / col_non_nulls[i];
-                    avg_non_null * col_non_nulls[i] / total_rows
+                    col_bytes[i] / total_rows
                 };
                 result.insert(col_name.clone(), estimate);
             }

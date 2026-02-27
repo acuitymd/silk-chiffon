@@ -298,8 +298,9 @@ pub async fn run(args: TransformCommand) -> Result<()> {
     let sort_spill_reservation = if let (Some(budget), Some(col_names)) = (&budget, &sort_col_names)
     {
         let avg_sizes = first_source.estimate_column_sizes(col_names, TARGET_SAMPLE_ROWS)?;
+        let rb = row_bytes.expect("row_bytes is Some when budget is Some");
         let (data_bytes, encoding_bytes) =
-            sort_merge_row_overhead(&input_schema, col_names, &avg_sizes);
+            sort_merge_row_overhead(&input_schema, col_names, &avg_sizes, rb);
         let reservation =
             compute_sort_spill_reservation(budget.datafusion_pool, data_bytes, encoding_bytes);
         tracing::info!(

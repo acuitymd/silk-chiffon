@@ -231,8 +231,9 @@ pub fn sort_merge_row_overhead(
     schema: &Schema,
     sort_columns: &[String],
     avg_variable_sizes: &HashMap<String, usize>,
+    row_bytes: usize,
 ) -> (usize, usize) {
-    let data_bytes = estimate_row_bytes(schema);
+    let data_bytes = row_bytes;
 
     // per-row offset in the Rows struct: one usize per row
     let mut encoding_bytes: usize = std::mem::size_of::<usize>();
@@ -258,6 +259,7 @@ pub fn sort_merge_row_overhead(
 
 /// Replicate arrow-row's padded_length formula for variable-width encoding.
 /// See arrow-row/src/variable.rs: `padded_length(Some(len))`.
+/// Validated against arrow-row 54.x (arrow crate ^57.2.0). Re-verify on major upgrades.
 fn arrow_row_variable_encoded_len(value_len: usize) -> usize {
     const BLOCK_SIZE: usize = 32;
     const MINI_BLOCK_COUNT: usize = 4;
@@ -361,6 +363,7 @@ impl WorkloadKind {
 /// in-memory sort merge temporarily holds ~100% of pool (one batch per input stream
 /// for all in-memory batches), leaving non-pool memory (tokio, IPC spill writer,
 /// OS buffers) to fit within the overhead. Passthrough workloads use 5%.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BudgetPlan {
     pub total: usize,
     pub overhead_reserve: usize,
@@ -850,6 +853,32 @@ kernel 500";
         assert_eq!(arrow_row_variable_encoded_len(64), 70);
     }
 
+    #[test]
+    fn test_arrow_row_encoded_len_matches_actual_library() {
+        use arrow::array::StringArray;
+        use arrow::row::{RowConverter, SortField};
+        use std::sync::Arc;
+
+        // test several value lengths spanning both mini-block and full-block paths
+        for &len in &[0usize, 5, 8, 10, 16, 32, 33, 50, 64, 100, 200] {
+            let value: String = "x".repeat(len);
+            let array = StringArray::from(vec![Some(value.as_str())]);
+            let mut converter =
+                RowConverter::new(vec![SortField::new(DataType::Utf8)]).unwrap();
+            let rows = converter
+                .convert_columns(&[Arc::new(array)])
+                .unwrap();
+
+            let actual_encoded_len = rows.row(0).as_ref().len();
+            let predicted = arrow_row_variable_encoded_len(len);
+
+            assert_eq!(
+                actual_encoded_len, predicted,
+                "mismatch for value_len={len}: actual={actual_encoded_len}, predicted={predicted}"
+            );
+        }
+    }
+
     // -- sort_merge_row_overhead tests --
 
     #[test]
@@ -859,7 +888,7 @@ kernel 500";
             Field::new("a", DataType::Int32, false),
             Field::new("b", DataType::Int64, false),
         ]);
-        let (data, encoding) = sort_merge_row_overhead(&schema, &["a".into()], &HashMap::new());
+        let (data, encoding) = sort_merge_row_overhead(&schema, &["a".into()], &HashMap::new(), 12);
         assert_eq!(data, 12); // 4 + 8
         // encoding: 8 (usize offset) + 1 (null) + 4 (i32) = 13
         assert_eq!(encoding, 13);
@@ -869,7 +898,7 @@ kernel 500";
     fn test_sort_merge_overhead_boolean() {
         use arrow::datatypes::Field;
         let schema = Schema::new(vec![Field::new("flag", DataType::Boolean, false)]);
-        let (_, encoding) = sort_merge_row_overhead(&schema, &["flag".into()], &HashMap::new());
+        let (_, encoding) = sort_merge_row_overhead(&schema, &["flag".into()], &HashMap::new(), 1);
         // 8 (usize) + 2 (bool: 1 null + 1 data) = 10
         assert_eq!(encoding, 10);
     }
@@ -883,8 +912,8 @@ kernel 500";
         ]);
         let mut sizes = HashMap::new();
         sizes.insert("name".to_string(), 10usize);
-        let (data, encoding) = sort_merge_row_overhead(&schema, &["name".into()], &sizes);
-        assert_eq!(data, 36); // 4 + 32
+        let (data, encoding) = sort_merge_row_overhead(&schema, &["name".into()], &sizes, 14);
+        assert_eq!(data, 14); // 4 (Int32) + 10 (sampled Utf8)
         // encoding: 8 (usize) + arrow_row_variable_encoded_len(10)
         // 10 bytes: 1 + ceil(10/8) * 9 = 1 + 2*9 = 19
         assert_eq!(encoding, 8 + 19);

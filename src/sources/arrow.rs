@@ -116,6 +116,9 @@ fn file_format_row_count(file: &mut File) -> Result<Option<usize>> {
         Err(_) => return Ok(None),
     };
 
+    if footer_len + 10 > file_len as usize {
+        return Ok(None);
+    }
     let mut footer_data = vec![0u8; footer_len];
     file.seek(SeekFrom::End(-10 - footer_len as i64))?;
     file.read_exact(&mut footer_data)?;
@@ -159,7 +162,7 @@ fn file_format_row_count(file: &mut File) -> Result<Option<usize>> {
             && message.header_type() == MessageHeader::RecordBatch
             && let Some(rb) = message.header_as_record_batch()
         {
-            total_rows += rb.length() as usize;
+            total_rows = total_rows.saturating_add(rb.length() as usize);
         }
     }
 
@@ -188,8 +191,12 @@ fn stream_format_row_count(file: &mut File) -> Result<Option<usize>> {
         }
 
         // handle continuation marker
-        if meta_len_buf == CONTINUATION_MARKER && file.read_exact(&mut meta_len_buf).is_err() {
-            break;
+        if meta_len_buf == CONTINUATION_MARKER {
+            match file.read_exact(&mut meta_len_buf) {
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(e.into()),
+            }
         }
 
         let meta_len = i32::from_le_bytes(meta_len_buf);
@@ -203,6 +210,10 @@ fn stream_format_row_count(file: &mut File) -> Result<Option<usize>> {
             bail!("invalid metadata length in Arrow IPC stream");
         }
         let meta_len = meta_len as usize;
+        // cap at 64MB to avoid pathological allocations from crafted streams
+        if meta_len > 64 * 1024 * 1024 {
+            bail!("metadata length {meta_len} exceeds 64MB limit");
+        }
 
         meta_buf.resize(meta_len, 0);
         file.read_exact(&mut meta_buf)?;
@@ -225,7 +236,7 @@ fn stream_format_row_count(file: &mut File) -> Result<Option<usize>> {
             }
             MessageHeader::RecordBatch => {
                 if let Some(rb) = message.header_as_record_batch() {
-                    total_rows += rb.length() as usize;
+                    total_rows = total_rows.saturating_add(rb.length() as usize);
                 }
             }
             _ => {}
