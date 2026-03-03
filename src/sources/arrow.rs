@@ -143,13 +143,17 @@ fn file_format_row_count(file: &mut File) -> Result<Option<usize>> {
             continue;
         }
         let meta_len = raw_meta_len as usize;
-        if meta_len < 8 {
+        if meta_len < 8 || meta_len > 64 * 1024 * 1024 {
             continue;
         }
 
-        file.seek(SeekFrom::Start(offset))?;
+        if file.seek(SeekFrom::Start(offset)).is_err() {
+            continue;
+        }
         meta_buf.resize(meta_len, 0);
-        file.read_exact(&mut meta_buf)?;
+        if file.read_exact(&mut meta_buf).is_err() {
+            continue;
+        }
 
         // skip continuation marker if present
         let msg_bytes = if meta_buf.len() >= 4 && meta_buf[..4] == CONTINUATION_MARKER {
@@ -161,6 +165,7 @@ fn file_format_row_count(file: &mut File) -> Result<Option<usize>> {
         if let Ok(message) = root_as_message(msg_bytes)
             && message.header_type() == MessageHeader::RecordBatch
             && let Some(rb) = message.header_as_record_batch()
+            && rb.length() >= 0
         {
             total_rows = total_rows.saturating_add(rb.length() as usize);
         }
@@ -235,7 +240,9 @@ fn stream_format_row_count(file: &mut File) -> Result<Option<usize>> {
                 saw_schema = true;
             }
             MessageHeader::RecordBatch => {
-                if let Some(rb) = message.header_as_record_batch() {
+                if let Some(rb) = message.header_as_record_batch()
+                    && rb.length() >= 0
+                {
                     total_rows = total_rows.saturating_add(rb.length() as usize);
                 }
             }

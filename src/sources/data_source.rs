@@ -71,6 +71,10 @@ pub trait DataSource: Send + Sync {
     /// Fixed-width columns return exact sizes from the schema (no data access).
     /// Variable-width columns are sampled once and cached — subsequent calls
     /// return from cache with no I/O.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called from a single-threaded (`current_thread`) tokio runtime.
     fn estimate_column_sizes(
         &self,
         columns: &[String],
@@ -211,9 +215,9 @@ fn array_data_size_inner(data: &arrow::array::ArrayData) -> usize {
 /// even when columns have high null rates. Caps total rows read at
 /// `10 * max_sample_rows` to avoid reading the entire file.
 ///
-/// The per-row estimate accounts for null rate: we compute the average size
-/// of non-null values, then scale by `(1 - null_rate)` to reflect that
-/// null rows contribute essentially zero data bytes.
+/// The per-row estimate inherently accounts for null rate: dividing total
+/// buffer bytes by total rows gives a per-row average where nulls contribute
+/// zero data bytes (only offset/bitmap overhead).
 fn sample_variable_column_sizes_from_stream(
     source: &(impl DataSource + ?Sized),
     variable_cols: &[(String, usize)],
@@ -222,7 +226,7 @@ fn sample_variable_column_sizes_from_stream(
 ) -> Result<()> {
     tokio::task::block_in_place(|| {
         tokio::runtime::Handle::current().block_on(async {
-            let max_total_rows = max_sample_rows * 10;
+            let max_total_rows = max_sample_rows.saturating_mul(10);
 
             // set batch_size to max_total_rows so DataFusion doesn't split IPC
             // record batches into sub-batches. sub-batches share the same
