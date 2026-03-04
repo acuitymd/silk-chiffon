@@ -6,9 +6,7 @@ use crate::{
     DictionaryMode, ListOutputsFormat, ParquetCompression, ParquetEncoding, ParquetStatistics,
     ParquetWriterVersion, PartitionStrategy, SortSpec, TransformCommand, default_thread_budget,
     io_strategies::{
-        OutputFileInfo,
-        input_strategy::InputStrategy,
-        output_strategy::SinkFactory,
+        OutputFileInfo, input_strategy::InputStrategy, output_strategy::SinkFactory,
         path_template::PathTemplate,
     },
     operations::{query::QueryOperation, sort::SortOperation},
@@ -503,10 +501,7 @@ fn to_title_case(s: &str) -> String {
         .join(" ")
 }
 
-fn make_source(
-    path: &str,
-    input_format: Option<DataFormat>,
-) -> Result<Box<dyn DataSource>> {
+fn make_source(path: &str, input_format: Option<DataFormat>) -> Result<Box<dyn DataSource>> {
     let format = detect_format(path, input_format)?;
     Ok(match format {
         DataFormat::Arrow => Box::new(ArrowDataSource::new(path.to_string())),

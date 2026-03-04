@@ -453,10 +453,10 @@ kernel 500";
     fn test_sort_spill_reservation_hits_floor() {
         // small input that would compute below 10MB
         let reservation = estimate_sort_spill_reservation(
-            100,            // 100 bytes/row
-            1_000_000,      // 1MB input
-            100_000_000,    // 100MB per partition
-            8192,           // batch size
+            100,         // 100 bytes/row
+            1_000_000,   // 1MB input
+            100_000_000, // 100MB per partition
+            8192,        // batch size
         );
         assert_eq!(reservation, 10 * 1024 * 1024); // 10MB floor
     }
@@ -466,14 +466,14 @@ kernel 500";
         // large input: 10GB input, 500MB per partition = ~20 spill files
         // 20 * 8192 * 200 = ~32MB
         let reservation = estimate_sort_spill_reservation(
-            200,                // 200 bytes/row
-            10_000_000_000,     // 10GB input
-            500_000_000,        // 500MB per partition
-            8192,               // batch size
+            200,            // 200 bytes/row
+            10_000_000_000, // 10GB input
+            500_000_000,    // 500MB per partition
+            8192,           // batch size
         );
         assert_eq!(reservation, 20 * 8192 * 200);
         assert!(reservation > 10 * 1024 * 1024); // above floor
-        assert!(reservation < 250_000_000);       // below ceiling (250MB)
+        assert!(reservation < 250_000_000); // below ceiling (250MB)
     }
 
     #[test]
@@ -481,8 +481,8 @@ kernel 500";
         // huge input with wide rows: would exceed half of per-partition budget
         let memory_per_partition = 100_000_000; // 100MB
         let reservation = estimate_sort_spill_reservation(
-            2000,               // 2KB/row (wide rows)
-            100_000_000_000,    // 100GB input
+            2000,            // 2KB/row (wide rows)
+            100_000_000_000, // 100GB input
             memory_per_partition,
             8192,
         );

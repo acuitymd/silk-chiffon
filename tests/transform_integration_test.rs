@@ -3167,14 +3167,8 @@ async fn test_transform_sort_multi_file_with_spill_reservation() {
     let input2 = temp_dir.path().join("b.arrow");
     let output = temp_dir.path().join("output.arrow");
 
-    TestFile::write_arrow_batch(
-        &input1,
-        &TestBatch::simple_with(&[4, 2], &["d", "b"]),
-    );
-    TestFile::write_arrow_batch(
-        &input2,
-        &TestBatch::simple_with(&[3, 1], &["c", "a"]),
-    );
+    TestFile::write_arrow_batch(&input1, &TestBatch::simple_with(&[4, 2], &["d", "b"]));
+    TestFile::write_arrow_batch(&input2, &TestBatch::simple_with(&[3, 1], &["c", "a"]));
 
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from_many: vec![
