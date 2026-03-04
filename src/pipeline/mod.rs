@@ -51,21 +51,6 @@ impl Pipeline {
         self
     }
 
-    pub fn with_input_strategy_with_single_source(mut self, source: Box<dyn DataSource>) -> Self {
-        self.input_strategy = Some(InputStrategy::Single(source));
-
-        self
-    }
-
-    pub fn with_input_strategy_with_multiple_sources(
-        mut self,
-        sources: Vec<Box<dyn DataSource>>,
-    ) -> Self {
-        self.input_strategy = Some(InputStrategy::Multiple(sources));
-
-        self
-    }
-
     pub fn with_operation(mut self, operation: Box<dyn DataOperation>) -> Self {
         self.operations.push(operation);
 
