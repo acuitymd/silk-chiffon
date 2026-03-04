@@ -124,7 +124,7 @@ fn file_format_row_count(file: &mut File) -> Result<Option<usize>> {
             continue;
         }
         let meta_len = raw_meta_len as usize;
-        if meta_len < 8 || meta_len > 64 * 1024 * 1024 {
+        if !(8..=64 * 1024 * 1024).contains(&meta_len) {
             continue;
         }
 
