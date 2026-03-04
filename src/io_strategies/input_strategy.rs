@@ -68,6 +68,19 @@ impl InputStrategy {
         }
     }
 
+    pub fn row_count(&self) -> Result<usize> {
+        match self {
+            InputStrategy::Single(source) => source.row_count(),
+            InputStrategy::Multiple(sources) => {
+                let mut total = 0;
+                for source in sources {
+                    total += source.row_count()?;
+                }
+                Ok(total)
+            }
+        }
+    }
+
     pub async fn as_stream(&self, ctx: &mut SessionContext) -> Result<SendableRecordBatchStream> {
         match self {
             InputStrategy::Single(source) => source.as_stream_with_session_context(ctx).await,

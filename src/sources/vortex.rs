@@ -62,6 +62,22 @@ impl DataSource for VortexDataSource {
         })
     }
 
+    fn row_count(&self) -> Result<usize> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let session = VortexSession::default();
+                let vortex_file = session
+                    .open_options()
+                    .open(self.path.as_str())
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to open Vortex file: {}", e))?;
+
+                #[allow(clippy::cast_possible_truncation)]
+                Ok(vortex_file.row_count() as usize)
+            })
+        })
+    }
+
     async fn as_table_provider(&self, _ctx: &mut SessionContext) -> Result<Arc<dyn TableProvider>> {
         Ok(Arc::new(VortexTableProvider {
             path: self.path.clone(),
@@ -290,5 +306,54 @@ impl fmt::Debug for VortexExec {
             .field("projection", &self.projection)
             .field("limit", &self.limit)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use arrow::array::{Int32Array, RecordBatch, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::sinks::data_sink::DataSink;
+    use crate::sinks::vortex::{VortexSink, VortexSinkOptions};
+
+    fn write_vortex_file(path: &Path, schema: &SchemaRef, batch: RecordBatch) {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let mut sink =
+                VortexSink::create(path.to_path_buf(), schema, VortexSinkOptions::new()).unwrap();
+            sink.write_batch(batch).await.unwrap();
+            sink.finish().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_row_count() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.vortex");
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("name", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 2, 3, 4, 5])),
+                Arc::new(StringArray::from(vec!["a", "b", "c", "d", "e"])),
+            ],
+        )
+        .unwrap();
+        write_vortex_file(&path, &schema, batch);
+
+        // row_count() uses block_in_place, so we need our own runtime
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let source = VortexDataSource::new(path.to_string_lossy().to_string());
+        let count = rt.block_on(async { source.row_count().unwrap() });
+        assert_eq!(count, 5);
     }
 }

@@ -183,11 +183,9 @@ pub async fn run(args: TransformCommand) -> Result<()> {
     };
 
     // resolve input paths (glob-expand if needed), build sources, and create InputStrategy
-    let resolved_paths: Vec<String>;
     let input_strategy = if !should_glob && input_paths.len() == 1 {
         let input_path = &input_paths[0];
         let source = make_source(input_path, input_format)?;
-        resolved_paths = vec![input_path.clone()];
         InputStrategy::Single(source)
     } else {
         let mut expanded_paths = Vec::new();
@@ -229,7 +227,6 @@ pub async fn run(args: TransformCommand) -> Result<()> {
             }
             sources.push(source);
         }
-        resolved_paths = expanded_paths;
         InputStrategy::Multiple(sources)
     };
 
@@ -238,11 +235,8 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         let avg_row_bytes = sample_avg_row_bytes(&input_strategy, 100_000).await?;
 
         if avg_row_bytes > 0 {
-            let total_input_bytes: u64 = resolved_paths
-                .iter()
-                .filter_map(|p| std::fs::metadata(p).ok())
-                .map(|m| m.len())
-                .sum();
+            let total_rows = input_strategy.row_count().unwrap_or(0);
+            let total_in_memory_bytes = total_rows.saturating_mul(avg_row_bytes);
 
             let memory_limit = effective_memory_limit.unwrap_or(total_budget * 60 / 100);
             let partitions = effective_target_partitions.unwrap_or(three_quarter_cpus);
@@ -250,7 +244,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
 
             let reservation = estimate_sort_spill_reservation(
                 avg_row_bytes,
-                total_input_bytes,
+                total_in_memory_bytes,
                 memory_per_partition,
                 8192, // DataFusion default batch size
             );

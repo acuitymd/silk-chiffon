@@ -13,6 +13,8 @@ pub trait DataSource: Send + Sync {
 
     fn schema(&self) -> Result<SchemaRef>;
 
+    fn row_count(&self) -> Result<usize>;
+
     async fn as_table_provider(&self, _ctx: &mut SessionContext) -> Result<Arc<dyn TableProvider>> {
         Err(anyhow!("as_table_provider is not implemented"))
     }

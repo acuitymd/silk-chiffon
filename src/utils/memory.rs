@@ -203,14 +203,17 @@ const MIN_SORT_SPILL_RESERVATION: usize = 10 * 1024 * 1024; // 10MB (DataFusion 
 /// Estimate `sort_spill_reservation_bytes` from sampled row size and input characteristics.
 ///
 /// The merge phase holds one batch per spill file in memory simultaneously.
-/// We estimate spill file count from total input size vs per-partition memory budget,
-/// then multiply by `batch_size * avg_row_bytes` to get the reservation.
+/// We estimate spill file count from total in-memory input size vs per-partition memory
+/// budget, then multiply by `batch_size * avg_row_bytes` to get the reservation.
+///
+/// `total_in_memory_bytes` should be computed from metadata row counts * avg_row_bytes,
+/// NOT from on-disk file sizes (which would underestimate for compressed formats).
 ///
 /// Clamped to [10MB, memory_per_partition / 2] so there's always room for the sorter
 /// to accumulate batches before spilling.
 pub fn estimate_sort_spill_reservation(
     avg_row_bytes: usize,
-    total_input_bytes: u64,
+    total_in_memory_bytes: usize,
     memory_per_partition: usize,
     batch_size: usize,
 ) -> usize {
@@ -218,8 +221,7 @@ pub fn estimate_sort_spill_reservation(
         return MIN_SORT_SPILL_RESERVATION;
     }
 
-    #[allow(clippy::cast_possible_truncation)]
-    let estimated_spill_files = (total_input_bytes as usize)
+    let estimated_spill_files = total_in_memory_bytes
         .checked_div(memory_per_partition)
         .unwrap_or(1)
         .max(1);
