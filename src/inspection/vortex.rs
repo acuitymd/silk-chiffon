@@ -52,7 +52,7 @@ impl VortexInspector {
                 let session = VortexSession::default();
                 let vortex_file = session
                     .open_options()
-                    .open(path.as_str())
+                    .open_path(path.as_std_path())
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to open Vortex file: {}", e))?;
 
@@ -63,7 +63,9 @@ impl VortexInspector {
 
                 let schema = Arc::new(arrow_schema);
                 let num_rows = vortex_file.row_count();
-                let file_stats = vortex_file.file_stats().cloned();
+                let file_stats = vortex_file
+                    .file_stats()
+                    .map(|fs| Arc::clone(fs.stats_sets()));
                 let footer = vortex_file.footer();
                 let segments = Arc::clone(footer.segment_map());
 

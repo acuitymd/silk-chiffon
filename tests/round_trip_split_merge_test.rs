@@ -16,7 +16,7 @@ use arrow::array::{Date32Array, Int16Array, Int32Array, RecordBatch};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::prelude::SessionContext;
 use rand::rngs::SmallRng;
-use rand::{Rng, SeedableRng};
+use rand::{Rng, RngExt, SeedableRng};
 use silk_chiffon::sinks::arrow::{ArrowSink, ArrowSinkOptions};
 use silk_chiffon::sinks::data_sink::DataSink;
 use silk_chiffon::sinks::parquet::ParquetSink;
@@ -178,7 +178,7 @@ async fn register_table(ctx: &mut SessionContext, name: &str, path: &Path, ext: 
 
 async fn write_test_data(path: &Path, schema: &SchemaRef, ext: &str) {
     // SmallRng is like 5x faster(!!) than the default RNG (ChaChaRng)
-    let mut rng = SmallRng::from_os_rng();
+    let mut rng = SmallRng::from_rng(&mut rand::rng());
     let mut sink: Box<dyn DataSink> = match ext {
         "arrow" => Box::new(
             ArrowSink::create(path.to_path_buf(), schema, ArrowSinkOptions::default()).unwrap(),

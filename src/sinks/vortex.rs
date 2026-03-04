@@ -53,7 +53,7 @@ struct VortexSinkInner {
 impl VortexSinkInner {
     async fn flush_completed_batches(&mut self) -> Result<()> {
         while let Some(completed_batch) = self.coalescer.next_completed_batch() {
-            let vortex_array = ArrayRef::from_arrow(completed_batch.clone(), false);
+            let vortex_array = ArrayRef::from_arrow(completed_batch.clone(), false)?;
 
             self.sender
                 .as_ref()
