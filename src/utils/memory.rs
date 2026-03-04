@@ -500,4 +500,134 @@ kernel 500";
         let reservation = estimate_sort_spill_reservation(100, 1_000_000, 0, 8192);
         assert_eq!(reservation, 10 * 1024 * 1024); // falls back to floor
     }
+
+    #[tokio::test]
+    async fn test_sample_avg_row_bytes_single_arrow() {
+        use crate::sources::arrow::ArrowDataSource;
+        use crate::utils::test_data::{TestBatch, TestFile};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.arrow");
+        let batch = TestBatch::simple_with(&[1, 2, 3], &["hello", "world", "foo"]);
+        TestFile::write_arrow_batch(&path, &batch);
+
+        let source: Box<dyn crate::sources::data_source::DataSource> =
+            Box::new(ArrowDataSource::new(path.to_string_lossy().to_string()));
+        let strategy = InputStrategy::Single(source);
+
+        let avg = sample_avg_row_bytes(&strategy, 100).await.unwrap();
+        // i32 (4 bytes) + variable-length strings -- should be non-trivial
+        assert!(avg > 0, "avg_row_bytes should be > 0, got {avg}");
+    }
+
+    #[tokio::test]
+    async fn test_sample_avg_row_bytes_multiple_files() {
+        use crate::sources::arrow::ArrowDataSource;
+        use crate::utils::test_data::{TestBatch, TestFile};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path1 = dir.path().join("a.arrow");
+        let path2 = dir.path().join("b.arrow");
+        let batch1 = TestBatch::simple_with(&[1, 2], &["aa", "bb"]);
+        let batch2 = TestBatch::simple_with(&[3, 4], &["cc", "dd"]);
+        TestFile::write_arrow_batch(&path1, &batch1);
+        TestFile::write_arrow_batch(&path2, &batch2);
+
+        let sources: Vec<Box<dyn crate::sources::data_source::DataSource>> = vec![
+            Box::new(ArrowDataSource::new(path1.to_string_lossy().to_string())),
+            Box::new(ArrowDataSource::new(path2.to_string_lossy().to_string())),
+        ];
+        let strategy = InputStrategy::Multiple(sources);
+
+        let avg = sample_avg_row_bytes(&strategy, 100).await.unwrap();
+        assert!(avg > 0);
+    }
+
+    #[tokio::test]
+    async fn test_sample_avg_row_bytes_parquet() {
+        use crate::sources::parquet::ParquetDataSource;
+        use crate::utils::test_data::{TestBatch, TestFile};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.parquet");
+        let batch = TestBatch::builder()
+            .column_i32("id", &[1, 2, 3, 4, 5])
+            .column_string("name", &["alpha", "bravo", "charlie", "delta", "echo"])
+            .column_f64("score", &[1.0, 2.0, 3.0, 4.0, 5.0])
+            .build();
+        TestFile::write_parquet_batch(&path, &batch);
+
+        let source: Box<dyn crate::sources::data_source::DataSource> =
+            Box::new(ParquetDataSource::new(path.to_string_lossy().to_string()));
+        let strategy = InputStrategy::Single(source);
+
+        let avg = sample_avg_row_bytes(&strategy, 100).await.unwrap();
+        assert!(avg > 0);
+    }
+
+    #[tokio::test]
+    async fn test_sample_avg_row_bytes_respects_target_rows() {
+        use crate::sources::arrow::ArrowDataSource;
+        use crate::utils::test_data::{TestBatch, TestFile};
+
+        let dir = tempfile::tempdir().unwrap();
+
+        // write 5 files with 100 rows each = 500 rows total
+        let mut sources: Vec<Box<dyn crate::sources::data_source::DataSource>> = Vec::new();
+        for i in 0..5 {
+            let path = dir.path().join(format!("file_{i}.arrow"));
+            let ids: Vec<i32> = (0..100).collect();
+            let names: Vec<&str> = (0..100).map(|_| "test_value").collect();
+            let batch = TestBatch::simple_with(&ids, &names);
+            TestFile::write_arrow_batch(&path, &batch);
+            sources.push(Box::new(ArrowDataSource::new(
+                path.to_string_lossy().to_string(),
+            )));
+        }
+
+        let strategy = InputStrategy::Multiple(sources);
+
+        // target only 50 rows -- should still produce a valid average
+        let avg = sample_avg_row_bytes(&strategy, 50).await.unwrap();
+        assert!(avg > 0);
+    }
+
+    #[tokio::test]
+    async fn test_sample_avg_row_bytes_wide_vs_narrow() {
+        use crate::sources::arrow::ArrowDataSource;
+        use crate::utils::test_data::{TestBatch, TestFile};
+
+        let dir = tempfile::tempdir().unwrap();
+
+        // narrow: single i32 column
+        let narrow_path = dir.path().join("narrow.arrow");
+        let narrow_batch = TestBatch::builder().column_i32("x", &[1, 2, 3]).build();
+        TestFile::write_arrow_batch(&narrow_path, &narrow_batch);
+
+        let narrow_strategy = InputStrategy::Single(Box::new(ArrowDataSource::new(
+            narrow_path.to_string_lossy().to_string(),
+        )));
+        let narrow_avg = sample_avg_row_bytes(&narrow_strategy, 100).await.unwrap();
+
+        // wide: many columns including strings
+        let wide_path = dir.path().join("wide.arrow");
+        let wide_batch = TestBatch::builder()
+            .column_i32("a", &[1, 2, 3])
+            .column_i64("b", &[100, 200, 300])
+            .column_f64("c", &[1.1, 2.2, 3.3])
+            .column_string("d", &["a long string value", "another one here", "third"])
+            .column_string("e", &["more text data", "for testing", "purposes"])
+            .build();
+        TestFile::write_arrow_batch(&wide_path, &wide_batch);
+
+        let wide_strategy = InputStrategy::Single(Box::new(ArrowDataSource::new(
+            wide_path.to_string_lossy().to_string(),
+        )));
+        let wide_avg = sample_avg_row_bytes(&wide_strategy, 100).await.unwrap();
+
+        assert!(
+            wide_avg > narrow_avg,
+            "wide schema ({wide_avg} bytes/row) should be larger than narrow ({narrow_avg} bytes/row)"
+        );
+    }
 }

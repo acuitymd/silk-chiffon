@@ -3110,3 +3110,102 @@ async fn test_bloom_filter_prefix_with_exclusion() {
     test_helpers::assert_has_bloom_filter(&inspector, "person.name");
     test_helpers::assert_no_bloom_filter(&inspector, "person.age");
 }
+
+#[tokio::test]
+async fn test_transform_sort_with_spill_reservation_sampling() {
+    // verifies the sample-based sort_spill_reservation_bytes path runs without error
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.parquet");
+    let output = temp_dir.path().join("output.parquet");
+
+    // wider schema so sampling produces a meaningful row-byte estimate
+    let batch = TestBatch::builder()
+        .column_i32("id", &[5, 3, 1, 4, 2])
+        .column_string("name", &["echo", "charlie", "alpha", "delta", "bravo"])
+        .column_f64("score", &[50.0, 30.0, 10.0, 40.0, 20.0])
+        .build();
+    TestFile::write_parquet_batch(&input, &batch);
+
+    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+        from: Some(input.to_string_lossy().to_string()),
+        to: Some(output.to_string_lossy().to_string()),
+        sort_by: Some(SortSpec {
+            columns: vec![SortColumn {
+                name: "id".to_string(),
+                direction: SortDirection::Ascending,
+            }],
+        }),
+        output_format: Some(DataFormat::Parquet),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    assert!(output.exists());
+    let batches = TestFile::read_parquet(&output);
+    let ids: Vec<i32> = batches
+        .iter()
+        .flat_map(|b| {
+            b.column_by_name("id")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap()
+                .values()
+                .iter()
+                .copied()
+        })
+        .collect();
+    assert_eq!(ids, vec![1, 2, 3, 4, 5]);
+}
+
+#[tokio::test]
+async fn test_transform_sort_multi_file_with_spill_reservation() {
+    // exercises sampling across multiple input files
+    let temp_dir = TempDir::new().unwrap();
+    let input1 = temp_dir.path().join("a.arrow");
+    let input2 = temp_dir.path().join("b.arrow");
+    let output = temp_dir.path().join("output.arrow");
+
+    TestFile::write_arrow_batch(
+        &input1,
+        &TestBatch::simple_with(&[4, 2], &["d", "b"]),
+    );
+    TestFile::write_arrow_batch(
+        &input2,
+        &TestBatch::simple_with(&[3, 1], &["c", "a"]),
+    );
+
+    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+        from_many: vec![
+            input1.to_string_lossy().to_string(),
+            input2.to_string_lossy().to_string(),
+        ],
+        to: Some(output.to_string_lossy().to_string()),
+        sort_by: Some(SortSpec {
+            columns: vec![SortColumn {
+                name: "id".to_string(),
+                direction: SortDirection::Ascending,
+            }],
+        }),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    assert!(output.exists());
+    let batches = TestFile::read_arrow_auto(&output);
+    let ids: Vec<i32> = batches
+        .iter()
+        .flat_map(|b| {
+            b.column(0)
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap()
+                .values()
+                .iter()
+                .copied()
+        })
+        .collect();
+    assert_eq!(ids, vec![1, 2, 3, 4]);
+}
