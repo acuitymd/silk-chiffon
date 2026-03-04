@@ -17,7 +17,6 @@ use crate::{
         path_template::PathTemplate,
     },
     operations::data_operation::DataOperation,
-    sources::data_source::DataSource,
 };
 
 #[derive(Default)]
@@ -28,6 +27,7 @@ pub struct PipelineConfig {
     pub target_partitions: Option<usize>,
     pub spill_path: Option<Utf8PathBuf>,
     pub spill_compression: SpillCompression,
+    pub sort_spill_reservation_bytes: Option<usize>,
 }
 
 #[derive(Default)]
@@ -45,18 +45,8 @@ impl Pipeline {
         Self::default()
     }
 
-    pub fn with_input_strategy_with_single_source(mut self, source: Box<dyn DataSource>) -> Self {
-        self.input_strategy = Some(InputStrategy::Single(source));
-
-        self
-    }
-
-    pub fn with_input_strategy_with_multiple_sources(
-        mut self,
-        sources: Vec<Box<dyn DataSource>>,
-    ) -> Self {
-        self.input_strategy = Some(InputStrategy::Multiple(sources));
-
+    pub fn with_input_strategy(mut self, input_strategy: InputStrategy) -> Self {
+        self.input_strategy = Some(input_strategy);
         self
     }
 
@@ -163,6 +153,14 @@ impl Pipeline {
         self
     }
 
+    pub fn with_sort_spill_reservation_bytes(
+        mut self,
+        sort_spill_reservation_bytes: Option<usize>,
+    ) -> Self {
+        self.config.sort_spill_reservation_bytes = sort_spill_reservation_bytes;
+        self
+    }
+
     pub async fn execute(&mut self) -> Result<Vec<OutputFileInfo>> {
         let mut ctx = self.build_session_context()?;
         self.execute_with_session_context(&mut ctx).await
@@ -213,6 +211,10 @@ impl Pipeline {
 
         cfg.options_mut().sql_parser.dialect = self.config.query_dialect.into();
         cfg.options_mut().execution.spill_compression = self.config.spill_compression.into();
+
+        if let Some(reservation) = self.config.sort_spill_reservation_bytes {
+            cfg.options_mut().execution.sort_spill_reservation_bytes = reservation;
+        }
 
         if let Some(target_partitions) = self.config.target_partitions {
             cfg = cfg.with_target_partitions(target_partitions);

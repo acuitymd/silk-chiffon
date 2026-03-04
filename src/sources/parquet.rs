@@ -8,6 +8,7 @@ use datafusion::{
     prelude::{ParquetReadOptions, SessionContext},
 };
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::file::reader::{FileReader as _, SerializedFileReader};
 use uuid::Uuid;
 
 use crate::sources::data_source::DataSource;
@@ -33,6 +34,14 @@ impl DataSource for ParquetDataSource {
         let file = File::open(&self.path)?;
         let reader = ParquetRecordBatchReaderBuilder::try_new(file)?;
         Ok(Arc::clone(reader.schema()))
+    }
+
+    #[allow(clippy::cast_sign_loss)]
+    fn row_count(&self) -> Result<usize> {
+        let file = File::open(&self.path)?;
+        let reader = SerializedFileReader::new(file)?;
+        #[allow(clippy::cast_possible_truncation)]
+        Ok(reader.metadata().file_metadata().num_rows() as usize)
     }
 
     async fn as_table_provider(&self, ctx: &mut SessionContext) -> Result<Arc<dyn TableProvider>> {
@@ -101,5 +110,35 @@ mod tests {
         let batch = stream.next().await.unwrap().unwrap();
         assert!(stream.next().await.is_none());
         assert!(batch.num_rows() > 0);
+    }
+
+    #[tokio::test]
+    async fn test_row_count() {
+        let source = ParquetDataSource::new(TEST_PARQUET_PATH.to_string());
+        let count = source.row_count().unwrap();
+
+        // verify against actually streaming all rows
+        let mut stream = source.as_stream().await.unwrap();
+        let mut streamed = 0;
+        while let Some(batch) = stream.next().await {
+            streamed += batch.unwrap().num_rows();
+        }
+        assert_eq!(count, streamed);
+    }
+
+    #[test]
+    fn test_row_count_written_file() {
+        use crate::utils::test_data::{TestBatch, TestFile};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.parquet");
+        let batch = TestBatch::builder()
+            .column_i32("id", &[1, 2, 3, 4, 5])
+            .column_string("name", &["a", "b", "c", "d", "e"])
+            .build();
+        TestFile::write_parquet_batch(&path, &batch);
+
+        let source = ParquetDataSource::new(path.to_string_lossy().to_string());
+        assert_eq!(source.row_count().unwrap(), 5);
     }
 }
