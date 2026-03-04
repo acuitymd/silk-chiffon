@@ -249,7 +249,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
                 8192, // DataFusion default batch size
             );
 
-            pipeline = pipeline.with_sort_spill_reservation_bytes(Some(reservation));
+            pipeline = pipeline.with_sort_spill_reservation_bytes(reservation);
         }
     }
 

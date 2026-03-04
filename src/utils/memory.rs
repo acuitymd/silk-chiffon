@@ -210,15 +210,21 @@ const MIN_SORT_SPILL_RESERVATION: usize = 10 * 1024 * 1024; // 10MB (DataFusion 
 /// NOT from on-disk file sizes (which would underestimate for compressed formats).
 ///
 /// Clamped to [10MB, memory_per_partition / 2] so there's always room for the sorter
-/// to accumulate batches before spilling.
+/// to accumulate batches before spilling. Returns `None` when input is insufficient
+/// to produce a useful estimate (zero row bytes, zero budget, or budget too tight).
 pub fn estimate_sort_spill_reservation(
     avg_row_bytes: usize,
     total_in_memory_bytes: usize,
     memory_per_partition: usize,
     batch_size: usize,
-) -> usize {
+) -> Option<usize> {
     if avg_row_bytes == 0 || memory_per_partition == 0 {
-        return MIN_SORT_SPILL_RESERVATION;
+        return None;
+    }
+
+    let max_reservation = memory_per_partition / 2;
+    if max_reservation < MIN_SORT_SPILL_RESERVATION {
+        return None;
     }
 
     let estimated_spill_files = total_in_memory_bytes
@@ -227,13 +233,8 @@ pub fn estimate_sort_spill_reservation(
         .max(1);
     let merge_batch_bytes = batch_size.saturating_mul(avg_row_bytes);
     let reservation = estimated_spill_files.saturating_mul(merge_batch_bytes);
-    let max_reservation = memory_per_partition / 2;
 
-    if max_reservation <= MIN_SORT_SPILL_RESERVATION {
-        // memory budget too tight for clamping -- just use what we can afford
-        return max_reservation;
-    }
-    reservation.clamp(MIN_SORT_SPILL_RESERVATION, max_reservation)
+    Some(reservation.clamp(MIN_SORT_SPILL_RESERVATION, max_reservation))
 }
 
 /// Returns the exact byte size for fixed-width Arrow types, or `None` for variable-width types.
@@ -465,7 +466,7 @@ kernel 500";
             100_000_000, // 100MB per partition
             8192,        // batch size
         );
-        assert_eq!(reservation, 10 * 1024 * 1024); // 10MB floor
+        assert_eq!(reservation, Some(10 * 1024 * 1024)); // 10MB floor
     }
 
     #[test]
@@ -477,7 +478,8 @@ kernel 500";
             10_000_000_000, // 10GB input
             500_000_000,    // 500MB per partition
             8192,           // batch size
-        );
+        )
+        .unwrap();
         assert_eq!(reservation, 20 * 8192 * 200);
         assert!(reservation > 10 * 1024 * 1024); // above floor
         assert!(reservation < 250_000_000); // below ceiling (250MB)
@@ -493,33 +495,31 @@ kernel 500";
             memory_per_partition,
             8192,
         );
-        assert_eq!(reservation, memory_per_partition / 2); // ceiling
+        assert_eq!(reservation, Some(memory_per_partition / 2)); // ceiling
     }
 
     #[test]
     fn test_sort_spill_reservation_zero_row_bytes() {
         let reservation = estimate_sort_spill_reservation(0, 1_000_000, 100_000_000, 8192);
-        assert_eq!(reservation, 10 * 1024 * 1024); // falls back to floor
+        assert_eq!(reservation, None);
     }
 
     #[test]
     fn test_sort_spill_reservation_zero_memory_per_partition() {
         let reservation = estimate_sort_spill_reservation(100, 1_000_000, 0, 8192);
-        assert_eq!(reservation, 10 * 1024 * 1024); // falls back to floor
+        assert_eq!(reservation, None);
     }
 
     #[test]
     fn test_sort_spill_reservation_tight_budget() {
         // memory_per_partition < 20MB means max_reservation < MIN_SORT_SPILL_RESERVATION
-        // should return max_reservation instead of panicking
-        let memory_per_partition = 10_000_000; // 10MB
         let reservation = estimate_sort_spill_reservation(
             200,            // 200 bytes/row
             10_000_000_000, // 10GB input
-            memory_per_partition,
+            10_000_000,     // 10MB per partition
             8192,
         );
-        assert_eq!(reservation, memory_per_partition / 2);
+        assert_eq!(reservation, None);
     }
 
     #[tokio::test]
