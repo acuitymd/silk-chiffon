@@ -1,10 +1,13 @@
-//! Container-aware memory detection.
+//! Container-aware memory detection and sort memory estimation.
 //!
 //! Uses cgroup limits when running in a container (Linux), falls back to system
 //! memory on macOS or when not containerized.
 
 use arrow::datatypes::{DataType, Schema};
+use futures::StreamExt;
 use sysinfo::System;
+
+use crate::io_strategies::input_strategy::InputStrategy;
 
 /// Returns total memory in bytes, respecting container cgroup limits.
 ///
@@ -163,6 +166,67 @@ fn parse_memory_stat_net_used(content: &str) -> Option<u64> {
 
     let total = anon + file + kernel + kernel_stack + pagetables + percpu + slab_unreclaimable;
     Some(total.saturating_sub(slab_reclaimable))
+}
+
+/// Sample actual rows from an `InputStrategy` to measure average in-memory Arrow row size.
+///
+/// Creates a throwaway `SessionContext` and streams batches until `target_rows` rows are
+/// read (or EOF). Returns the average bytes per row based on
+/// `RecordBatch::get_array_memory_size()`, which reflects the real in-memory footprint
+/// including variable-width columns like strings and lists.
+pub async fn sample_avg_row_bytes(
+    input_strategy: &InputStrategy,
+    target_rows: usize,
+) -> anyhow::Result<usize> {
+    let mut ctx = datafusion::prelude::SessionContext::new();
+    let mut stream = input_strategy.as_stream(&mut ctx).await?;
+
+    let mut total_bytes: usize = 0;
+    let mut total_rows: usize = 0;
+    while let Some(batch) = stream.next().await {
+        let batch = batch?;
+        total_bytes += batch.get_array_memory_size();
+        total_rows += batch.num_rows();
+        if total_rows >= target_rows {
+            break;
+        }
+    }
+
+    if total_rows == 0 {
+        return Ok(0);
+    }
+    Ok(total_bytes / total_rows)
+}
+
+const MIN_SORT_SPILL_RESERVATION: usize = 10 * 1024 * 1024; // 10MB (DataFusion default)
+
+/// Estimate `sort_spill_reservation_bytes` from sampled row size and input characteristics.
+///
+/// The merge phase holds one batch per spill file in memory simultaneously.
+/// We estimate spill file count from total input size vs per-partition memory budget,
+/// then multiply by `batch_size * avg_row_bytes` to get the reservation.
+///
+/// Clamped to [10MB, memory_per_partition / 2] so there's always room for the sorter
+/// to accumulate batches before spilling.
+pub fn estimate_sort_spill_reservation(
+    avg_row_bytes: usize,
+    total_input_bytes: u64,
+    memory_per_partition: usize,
+    batch_size: usize,
+) -> usize {
+    if avg_row_bytes == 0 || memory_per_partition == 0 {
+        return MIN_SORT_SPILL_RESERVATION;
+    }
+
+    let estimated_spill_files = (total_input_bytes as usize)
+        .checked_div(memory_per_partition)
+        .unwrap_or(1)
+        .max(1);
+    let merge_batch_bytes = batch_size.saturating_mul(avg_row_bytes);
+    let reservation = estimated_spill_files.saturating_mul(merge_batch_bytes);
+    let max_reservation = memory_per_partition / 2;
+
+    reservation.clamp(MIN_SORT_SPILL_RESERVATION, max_reservation)
 }
 
 /// Returns the exact byte size for fixed-width Arrow types, or `None` for variable-width types.
@@ -383,5 +447,57 @@ kernel 500";
     fn test_estimate_row_bytes_empty_schema() {
         let schema = Schema::empty();
         assert_eq!(estimate_row_bytes(&schema), 0);
+    }
+
+    #[test]
+    fn test_sort_spill_reservation_hits_floor() {
+        // small input that would compute below 10MB
+        let reservation = estimate_sort_spill_reservation(
+            100,            // 100 bytes/row
+            1_000_000,      // 1MB input
+            100_000_000,    // 100MB per partition
+            8192,           // batch size
+        );
+        assert_eq!(reservation, 10 * 1024 * 1024); // 10MB floor
+    }
+
+    #[test]
+    fn test_sort_spill_reservation_scales_up() {
+        // large input: 10GB input, 500MB per partition = ~20 spill files
+        // 20 * 8192 * 200 = ~32MB
+        let reservation = estimate_sort_spill_reservation(
+            200,                // 200 bytes/row
+            10_000_000_000,     // 10GB input
+            500_000_000,        // 500MB per partition
+            8192,               // batch size
+        );
+        assert_eq!(reservation, 20 * 8192 * 200);
+        assert!(reservation > 10 * 1024 * 1024); // above floor
+        assert!(reservation < 250_000_000);       // below ceiling (250MB)
+    }
+
+    #[test]
+    fn test_sort_spill_reservation_hits_ceiling() {
+        // huge input with wide rows: would exceed half of per-partition budget
+        let memory_per_partition = 100_000_000; // 100MB
+        let reservation = estimate_sort_spill_reservation(
+            2000,               // 2KB/row (wide rows)
+            100_000_000_000,    // 100GB input
+            memory_per_partition,
+            8192,
+        );
+        assert_eq!(reservation, memory_per_partition / 2); // ceiling
+    }
+
+    #[test]
+    fn test_sort_spill_reservation_zero_row_bytes() {
+        let reservation = estimate_sort_spill_reservation(0, 1_000_000, 100_000_000, 8192);
+        assert_eq!(reservation, 10 * 1024 * 1024); // falls back to floor
+    }
+
+    #[test]
+    fn test_sort_spill_reservation_zero_memory_per_partition() {
+        let reservation = estimate_sort_spill_reservation(100, 1_000_000, 0, 8192);
+        assert_eq!(reservation, 10 * 1024 * 1024); // falls back to floor
     }
 }
