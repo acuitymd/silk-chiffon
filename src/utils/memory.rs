@@ -227,6 +227,10 @@ pub fn estimate_sort_spill_reservation(
     let reservation = estimated_spill_files.saturating_mul(merge_batch_bytes);
     let max_reservation = memory_per_partition / 2;
 
+    if max_reservation <= MIN_SORT_SPILL_RESERVATION {
+        // memory budget too tight for clamping -- just use what we can afford
+        return max_reservation;
+    }
     reservation.clamp(MIN_SORT_SPILL_RESERVATION, max_reservation)
 }
 
@@ -500,6 +504,20 @@ kernel 500";
     fn test_sort_spill_reservation_zero_memory_per_partition() {
         let reservation = estimate_sort_spill_reservation(100, 1_000_000, 0, 8192);
         assert_eq!(reservation, 10 * 1024 * 1024); // falls back to floor
+    }
+
+    #[test]
+    fn test_sort_spill_reservation_tight_budget() {
+        // memory_per_partition < 20MB means max_reservation < MIN_SORT_SPILL_RESERVATION
+        // should return max_reservation instead of panicking
+        let memory_per_partition = 10_000_000; // 10MB
+        let reservation = estimate_sort_spill_reservation(
+            200,            // 200 bytes/row
+            10_000_000_000, // 10GB input
+            memory_per_partition,
+            8192,
+        );
+        assert_eq!(reservation, memory_per_partition / 2);
     }
 
     #[tokio::test]
