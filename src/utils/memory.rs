@@ -218,6 +218,7 @@ pub fn estimate_sort_spill_reservation(
         return MIN_SORT_SPILL_RESERVATION;
     }
 
+    #[allow(clippy::cast_possible_truncation)]
     let estimated_spill_files = (total_input_bytes as usize)
         .checked_div(memory_per_partition)
         .unwrap_or(1)
