@@ -620,12 +620,12 @@ kernel 500";
 
     #[test]
     fn test_budget_plan_generous_narrow_sort() {
-        // 500MB, narrow schema (36 bytes/row), sort, parquet sink needs ~205MB
+        // 500MB, narrow schema (36 bytes/row), sort — with default queues (no
+        // user overrides), estimate uses minimum 4 slots so sink needs ~205MB
         let total = 500 * 1024 * 1024;
         let row_bytes = 36;
         let sink_needs = ParquetSinkOptions::new().estimate_sink_needs(row_bytes);
         let plan = BudgetPlan::new(total, WorkloadKind::Active, row_bytes, sink_needs);
-        // sort workloads use 15% overhead
         let overhead = total * 15 / 100;
         let usable = total - overhead;
         assert_eq!(plan.overhead_reserve, overhead);

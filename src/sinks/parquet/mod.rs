@@ -306,9 +306,14 @@ struct ResolvedParquetSizing {
 impl ParquetSinkOptions {
     pub fn estimate_sink_needs(&self, row_bytes: usize) -> usize {
         let row_group_bytes = self.max_row_group_size.saturating_mul(row_bytes);
-        // 4 slots: ingestion(1) + encoding(1) + writing(1) + concurrency(1) at minimum
+        // user-specified queue sizes are trusted; unset queues use 1 (minimum
+        // viable) so the budget planner gives DF maximum breathing room
+        let slots = self.ingestion_queue_size.unwrap_or(1)
+            + self.encoding_queue_size.unwrap_or(1)
+            + self.writing_queue_size.unwrap_or(1)
+            + self.max_row_group_concurrency.unwrap_or(1);
         row_group_bytes
-            .saturating_mul(4)
+            .saturating_mul(slots)
             .saturating_mul(ENCODING_OVERHEAD_PCT)
             .saturating_div(100)
             .saturating_add(self.buffer_size)
