@@ -40,6 +40,7 @@ impl DataSource for ParquetDataSource {
     fn row_count(&self) -> Result<usize> {
         let file = File::open(&self.path)?;
         let reader = SerializedFileReader::new(file)?;
+        #[allow(clippy::cast_possible_truncation)]
         Ok(reader.metadata().file_metadata().num_rows() as usize)
     }
 

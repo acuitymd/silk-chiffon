@@ -17,7 +17,6 @@ use crate::{
         path_template::PathTemplate,
     },
     operations::data_operation::DataOperation,
-    sources::data_source::DataSource,
 };
 
 #[derive(Default)]
