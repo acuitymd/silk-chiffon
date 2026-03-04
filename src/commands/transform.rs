@@ -4,7 +4,10 @@ use crate::{
     AllColumnsBloomFilterConfig, BloomFilterConfig, DEFAULT_BLOOM_FILTER_FPP, DataFormat,
     DictionaryMode, ListOutputsFormat, PartitionStrategy, SortSpec, TransformCommand,
     default_thread_budget,
-    io_strategies::{OutputFileInfo, output_strategy::SinkFactory, path_template::PathTemplate},
+    io_strategies::{
+        OutputFileInfo, input_strategy::InputStrategy, output_strategy::SinkFactory,
+        path_template::PathTemplate,
+    },
     operations::{query::QueryOperation, sort::SortOperation},
     pipeline::Pipeline,
     sinks::{
@@ -151,8 +154,8 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         (from_many, true)
     };
 
-    let first_source = open_first_source(&input_paths, should_glob, input_format)?;
-    let input_schema = first_source.schema()?;
+    let (input_strategy, input_schema) =
+        build_input_strategy(&input_paths, should_glob, input_format)?;
 
     let output_path_for_format = to.as_deref().or(to_many.as_deref());
     let detected_output_format = output_path_for_format
@@ -239,8 +242,8 @@ pub async fn run(args: TransformCommand) -> Result<()> {
     // only sample row sizes when a budget is active — row_size() opens the file
     // and streams up to TARGET_SAMPLE_ROWS rows, which is wasted I/O otherwise
     let (budget, row_bytes) = if let Some(total) = resolved_budget {
-        let rb = first_source
-            .row_size()
+        let rb = input_strategy
+            .row_size(&input_schema)
             .context("failed to sample row sizes from input")?;
         let sink_needs = match detected_output_format {
             Some(DataFormat::Parquet) | None => parquet_options.estimate_sink_needs(rb),
@@ -297,7 +300,8 @@ pub async fn run(args: TransformCommand) -> Result<()> {
     };
     let sort_spill_reservation = if let (Some(budget), Some(col_names)) = (&budget, &sort_col_names)
     {
-        let avg_sizes = first_source.estimate_column_sizes(col_names, TARGET_SAMPLE_ROWS)?;
+        let avg_sizes =
+            input_strategy.estimate_column_sizes(&input_schema, col_names, TARGET_SAMPLE_ROWS)?;
         let rb = row_bytes.expect("row_bytes is Some when budget is Some");
         let (data_bytes, encoding_bytes) =
             sort_merge_row_overhead(&input_schema, col_names, &avg_sizes, rb);
@@ -329,63 +333,8 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         .with_target_partitions(effective_target_partitions)
         .with_sort_spill_reservation(sort_spill_reservation)
         .with_spill_path(spill_path)
-        .with_spill_compression(spill_compression);
-
-    let setup_result: Result<()> = {
-        if !should_glob && input_paths.len() == 1 {
-            let input_path = &input_paths[0];
-            let detected_input_format = detect_format(input_path, input_format)?;
-
-            let source = detected_input_format.into_datasource(input_path.clone());
-            pipeline = pipeline.with_input_strategy_with_single_source(source);
-            Ok(())
-        } else {
-            let mut expanded_paths = Vec::new();
-
-            for pattern in &input_paths {
-                for entry in glob(pattern)
-                    .map_err(|e| anyhow!("Error expanding glob pattern {}: {}", pattern, e))?
-                {
-                    expanded_paths.push(
-                        entry
-                            .map_err(|e| anyhow!("Error decoding file path: {}", e))?
-                            .to_string_lossy()
-                            .to_string(),
-                    );
-                }
-            }
-
-            expanded_paths.sort();
-            expanded_paths.dedup();
-
-            if expanded_paths.is_empty() {
-                anyhow::bail!("No input files found matching patterns: {:?}", input_paths);
-            }
-
-            let mut sources: Vec<Box<dyn DataSource>> = Vec::new();
-            let mut schema: Option<SchemaRef> = None;
-            for input_path in expanded_paths {
-                let detected_input_format = detect_format(&input_path, input_format)?;
-                let source = detected_input_format.into_datasource(input_path.clone());
-                if let Some(ref schema) = schema {
-                    let source_schema = source.schema()?;
-                    if *schema != source_schema {
-                        anyhow::bail!(
-                            "Schema mismatch for input file {} (does not match other file(s))",
-                            &input_path
-                        );
-                    }
-                } else {
-                    schema = Some(source.schema()?);
-                }
-                sources.push(source);
-            }
-            pipeline = pipeline.with_input_strategy_with_multiple_sources(sources);
-            Ok(())
-        }
-    };
-
-    setup_result?;
+        .with_spill_compression(spill_compression)
+        .with_input_strategy(input_strategy);
 
     let list_outputs_format = list_outputs;
 
@@ -652,24 +601,55 @@ fn create_sink_factory(
     }))
 }
 
-fn open_first_source(
+fn build_input_strategy(
     paths: &[String],
     should_glob: bool,
     input_format: Option<DataFormat>,
-) -> Result<Box<dyn DataSource>> {
-    let first_path = if should_glob {
-        paths
-            .iter()
-            .find_map(|pattern| glob(pattern).ok().and_then(|mut g| g.next()))
-            .ok_or_else(|| anyhow!("No input files found matching patterns: {:?}", paths))?
-            .map_err(|e| anyhow!("Error decoding file path: {}", e))?
-            .to_string_lossy()
-            .to_string()
+) -> Result<(InputStrategy, SchemaRef)> {
+    if !should_glob && paths.len() == 1 {
+        let path = &paths[0];
+        let source = detect_format(path, input_format)?.into_datasource(path.clone());
+        let schema = source.schema()?;
+        Ok((InputStrategy::Single(source), schema))
     } else {
-        paths
-            .first()
-            .cloned()
-            .ok_or_else(|| anyhow!("No input files provided"))?
-    };
-    Ok(detect_format(&first_path, input_format)?.into_datasource(first_path))
+        let mut expanded_paths = Vec::new();
+        for pattern in paths {
+            for entry in
+                glob(pattern).map_err(|e| anyhow!("Error expanding glob pattern {pattern}: {e}"))?
+            {
+                expanded_paths.push(
+                    entry
+                        .map_err(|e| anyhow!("Error decoding file path: {e}"))?
+                        .to_string_lossy()
+                        .to_string(),
+                );
+            }
+        }
+        expanded_paths.sort();
+        expanded_paths.dedup();
+
+        if expanded_paths.is_empty() {
+            anyhow::bail!("No input files found matching patterns: {:?}", paths);
+        }
+
+        let mut sources: Vec<Box<dyn DataSource>> = Vec::new();
+        let mut schema: Option<SchemaRef> = None;
+        for input_path in expanded_paths {
+            let source = detect_format(&input_path, input_format)?.into_datasource(input_path.clone());
+            if let Some(ref schema) = schema {
+                let source_schema = source.schema()?;
+                if *schema != source_schema {
+                    anyhow::bail!(
+                        "Schema mismatch for input file {} (does not match other file(s))",
+                        &input_path
+                    );
+                }
+            } else {
+                schema = Some(source.schema()?);
+            }
+            sources.push(source);
+        }
+        let schema = schema.expect("expanded_paths is non-empty");
+        Ok((InputStrategy::Multiple(sources), schema))
+    }
 }

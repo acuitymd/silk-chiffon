@@ -210,14 +210,8 @@ fn array_data_size_inner(data: &arrow::array::ArrayData) -> usize {
 
 /// Sample variable-width column sizes from a data source's stream.
 ///
-/// Reads batches until we have at least `max_sample_rows` non-null values
-/// for every variable-width column. This ensures we get a robust estimate
-/// even when columns have high null rates. Caps total rows read at
-/// `10 * max_sample_rows` to avoid reading the entire file.
-///
-/// The per-row estimate inherently accounts for null rate: dividing total
-/// buffer bytes by total rows gives a per-row average where nulls contribute
-/// zero data bytes (only offset/bitmap overhead).
+/// Thin wrapper around [`sample_column_sizes_from_batch_stream`] that opens
+/// a stream from the source with a large batch_size to avoid sub-batch splitting.
 fn sample_variable_column_sizes_from_stream(
     source: &(impl DataSource + ?Sized),
     variable_cols: &[(String, usize)],
@@ -234,55 +228,75 @@ fn sample_variable_column_sizes_from_stream(
             let config = datafusion::prelude::SessionConfig::new().with_batch_size(max_total_rows);
             let state = SessionStateBuilder::new().with_config(config).build();
             let mut ctx = SessionContext::new_with_state(state);
-            let mut stream = source.as_stream_with_session_context(&mut ctx).await?;
-            let mut col_bytes: Vec<usize> = vec![0; variable_cols.len()];
-            let mut col_non_nulls: Vec<usize> = vec![0; variable_cols.len()];
-            let mut total_rows: usize = 0;
-
-            while let Some(batch_result) = stream.next().await {
-                let batch = batch_result?;
-                let n = batch.num_rows();
-                if n == 0 {
-                    continue;
-                }
-
-                for (i, (_col_name, col_idx)) in variable_cols.iter().enumerate() {
-                    let col = batch.column(*col_idx);
-                    col_bytes[i] += array_data_size(col.as_ref());
-                    col_non_nulls[i] += n - col.null_count();
-                }
-                total_rows += n;
-
-                // a column is satisfied when we have enough non-null samples, or
-                // when we've read enough rows to be confident it's truly all-null
-                // (not just null-prefixed from sorted/partitioned data)
-                let all_satisfied = col_non_nulls
-                    .iter()
-                    .all(|&nn| nn >= max_sample_rows || (total_rows >= max_sample_rows && nn == 0));
-                if all_satisfied || total_rows >= max_total_rows {
-                    break;
-                }
-            }
-
-            if total_rows == 0 {
-                for (col_name, _) in variable_cols {
-                    result.insert(col_name.clone(), 32);
-                }
-                return Ok(());
-            }
-
-            for (i, (col_name, _)) in variable_cols.iter().enumerate() {
-                let estimate = if col_non_nulls[i] == 0 {
-                    // all null — essentially 0 data bytes per row (just bitmap)
-                    0
-                } else {
-                    col_bytes[i] / total_rows
-                };
-                result.insert(col_name.clone(), estimate);
-            }
-            Ok(())
+            let stream = source.as_stream_with_session_context(&mut ctx).await?;
+            sample_column_sizes_from_batch_stream(stream, variable_cols, max_sample_rows, result)
+                .await
         })
     })
+}
+
+/// Sample variable-width column sizes from a record batch stream.
+///
+/// Reads batches until we have at least `max_sample_rows` non-null values
+/// for every variable-width column. This ensures we get a robust estimate
+/// even when columns have high null rates. Caps total rows read at
+/// `10 * max_sample_rows` to avoid reading the entire file.
+///
+/// The per-row estimate inherently accounts for null rate: dividing total
+/// buffer bytes by total rows gives a per-row average where nulls contribute
+/// zero data bytes (only offset/bitmap overhead).
+pub(crate) async fn sample_column_sizes_from_batch_stream(
+    mut stream: SendableRecordBatchStream,
+    variable_cols: &[(String, usize)],
+    max_sample_rows: usize,
+    result: &mut HashMap<String, usize>,
+) -> Result<()> {
+    let max_total_rows = max_sample_rows.saturating_mul(10);
+    let mut col_bytes: Vec<usize> = vec![0; variable_cols.len()];
+    let mut col_non_nulls: Vec<usize> = vec![0; variable_cols.len()];
+    let mut total_rows: usize = 0;
+
+    while let Some(batch_result) = stream.next().await {
+        let batch = batch_result?;
+        let n = batch.num_rows();
+        if n == 0 {
+            continue;
+        }
+
+        for (i, (_col_name, col_idx)) in variable_cols.iter().enumerate() {
+            let col = batch.column(*col_idx);
+            col_bytes[i] += array_data_size(col.as_ref());
+            col_non_nulls[i] += n - col.null_count();
+        }
+        total_rows += n;
+
+        // a column is satisfied when we have enough non-null samples, or
+        // when we've read enough rows to be confident it's truly all-null
+        // (not just null-prefixed from sorted/partitioned data)
+        let all_satisfied = col_non_nulls
+            .iter()
+            .all(|&nn| nn >= max_sample_rows || (total_rows >= max_sample_rows && nn == 0));
+        if all_satisfied || total_rows >= max_total_rows {
+            break;
+        }
+    }
+
+    if total_rows == 0 {
+        for (col_name, _) in variable_cols {
+            result.insert(col_name.clone(), 32);
+        }
+        return Ok(());
+    }
+
+    for (i, (col_name, _)) in variable_cols.iter().enumerate() {
+        let estimate = if col_non_nulls[i] == 0 {
+            0
+        } else {
+            col_bytes[i] / total_rows
+        };
+        result.insert(col_name.clone(), estimate);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

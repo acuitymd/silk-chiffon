@@ -620,8 +620,8 @@ kernel 500";
 
     #[test]
     fn test_budget_plan_generous_narrow_sort() {
-        // 500MB, narrow schema (36 bytes/row), sort — with default queues (no
-        // user overrides), estimate uses minimum 4 slots so sink needs ~205MB
+        // 500MB, narrow schema (36 bytes/row), sort -- with default queues (no
+        // user overrides), estimate uses 1 slot (concurrency only) so sink needs ~75MB
         let total = 500 * 1024 * 1024;
         let row_bytes = 36;
         let sink_needs = ParquetSinkOptions::new().estimate_sink_needs(row_bytes);
@@ -640,17 +640,16 @@ kernel 500";
 
     #[test]
     fn test_budget_plan_generous_wide_sort() {
-        // 500MB, wide schema (260 bytes/row), sort — sink needs exceed budget,
-        // DF floor kicks in
+        // 500MB, wide schema (260 bytes/row), sort -- with 1-slot estimate,
+        // sink needs ~344MB which fits in usable (~425MB), DF gets the rest
         let total = 500 * 1024 * 1024;
         let row_bytes = 260;
         let sink_needs = ParquetSinkOptions::new().estimate_sink_needs(row_bytes);
         let plan = BudgetPlan::new(total, WorkloadKind::Active, row_bytes, sink_needs);
-        let df_floor = WorkloadKind::Active.df_floor(row_bytes);
-        assert_eq!(plan.datafusion_pool, df_floor);
-        // sink gets usable minus DF floor
         let usable = total - plan.overhead_reserve;
-        assert_eq!(plan.sink_budget, usable - df_floor);
+        // sink fits within usable, so DF gets usable - sink_needs
+        assert_eq!(plan.datafusion_pool, usable - sink_needs);
+        assert_eq!(plan.sink_budget, sink_needs);
     }
 
     #[test]

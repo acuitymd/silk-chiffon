@@ -732,6 +732,159 @@ async fn test_budget_million_row_multi_col_sort_with_strings() {
     assert_sorted_asc_string(&batches, "region");
 }
 
+// --- stress tests: sort partition count capping ---
+//
+// These push large data through constrained budgets where partition capping
+// (pool / 256MB) is the difference between success and OOM. Each test asserts
+// correct row count AND sort order — if capping fails, the sort will either
+// OOM or produce incorrect results.
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_stress_sort_partition_cap_narrow_500k() {
+    // 500K narrow rows, 300MB budget. DF pool ~220-250MB → 1 partition.
+    // forces spills within a single partition.
+    let t = BudgetTest::new();
+    let input = t.write_narrow(500_000);
+    let (output, output_path) = t.parquet_output();
+
+    run_transform(silk_chiffon::TransformCommand {
+        memory_budget: MemoryBudgetSpec::Fixed(300 * MB),
+        output_format: Some(DataFormat::Parquet),
+        sort_by: Some(sort_asc("id")),
+        ..default_args(&input, &output)
+    })
+    .await;
+
+    let batches = TestFile::read_parquet(&output_path);
+    assert_eq!(count_rows(&batches), 500_000);
+    assert_sorted_asc_i32(&batches, "id");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_stress_sort_partition_cap_wide_200k() {
+    // 200K wide rows (~280 bytes/row, ~56MB data), 800MB budget.
+    // sink estimate ~336MB (1 RG x 280 bytes x 1.2), DF pool ~340MB -> 1 partition.
+    // wide schema has large RowConverter encoding overhead.
+    let t = BudgetTest::new();
+    let input = t.write_wide(200_000);
+    let (output, output_path) = t.parquet_output();
+
+    run_transform(silk_chiffon::TransformCommand {
+        memory_budget: MemoryBudgetSpec::Fixed(800 * MB),
+        output_format: Some(DataFormat::Parquet),
+        sort_by: Some(sort_desc("i32_0")),
+        ..default_args(&input, &output)
+    })
+    .await;
+
+    let batches = TestFile::read_parquet(&output_path);
+    assert_eq!(count_rows(&batches), 200_000);
+    assert_sorted_desc_i32(&batches, "i32_0");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_stress_sort_partition_cap_string_heavy_300k() {
+    // 300K string-heavy rows (~280 bytes/row), 800MB budget.
+    // sink estimate ~336MB, DF pool ~340MB -> 1 partition.
+    // variable-width sort keys exercise both partition capping AND
+    // spill reservation (RowConverter overhead).
+    let t = BudgetTest::new();
+    let input = t.write_string_heavy(300_000);
+    let (output, output_path) = t.parquet_output();
+
+    run_transform(silk_chiffon::TransformCommand {
+        memory_budget: MemoryBudgetSpec::Fixed(800 * MB),
+        output_format: Some(DataFormat::Parquet),
+        sort_by: Some(multi_sort(&[
+            ("region", SortDirection::Ascending),
+            ("category", SortDirection::Ascending),
+            ("score", SortDirection::Descending),
+        ])),
+        ..default_args(&input, &output)
+    })
+    .await;
+
+    let batches = TestFile::read_parquet(&output_path);
+    assert_eq!(count_rows(&batches), 300_000);
+    assert_sorted_asc_string(&batches, "region");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_stress_sort_partition_cap_at_boundary() {
+    // 200K narrow rows, 600MB budget. DF pool ~480-510MB → ~2 partitions.
+    // tests the 1→2 partition transition boundary.
+    let t = BudgetTest::new();
+    let input = t.write_narrow(200_000);
+    let (output, output_path) = t.parquet_output();
+
+    run_transform(silk_chiffon::TransformCommand {
+        memory_budget: MemoryBudgetSpec::Fixed(600 * MB),
+        output_format: Some(DataFormat::Parquet),
+        sort_by: Some(sort_asc("id")),
+        ..default_args(&input, &output)
+    })
+    .await;
+
+    let batches = TestFile::read_parquet(&output_path);
+    assert_eq!(count_rows(&batches), 200_000);
+    assert_sorted_asc_i32(&batches, "id");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_stress_sort_partition_cap_multi_source() {
+    // 10 small Arrow files (10K rows each = 100K total), 300MB budget, sort.
+    // exercises multi-source sampling AND partition capping with glob input.
+    let t = BudgetTest::new();
+    let dir = t.dir.path();
+    for i in 0..10 {
+        let path = dir.join(format!("input_{i:02}.arrow"));
+        TestFile::write_arrow_batch(&path, &TestBatch::narrow(10_000));
+    }
+    let glob_pattern = dir.join("input_*.arrow").to_str().unwrap().to_string();
+    let (output, output_path) = t.parquet_output();
+
+    run_transform(silk_chiffon::TransformCommand {
+        from: None,
+        from_many: vec![glob_pattern],
+        memory_budget: MemoryBudgetSpec::Fixed(300 * MB),
+        output_format: Some(DataFormat::Parquet),
+        sort_by: Some(sort_asc("id")),
+        ..default_args("unused", &output)
+    })
+    .await;
+
+    let batches = TestFile::read_parquet(&output_path);
+    assert_eq!(count_rows(&batches), 100_000);
+    assert_sorted_asc_i32(&batches, "id");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_stress_sort_partition_cap_multi_col_variable() {
+    // 100K string-heavy rows (~280 bytes/row), 800MB budget. sort on 4
+    // columns including multiple variable-width keys -- amplifies
+    // RowConverter encoding overhead.
+    let t = BudgetTest::new();
+    let input = t.write_string_heavy(100_000);
+    let (output, output_path) = t.parquet_output();
+
+    run_transform(silk_chiffon::TransformCommand {
+        memory_budget: MemoryBudgetSpec::Fixed(800 * MB),
+        output_format: Some(DataFormat::Parquet),
+        sort_by: Some(multi_sort(&[
+            ("region", SortDirection::Ascending),
+            ("label", SortDirection::Ascending),
+            ("category", SortDirection::Ascending),
+            ("id", SortDirection::Ascending),
+        ])),
+        ..default_args(&input, &output)
+    })
+    .await;
+
+    let batches = TestFile::read_parquet(&output_path);
+    assert_eq!(count_rows(&batches), 100_000);
+    assert_sorted_asc_string(&batches, "region");
+}
+
 #[test]
 fn test_budget_plan_invariant_across_sizes() {
     use silk_chiffon::sinks::parquet::ParquetSinkOptions;

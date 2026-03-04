@@ -53,6 +53,11 @@ impl Pipeline {
         Self::default()
     }
 
+    pub fn with_input_strategy(mut self, strategy: InputStrategy) -> Self {
+        self.input_strategy = Some(strategy);
+        self
+    }
+
     pub fn with_input_strategy_with_single_source(mut self, source: Box<dyn DataSource>) -> Self {
         self.input_strategy = Some(InputStrategy::Single(source));
 

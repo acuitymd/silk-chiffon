@@ -306,11 +306,15 @@ struct ResolvedParquetSizing {
 impl ParquetSinkOptions {
     pub fn estimate_sink_needs(&self, row_bytes: usize) -> usize {
         let row_group_bytes = self.max_row_group_size.saturating_mul(row_bytes);
-        // user-specified queue sizes are trusted; unset queues use 1 (minimum
-        // viable) so the budget planner gives DF maximum breathing room
-        let slots = self.ingestion_queue_size.unwrap_or(1)
-            + self.encoding_queue_size.unwrap_or(1)
-            + self.writing_queue_size.unwrap_or(1)
+        // user-specified queue sizes are trusted; unset queues default to 0
+        // (pipelining is optional). concurrency defaults to 1 because the
+        // sink always needs at least one row group in flight. this gives
+        // the budget planner the minimum viable sink footprint so DF gets
+        // maximum breathing room. resolve_sizing later derives actual
+        // queue depths from whatever sink_budget BudgetPlan allocates.
+        let slots = self.ingestion_queue_size.unwrap_or(0)
+            + self.encoding_queue_size.unwrap_or(0)
+            + self.writing_queue_size.unwrap_or(0)
             + self.max_row_group_concurrency.unwrap_or(1);
         row_group_bytes
             .saturating_mul(slots)
