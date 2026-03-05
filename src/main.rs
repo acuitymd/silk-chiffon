@@ -1,6 +1,10 @@
 use anyhow::Result;
 use clap::Parser;
+use mimalloc::MiMalloc;
 use silk_chiffon::{Cli, Commands, commands, default_thread_budget};
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
