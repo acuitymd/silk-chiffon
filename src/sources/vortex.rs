@@ -48,7 +48,7 @@ impl DataSource for VortexDataSource {
                 let session = VortexSession::default();
                 let vortex_file = session
                     .open_options()
-                    .open(self.path.as_str())
+                    .open_path(self.path.as_str())
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to open Vortex file: {}", e))?;
 
@@ -68,7 +68,7 @@ impl DataSource for VortexDataSource {
                 let session = VortexSession::default();
                 let vortex_file = session
                     .open_options()
-                    .open(self.path.as_str())
+                    .open_path(self.path.as_str())
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to open Vortex file: {}", e))?;
 
@@ -228,7 +228,7 @@ impl ExecutionPlan for VortexExec {
             let session = VortexSession::default();
             let vortex_file = session
                 .open_options()
-                .open(path.to_str().unwrap())
+                .open_path(&path)
                 .await
                 .map_err(|e| DataFusionError::External(Box::new(e)))?;
 
