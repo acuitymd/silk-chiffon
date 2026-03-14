@@ -218,6 +218,65 @@ fn parse_percent(s: Option<&str>, default: u8) -> Result<u8> {
     Ok(pct)
 }
 
+/// Specifies a memory reserve as either a percentage or fixed byte size.
+///
+/// Used for pool sub-budgets where the reference point is the pool size.
+/// - `"10"` or `"10%"` - percentage of pool
+/// - `"200MB"` or `"1GiB"` - fixed byte size (unit required)
+#[derive(Debug, Clone)]
+pub enum PoolReserveSpec {
+    /// Percentage of pool size (1-99).
+    Percent(u8),
+    /// Fixed byte amount.
+    Fixed(usize),
+}
+
+impl PoolReserveSpec {
+    /// Resolve the reserve against the given pool size.
+    ///
+    /// Fixed values are clamped to at most `pool_size - 1` so the pool
+    /// always retains at least 1 byte for spillable consumers.
+    pub fn resolve(&self, pool_size: usize) -> usize {
+        match self {
+            Self::Percent(pct) => pool_size * usize::from(*pct) / 100,
+            Self::Fixed(n) => {
+                let max_reserve = pool_size.saturating_sub(1);
+                if *n > max_reserve {
+                    eprintln!(
+                        "warning: non-spillable reserve ({}) exceeds pool size ({}), clamping to {}",
+                        bytesize::ByteSize::b(*n as u64),
+                        bytesize::ByteSize::b(pool_size as u64),
+                        bytesize::ByteSize::b(max_reserve as u64),
+                    );
+                    max_reserve
+                } else {
+                    *n
+                }
+            }
+        }
+    }
+}
+
+impl FromStr for PoolReserveSpec {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s_stripped = s.strip_suffix('%').unwrap_or(s);
+
+        if !s_stripped.is_empty() && s_stripped.chars().all(|c| c.is_ascii_digit()) {
+            let pct: u8 = s_stripped
+                .parse()
+                .map_err(|_| anyhow!("invalid percentage '{s}': expected 1-99"))?;
+            if pct == 0 || pct >= 100 {
+                anyhow::bail!("reserve percentage must be between 1 and 99, got {pct}");
+            }
+            return Ok(Self::Percent(pct));
+        }
+
+        parse_nonzero_byte_size(s).map(Self::Fixed)
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(version = env!("SILK_CHIFFON_VERSION"), about, long_about = None)]
 pub struct Cli {
@@ -1281,6 +1340,29 @@ pub struct TransformCommand {
     #[arg(long, help_heading = "Execution", value_parser = MemoryBudgetSpec::from_str, default_value = "total:80%")]
     pub memory_budget: MemoryBudgetSpec,
 
+    /// Memory reserved for non-spillable operations (sort merge phases, etc.).
+    ///
+    /// Spillable operators (sorts, aggregations) cannot use this portion of
+    /// the memory pool, guaranteeing headroom for non-spillable consumers
+    /// that would otherwise fail when the pool is full.
+    ///
+    /// Accepts a percentage (e.g. "10%", "10") or a fixed byte size (e.g. "200MB").
+    /// Percentages are resolved against the memory pool size.
+    ///
+    /// Default: 10% of the memory pool.
+    #[arg(long, help_heading = "Execution", value_parser = PoolReserveSpec::from_str, default_value = "10%")]
+    pub non_spillable_reserve: PoolReserveSpec,
+
+    /// Number of top memory consumers to report in out-of-memory error messages.
+    ///
+    /// When a memory allocation fails, the error message includes the N largest
+    /// memory consumers to help diagnose what is using the pool. Set to 0 to
+    /// report all consumers.
+    ///
+    /// Default: 10.
+    #[arg(long, help_heading = "Execution", default_value = "10")]
+    pub memory_pool_top_consumers: usize,
+
     /// Target thread budget for parallel work. Best-effort, not a hard limit.
     ///
     /// Accepts a number (e.g. "8"), "reserve:N" to use all CPUs minus N (minimum 1),
@@ -1824,6 +1906,8 @@ impl TransformCommand {
             query: None,
             sort_by: None,
             memory_budget: MemoryBudgetSpec::Total { pct: 80, min: None },
+            non_spillable_reserve: PoolReserveSpec::Percent(10),
+            memory_pool_top_consumers: 10,
             preserve_input_order: false,
             target_partitions: None,
             thread_budget: None,
@@ -2108,6 +2192,70 @@ mod tests {
             assert!(ThreadBudgetSpec::from_str("reserve").is_err());
             assert!(ThreadBudgetSpec::from_str("garbage:2").is_err());
             assert!(ThreadBudgetSpec::from_str("reserve:abc").is_err());
+        }
+    }
+
+    mod pool_reserve_spec_tests {
+        use super::*;
+
+        #[test]
+        fn parse_bare_number_as_percentage() {
+            let spec: PoolReserveSpec = "10".parse().unwrap();
+            assert!(matches!(spec, PoolReserveSpec::Percent(10)));
+        }
+
+        #[test]
+        fn parse_percentage_with_suffix() {
+            let spec: PoolReserveSpec = "25%".parse().unwrap();
+            assert!(matches!(spec, PoolReserveSpec::Percent(25)));
+        }
+
+        #[test]
+        fn parse_fixed_byte_size() {
+            let spec: PoolReserveSpec = "200MB".parse().unwrap();
+            assert!(matches!(spec, PoolReserveSpec::Fixed(200_000_000)));
+        }
+
+        #[test]
+        fn parse_fixed_byte_size_binary() {
+            let spec: PoolReserveSpec = "1GiB".parse().unwrap();
+            assert!(matches!(spec, PoolReserveSpec::Fixed(1_073_741_824)));
+        }
+
+        #[test]
+        fn reject_zero_percentage() {
+            assert!("0".parse::<PoolReserveSpec>().is_err());
+            assert!("0%".parse::<PoolReserveSpec>().is_err());
+        }
+
+        #[test]
+        fn reject_100_percent() {
+            assert!("100".parse::<PoolReserveSpec>().is_err());
+            assert!("100%".parse::<PoolReserveSpec>().is_err());
+        }
+
+        #[test]
+        fn reject_empty_string() {
+            assert!("".parse::<PoolReserveSpec>().is_err());
+        }
+
+        #[test]
+        fn resolve_percentage() {
+            let spec = PoolReserveSpec::Percent(10);
+            assert_eq!(spec.resolve(1000), 100);
+        }
+
+        #[test]
+        fn resolve_fixed_clamps_to_pool() {
+            let spec = PoolReserveSpec::Fixed(8_000_000_000);
+            let resolved = spec.resolve(4_000_000_000);
+            assert_eq!(resolved, 3_999_999_999);
+        }
+
+        #[test]
+        fn resolve_fixed_within_pool() {
+            let spec = PoolReserveSpec::Fixed(200_000_000);
+            assert_eq!(spec.resolve(1_000_000_000), 200_000_000);
         }
     }
 

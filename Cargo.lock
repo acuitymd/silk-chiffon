@@ -3781,6 +3781,7 @@ dependencies = [
  "minijinja",
  "num-format",
  "owo-colors",
+ "parking_lot",
  "parquet",
  "percent-encoding",
  "predicates",

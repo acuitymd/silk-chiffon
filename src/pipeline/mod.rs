@@ -1,13 +1,17 @@
-use crate::utils::memory::total_memory;
+mod memory_pool;
+
+use std::num::NonZeroUsize;
+
 use anyhow::{Result, anyhow};
 use bytesize::ByteSize;
 use camino::Utf8PathBuf;
-use datafusion::{
-    execution::memory_pool::FairSpillPool,
-    prelude::{SessionConfig, SessionContext},
-};
+use datafusion::execution::memory_pool::TrackConsumersPool;
+use datafusion::prelude::{SessionConfig, SessionContext};
 use tempfile::TempDir;
 
+use memory_pool::ReservedSpillPool;
+
+use crate::utils::memory::total_memory;
 use crate::{
     ListOutputsFormat, QueryDialect, SpillCompression,
     io_strategies::{
@@ -28,6 +32,8 @@ pub struct PipelineConfig {
     pub spill_path: Option<Utf8PathBuf>,
     pub spill_compression: SpillCompression,
     pub sort_spill_reservation_bytes: Option<usize>,
+    pub non_spillable_reserve: Option<usize>,
+    pub memory_pool_top_consumers: usize,
 }
 
 #[derive(Default)]
@@ -161,6 +167,16 @@ impl Pipeline {
         self
     }
 
+    pub fn with_non_spillable_reserve(mut self, reserve: Option<usize>) -> Self {
+        self.config.non_spillable_reserve = reserve;
+        self
+    }
+
+    pub fn with_memory_pool_top_consumers(mut self, n: usize) -> Self {
+        self.config.memory_pool_top_consumers = n;
+        self
+    }
+
     pub async fn execute(&mut self) -> Result<Vec<OutputFileInfo>> {
         let mut ctx = self.build_session_context()?;
         self.execute_with_session_context(&mut ctx).await
@@ -237,7 +253,16 @@ impl Pipeline {
             path.try_into()?
         };
 
-        let pool = FairSpillPool::new(memory_limit);
+        let non_spillable_reserve = self
+            .config
+            .non_spillable_reserve
+            .unwrap_or(memory_limit / 10);
+        let inner = ReservedSpillPool::new(memory_limit, non_spillable_reserve);
+        let top_n = match self.config.memory_pool_top_consumers {
+            0 => NonZeroUsize::MAX,
+            n => NonZeroUsize::new(n).expect("nonzero by match"),
+        };
+        let pool = TrackConsumersPool::new(inner, top_n);
         let runtime = datafusion::execution::runtime_env::RuntimeEnvBuilder::default()
             .with_temp_file_path(&spill_path)
             .with_memory_pool(std::sync::Arc::new(pool))

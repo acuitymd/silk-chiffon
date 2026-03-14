@@ -47,6 +47,8 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         dialect,
         sort_by,
         memory_budget,
+        non_spillable_reserve,
+        memory_pool_top_consumers,
         preserve_input_order,
         target_partitions,
         input_format,
@@ -169,9 +171,14 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         Some(total_budget * 20 / 100)
     };
 
+    let effective_non_spillable_reserve = effective_memory_limit
+        .map(|pool_size| non_spillable_reserve.resolve(pool_size));
+
     let mut pipeline = Pipeline::new()
         .with_query_dialect(dialect)
         .with_memory_limit(effective_memory_limit)
+        .with_non_spillable_reserve(effective_non_spillable_reserve)
+        .with_memory_pool_top_consumers(memory_pool_top_consumers)
         .with_target_partitions(effective_target_partitions)
         .with_spill_path(spill_path)
         .with_spill_compression(spill_compression);
