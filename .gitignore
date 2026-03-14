@@ -6,3 +6,4 @@
 *.parquet
 *.vortex
 /benchmark_output
+__pycache__

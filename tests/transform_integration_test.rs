@@ -4,8 +4,8 @@ use camino::Utf8PathBuf;
 use silk_chiffon::{
     AllColumnsBloomFilterConfig, ArrowCompression, ArrowIPCFormat, ColumnDictionaryConfig,
     ColumnSpecificBloomFilterConfig, DataFormat, DictionaryMode, ListOutputsFormat,
-    ParquetCompression, ParquetStatistics, ParquetWriterVersion, PartitionStrategy, QueryDialect,
-    SortColumn, SortDirection, SortSpec,
+    ParquetCompression, ParquetStatistics, ParquetWriterVersion, PartitionStrategy,
+    PoolReserveSpec, QueryDialect, SortColumn, SortDirection, SortSpec,
     utils::test_data::{TestBatch, TestFile},
 };
 use std::path::Path;
@@ -3202,4 +3202,182 @@ async fn test_transform_sort_multi_file_with_spill_reservation() {
         })
         .collect();
     assert_eq!(ids, vec![1, 2, 3, 4]);
+}
+
+#[tokio::test]
+async fn test_reserved_spill_pool_simple_transform() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let output = temp_dir.path().join("output.arrow");
+
+    let batch = TestBatch::simple_with(&[3, 1, 2], &["c", "a", "b"]);
+    TestFile::write_arrow_batch(&input, &batch);
+
+    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+        from: Some(input.to_string_lossy().to_string()),
+        to: Some(output.to_string_lossy().to_string()),
+        non_spillable_reserve: Some(PoolReserveSpec::Percent(10)),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    assert!(output.exists());
+    let batches = TestFile::read_arrow_auto(&output);
+    assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 3);
+}
+
+#[tokio::test]
+async fn test_reserved_spill_pool_with_sorting() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let output = temp_dir.path().join("output.arrow");
+
+    let batch = TestBatch::simple_with(&[3, 1, 2], &["c", "a", "b"]);
+    TestFile::write_arrow_batch(&input, &batch);
+
+    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+        from: Some(input.to_string_lossy().to_string()),
+        to: Some(output.to_string_lossy().to_string()),
+        non_spillable_reserve: Some(PoolReserveSpec::Percent(10)),
+        sort_by: Some(SortSpec {
+            columns: vec![SortColumn {
+                name: "id".to_string(),
+                direction: SortDirection::Ascending,
+            }],
+        }),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    assert!(output.exists());
+    let batches = TestFile::read_arrow_auto(&output);
+    let ids = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap();
+    assert_eq!(ids.value(0), 1);
+    assert_eq!(ids.value(1), 2);
+    assert_eq!(ids.value(2), 3);
+}
+
+#[tokio::test]
+async fn test_reserved_spill_pool_with_fixed_reserve() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let output = temp_dir.path().join("output.parquet");
+
+    let batch = TestBatch::simple_with(&[5, 2, 4, 1, 3], &["e", "b", "d", "a", "c"]);
+    TestFile::write_arrow_batch(&input, &batch);
+
+    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+        from: Some(input.to_string_lossy().to_string()),
+        to: Some(output.to_string_lossy().to_string()),
+        output_format: Some(DataFormat::Parquet),
+        non_spillable_reserve: Some(PoolReserveSpec::Fixed(50 * 1024 * 1024)), // 50MB
+        sort_by: Some(SortSpec {
+            columns: vec![SortColumn {
+                name: "name".to_string(),
+                direction: SortDirection::Ascending,
+            }],
+        }),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    assert!(output.exists());
+    let batches = TestFile::read_parquet(&output);
+    let names = batches[0]
+        .column(1)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(names.value(0), "a");
+    assert_eq!(names.value(1), "b");
+    assert_eq!(names.value(2), "c");
+    assert_eq!(names.value(3), "d");
+    assert_eq!(names.value(4), "e");
+}
+
+#[tokio::test]
+async fn test_reserved_spill_pool_with_top_consumers() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let output = temp_dir.path().join("output.arrow");
+
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_arrow_batch(&input, &batch);
+
+    // exercise the top-consumers=0 (all) path alongside the reserved pool
+    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+        from: Some(input.to_string_lossy().to_string()),
+        to: Some(output.to_string_lossy().to_string()),
+        non_spillable_reserve: Some(PoolReserveSpec::Percent(25)),
+        memory_pool_top_consumers: 0,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    assert!(output.exists());
+    let batches = TestFile::read_arrow_auto(&output);
+    assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 3);
+}
+
+#[tokio::test]
+async fn test_nosort_evict_partitioned_write() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let output_dir = temp_dir.path().join("output");
+    std::fs::create_dir_all(&output_dir).unwrap();
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("category", DataType::Utf8, false),
+        Field::new("value", DataType::Int32, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(StringArray::from(vec!["x", "y", "z", "x", "y"])),
+            Arc::new(Int32Array::from(vec![10, 20, 30, 40, 50])),
+        ],
+    )
+    .unwrap();
+    TestFile::write_arrow_batch(&input, &batch);
+
+    let template = output_dir.join("{{category}}.parquet");
+    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+        from: Some(input.to_string_lossy().to_string()),
+        to_many: Some(template.to_string_lossy().to_string()),
+        by: Some("category".to_string()),
+        partition_strategy: PartitionStrategy::NosortEvict,
+        max_open_partitions: Some(2),
+        overwrite: true,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    // with max_open=2, x and y open first; z evicts x; then x reopens as x_1
+    assert!(output_dir.join("x.parquet").exists());
+    assert!(output_dir.join("y.parquet").exists());
+    assert!(output_dir.join("z.parquet").exists());
+    assert!(
+        output_dir.join("x_1.parquet").exists(),
+        "evicted partition should reopen with _1 suffix"
+    );
+
+    // verify data correctness: all 5 rows present across files
+    let mut total_rows = 0;
+    for entry in std::fs::read_dir(&output_dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_some_and(|e| e == "parquet") {
+            let batches = TestFile::read_parquet(&path);
+            total_rows += batches.iter().map(|b| b.num_rows()).sum::<usize>();
+        }
+    }
+    assert_eq!(total_rows, 5);
 }

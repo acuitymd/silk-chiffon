@@ -19,6 +19,7 @@ use crate::{
     utils::memory::estimate_row_bytes,
 };
 
+#[derive(Clone)]
 pub struct ArrowSinkOptions {
     format: ArrowIPCFormat,
     record_batch_size: usize,

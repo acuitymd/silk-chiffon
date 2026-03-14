@@ -32,8 +32,9 @@ use arrow::{
 use async_trait::async_trait;
 
 use crate::{
-    BloomFilterConfig, ColumnEncodingConfig, ParquetEncoding, ParquetStatistics,
-    ParquetWriterVersion, SortDirection, SortSpec,
+    BloomFilterConfig, ColumnDictionaryConfig, ColumnEncodingConfig, DictionaryMode,
+    ParquetCompression, ParquetEncoding, ParquetStatistics, ParquetWriterVersion, SortDirection,
+    SortSpec,
     sinks::data_sink::{DataSink, SinkResult},
     utils::memory::estimate_row_bytes,
 };
@@ -42,6 +43,7 @@ use crate::{
 ///
 /// Column paths use dot notation with prefix matching. For example, "user" matches
 /// all columns under the user struct (user.name, user.address.city, etc.).
+#[derive(Clone)]
 pub struct ParquetSinkOptions {
     /// Rows per row group.
     pub max_row_group_size: usize,
@@ -164,6 +166,16 @@ impl ParquetSinkOptions {
         self
     }
 
+    /// Resolve a `ParquetCompression` enum + optional level into the low-level
+    /// `Compression` type and set it on this options struct.
+    pub fn with_parquet_compression(
+        self,
+        compression: ParquetCompression,
+        level: Option<i32>,
+    ) -> anyhow::Result<Self> {
+        Ok(self.with_compression(compression.to_compression(level)?))
+    }
+
     pub fn with_bloom_filters(mut self, bloom_filters: BloomFilterConfig) -> Self {
         self.bloom_filters = bloom_filters;
         self
@@ -191,6 +203,22 @@ impl ParquetSinkOptions {
 
     pub fn with_column_no_dictionary(mut self, column_no_dictionary: Vec<String>) -> Self {
         self.column_no_dictionary = column_no_dictionary;
+        self
+    }
+
+    /// Apply dictionary configuration from CLI-style `ColumnDictionaryConfig` entries,
+    /// splitting them into always/analyze lists internally.
+    pub fn with_dictionary_configs(mut self, configs: &[ColumnDictionaryConfig]) -> Self {
+        let mut always = Vec::new();
+        let mut analyze = Vec::new();
+        for config in configs {
+            match config.mode {
+                DictionaryMode::Always => always.push(config.name.clone()),
+                DictionaryMode::Analyze => analyze.push(config.name.clone()),
+            }
+        }
+        self.column_dictionary_always = always;
+        self.column_dictionary_analyze = analyze;
         self
     }
 

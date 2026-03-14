@@ -1,10 +1,14 @@
 use std::{
     collections::{HashMap, hash_map::Entry},
+    num::NonZeroUsize,
     path::Path,
     sync::Arc,
 };
 
+use lru::LruCache;
+
 use anyhow::{Context, Result, anyhow};
+use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use datafusion::{execution::SendableRecordBatchStream, prelude::DataFrame};
 use futures::StreamExt;
@@ -117,6 +121,18 @@ pub enum OutputStrategy {
         create_dirs: bool,
         overwrite: bool,
         list_outputs: ListOutputsFormat,
+    },
+    /// Like PartitionedMultiWriter but caps open writers with LRU eviction.
+    /// Evicted partitions get new numbered files if they reappear.
+    PartitionedEvictWriter {
+        columns: Vec<String>,
+        template: Box<PathTemplate>,
+        sink_factory: SinkFactory,
+        exclude_columns: Vec<String>,
+        create_dirs: bool,
+        overwrite: bool,
+        list_outputs: ListOutputsFormat,
+        max_open: NonZeroUsize,
     },
 }
 
@@ -238,20 +254,7 @@ impl OutputStrategy {
                 overwrite,
                 list_outputs: _,
             } => {
-                let column_order = columns.clone();
-                let schema = stream.schema();
-
-                validate_partition_columns_primitive(&schema, columns)?;
-                validate_excluded_columns(&schema, exclude_columns)?;
-
-                let projected_column_indices =
-                    projection_indices_excluding(&schema, exclude_columns);
-
-                let projected_schema = match &projected_column_indices {
-                    Some(indices) => Arc::new(schema.project(indices)?),
-                    None => Arc::clone(&schema),
-                };
-
+                let ctx = PartitionedWriteContext::new(&stream.schema(), columns, exclude_columns)?;
                 let partitioner = Partitioner::new(columns.clone());
                 let mut partitioned_stream = partitioner.partition_stream(stream);
 
@@ -259,44 +262,133 @@ impl OutputStrategy {
 
                 while let Some(result) = partitioned_stream.next().await {
                     let (partition_values, batch) = result?;
-                    let key = partition_key(&partition_values, &column_order);
+                    let key = partition_key(&partition_values, &ctx.column_order);
 
                     let open_sink = match open_sinks.entry(key) {
                         Entry::Occupied(e) => e.into_mut(),
                         Entry::Vacant(e) => {
                             let path = template.resolve(&partition_values);
                             prepare_output_path(&path, *overwrite, *create_dirs).await?;
-                            let sink = sink_factory(path.clone(), Arc::clone(&projected_schema))?;
+                            let sink =
+                                sink_factory(path.clone(), Arc::clone(&ctx.projected_schema))?;
                             e.insert(OpenSink::new(sink, path, partition_values.clone()))
                         }
                     };
 
-                    let projected = match projected_column_indices {
-                        Some(ref indices) => batch.project(indices)?,
-                        None => batch,
-                    };
-
+                    let projected = ctx.project_batch(batch)?;
                     open_sink.sink.write_batch(projected).await?;
                 }
 
-                // finish all sinks and collect output info
-                let mut created_files = Vec::new();
-                for (_, mut open_sink) in open_sinks {
-                    let result = open_sink.sink.finish().await?;
-                    created_files.push(OutputFileInfo {
-                        path: open_sink.path,
-                        row_count: result.rows_written,
-                        partition_values: partition_values_to_json(
-                            &open_sink.partition_values,
-                            &column_order,
-                        ),
-                    });
+                drain_open_sinks(open_sinks, &ctx.column_order).await
+            }
+            OutputStrategy::PartitionedEvictWriter {
+                sink_factory,
+                columns,
+                exclude_columns,
+                template,
+                create_dirs,
+                overwrite,
+                list_outputs: _,
+                max_open,
+            } => {
+                let ctx = PartitionedWriteContext::new(&stream.schema(), columns, exclude_columns)?;
+                let partitioner = Partitioner::new(columns.clone());
+                let mut partitioned_stream = partitioner.partition_stream(stream);
+
+                let mut cache: LruCache<String, OpenSink> = LruCache::new(*max_open);
+                let mut file_counts: HashMap<String, usize> = HashMap::new();
+                let mut created_files: Vec<OutputFileInfo> = Vec::new();
+
+                while let Some(result) = partitioned_stream.next().await {
+                    let (partition_values, batch) = result?;
+                    let key = partition_key(&partition_values, &ctx.column_order);
+
+                    if cache.get(&key).is_none() {
+                        let file_idx = file_counts.entry(key.clone()).or_insert(0);
+                        let path = if *file_idx == 0 {
+                            template.resolve(&partition_values)
+                        } else {
+                            template.resolve_with_index(&partition_values, *file_idx)
+                        };
+                        *file_idx += 1;
+
+                        prepare_output_path(&path, *overwrite, *create_dirs).await?;
+                        let sink = sink_factory(path.clone(), Arc::clone(&ctx.projected_schema))?;
+                        let new_sink = OpenSink::new(sink, path, partition_values.clone());
+
+                        if let Some((_, mut evicted)) = cache.push(key.clone(), new_sink) {
+                            let result = evicted.sink.finish().await?;
+                            created_files.push(OutputFileInfo {
+                                path: evicted.path,
+                                row_count: result.rows_written,
+                                partition_values: partition_values_to_json(
+                                    &evicted.partition_values,
+                                    &ctx.column_order,
+                                ),
+                            });
+                        }
+                    }
+
+                    let open_sink = cache.get_mut(&key).unwrap();
+                    let projected = ctx.project_batch(batch)?;
+                    open_sink.sink.write_batch(projected).await?;
                 }
 
+                let mut remaining = drain_open_sinks(cache, &ctx.column_order).await?;
+                created_files.append(&mut remaining);
                 Ok(created_files)
             }
         }
     }
+}
+
+/// Shared setup for partitioned write strategies.
+struct PartitionedWriteContext {
+    column_order: Vec<String>,
+    projected_column_indices: Option<Vec<usize>>,
+    projected_schema: SchemaRef,
+}
+
+impl PartitionedWriteContext {
+    fn new(schema: &SchemaRef, columns: &[String], exclude_columns: &[String]) -> Result<Self> {
+        validate_partition_columns_primitive(schema, columns)?;
+        validate_excluded_columns(schema, exclude_columns)?;
+
+        let projected_column_indices = projection_indices_excluding(schema, exclude_columns);
+        let projected_schema = match &projected_column_indices {
+            Some(indices) => Arc::new(schema.project(indices)?),
+            None => Arc::clone(schema),
+        };
+
+        Ok(Self {
+            column_order: columns.to_vec(),
+            projected_column_indices,
+            projected_schema,
+        })
+    }
+
+    fn project_batch(&self, batch: RecordBatch) -> Result<RecordBatch> {
+        match self.projected_column_indices {
+            Some(ref indices) => Ok(batch.project(indices)?),
+            None => Ok(batch),
+        }
+    }
+}
+
+async fn drain_open_sinks(
+    sinks: impl IntoIterator<Item = (String, OpenSink)>,
+    column_order: &[String],
+) -> Result<Vec<OutputFileInfo>> {
+    let mut created_files = Vec::new();
+    for (_, mut open_sink) in sinks {
+        let result = open_sink.sink.finish().await?;
+        created_files.push(OutputFileInfo {
+            path: open_sink.path,
+            row_count: result.rows_written,
+            partition_values: partition_values_to_json(&open_sink.partition_values, column_order),
+        });
+    }
+    Ok(created_files)
 }
 
 #[cfg(test)]
@@ -1120,5 +1212,210 @@ mod tests {
                 rows_written: 0,
             })
         }
+    }
+
+    #[tokio::test]
+    async fn test_evict_under_cap() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("category", DataType::Utf8, false),
+            Field::new("value", DataType::Int32, false),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(StringArray::from(vec!["a", "b", "c"])),
+                Arc::new(Int32Array::from(vec![1, 2, 3])),
+            ],
+        )
+        .unwrap();
+
+        let stream = create_test_stream(vec![batch]);
+        let sink_create_count = Arc::new(Mutex::new(0usize));
+        let sink_create_count_clone = Arc::clone(&sink_create_count);
+
+        let sink_factory: SinkFactory = Box::new(move |name, _schema| {
+            *sink_create_count_clone.lock().unwrap() += 1;
+            Ok(Box::new(MockSink {
+                name,
+                batches: Arc::new(Mutex::new(Vec::new())),
+                finished: Arc::new(Mutex::new(false)),
+            }))
+        });
+
+        let mut strategy = OutputStrategy::PartitionedEvictWriter {
+            columns: vec!["category".to_string()],
+            template: Box::new(PathTemplate::new("output/{{category}}.parquet".to_string())),
+            sink_factory,
+            exclude_columns: vec![],
+            create_dirs: false,
+            overwrite: false,
+            list_outputs: ListOutputsFormat::None,
+            max_open: NonZeroUsize::new(10).unwrap(),
+        };
+
+        let files = strategy.write_stream(stream).await.unwrap();
+        assert_eq!(*sink_create_count.lock().unwrap(), 3);
+        assert_eq!(files.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_evict_at_cap() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("category", DataType::Utf8, false),
+            Field::new("value", DataType::Int32, false),
+        ]));
+
+        // a, b, c -> when c arrives with max_open=2, one of a/b gets evicted
+        // then a again -> reopened with _1 suffix
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(StringArray::from(vec!["a", "b", "c", "a", "b"])),
+                Arc::new(Int32Array::from(vec![1, 2, 3, 4, 5])),
+            ],
+        )
+        .unwrap();
+
+        let stream = create_test_stream(vec![batch]);
+        let created_paths = Arc::new(Mutex::new(Vec::new()));
+        let created_paths_clone = Arc::clone(&created_paths);
+
+        let sink_factory: SinkFactory = Box::new(move |name, _schema| {
+            created_paths_clone.lock().unwrap().push(name.clone());
+            Ok(Box::new(MockSink {
+                name,
+                batches: Arc::new(Mutex::new(Vec::new())),
+                finished: Arc::new(Mutex::new(false)),
+            }))
+        });
+
+        let mut strategy = OutputStrategy::PartitionedEvictWriter {
+            columns: vec!["category".to_string()],
+            template: Box::new(PathTemplate::new("output/{{category}}.parquet".to_string())),
+            sink_factory,
+            exclude_columns: vec![],
+            create_dirs: false,
+            overwrite: false,
+            list_outputs: ListOutputsFormat::None,
+            max_open: NonZeroUsize::new(2).unwrap(),
+        };
+
+        let files = strategy.write_stream(stream).await.unwrap();
+        let paths = created_paths.lock().unwrap();
+
+        // a, b, c (evicts a), a_1 (evicts b), b_1 (evicts c)
+        assert!(paths.contains(&"output/a.parquet".to_string()));
+        assert!(paths.contains(&"output/b.parquet".to_string()));
+        assert!(paths.contains(&"output/c.parquet".to_string()));
+        assert!(paths.contains(&"output/a_1.parquet".to_string()));
+        assert!(paths.contains(&"output/b_1.parquet".to_string()));
+        assert_eq!(paths.len(), 5);
+        assert_eq!(files.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn test_evict_file_numbering() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("category", DataType::Utf8, false),
+            Field::new("value", DataType::Int32, false),
+        ]));
+
+        // with max_open=1, every new partition evicts the previous
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(StringArray::from(vec!["a", "b", "a", "b", "a"])),
+                Arc::new(Int32Array::from(vec![1, 2, 3, 4, 5])),
+            ],
+        )
+        .unwrap();
+
+        let stream = create_test_stream(vec![batch]);
+        let created_paths = Arc::new(Mutex::new(Vec::new()));
+        let created_paths_clone = Arc::clone(&created_paths);
+
+        let sink_factory: SinkFactory = Box::new(move |name, _schema| {
+            created_paths_clone.lock().unwrap().push(name.clone());
+            Ok(Box::new(MockSink {
+                name,
+                batches: Arc::new(Mutex::new(Vec::new())),
+                finished: Arc::new(Mutex::new(false)),
+            }))
+        });
+
+        let mut strategy = OutputStrategy::PartitionedEvictWriter {
+            columns: vec!["category".to_string()],
+            template: Box::new(PathTemplate::new("output/{{category}}.parquet".to_string())),
+            sink_factory,
+            exclude_columns: vec![],
+            create_dirs: false,
+            overwrite: false,
+            list_outputs: ListOutputsFormat::None,
+            max_open: NonZeroUsize::new(1).unwrap(),
+        };
+
+        strategy.write_stream(stream).await.unwrap();
+        let paths = created_paths.lock().unwrap();
+
+        assert!(paths.contains(&"output/a.parquet".to_string()));
+        assert!(paths.contains(&"output/b.parquet".to_string()));
+        assert!(paths.contains(&"output/a_1.parquet".to_string()));
+        assert!(paths.contains(&"output/b_1.parquet".to_string()));
+        assert!(paths.contains(&"output/a_2.parquet".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_evict_lru_order() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("category", DataType::Utf8, false),
+            Field::new("value", DataType::Int32, false),
+        ]));
+
+        // write a, b, a, c -> with max_open=2, b should be evicted (not a)
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(StringArray::from(vec!["a", "b", "a", "c"])),
+                Arc::new(Int32Array::from(vec![1, 2, 3, 4])),
+            ],
+        )
+        .unwrap();
+
+        let stream = create_test_stream(vec![batch]);
+        let finished_names = Arc::new(Mutex::new(Vec::new()));
+        let finished_names_clone = Arc::clone(&finished_names);
+
+        let sink_factory: SinkFactory = Box::new(move |name, _schema| {
+            let finished_names = Arc::clone(&finished_names_clone);
+            let name_for_finish = name.clone();
+            Ok(Box::new(MockSinkWithCallback {
+                name,
+                batches: Arc::new(Mutex::new(Vec::new())),
+                on_finish: Box::new(move || {
+                    finished_names.lock().unwrap().push(name_for_finish.clone());
+                }),
+            }))
+        });
+
+        let mut strategy = OutputStrategy::PartitionedEvictWriter {
+            columns: vec!["category".to_string()],
+            template: Box::new(PathTemplate::new("output/{{category}}.parquet".to_string())),
+            sink_factory,
+            exclude_columns: vec![],
+            create_dirs: false,
+            overwrite: false,
+            list_outputs: ListOutputsFormat::None,
+            max_open: NonZeroUsize::new(2).unwrap(),
+        };
+
+        strategy.write_stream(stream).await.unwrap();
+        let names = finished_names.lock().unwrap();
+
+        // b should be evicted first (LRU), then a and c finished at end
+        assert_eq!(
+            names[0], "output/b.parquet",
+            "b should be evicted first (LRU)"
+        );
     }
 }
