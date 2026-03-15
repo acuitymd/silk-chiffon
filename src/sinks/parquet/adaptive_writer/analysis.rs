@@ -11,7 +11,7 @@ use arrow::array::{Array, AsArray, RecordBatch};
 use arrow::datatypes::{DataType, SchemaRef};
 use datafusion::functions::string::expr_fn::octet_length;
 use datafusion::functions_aggregate::expr_fn::{approx_distinct, avg, count_distinct};
-use datafusion::prelude::{SessionConfig, SessionContext, cast, col};
+use datafusion::prelude::{SessionConfig, SessionContext, col};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -96,8 +96,7 @@ async fn run_streaming_analysis(
         {
             approx_distinct(col(col_name))
         } else {
-            // count_distinct returns Int64, cast to UInt64 for consistency
-            cast(count_distinct(col(col_name)), DataType::UInt64)
+            count_distinct(col(col_name))
         };
         agg_exprs.push(ndv_expr.alias(format!("{col_name}_ndv")));
 
@@ -169,8 +168,15 @@ fn extract_analysis_from_results(
 
         let approx_distinct = batch
             .column_by_name(&ndv_col)
-            .and_then(|arr| arr.as_primitive_opt::<arrow::datatypes::UInt64Type>())
-            .and_then(|arr| arr.is_valid(0).then(|| arr.value(0)))
+            .and_then(|arr| {
+                // approx_distinct returns UInt64, count_distinct returns Int64
+                arr.as_primitive_opt::<arrow::datatypes::UInt64Type>()
+                    .and_then(|a| a.is_valid(0).then(|| a.value(0)))
+                    .or_else(|| {
+                        arr.as_primitive_opt::<arrow::datatypes::Int64Type>()
+                            .and_then(|a| a.is_valid(0).then(|| a.value(0) as u64))
+                    })
+            })
             .unwrap_or(0);
 
         let avg_value_size = batch
