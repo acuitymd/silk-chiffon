@@ -1175,3 +1175,85 @@ async fn test_parquet_row_order_preserved() {
         .value(0);
     assert_eq!(bad_names, 0, "found rows with incorrect names");
 }
+
+#[test]
+fn test_non_spillable_reserve_percentage_with_sort() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let output = temp_dir.path().join("output.arrow");
+
+    let batch = TestBatch::simple_with(&[5, 2, 8, 1, 3], &["e", "b", "h", "a", "c"]);
+    TestFile::write_arrow_batch(&input, &batch);
+
+    cargo::cargo_bin_cmd!("silk-chiffon")
+        .args([
+            "transform",
+            "--from",
+            input.to_str().unwrap(),
+            "--to",
+            output.to_str().unwrap(),
+            "--sort-by",
+            "id",
+            "--non-spillable-reserve",
+            "10%",
+        ])
+        .assert()
+        .success();
+
+    let batches = TestFile::read_arrow(&output);
+    assert_eq!(TestExtract::i32_all(&batches, "id"), vec![1, 2, 3, 5, 8]);
+}
+
+#[test]
+fn test_non_spillable_reserve_fixed_bytes() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let output = temp_dir.path().join("output.parquet");
+
+    let batch = TestBatch::simple_with(&[3, 1, 2], &["c", "a", "b"]);
+    TestFile::write_arrow_batch(&input, &batch);
+
+    cargo::cargo_bin_cmd!("silk-chiffon")
+        .args([
+            "transform",
+            "--from",
+            input.to_str().unwrap(),
+            "--to",
+            output.to_str().unwrap(),
+            "--non-spillable-reserve",
+            "50MB",
+        ])
+        .assert()
+        .success();
+
+    let batches = TestFile::read_parquet(&output);
+    assert_eq!(count_rows(&batches), 3);
+}
+
+#[test]
+fn test_memory_pool_top_consumers_flag() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let output = temp_dir.path().join("output.arrow");
+
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_arrow_batch(&input, &batch);
+
+    cargo::cargo_bin_cmd!("silk-chiffon")
+        .args([
+            "transform",
+            "--from",
+            input.to_str().unwrap(),
+            "--to",
+            output.to_str().unwrap(),
+            "--non-spillable-reserve",
+            "15",
+            "--memory-pool-top-consumers",
+            "0",
+        ])
+        .assert()
+        .success();
+
+    let batches = TestFile::read_arrow(&output);
+    assert_eq!(count_rows(&batches), 3);
+}
