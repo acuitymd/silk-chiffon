@@ -1,11 +1,12 @@
 mod memory_pool;
 
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use bytesize::ByteSize;
 use camino::Utf8PathBuf;
-use datafusion::execution::memory_pool::TrackConsumersPool;
+use datafusion::execution::memory_pool::{FairSpillPool, MemoryPool, TrackConsumersPool};
 use datafusion::prelude::{SessionConfig, SessionContext};
 use tempfile::TempDir;
 
@@ -23,7 +24,6 @@ use crate::{
     operations::data_operation::DataOperation,
 };
 
-#[derive(Default)]
 pub struct PipelineConfig {
     pub working_directory: Option<String>,
     pub query_dialect: QueryDialect,
@@ -34,6 +34,22 @@ pub struct PipelineConfig {
     pub sort_spill_reservation_bytes: Option<usize>,
     pub non_spillable_reserve: Option<usize>,
     pub memory_pool_top_consumers: usize,
+}
+
+impl Default for PipelineConfig {
+    fn default() -> Self {
+        Self {
+            working_directory: None,
+            query_dialect: QueryDialect::default(),
+            memory_limit: None,
+            target_partitions: None,
+            spill_path: None,
+            spill_compression: SpillCompression::default(),
+            sort_spill_reservation_bytes: None,
+            non_spillable_reserve: None,
+            memory_pool_top_consumers: 10,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -253,19 +269,25 @@ impl Pipeline {
             path.try_into()?
         };
 
-        let non_spillable_reserve = self
-            .config
-            .non_spillable_reserve
-            .unwrap_or(memory_limit / 10);
-        let inner = ReservedSpillPool::new(memory_limit, non_spillable_reserve);
         let top_n = match self.config.memory_pool_top_consumers {
             0 => NonZeroUsize::MAX,
             n => NonZeroUsize::new(n).expect("nonzero by match"),
         };
-        let pool = TrackConsumersPool::new(inner, top_n);
+
+        let pool: Arc<dyn MemoryPool> = match self.config.non_spillable_reserve {
+            Some(reserve) => {
+                let inner = ReservedSpillPool::new(memory_limit, reserve);
+                Arc::new(TrackConsumersPool::new(inner, top_n))
+            }
+            None => {
+                let inner = FairSpillPool::new(memory_limit);
+                Arc::new(TrackConsumersPool::new(inner, top_n))
+            }
+        };
+
         let runtime = datafusion::execution::runtime_env::RuntimeEnvBuilder::default()
             .with_temp_file_path(&spill_path)
-            .with_memory_pool(std::sync::Arc::new(pool))
+            .with_memory_pool(pool)
             .build()?;
 
         Ok(SessionContext::new_with_config_rt(

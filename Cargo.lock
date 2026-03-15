@@ -3793,6 +3793,7 @@ dependencies = [
  "tabled",
  "tempfile",
  "tokio",
+ "tracing",
  "uuid",
  "vortex",
 ]

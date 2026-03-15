@@ -223,7 +223,7 @@ fn parse_percent(s: Option<&str>, default: u8) -> Result<u8> {
 /// Used for pool sub-budgets where the reference point is the pool size.
 /// - `"10"` or `"10%"` - percentage of pool
 /// - `"200MB"` or `"1GiB"` - fixed byte size (unit required)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum PoolReserveSpec {
     /// Percentage of pool size (1-99).
     Percent(u8),
@@ -237,23 +237,24 @@ impl PoolReserveSpec {
     /// Fixed values are clamped to at most `pool_size - 1` so the pool
     /// always retains at least 1 byte for spillable consumers.
     pub fn resolve(&self, pool_size: usize) -> usize {
-        match self {
+        let reserve = match self {
             Self::Percent(pct) => pool_size * usize::from(*pct) / 100,
-            Self::Fixed(n) => {
-                let max_reserve = pool_size.saturating_sub(1);
-                if *n > max_reserve {
-                    eprintln!(
-                        "warning: non-spillable reserve ({}) exceeds pool size ({}), clamping to {}",
-                        bytesize::ByteSize::b(*n as u64),
-                        bytesize::ByteSize::b(pool_size as u64),
-                        bytesize::ByteSize::b(max_reserve as u64),
-                    );
-                    max_reserve
-                } else {
-                    *n
-                }
-            }
+            Self::Fixed(n) => *n,
+        };
+
+        let max_reserve = pool_size.saturating_sub(1);
+        if reserve > max_reserve {
+            tracing::warn!(
+                reserve_bytes = reserve,
+                pool_bytes = pool_size,
+                clamped_to = max_reserve,
+                "non-spillable reserve exceeds pool size, clamping",
+            );
+            return max_reserve;
         }
+
+        // ensure at least 1 byte of reserve when the user asked for one
+        reserve.max(1)
     }
 }
 
@@ -1340,18 +1341,18 @@ pub struct TransformCommand {
     #[arg(long, help_heading = "Execution", value_parser = MemoryBudgetSpec::from_str, default_value = "total:80%")]
     pub memory_budget: MemoryBudgetSpec,
 
-    /// Memory reserved for non-spillable operations (sort merge phases, etc.).
+    /// Reserve memory for non-spillable operations (sort merge phases, etc.).
     ///
-    /// Spillable operators (sorts, aggregations) cannot use this portion of
-    /// the memory pool, guaranteeing headroom for non-spillable consumers
-    /// that would otherwise fail when the pool is full.
+    /// Enables an alternative memory pool that prevents spillable operators
+    /// (sorts, aggregations) from consuming the entire pool, guaranteeing
+    /// headroom for non-spillable consumers that would otherwise fail.
     ///
     /// Accepts a percentage (e.g. "10%", "10") or a fixed byte size (e.g. "200MB").
     /// Percentages are resolved against the memory pool size.
     ///
-    /// Default: 10% of the memory pool.
-    #[arg(long, help_heading = "Execution", value_parser = PoolReserveSpec::from_str, default_value = "10%")]
-    pub non_spillable_reserve: PoolReserveSpec,
+    /// When not set, the default DataFusion FairSpillPool is used instead.
+    #[arg(long, help_heading = "Execution", value_parser = PoolReserveSpec::from_str)]
+    pub non_spillable_reserve: Option<PoolReserveSpec>,
 
     /// Number of top memory consumers to report in out-of-memory error messages.
     ///
@@ -1906,7 +1907,7 @@ impl TransformCommand {
             query: None,
             sort_by: None,
             memory_budget: MemoryBudgetSpec::Total { pct: 80, min: None },
-            non_spillable_reserve: PoolReserveSpec::Percent(10),
+            non_spillable_reserve: None,
             memory_pool_top_consumers: 10,
             preserve_input_order: false,
             target_partitions: None,

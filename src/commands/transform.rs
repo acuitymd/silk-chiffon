@@ -171,8 +171,9 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         Some(total_budget * 20 / 100)
     };
 
-    let effective_non_spillable_reserve = effective_memory_limit
-        .map(|pool_size| non_spillable_reserve.resolve(pool_size));
+    let effective_non_spillable_reserve = non_spillable_reserve
+        .zip(effective_memory_limit)
+        .map(|(spec, pool_size)| spec.resolve(pool_size));
 
     let mut pipeline = Pipeline::new()
         .with_query_dialect(dialect)
