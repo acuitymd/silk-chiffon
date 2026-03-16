@@ -16,17 +16,17 @@ use parking_lot::Mutex;
 /// Memory is partitioned into two regions:
 ///
 /// ```text
-/// ┌──────────────────────────────────────────────────────────────┐
-/// │                        pool_size                             │
-/// │                                                              │
-/// │  ┌─────────────────────────────┐  ┌────────────────────────┐ │
-/// │  │   spillable region          │  │  non-spillable reserve │ │
-/// │  │   (pool_size - reserve)     │  │  (reserve_for_         │ │
-/// │  │                             │  │   non_spillable)       │ │
-/// │  │  spillable consumers share  │  │                        │ │
-/// │  │  this region evenly         │  │  non-spillable only    │ │
-/// │  └─────────────────────────────┘  └────────────────────────┘ │
-/// └──────────────────────────────────────────────────────────────┘
+/// ┌─────────────────────────────────────────────────────────────────────┐
+/// │                        pool_size                                    │
+/// │                                                                     │
+/// │  ┌─────────────────────────────┐  ┌───────────────────────────────┐ │
+/// │  │   spillable region          │  │  non-spillable reserve        │ │
+/// │  │   (pool_size - reserve)     │  │  (reserve_for_non_spillable)  │ │
+/// │  │                             │  │                               │ │
+/// │  │  spillable consumers share  │  │                               │ │
+/// │  │  this region evenly         │  │  non-spillable only           │ │
+/// │  └─────────────────────────────┘  └───────────────────────────────┘ │
+/// └─────────────────────────────────────────────────────────────────────┘
 /// ```
 ///
 /// - **Spillable consumers** can only use `pool_size - reserve_for_non_spillable`,
