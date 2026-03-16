@@ -1,10 +1,9 @@
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use crate::{
-    AllColumnsBloomFilterConfig, ArrowCompression, ArrowIPCFormat, BloomFilterConfig,
-    ColumnDictionaryConfig, ColumnEncodingConfig, DEFAULT_BLOOM_FILTER_FPP, DataFormat,
-    DictionaryMode, ListOutputsFormat, ParquetCompression, ParquetEncoding, ParquetStatistics,
-    ParquetWriterVersion, PartitionStrategy, SortSpec, TransformCommand, default_thread_budget,
+    AllColumnsBloomFilterConfig, BloomFilterConfig, DEFAULT_BLOOM_FILTER_FPP, DataFormat,
+    ListOutputsFormat, PartitionStrategy, SortSpec, TransformCommand, default_thread_budget,
     io_strategies::{
         OutputFileInfo, input_strategy::InputStrategy, output_strategy::SinkFactory,
         path_template::PathTemplate,
@@ -24,6 +23,7 @@ use crate::{
     utils::memory::{estimate_sort_spill_reservation, sample_avg_row_bytes},
 };
 use anyhow::{Result, anyhow};
+use apply_if::ApplyIf;
 use arrow::datatypes::SchemaRef;
 use camino::Utf8Path;
 use glob::glob;
@@ -38,6 +38,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         to_many,
         by,
         partition_strategy,
+        max_open_partitions,
         exclude_columns,
         list_outputs,
         list_outputs_file,
@@ -47,6 +48,8 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         dialect,
         sort_by,
         memory_budget,
+        non_spillable_reserve,
+        memory_pool_top_consumers,
         preserve_input_order,
         target_partitions,
         input_format,
@@ -169,9 +172,20 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         Some(total_budget * 20 / 100)
     };
 
+    if non_spillable_reserve.is_some() && effective_memory_limit.is_none() {
+        anyhow::bail!("--non-spillable-reserve requires a memory limit (--memory-budget)");
+    }
+
+    let effective_non_spillable_reserve = non_spillable_reserve
+        .zip(effective_memory_limit)
+        .map(|(spec, pool_size)| spec.resolve(pool_size))
+        .transpose()?;
+
     let mut pipeline = Pipeline::new()
         .with_query_dialect(dialect)
         .with_memory_limit(effective_memory_limit)
+        .with_non_spillable_reserve(effective_non_spillable_reserve)
+        .with_memory_pool_top_consumers(memory_pool_top_consumers)
         .with_target_partitions(effective_target_partitions)
         .with_spill_path(spill_path)
         .with_spill_compression(spill_compression);
@@ -287,11 +301,11 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         vec![]
     };
 
-    // sort-single: requires global sort by partition columns (one file at a time)
-    // nosort-multi: keeps file handles open per partition, no sort required
+    // sort-single: global sort by partition columns, emits one partition file at a time
+    // nosort-multi/nosort-evict: file handles per partition, no sort needed
     let partition_sort_spec = match partition_strategy {
         PartitionStrategy::SortSingle => SortSpec::from(partition_columns.clone()),
-        PartitionStrategy::NosortMulti => SortSpec::default(),
+        PartitionStrategy::NosortMulti | PartitionStrategy::NosortEvict => SortSpec::default(),
     };
 
     let user_sort_spec = sort_by.clone().unwrap_or(SortSpec::default());
@@ -309,38 +323,66 @@ pub async fn run(args: TransformCommand) -> Result<()> {
     let mut full_sort_spec = partition_sort_spec.clone();
     full_sort_spec.extend(&user_sort_spec_without_partition_cols);
 
+    let arrow_opts = ArrowSinkOptions::new()
+        .with_compression(arrow_compression)
+        .with_format(arrow_format)
+        .with_record_batch_size(arrow_record_batch_size)
+        .with_queue_depth(arrow_writing_queue_size);
+
+    let parquet_opts = ParquetSinkOptions::new()
+        .with_parquet_compression(parquet_compression, parquet_compression_level)?
+        .with_statistics(parquet_statistics)
+        .with_writer_version(parquet_writer_version)
+        .with_ingestion_queue_size(parquet_ingestion_queue_size)
+        .with_encoding_queue_size(parquet_encoding_queue_size)
+        .with_writing_queue_size(parquet_writing_queue_size)
+        .with_no_dictionary(parquet_dictionary_all_off)
+        .with_dictionary_configs(&parquet_dictionary_column)
+        .with_column_no_dictionary(parquet_dictionary_column_off)
+        .with_encoding(parquet_encoding)
+        .with_column_encodings(parquet_column_encoding)
+        .with_bloom_filters(bloom_filter)
+        .with_offset_index_enabled(parquet_offset_index)
+        .with_skip_arrow_metadata(!parquet_arrow_metadata)
+        .with_page_header_statistics(parquet_page_header_statistics)
+        .apply_if_some(parquet_buffer_size, ParquetSinkOptions::with_buffer_size)
+        .apply_if_some(
+            parquet_row_group_size,
+            ParquetSinkOptions::with_max_row_group_size,
+        )
+        .apply_if_some(
+            parquet_row_group_concurrency,
+            ParquetSinkOptions::with_max_row_group_concurrency,
+        )
+        .apply_if_some(
+            parquet_data_page_size,
+            ParquetSinkOptions::with_data_page_size_limit,
+        )
+        .apply_if_some(
+            parquet_data_page_row_limit,
+            ParquetSinkOptions::with_data_page_row_count_limit,
+        )
+        .apply_if_some(
+            parquet_dictionary_page_size,
+            ParquetSinkOptions::with_dictionary_page_size_limit,
+        )
+        .apply_if_some(
+            parquet_write_batch_size,
+            ParquetSinkOptions::with_write_batch_size,
+        )
+        .apply_if_some(parquet_sort_spec, ParquetSinkOptions::with_sort_spec);
+
+    let vortex_opts = VortexSinkOptions::new().apply_if_some(
+        vortex_record_batch_size,
+        VortexSinkOptions::with_record_batch_size,
+    );
+
     let sink_factory = create_sink_factory(
         output_format,
-        arrow_compression,
-        arrow_format,
-        arrow_record_batch_size,
-        arrow_writing_queue_size,
-        bloom_filter,
-        parquet_buffer_size,
-        parquet_dictionary_column,
-        parquet_column_encoding,
-        parquet_dictionary_column_off,
-        parquet_compression,
-        parquet_compression_level,
-        parquet_ingestion_queue_size,
-        parquet_encoding_queue_size,
-        parquet_writing_queue_size,
-        parquet_encoding,
-        parquet_dictionary_all_off,
-        parquet_row_group_concurrency,
-        parquet_row_group_size,
-        parquet_sort_spec,
-        parquet_statistics,
-        parquet_writer_version,
-        parquet_data_page_size,
-        parquet_data_page_row_limit,
-        parquet_dictionary_page_size,
-        parquet_write_batch_size,
-        parquet_offset_index,
-        parquet_arrow_metadata,
-        parquet_page_header_statistics,
-        vortex_record_batch_size,
-        runtimes,
+        arrow_opts.clone(),
+        parquet_opts.clone(),
+        vortex_opts,
+        Arc::clone(&runtimes),
     )?;
 
     if let Some(output_path) = to {
@@ -354,26 +396,63 @@ pub async fn run(args: TransformCommand) -> Result<()> {
     } else if let Some(template) = to_many {
         let path_template = PathTemplate::new(template);
 
-        if partition_strategy == PartitionStrategy::NosortMulti {
-            pipeline = pipeline.with_multi_writer_partitioned_sink(
-                partition_columns,
-                path_template,
-                sink_factory,
-                exclude_columns.clone(),
-                create_dirs,
-                overwrite,
-                list_outputs.unwrap_or_default(),
+        if max_open_partitions.is_some() && partition_strategy != PartitionStrategy::NosortEvict {
+            anyhow::bail!(
+                "--max-open-partitions is only supported with --partition-strategy=nosort-evict"
             );
-        } else {
-            pipeline = pipeline.with_single_writer_partitioned_sink(
-                partition_columns,
-                path_template,
-                sink_factory,
-                exclude_columns.clone(),
-                create_dirs,
-                overwrite,
-                list_outputs.unwrap_or_default(),
-            );
+        }
+
+        let max_open_partitions = NonZeroUsize::new(max_open_partitions.unwrap_or(100))
+            .ok_or_else(|| anyhow!("--max-open-partitions must be at least 1"))?;
+
+        match partition_strategy {
+            PartitionStrategy::NosortMulti => {
+                pipeline = pipeline.with_multi_writer_partitioned_sink(
+                    partition_columns,
+                    path_template,
+                    sink_factory,
+                    exclude_columns.clone(),
+                    create_dirs,
+                    overwrite,
+                    list_outputs.unwrap_or_default(),
+                );
+            }
+            PartitionStrategy::NosortEvict => {
+                // each partition gets its own writer, so we minimize per-writer
+                // concurrency to avoid scheduling overhead from 100+ parallel pipelines
+                let evict_sink_factory = create_sink_factory(
+                    output_format,
+                    arrow_opts,
+                    parquet_opts
+                        .with_ingestion_queue_size(1)
+                        .with_encoding_queue_size(1)
+                        .with_writing_queue_size(1)
+                        .with_max_row_group_concurrency(1),
+                    vortex_opts,
+                    runtimes,
+                )?;
+                pipeline = pipeline.with_evict_writer_partitioned_sink(
+                    partition_columns,
+                    path_template,
+                    evict_sink_factory,
+                    exclude_columns.clone(),
+                    create_dirs,
+                    overwrite,
+                    list_outputs.unwrap_or_default(),
+                    max_open_partitions,
+                );
+            }
+            PartitionStrategy::SortSingle => {
+                pipeline = pipeline.with_single_writer_partitioned_sink(
+                    partition_columns,
+                    path_template,
+                    sink_factory,
+                    exclude_columns.clone(),
+                    create_dirs,
+                    overwrite,
+                    list_outputs.unwrap_or_default(),
+                );
+            }
         }
     }
 
@@ -526,38 +605,11 @@ fn detect_format(path: &str, explicit_format: Option<DataFormat>) -> Result<Data
     ))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn create_sink_factory(
     output_format: Option<DataFormat>,
-    arrow_compression: ArrowCompression,
-    arrow_format: ArrowIPCFormat,
-    arrow_record_batch_size: usize,
-    arrow_writing_queue_size: usize,
-    parquet_bloom_filter: BloomFilterConfig,
-    parquet_buffer_size: Option<usize>,
-    parquet_dictionary_column: Vec<ColumnDictionaryConfig>,
-    parquet_column_encoding: Vec<ColumnEncodingConfig>,
-    parquet_dictionary_column_off: Vec<String>,
-    parquet_compression: ParquetCompression,
-    parquet_compression_level: Option<i32>,
-    parquet_ingestion_queue_size: usize,
-    parquet_encoding_queue_size: usize,
-    parquet_writing_queue_size: usize,
-    parquet_encoding: Option<ParquetEncoding>,
-    parquet_dictionary_all_off: bool,
-    parquet_row_group_concurrency: Option<usize>,
-    parquet_row_group_size: Option<usize>,
-    parquet_sort_spec: Option<SortSpec>,
-    parquet_statistics: ParquetStatistics,
-    parquet_writer_version: ParquetWriterVersion,
-    parquet_data_page_size: Option<usize>,
-    parquet_data_page_row_limit: Option<usize>,
-    parquet_dictionary_page_size: Option<usize>,
-    parquet_write_batch_size: Option<usize>,
-    parquet_offset_index: bool,
-    parquet_arrow_metadata: bool,
-    parquet_page_header_statistics: bool,
-    vortex_record_batch_size: Option<usize>,
+    arrow_opts: ArrowSinkOptions,
+    parquet_opts: ParquetSinkOptions,
+    vortex_opts: VortexSinkOptions,
     runtimes: Arc<ParquetRuntimes>,
 ) -> Result<SinkFactory> {
     Ok(Box::new(move |path: String, schema: SchemaRef| {
@@ -565,87 +617,15 @@ fn create_sink_factory(
 
         let sink: Box<dyn DataSink> = match detected_format {
             DataFormat::Arrow => {
-                let options = ArrowSinkOptions::new()
-                    .with_compression(arrow_compression)
-                    .with_format(arrow_format)
-                    .with_record_batch_size(arrow_record_batch_size)
-                    .with_queue_depth(arrow_writing_queue_size);
-                Box::new(ArrowSink::create(path.into(), &schema, options)?)
+                Box::new(ArrowSink::create(path.into(), &schema, arrow_opts.clone())?)
             }
-            DataFormat::Parquet => {
-                let compression = parquet_compression.to_compression(parquet_compression_level)?;
-                let mut options = ParquetSinkOptions::new()
-                    .with_compression(compression)
-                    .with_statistics(parquet_statistics)
-                    .with_writer_version(parquet_writer_version)
-                    .with_ingestion_queue_size(parquet_ingestion_queue_size)
-                    .with_encoding_queue_size(parquet_encoding_queue_size)
-                    .with_writing_queue_size(parquet_writing_queue_size);
-                if let Some(row_group_size) = parquet_row_group_size {
-                    options = options.with_max_row_group_size(row_group_size);
-                }
-                if let Some(buffer_size) = parquet_buffer_size {
-                    options = options.with_buffer_size(buffer_size);
-                }
-                if let Some(concurrency) = parquet_row_group_concurrency {
-                    options = options.with_max_row_group_concurrency(concurrency);
-                }
-                if parquet_dictionary_all_off {
-                    options = options.with_no_dictionary(true);
-                }
-
-                let mut column_dictionary_always = Vec::new();
-                let mut column_dictionary_analyze = Vec::new();
-                for config in &parquet_dictionary_column {
-                    match config.mode {
-                        DictionaryMode::Always => {
-                            column_dictionary_always.push(config.name.clone());
-                        }
-                        DictionaryMode::Analyze => {
-                            column_dictionary_analyze.push(config.name.clone());
-                        }
-                    }
-                }
-
-                options = options
-                    .with_column_dictionary_always(column_dictionary_always)
-                    .with_column_dictionary_analyze(column_dictionary_analyze)
-                    .with_column_no_dictionary(parquet_dictionary_column_off.clone())
-                    .with_encoding(parquet_encoding)
-                    .with_column_encodings(parquet_column_encoding.clone())
-                    .with_bloom_filters(parquet_bloom_filter.clone())
-                    .with_offset_index_enabled(parquet_offset_index)
-                    .with_skip_arrow_metadata(!parquet_arrow_metadata)
-                    .with_page_header_statistics(parquet_page_header_statistics);
-                if let Some(size) = parquet_data_page_size {
-                    options = options.with_data_page_size_limit(size);
-                }
-                if let Some(limit) = parquet_data_page_row_limit {
-                    options = options.with_data_page_row_count_limit(limit);
-                }
-                if let Some(size) = parquet_dictionary_page_size {
-                    options = options.with_dictionary_page_size_limit(size);
-                }
-                if let Some(size) = parquet_write_batch_size {
-                    options = options.with_write_batch_size(size);
-                }
-                if let Some(sort_spec) = parquet_sort_spec.clone() {
-                    options = options.with_sort_spec(sort_spec);
-                }
-                Box::new(ParquetSink::create(
-                    path.into(),
-                    &schema,
-                    &options,
-                    Arc::clone(&runtimes),
-                )?)
-            }
-            DataFormat::Vortex => {
-                let mut options = VortexSinkOptions::new();
-                if let Some(batch_size) = vortex_record_batch_size {
-                    options = options.with_record_batch_size(batch_size);
-                }
-                Box::new(VortexSink::create(path.into(), &schema, options)?)
-            }
+            DataFormat::Parquet => Box::new(ParquetSink::create(
+                path.into(),
+                &schema,
+                &parquet_opts,
+                Arc::clone(&runtimes),
+            )?),
+            DataFormat::Vortex => Box::new(VortexSink::create(path.into(), &schema, vortex_opts)?),
         };
 
         Ok(sink)

@@ -61,3 +61,5 @@ lint-fix-linux: _check-zigbuild
     cargo zigbuild clippy --target x86_64-unknown-linux-gnu --all-targets --all-features --fix --allow-dirty -- -D warnings
 
 alias lint := lint-fix
+
+verify: type-check fmt-fix lint-check

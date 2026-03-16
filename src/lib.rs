@@ -218,6 +218,77 @@ fn parse_percent(s: Option<&str>, default: u8) -> Result<u8> {
     Ok(pct)
 }
 
+/// Specifies a memory reserve as either a percentage or fixed byte size.
+///
+/// Used for pool sub-budgets where the reference point is the pool size.
+/// - `"10"` or `"10%"` - percentage of pool
+/// - `"200MB"` or `"1GiB"` - fixed byte size (unit required)
+#[derive(Debug, Clone, Copy)]
+pub enum PoolReserveSpec {
+    /// Percentage of pool size (1-99).
+    Percent(u8),
+    /// Fixed byte amount.
+    Fixed(usize),
+}
+
+impl PoolReserveSpec {
+    /// Resolve the reserve against the given pool size.
+    ///
+    /// Returns an error if pool_size is 0 or if the reserve exceeds `pool_size - 1`.
+    pub fn resolve(&self, pool_size: usize) -> Result<usize> {
+        if pool_size == 0 {
+            anyhow::bail!("cannot resolve non-spillable reserve against a zero-byte pool");
+        }
+
+        let reserve = match self {
+            Self::Percent(pct) => {
+                let r = pool_size * usize::from(*pct) / 100;
+                if r == 0 {
+                    anyhow::bail!(
+                        "non-spillable reserve of {pct}% resolves to 0 bytes for pool size {}; \
+                         use a larger pool or a fixed byte reserve instead",
+                        bytesize::ByteSize::b(pool_size as u64),
+                    );
+                }
+                r
+            }
+            Self::Fixed(n) => *n,
+        };
+
+        let max_reserve = pool_size - 1;
+        if reserve > max_reserve {
+            anyhow::bail!(
+                "non-spillable reserve ({}) exceeds pool size ({}); \
+                 the reserve must be less than the pool size",
+                bytesize::ByteSize::b(reserve as u64),
+                bytesize::ByteSize::b(pool_size as u64),
+            );
+        }
+
+        Ok(reserve)
+    }
+}
+
+impl FromStr for PoolReserveSpec {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s_stripped = s.strip_suffix('%').unwrap_or(s);
+
+        if !s_stripped.is_empty() && s_stripped.chars().all(|c| c.is_ascii_digit()) {
+            let pct: u8 = s_stripped
+                .parse()
+                .map_err(|_| anyhow!("invalid percentage '{s}': expected 1-99"))?;
+            if pct == 0 || pct >= 100 {
+                anyhow::bail!("reserve percentage must be between 1 and 99, got {pct}");
+            }
+            return Ok(Self::Percent(pct));
+        }
+
+        parse_nonzero_byte_size(s).map(Self::Fixed)
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(version = env!("SILK_CHIFFON_VERSION"), about, long_about = None)]
 pub struct Cli {
@@ -312,6 +383,13 @@ pub enum PartitionStrategy {
     /// No sorting required, preserves input order within each partition.
     /// Best for low-cardinality partition columns with low fragmentation.
     NosortMulti,
+    /// Like nosort-multi but caps the number of simultaneously open partition writers.
+    /// When the cap is hit, the least-recently-written partition is finalized.
+    /// If that partition reappears, a new numbered file is created.
+    /// Best for high-cardinality partitions where sorting is too expensive.
+    /// Per-writer concurrency is minimized (sequential encoding) since parallelism
+    /// comes from having many partition writers active simultaneously.
+    NosortEvict,
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Display)]
@@ -1281,6 +1359,29 @@ pub struct TransformCommand {
     #[arg(long, help_heading = "Execution", value_parser = MemoryBudgetSpec::from_str, default_value = "total:80%")]
     pub memory_budget: MemoryBudgetSpec,
 
+    /// Reserve memory for non-spillable operations (sort merge phases, etc.).
+    ///
+    /// Enables an alternative memory pool that prevents spillable operators
+    /// (sorts, aggregations) from consuming the entire pool, guaranteeing
+    /// headroom for non-spillable consumers that would otherwise fail.
+    ///
+    /// Accepts a percentage (e.g. "10%", "10") or a fixed byte size (e.g. "200MB").
+    /// Percentages are resolved against the memory pool size.
+    ///
+    /// When not set, the default DataFusion FairSpillPool is used instead.
+    #[arg(long, help_heading = "Execution", value_parser = PoolReserveSpec::from_str)]
+    pub non_spillable_reserve: Option<PoolReserveSpec>,
+
+    /// Number of top memory consumers to report in out-of-memory error messages.
+    ///
+    /// When a memory allocation fails, the error message includes the N largest
+    /// memory consumers to help diagnose what is using the pool. Set to 0 to
+    /// report all consumers.
+    ///
+    /// Default: 10.
+    #[arg(long, help_heading = "Execution", default_value = "10")]
+    pub memory_pool_top_consumers: usize,
+
     /// Target thread budget for parallel work. Best-effort, not a hard limit.
     ///
     /// Accepts a number (e.g. "8"), "reserve:N" to use all CPUs minus N (minimum 1),
@@ -1351,6 +1452,12 @@ pub struct TransformCommand {
         help_heading = "Partitioning"
     )]
     pub partition_strategy: PartitionStrategy,
+
+    /// Maximum number of partition file handles to keep open simultaneously.
+    /// When this limit is reached, the least-recently-written partition is finalized.
+    /// Only used with --partition-strategy=nosort-evict. Defaults to 100.
+    #[arg(long, requires = "by", help_heading = "Partitioning")]
+    pub max_open_partitions: Option<usize>,
 
     /// List the output files after creation (only with --to-many).
     #[arg(
@@ -1824,11 +1931,14 @@ impl TransformCommand {
             query: None,
             sort_by: None,
             memory_budget: MemoryBudgetSpec::Total { pct: 80, min: None },
+            non_spillable_reserve: None,
+            memory_pool_top_consumers: 10,
             preserve_input_order: false,
             target_partitions: None,
             thread_budget: None,
             by: None,
             partition_strategy: PartitionStrategy::default(),
+            max_open_partitions: None,
             list_outputs: None,
             list_outputs_file: None,
             create_dirs: true,
@@ -2108,6 +2218,83 @@ mod tests {
             assert!(ThreadBudgetSpec::from_str("reserve").is_err());
             assert!(ThreadBudgetSpec::from_str("garbage:2").is_err());
             assert!(ThreadBudgetSpec::from_str("reserve:abc").is_err());
+        }
+    }
+
+    mod pool_reserve_spec_tests {
+        use super::*;
+
+        #[test]
+        fn parse_bare_number_as_percentage() {
+            let spec: PoolReserveSpec = "10".parse().unwrap();
+            assert!(matches!(spec, PoolReserveSpec::Percent(10)));
+        }
+
+        #[test]
+        fn parse_percentage_with_suffix() {
+            let spec: PoolReserveSpec = "25%".parse().unwrap();
+            assert!(matches!(spec, PoolReserveSpec::Percent(25)));
+        }
+
+        #[test]
+        fn parse_fixed_byte_size() {
+            let spec: PoolReserveSpec = "200MB".parse().unwrap();
+            assert!(matches!(spec, PoolReserveSpec::Fixed(200_000_000)));
+        }
+
+        #[test]
+        fn parse_fixed_byte_size_binary() {
+            let spec: PoolReserveSpec = "1GiB".parse().unwrap();
+            assert!(matches!(spec, PoolReserveSpec::Fixed(1_073_741_824)));
+        }
+
+        #[test]
+        fn reject_zero_percentage() {
+            assert!("0".parse::<PoolReserveSpec>().is_err());
+            assert!("0%".parse::<PoolReserveSpec>().is_err());
+        }
+
+        #[test]
+        fn reject_100_percent() {
+            assert!("100".parse::<PoolReserveSpec>().is_err());
+            assert!("100%".parse::<PoolReserveSpec>().is_err());
+        }
+
+        #[test]
+        fn reject_empty_string() {
+            assert!("".parse::<PoolReserveSpec>().is_err());
+        }
+
+        #[test]
+        fn resolve_percentage() {
+            let spec = PoolReserveSpec::Percent(10);
+            assert_eq!(spec.resolve(1000).unwrap(), 100);
+        }
+
+        #[test]
+        fn resolve_fixed_errors_when_exceeds_pool() {
+            let spec = PoolReserveSpec::Fixed(8_000_000_000);
+            let err = spec.resolve(4_000_000_000).unwrap_err();
+            assert!(err.to_string().contains("exceeds pool size"));
+        }
+
+        #[test]
+        fn resolve_fixed_within_pool() {
+            let spec = PoolReserveSpec::Fixed(200_000_000);
+            assert_eq!(spec.resolve(1_000_000_000).unwrap(), 200_000_000);
+        }
+
+        #[test]
+        fn resolve_percentage_errors_when_rounds_to_zero() {
+            let spec = PoolReserveSpec::Percent(1);
+            let err = spec.resolve(50).unwrap_err();
+            assert!(err.to_string().contains("resolves to 0 bytes"));
+        }
+
+        #[test]
+        fn resolve_errors_on_zero_pool() {
+            let spec = PoolReserveSpec::Percent(10);
+            assert!(spec.resolve(0).is_err());
         }
     }
 

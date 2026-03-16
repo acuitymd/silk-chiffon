@@ -1,13 +1,18 @@
-use crate::utils::memory::total_memory;
+mod memory_pool;
+
+use std::num::NonZeroUsize;
+use std::sync::Arc;
+
 use anyhow::{Result, anyhow};
 use bytesize::ByteSize;
 use camino::Utf8PathBuf;
-use datafusion::{
-    execution::memory_pool::FairSpillPool,
-    prelude::{SessionConfig, SessionContext},
-};
+use datafusion::execution::memory_pool::{FairSpillPool, MemoryPool, TrackConsumersPool};
+use datafusion::prelude::{SessionConfig, SessionContext};
 use tempfile::TempDir;
 
+use memory_pool::ReservedSpillPool;
+
+use crate::utils::memory::total_memory;
 use crate::{
     ListOutputsFormat, QueryDialect, SpillCompression,
     io_strategies::{
@@ -19,7 +24,6 @@ use crate::{
     operations::data_operation::DataOperation,
 };
 
-#[derive(Default)]
 pub struct PipelineConfig {
     pub working_directory: Option<String>,
     pub query_dialect: QueryDialect,
@@ -28,6 +32,24 @@ pub struct PipelineConfig {
     pub spill_path: Option<Utf8PathBuf>,
     pub spill_compression: SpillCompression,
     pub sort_spill_reservation_bytes: Option<usize>,
+    pub non_spillable_reserve: Option<usize>,
+    pub memory_pool_top_consumers: usize,
+}
+
+impl Default for PipelineConfig {
+    fn default() -> Self {
+        Self {
+            working_directory: None,
+            query_dialect: QueryDialect::default(),
+            memory_limit: None,
+            target_partitions: None,
+            spill_path: None,
+            spill_compression: SpillCompression::default(),
+            sort_spill_reservation_bytes: None,
+            non_spillable_reserve: None,
+            memory_pool_top_consumers: 10,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -123,6 +145,32 @@ impl Pipeline {
         self
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_evict_writer_partitioned_sink(
+        mut self,
+        columns: Vec<String>,
+        template: PathTemplate,
+        sink_factory: SinkFactory,
+        exclude_columns: Vec<String>,
+        create_dirs: bool,
+        overwrite: bool,
+        list_outputs: ListOutputsFormat,
+        max_open: NonZeroUsize,
+    ) -> Self {
+        self.output_strategy = Some(OutputStrategy::PartitionedEvictWriter {
+            columns,
+            template: Box::new(template),
+            sink_factory,
+            exclude_columns,
+            create_dirs,
+            overwrite,
+            list_outputs,
+            max_open,
+        });
+
+        self
+    }
+
     pub fn with_working_directory(mut self, working_directory: String) -> Self {
         self.config.working_directory = Some(working_directory);
         self
@@ -158,6 +206,16 @@ impl Pipeline {
         sort_spill_reservation_bytes: Option<usize>,
     ) -> Self {
         self.config.sort_spill_reservation_bytes = sort_spill_reservation_bytes;
+        self
+    }
+
+    pub fn with_non_spillable_reserve(mut self, reserve: Option<usize>) -> Self {
+        self.config.non_spillable_reserve = reserve;
+        self
+    }
+
+    pub fn with_memory_pool_top_consumers(mut self, n: usize) -> Self {
+        self.config.memory_pool_top_consumers = n;
         self
     }
 
@@ -237,10 +295,25 @@ impl Pipeline {
             path.try_into()?
         };
 
-        let pool = FairSpillPool::new(memory_limit);
+        let top_n = match self.config.memory_pool_top_consumers {
+            0 => NonZeroUsize::MAX,
+            n => NonZeroUsize::new(n).expect("nonzero by match"),
+        };
+
+        let pool: Arc<dyn MemoryPool> = match self.config.non_spillable_reserve {
+            Some(reserve) => {
+                let inner = ReservedSpillPool::new(memory_limit, reserve);
+                Arc::new(TrackConsumersPool::new(inner, top_n))
+            }
+            None => {
+                let inner = FairSpillPool::new(memory_limit);
+                Arc::new(TrackConsumersPool::new(inner, top_n))
+            }
+        };
+
         let runtime = datafusion::execution::runtime_env::RuntimeEnvBuilder::default()
             .with_temp_file_path(&spill_path)
-            .with_memory_pool(std::sync::Arc::new(pool))
+            .with_memory_pool(pool)
             .build()?;
 
         Ok(SessionContext::new_with_config_rt(

@@ -11,7 +11,7 @@ use arrow::array::{Array, AsArray, RecordBatch};
 use arrow::datatypes::{DataType, SchemaRef};
 use datafusion::functions::string::expr_fn::octet_length;
 use datafusion::functions_aggregate::expr_fn::{approx_distinct, avg, count_distinct};
-use datafusion::prelude::{SessionConfig, SessionContext, cast, col};
+use datafusion::prelude::{SessionConfig, SessionContext, col};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -91,13 +91,18 @@ async fn run_streaming_analysis(
 
     let mut agg_exprs = Vec::new();
     for col_name in &columns {
+        // approx_distinct uses HyperLogLog and returns UInt64 but only supports
+        // a subset of types. count_distinct supports all types but returns Int64.
+        // we handle both return types in extract_analysis_from_results because
+        // DataFusion's cast(count_distinct(...), UInt64) breaks with certain column
+        // types (e.g. Boolean) where the count_distinct implementation doesn't
+        // support the cast expression.
         let ndv_expr = if let Ok(field) = schema.field_with_name(col_name)
             && supports_approx_distinct(field.data_type())
         {
             approx_distinct(col(col_name))
         } else {
-            // count_distinct returns Int64, cast to UInt64 for consistency
-            cast(count_distinct(col(col_name)), DataType::UInt64)
+            count_distinct(col(col_name))
         };
         agg_exprs.push(ndv_expr.alias(format!("{col_name}_ndv")));
 
@@ -169,8 +174,15 @@ fn extract_analysis_from_results(
 
         let approx_distinct = batch
             .column_by_name(&ndv_col)
-            .and_then(|arr| arr.as_primitive_opt::<arrow::datatypes::UInt64Type>())
-            .and_then(|arr| arr.is_valid(0).then(|| arr.value(0)))
+            .and_then(|arr| {
+                // approx_distinct returns UInt64, count_distinct returns Int64
+                arr.as_primitive_opt::<arrow::datatypes::UInt64Type>()
+                    .and_then(|a| a.is_valid(0).then(|| a.value(0)))
+                    .or_else(|| {
+                        arr.as_primitive_opt::<arrow::datatypes::Int64Type>()
+                            .and_then(|a| a.is_valid(0).then(|| a.value(0).max(0).cast_unsigned()))
+                    })
+            })
             .unwrap_or(0);
 
         let avg_value_size = batch

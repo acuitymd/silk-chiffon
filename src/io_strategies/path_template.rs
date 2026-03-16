@@ -95,6 +95,21 @@ impl PathTemplate {
         let tmpl = self.env.template_from_str(&self.template_str).unwrap();
         tmpl.render(context).unwrap()
     }
+
+    /// Like resolve(), but inserts a file index before the extension.
+    /// e.g. "output/{{col}}.parquet" with index 2 -> "output/val_2.parquet"
+    pub fn resolve_with_index(&self, values: &PartitionValues, file_index: usize) -> String {
+        let base = self.resolve(values);
+        // find the dot only in the filename component, not directory parts
+        let filename_start = base.rfind('/').map_or(0, |i| i + 1);
+        match base[filename_start..].rfind('.') {
+            Some(dot_offset) => {
+                let dot_pos = filename_start + dot_offset;
+                format!("{}_{}{}", &base[..dot_pos], file_index, &base[dot_pos..])
+            }
+            None => format!("{}_{}", base, file_index),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -866,5 +881,71 @@ mod tests {
         let result = template.resolve(&values);
         // year and day escaped, month raw
         assert_eq!(result, "output/2024%2FQ1/01/15/15%3A30.parquet");
+    }
+
+    #[test]
+    fn test_resolve_with_index_standard() {
+        let template = PathTemplate::new("output/{{col}}.parquet".to_string());
+        let mut values = HashMap::new();
+        values.insert(
+            "col".to_string(),
+            Arc::new(StringArray::from(vec!["foo"])) as _,
+        );
+
+        assert_eq!(
+            template.resolve_with_index(&values, 0),
+            "output/foo_0.parquet"
+        );
+        assert_eq!(
+            template.resolve_with_index(&values, 3),
+            "output/foo_3.parquet"
+        );
+    }
+
+    #[test]
+    fn test_resolve_with_index_no_extension() {
+        let template = PathTemplate::new("output/{{col}}".to_string());
+        let mut values = HashMap::new();
+        values.insert(
+            "col".to_string(),
+            Arc::new(StringArray::from(vec!["bar"])) as _,
+        );
+
+        assert_eq!(template.resolve_with_index(&values, 1), "output/bar_1");
+    }
+
+    #[test]
+    fn test_resolve_with_index_nested_dirs() {
+        let template = PathTemplate::new("output/{{region}}/{{city}}.parquet".to_string());
+        let mut values = HashMap::new();
+        values.insert(
+            "region".to_string(),
+            Arc::new(StringArray::from(vec!["us"])) as _,
+        );
+        values.insert(
+            "city".to_string(),
+            Arc::new(StringArray::from(vec!["nyc"])) as _,
+        );
+
+        assert_eq!(
+            template.resolve_with_index(&values, 2),
+            "output/us/nyc_2.parquet"
+        );
+    }
+
+    #[test]
+    fn test_resolve_with_index_dotted_dir_no_extension() {
+        let template = PathTemplate::new("output/v2.0/{{col}}".to_string());
+        let mut values = HashMap::new();
+        values.insert(
+            "col".to_string(),
+            Arc::new(StringArray::from(vec!["data"])) as _,
+        );
+
+        // the dot is in the directory, not the filename -- index goes at the end
+        assert_eq!(
+            template.resolve_with_index(&values, 1),
+            "output/v2.0/data_1"
+        );
     }
 }
