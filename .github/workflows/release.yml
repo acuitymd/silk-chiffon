@@ -15,9 +15,29 @@ env:
   CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
 
 jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      binary_version: ${{ steps.version.outputs.binary_version }}
+      release_version: ${{ steps.version.outputs.release_version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate version
+        id: version
+        run: |
+          CALVER=$(TZ=America/Chicago date '+%Y-%m-%d_%H-%M-%S')
+          SHORT_SHA=$(git rev-parse --short=8 "${GITHUB_SHA}")
+          BINARY_VERSION="${CALVER}_${SHORT_SHA}"
+
+          echo "binary_version=${BINARY_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "release_version=v${BINARY_VERSION}" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: version
     env:
       SILK_CHIFFON_WATCH_GIT_REF: "1"
+      SILK_CHIFFON_VERSION_OVERRIDE: ${{ needs.version.outputs.binary_version }}
     strategy:
       matrix:
         include:
@@ -69,13 +89,10 @@ jobs:
         run: cargo zigbuild --locked --release --target ${{ matrix.target }}
 
       - name: Test binary
-        run: ./target/${{ matrix.target }}/release/silk-chiffon --version
-
-      - name: Generate version
-        id: version
         run: |
-          SHORT_SHA=$(git rev-parse --short=8 ${{ github.sha }})
-          echo "version=$(date '+%Y%m%d')-${SHORT_SHA}" >> $GITHUB_OUTPUT
+          ACTUAL="$(./target/${{ matrix.target }}/release/silk-chiffon --version)"
+          EXPECTED="silk-chiffon ${{ needs.version.outputs.binary_version }}"
+          test "${ACTUAL}" = "${EXPECTED}"
 
       - name: Rename binary
         run: |
@@ -87,12 +104,14 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: silk-chiffon-${{ matrix.target }}-${{ steps.version.outputs.version }}
+          name: silk-chiffon-${{ matrix.target }}-${{ needs.version.outputs.binary_version }}
           path: target/${{ matrix.target }}/release/silk-chiffon-${{ matrix.target }}.gz
           compression-level: 0
 
   release:
-    needs: build
+    needs:
+      - build
+      - version
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -108,8 +127,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # picking central time just because I can
-          VERSION="v$(date '+%Y-%m-%d_%H-%M-%S')_$(git rev-parse --short=8 ${{ github.sha }})"
+          VERSION="${{ needs.version.outputs.release_version }}"
           gh release create ${VERSION} \
             --title "💝 Release ${VERSION}" \
             --generate-notes \

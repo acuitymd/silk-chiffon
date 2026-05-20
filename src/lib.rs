@@ -290,7 +290,12 @@ impl FromStr for PoolReserveSpec {
 }
 
 #[derive(Parser, Debug)]
-#[command(version = env!("SILK_CHIFFON_VERSION"), about, long_about = None)]
+#[command(
+    name = "silk-chiffon",
+    version = env!("SILK_CHIFFON_VERSION"),
+    about,
+    long_about = None
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
