@@ -240,7 +240,7 @@ fn bench_transform(c: &mut Criterion) {
                             .path()
                             .join(format!("out_{}_{}.parquet", config, strategy));
                         let props = WriterProperties::builder()
-                            .set_max_row_group_size(config.row_group_size)
+                            .set_max_row_group_row_count(Some(config.row_group_size))
                             .build();
 
                         match strategy {

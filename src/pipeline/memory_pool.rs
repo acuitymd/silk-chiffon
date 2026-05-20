@@ -185,12 +185,12 @@ mod tests {
     fn non_spillable_can_use_reserve() {
         let pool = Arc::new(ReservedSpillPool::new(100, 20)) as Arc<dyn MemoryPool>;
 
-        let mut s1 = MemoryConsumer::new("spiller")
+        let s1 = MemoryConsumer::new("spiller")
             .with_can_spill(true)
             .register(&pool);
         s1.try_grow(80).unwrap();
 
-        let mut ns1 = MemoryConsumer::new("merger").register(&pool);
+        let ns1 = MemoryConsumer::new("merger").register(&pool);
         ns1.try_grow(20).unwrap();
 
         assert_eq!(pool.reserved(), 100);
@@ -200,7 +200,7 @@ mod tests {
     fn spillable_cannot_use_reserve() {
         let pool = Arc::new(ReservedSpillPool::new(100, 20)) as Arc<dyn MemoryPool>;
 
-        let mut s1 = MemoryConsumer::new("spiller")
+        let s1 = MemoryConsumer::new("spiller")
             .with_can_spill(true)
             .register(&pool);
 
@@ -214,10 +214,10 @@ mod tests {
     fn fair_sharing_among_spillable() {
         let pool = Arc::new(ReservedSpillPool::new(100, 20)) as Arc<dyn MemoryPool>;
 
-        let mut s1 = MemoryConsumer::new("s1")
+        let s1 = MemoryConsumer::new("s1")
             .with_can_spill(true)
             .register(&pool);
-        let mut s2 = MemoryConsumer::new("s2")
+        let s2 = MemoryConsumer::new("s2")
             .with_can_spill(true)
             .register(&pool);
 
@@ -233,13 +233,13 @@ mod tests {
     fn non_spillable_uses_freed_spillable_memory() {
         let pool = Arc::new(ReservedSpillPool::new(100, 20)) as Arc<dyn MemoryPool>;
 
-        let mut s1 = MemoryConsumer::new("spiller")
+        let s1 = MemoryConsumer::new("spiller")
             .with_can_spill(true)
             .register(&pool);
         s1.try_grow(60).unwrap();
 
         // non-spillable can use reserve + whatever spillable hasn't claimed
-        let mut ns1 = MemoryConsumer::new("merger").register(&pool);
+        let ns1 = MemoryConsumer::new("merger").register(&pool);
         ns1.try_grow(40).unwrap(); // 100 - 60 = 40 available
 
         assert_eq!(pool.reserved(), 100);
@@ -249,7 +249,7 @@ mod tests {
     fn grow_and_shrink_tracking() {
         let pool = Arc::new(ReservedSpillPool::new(100, 20)) as Arc<dyn MemoryPool>;
 
-        let mut s1 = MemoryConsumer::new("spiller")
+        let s1 = MemoryConsumer::new("spiller")
             .with_can_spill(true)
             .register(&pool);
         s1.grow(50);
@@ -258,7 +258,7 @@ mod tests {
         s1.shrink(30);
         assert_eq!(pool.reserved(), 20);
 
-        let mut ns1 = MemoryConsumer::new("merger").register(&pool);
+        let ns1 = MemoryConsumer::new("merger").register(&pool);
         ns1.grow(10);
         assert_eq!(pool.reserved(), 30);
 
@@ -270,7 +270,7 @@ mod tests {
     fn spillable_share_adjusts_on_drop() {
         let pool = Arc::new(ReservedSpillPool::new(100, 20)) as Arc<dyn MemoryPool>;
 
-        let mut s1 = MemoryConsumer::new("s1")
+        let s1 = MemoryConsumer::new("s1")
             .with_can_spill(true)
             .register(&pool);
         let s2 = MemoryConsumer::new("s2")
@@ -292,16 +292,16 @@ mod tests {
     fn non_spillable_denied_when_pool_full() {
         let pool = Arc::new(ReservedSpillPool::new(100, 20)) as Arc<dyn MemoryPool>;
 
-        let mut s1 = MemoryConsumer::new("spiller")
+        let s1 = MemoryConsumer::new("spiller")
             .with_can_spill(true)
             .register(&pool);
         s1.try_grow(80).unwrap();
 
-        let mut ns1 = MemoryConsumer::new("merger").register(&pool);
+        let ns1 = MemoryConsumer::new("merger").register(&pool);
         ns1.try_grow(20).unwrap();
 
         // pool is full (100/100), second non-spillable allocation fails
-        let mut ns2 = MemoryConsumer::new("merger2").register(&pool);
+        let ns2 = MemoryConsumer::new("merger2").register(&pool);
         let err = ns2.try_grow(1).unwrap_err().strip_backtrace();
         assert!(err.contains("Failed to allocate"), "{err}");
     }
@@ -311,11 +311,11 @@ mod tests {
         let pool = Arc::new(ReservedSpillPool::new(100, 20)) as Arc<dyn MemoryPool>;
 
         // non-spillable uses 40 (more than the 20 reserve)
-        let mut ns1 = MemoryConsumer::new("merger").register(&pool);
+        let ns1 = MemoryConsumer::new("merger").register(&pool);
         ns1.try_grow(40).unwrap();
 
         // spillable should only get (100 - 40) / 1 = 60, not (100 - 20) / 1 = 80
-        let mut s1 = MemoryConsumer::new("spiller")
+        let s1 = MemoryConsumer::new("spiller")
             .with_can_spill(true)
             .register(&pool);
         s1.try_grow(60).unwrap();
