@@ -231,7 +231,7 @@ fn bench_sequential(c: &mut Criterion) {
                     let path = temp_dir.path().join("test.parquet");
                     let file = std::fs::File::create(&path).unwrap();
                     let props = WriterProperties::builder()
-                        .set_max_row_group_size(config.row_group_size)
+                        .set_max_row_group_row_count(Some(config.row_group_size))
                         .build();
 
                     let mut writer =

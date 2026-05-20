@@ -107,7 +107,7 @@ struct ChannelExec {
     schema: SchemaRef,
     receiver: std::sync::Mutex<Option<mpsc::Receiver<RecordBatch>>>,
     projection: Option<Vec<usize>>,
-    properties: PlanProperties,
+    properties: Arc<PlanProperties>,
 }
 
 impl ChannelExec {
@@ -127,7 +127,7 @@ impl ChannelExec {
             schema,
             receiver: std::sync::Mutex::new(Some(receiver)),
             projection,
-            properties,
+            properties: Arc::new(properties),
         }
     }
 }
@@ -145,7 +145,7 @@ impl ExecutionPlan for ChannelExec {
         Arc::clone(&self.schema)
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.properties
     }
 

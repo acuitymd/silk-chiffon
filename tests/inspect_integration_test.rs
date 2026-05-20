@@ -867,7 +867,7 @@ mod parity_tests {
         // write with small row group size to force multiple row groups
         let props = WriterProperties::builder()
             .set_compression(Compression::UNCOMPRESSED)
-            .set_max_row_group_size(2)
+            .set_max_row_group_row_count(Some(2))
             .build();
 
         let f = File::create(&file).unwrap();
