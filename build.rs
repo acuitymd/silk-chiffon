@@ -11,16 +11,11 @@ fn git_output(args: &[&str]) -> Option<String> {
         .filter(|output| !output.is_empty())
 }
 
-fn calver() -> Option<String> {
-    Command::new("date")
-        .env("TZ", "America/Chicago")
-        .arg("+%Y-%m-%d_%H-%M-%S")
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .map(|output| output.trim().to_string())
-        .filter(|output| !output.is_empty())
+fn calver() -> String {
+    chrono::Utc::now()
+        .with_timezone(&chrono_tz::America::Chicago)
+        .format("%Y-%m-%d_%H-%M-%S")
+        .to_string()
 }
 
 fn main() {
@@ -33,10 +28,7 @@ fn main() {
     let full_version = match version_override {
         Some(version) => version,
         None if git_hash.is_empty() => "dev".to_string(),
-        None => match calver() {
-            Some(calver) => format!("dev-{calver}_{git_hash}"),
-            None => format!("dev-{git_hash}"),
-        },
+        None => format!("dev-{}_{git_hash}", calver()),
     };
 
     println!("cargo:rustc-env=GIT_HASH={git_hash}");
