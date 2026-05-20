@@ -332,14 +332,11 @@ fn resolve_parquet_queue_sizes(
 
     let budget = options.memory_budget.unwrap();
     let row_bytes = estimate_row_bytes(schema).max(1);
-    let row_group_bytes = options
-        .max_row_group_size
-        .checked_mul(row_bytes)
-        .unwrap_or(usize::MAX);
+    let row_group_bytes = options.max_row_group_size.saturating_mul(row_bytes);
     let available = budget.saturating_sub(options.buffer_size);
     let total_slots = available
         .checked_div(row_group_bytes)
-        .unwrap_or_else(|| DEFAULT_CONCURRENCY + DEFAULT_ENCODING + DEFAULT_WRITING);
+        .unwrap_or(DEFAULT_CONCURRENCY + DEFAULT_ENCODING + DEFAULT_WRITING);
 
     // distribute: ~40% concurrency, ~25% encoding queue, ~25% writing queue, ingestion stays 1
     let concurrency = options

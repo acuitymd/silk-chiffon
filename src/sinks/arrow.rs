@@ -102,10 +102,7 @@ fn resolve_arrow_queue_depth(options: &ArrowSinkOptions, schema: &SchemaRef) -> 
 
     if let Some(budget) = options.memory_budget {
         let row_bytes = estimate_row_bytes(schema).max(1);
-        let batch_bytes = options
-            .record_batch_size
-            .checked_mul(row_bytes)
-            .unwrap_or(usize::MAX);
+        let batch_bytes = options.record_batch_size.saturating_mul(row_bytes);
         let derived = budget
             .checked_div(batch_bytes)
             .unwrap_or(DEFAULT_QUEUE_DEPTH)
