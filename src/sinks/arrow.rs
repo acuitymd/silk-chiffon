@@ -443,6 +443,28 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn test_default_file_metadata_is_empty() {
+            let temp_dir = tempdir().unwrap();
+            let output_path = temp_dir.path().join("output.arrow");
+
+            let schema = test_data::simple_schema();
+            let batch =
+                test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["a", "b", "c"]);
+
+            let mut sink =
+                ArrowSink::create(output_path.clone(), &schema, ArrowSinkOptions::new()).unwrap();
+
+            sink.write_batch(batch).await.unwrap();
+            sink.finish().await.unwrap();
+
+            let file = std::fs::File::open(&output_path).unwrap();
+            let reader = arrow::ipc::reader::FileReader::try_new_buffered(file, None).unwrap();
+
+            assert!(reader.custom_metadata().is_empty());
+            assert!(reader.schema().metadata().is_empty());
+        }
+
+        #[tokio::test]
         async fn test_sink_empty_batches() {
             let temp_dir = tempdir().unwrap();
             let output_path = temp_dir.path().join("output.arrow");
