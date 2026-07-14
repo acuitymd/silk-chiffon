@@ -34,17 +34,18 @@ Silky smooth conversion between columnar data formats 💝
 Transform data between formats with optional filtering, sorting, merging, and partitioning.
 
 Examples:
-  # Simple conversion
-  silk-chiffon transform --from input.arrow --to output.parquet
 
-  # Merge multiple files
-  silk-chiffon transform --from-many file1.arrow --from-many file2.arrow --to merged.parquet
+    # Simple conversion
+    silk-chiffon transform --from input.arrow --to output.parquet
 
-  # Partition into multiple files
-  silk-chiffon transform --from input.arrow --to-many "{{region}}.parquet" --by region
+    # Merge multiple files
+    silk-chiffon transform --from-many file1.arrow --from-many file2.arrow --to merged.parquet
 
-  # Merge and partition with glob
-  silk-chiffon transform --from-many '*.arrow' --to-many "{{year}}/{{month}}.parquet" --by year,month
+    # Partition into multiple files
+    silk-chiffon transform --from input.arrow --to-many "{{region}}.parquet" --by region
+
+    # Merge and partition with glob
+    silk-chiffon transform --from-many '*.arrow' --to-many "{{year}}/{{month}}.parquet" --by year,month
 
 **Usage:** `silk-chiffon transform [OPTIONS]`
 
@@ -72,13 +73,14 @@ Examples:
 * `-q`, `--query <QUERY>` — SQL query to apply to the data. The input data is available as table 'data'.
 
    Examples:
-     --query "SELECT * FROM data WHERE status = 'active'"
-     --query "SELECT id, name, amount FROM data"
-     --query "SELECT region, SUM(amount) FROM data GROUP BY region"
-     --query "SELECT *, amount * 1.1 as adjusted FROM data"
+
+       --query "SELECT * FROM data WHERE status = 'active'"
+       --query "SELECT id, name, amount FROM data"
+       --query "SELECT region, SUM(amount) FROM data GROUP BY region"
+       --query "SELECT *, amount * 1.1 as adjusted FROM data"
 * `-s`, `--sort-by <SORT_BY>` — Sort the data by one or more columns before writing.
 
-   Format: A comma-separated list like "col_a,col_b:desc,col_c".
+   Format: A comma-separated list like `col_a,col_b:desc,col_c`.
 * `--memory-budget <MEMORY_BUDGET>` — Target memory budget. Best-effort, not a hard limit.
 
    Accepts a byte size (e.g. "8GB"), "total[:pct]" for a percentage of total RAM, "available[:pct]" for a percentage of free RAM, or "reserve:<size>" to use total RAM minus a reserved amount. All keyword modes (total, available, reserve) support an optional minimum: "total:80:min:4GB". Examples: "total:90", "available:60%", "reserve:2GB:min:1GB", "4GB".
@@ -186,25 +188,28 @@ Examples:
      - This coupling exists because both features degrade for high-cardinality data
 
    To force bloom filters ON regardless of dictionary decisions, specify explicit NDV:
-     --parquet-bloom-column "high_card_col:ndv=100000"
+
+       --parquet-bloom-column "high_card_col:ndv=100000"
 
    NESTED TYPES (structs, lists, maps):
    Bloom filters apply to leaf columns within nested structures. The column path uses
    dot notation (e.g., "struct_col.field" or "list_col.element").
 
    Formats:
-     --parquet-bloom-all                       # Use defaults (fpp=0.01, auto NDV)
-     --parquet-bloom-all "fpp=VALUE"           # Custom false positive probability
-     --parquet-bloom-all "ndv=VALUE"           # Force bloom on with explicit NDV
-     --parquet-bloom-all "fpp=VALUE,ndv=VALUE" # Both custom
+
+       --parquet-bloom-all                       # Use defaults (fpp=0.01, auto NDV)
+       --parquet-bloom-all "fpp=VALUE"           # Custom false positive probability
+       --parquet-bloom-all "ndv=VALUE"           # Force bloom on with explicit NDV
+       --parquet-bloom-all "fpp=VALUE,ndv=VALUE" # Both custom
 
    CONFLICTS: Cannot be used with --parquet-bloom-all-off.
 
    Examples:
-     --parquet-bloom-all                                     # Bloom for low-cardinality columns
-     --parquet-bloom-all "fpp=0.001"                         # Tighter false positive rate
-     --parquet-bloom-all "ndv=10000"                         # Force bloom on ALL columns
-     --parquet-bloom-all --parquet-bloom-column-off user_id  # Exclude user_id
+
+       --parquet-bloom-all                                     # Bloom for low-cardinality columns
+       --parquet-bloom-all "fpp=0.001"                         # Tighter false positive rate
+       --parquet-bloom-all "ndv=10000"                         # Force bloom on ALL columns
+       --parquet-bloom-all --parquet-bloom-column-off user_id  # Exclude user_id
 * `--parquet-bloom-all-off` — Disable bloom filters for all columns.
 
    Use with --parquet-bloom-column to enable bloom filters for specific columns only.
@@ -212,8 +217,9 @@ Examples:
    CONFLICTS: Cannot be used with --parquet-bloom-all.
 
    Examples:
-     --parquet-bloom-all-off                                 # No bloom filters
-     --parquet-bloom-all-off --parquet-bloom-column user_id  # Only user_id
+
+       --parquet-bloom-all-off                                 # No bloom filters
+       --parquet-bloom-all-off --parquet-bloom-column user_id  # Only user_id
 * `--parquet-bloom-column <COLUMN[:fpp=VALUE][,ndv=VALUE]>` — Enable or customize bloom filters for specific columns.
 
    Overrides --parquet-bloom-all-off for the specified columns.
@@ -228,19 +234,21 @@ Examples:
    all leaf columns under that path, so you don't need to know Parquet internal naming.
 
    Formats:
-     COLUMN                     # Depends on dictionary decision
-     COLUMN:fpp=VALUE           # Custom false positive probability
-     COLUMN:ndv=VALUE           # Force bloom ON with explicit NDV
-     COLUMN:fpp=VALUE,ndv=VALUE # Both custom
+
+       COLUMN                     # Depends on dictionary decision
+       COLUMN:fpp=VALUE           # Custom false positive probability
+       COLUMN:ndv=VALUE           # Force bloom ON with explicit NDV
+       COLUMN:fpp=VALUE,ndv=VALUE # Both custom
 
    CONFLICTS: Cannot specify same column in both --parquet-bloom-column and
    --parquet-bloom-column-off.
 
    Examples:
-     --parquet-bloom-column "region"                    # If region keeps dictionary
-     --parquet-bloom-column "user.address"              # All leaves under user.address
-     --parquet-bloom-column "user_id:ndv=1000000"       # Force bloom on high-card column
-     --parquet-bloom-column "user_id:fpp=0.001"         # Tighter FPP
+
+       --parquet-bloom-column "region"                    # If region keeps dictionary
+       --parquet-bloom-column "user.address"              # All leaves under user.address
+       --parquet-bloom-column "user_id:ndv=1000000"       # Force bloom on high-card column
+       --parquet-bloom-column "user_id:fpp=0.001"         # Tighter FPP
 * `--parquet-bloom-column-off <COLUMN>` — Disable bloom filter for specific columns (repeatable).
 
    Overrides --parquet-bloom-all for the specified columns.
@@ -252,9 +260,10 @@ Examples:
    --parquet-bloom-column-off.
 
    Examples:
-     --parquet-bloom-all --parquet-bloom-column-off user_id  # All except user_id
-     --parquet-bloom-column-off "user.address"               # Disable for all user.address leaves
-     --parquet-bloom-column-off col1 --parquet-bloom-column-off col2  # Disable multiple
+
+       --parquet-bloom-all --parquet-bloom-column-off user_id  # All except user_id
+       --parquet-bloom-column-off "user.address"               # Disable for all user.address leaves
+       --parquet-bloom-column-off col1 --parquet-bloom-column-off col2  # Disable multiple
 * `--parquet-buffer-size <PARQUET_BUFFER_SIZE>` — I/O buffer size for Parquet writing (e.g., "32MB", "64MB", "1GB").
 
    Controls the size of the buffer used when writing encoded data to disk. Supports suffixes: B, KB, MB, GB, TB (or KiB, MiB, GiB, TiB for binary). Default: 32MB.
@@ -298,9 +307,10 @@ Examples:
    --parquet-dictionary-column-off.
 
    Examples:
-     --parquet-dictionary-column region:analyze       # Let analysis decide
-     --parquet-dictionary-column region:always        # Force dictionary on
-     --parquet-dictionary-column "user.address:always"   # All user.address leaves
+
+       --parquet-dictionary-column region:analyze       # Let analysis decide
+       --parquet-dictionary-column region:always        # Force dictionary on
+       --parquet-dictionary-column "user.address:always"   # All user.address leaves
 * `--parquet-column-encoding <COLUMN=ENCODING>` — Set data page encoding for specific columns. Can be specified multiple times.
 
    Overrides --parquet-encoding and automatic encoding selection for the named column.
@@ -318,9 +328,10 @@ Examples:
    byte-stream-split
 
    Examples:
-     --parquet-column-encoding id=delta-binary-packed      # Efficient for sorted integers
-     --parquet-column-encoding name=delta-byte-array       # Efficient for strings
-     --parquet-column-encoding price=byte-stream-split     # Efficient for floats
+
+       --parquet-column-encoding id=delta-binary-packed      # Efficient for sorted integers
+       --parquet-column-encoding name=delta-byte-array       # Efficient for strings
+       --parquet-column-encoding price=byte-stream-split     # Efficient for floats
 * `--parquet-column-encoding-threads <PARQUET_COLUMN_ENCODING_THREADS>` — Number of threads for CPU-bound parquet column encoding.
 
    Controls the rayon thread pool size for encoding columns within row groups. Column encoding is CPU-intensive and benefits from parallelism.
@@ -448,14 +459,15 @@ Examples:
 Inspect file metadata and structure.
 
 Examples:
-  # Identify format
-  silk-chiffon inspect identify data.parquet
 
-  # Inspect Parquet file
-  silk-chiffon inspect parquet data.parquet --stats --row-groups
+    # Identify format
+    silk-chiffon inspect identify data.parquet
 
-  # Inspect Arrow file
-  silk-chiffon inspect arrow data.arrow --schema --batches
+    # Inspect Parquet file
+    silk-chiffon inspect parquet data.parquet --pages
+
+    # Inspect Arrow file
+    silk-chiffon inspect arrow data.arrow --batches
 
 **Usage:** `silk-chiffon inspect <COMMAND>`
 
@@ -590,14 +602,16 @@ Inspect a Vortex file
 Generate shell completions for your shell.
 
 To add completions for your current shell session only:
-  zsh:  eval "$(silk-chiffon completions zsh)"
-  bash: eval "$(silk-chiffon completions bash)"
-  fish: silk-chiffon completions fish | source
+
+    zsh:  eval "$(silk-chiffon completions zsh)"
+    bash: eval "$(silk-chiffon completions bash)"
+    fish: silk-chiffon completions fish | source
 
 To persist completions across sessions:
-  zsh:  echo 'eval "$(silk-chiffon completions zsh)"' >> ~/.zshrc
-  bash: echo 'eval "$(silk-chiffon completions bash)"' >> ~/.bashrc
-  fish: silk-chiffon completions fish > ~/.config/fish/completions/silk-chiffon.fish
+
+    zsh:  echo 'eval "$(silk-chiffon completions zsh)"' >> ~/.zshrc
+    bash: echo 'eval "$(silk-chiffon completions bash)"' >> ~/.bashrc
+    fish: silk-chiffon completions fish > ~/.config/fish/completions/silk-chiffon.fish
 
 **Usage:** `silk-chiffon completions <SHELL>`
 
