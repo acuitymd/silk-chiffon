@@ -2,8 +2,10 @@
 //!
 //! Run via `just docs` (which passes `--features docs`). `just verify` runs it
 //! too, so the committed reference tracks the CLI without anyone remembering to.
+//!
+//! Declared in Cargo.toml with `required-features = ["docs"]`, so `--all-targets`
+//! skips it unless the `docs` feature is on.
 
-#[cfg(feature = "docs")]
 fn main() -> std::io::Result<()> {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/docs");
     std::fs::create_dir_all(dir)?;
@@ -11,10 +13,4 @@ fn main() -> std::io::Result<()> {
     std::fs::write(&path, silk_chiffon::cli_markdown())?;
     eprintln!("wrote {path}");
     Ok(())
-}
-
-#[cfg(not(feature = "docs"))]
-fn main() {
-    eprintln!("re-run with `--features docs` (or use `just docs`)");
-    std::process::exit(1);
 }

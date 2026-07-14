@@ -91,6 +91,10 @@ harness = false
 name = "transform_to_parquet"
 harness = false
 
+[[example]]
+name = "gen-docs"
+required-features = ["docs"]
+
 [profile.release]
 lto = true
 codegen-units = 1
