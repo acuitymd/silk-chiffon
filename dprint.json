@@ -6,7 +6,6 @@
   "excludes": [
     "**/target/",
     "Cargo.lock",
-    "docs/CLI.md",
     ".github/workflows/actions/sccache-action/"
   ],
   "plugins": [
