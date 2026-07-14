@@ -42,7 +42,7 @@ impl DataSource for ArrowDataSource {
             return Ok(reader.schema());
         }
 
-        anyhow::bail!("Could not read Arrow file: {}", &self.path)
+        anyhow::bail!("Could not read Arrow file: {}", self.path)
     }
 
     fn row_count(&self) -> Result<usize> {
