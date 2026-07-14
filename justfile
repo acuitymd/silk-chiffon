@@ -42,9 +42,11 @@ alias check := type-check
 
 fmt-check:
     cargo fmt --check
+    dprint check
 
 fmt-fix:
     cargo fmt
+    dprint fmt
 
 alias fmt := fmt-fix
 
@@ -62,4 +64,8 @@ lint-fix-linux: _check-zigbuild
 
 alias lint := lint-fix
 
-verify: type-check fmt-fix lint-check
+docs:
+    cargo run --features docs --example gen-docs
+    dprint fmt docs/CLI.md
+
+verify: type-check fmt-fix lint-check docs

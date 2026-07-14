@@ -301,51 +301,66 @@ pub struct Cli {
     pub command: Commands,
 }
 
+/// Render the full CLI reference as Markdown, used by `just docs` to regenerate
+/// `docs/CLI.md`. Behind the `docs` feature so `clap-markdown` stays out of the
+/// release binary.
+#[cfg(feature = "docs")]
+pub fn cli_markdown() -> String {
+    format!(
+        "<!-- Generated from the CLI by `just docs`; edit the clap definitions, not this file. -->\n\n{}",
+        clap_markdown::help_markdown::<Cli>()
+    )
+}
+
 #[derive(Subcommand, Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum Commands {
     /// Transform data between formats with optional filtering, sorting, merging, and partitioning.
     ///
     /// Examples:
-    ///   # Simple conversion
-    ///   silk-chiffon transform --from input.arrow --to output.parquet
     ///
-    ///   # Merge multiple files
-    ///   silk-chiffon transform --from-many file1.arrow --from-many file2.arrow --to merged.parquet
+    ///     # Simple conversion
+    ///     silk-chiffon transform --from input.arrow --to output.parquet
     ///
-    ///   # Partition into multiple files
-    ///   silk-chiffon transform --from input.arrow --to-many "{{region}}.parquet" --by region
+    ///     # Merge multiple files
+    ///     silk-chiffon transform --from-many file1.arrow --from-many file2.arrow --to merged.parquet
     ///
-    ///   # Merge and partition with glob
-    ///   silk-chiffon transform --from-many '*.arrow' --to-many "{{year}}/{{month}}.parquet" --by year,month
+    ///     # Partition into multiple files
+    ///     silk-chiffon transform --from input.arrow --to-many "{{region}}.parquet" --by region
+    ///
+    ///     # Merge and partition with glob
+    ///     silk-chiffon transform --from-many '*.arrow' --to-many "{{year}}/{{month}}.parquet" --by year,month
     #[command(verbatim_doc_comment)]
     Transform(TransformCommand),
 
     /// Inspect file metadata and structure.
     ///
     /// Examples:
-    ///   # Identify format
-    ///   silk-chiffon inspect identify data.parquet
     ///
-    ///   # Inspect Parquet file
-    ///   silk-chiffon inspect parquet data.parquet --stats --row-groups
+    ///     # Identify format
+    ///     silk-chiffon inspect identify data.parquet
     ///
-    ///   # Inspect Arrow file
-    ///   silk-chiffon inspect arrow data.arrow --schema --batches
+    ///     # Inspect Parquet file
+    ///     silk-chiffon inspect parquet data.parquet --pages
+    ///
+    ///     # Inspect Arrow file
+    ///     silk-chiffon inspect arrow data.arrow --batches
     #[command(verbatim_doc_comment)]
     Inspect(InspectCommand),
 
     /// Generate shell completions for your shell.
     ///
     /// To add completions for your current shell session only:
-    ///   zsh:  eval "$(silk-chiffon completions zsh)"
-    ///   bash: eval "$(silk-chiffon completions bash)"
-    ///   fish: silk-chiffon completions fish | source
+    ///
+    ///     zsh:  eval "$(silk-chiffon completions zsh)"
+    ///     bash: eval "$(silk-chiffon completions bash)"
+    ///     fish: silk-chiffon completions fish | source
     ///
     /// To persist completions across sessions:
-    ///   zsh:  echo 'eval "$(silk-chiffon completions zsh)"' >> ~/.zshrc
-    ///   bash: echo 'eval "$(silk-chiffon completions bash)"' >> ~/.bashrc
-    ///   fish: silk-chiffon completions fish > ~/.config/fish/completions/silk-chiffon.fish
+    ///
+    ///     zsh:  echo 'eval "$(silk-chiffon completions zsh)"' >> ~/.zshrc
+    ///     bash: echo 'eval "$(silk-chiffon completions bash)"' >> ~/.bashrc
+    ///     fish: silk-chiffon completions fish > ~/.config/fish/completions/silk-chiffon.fish
     #[command(verbatim_doc_comment)]
     Completions {
         /// Shell to generate completions for
@@ -1332,16 +1347,17 @@ pub struct TransformCommand {
     /// SQL query to apply to the data. The input data is available as table 'data'.
     ///
     /// Examples:
-    ///   --query "SELECT * FROM data WHERE status = 'active'"
-    ///   --query "SELECT id, name, amount FROM data"
-    ///   --query "SELECT region, SUM(amount) FROM data GROUP BY region"
-    ///   --query "SELECT *, amount * 1.1 as adjusted FROM data"
+    ///
+    ///     --query "SELECT * FROM data WHERE status = 'active'"
+    ///     --query "SELECT id, name, amount FROM data"
+    ///     --query "SELECT region, SUM(amount) FROM data GROUP BY region"
+    ///     --query "SELECT *, amount * 1.1 as adjusted FROM data"
     #[arg(short, long, verbatim_doc_comment, help_heading = "Transformations")]
     pub query: Option<String>,
 
     /// Sort the data by one or more columns before writing.
     ///
-    /// Format: A comma-separated list like "col_a,col_b:desc,col_c".
+    /// Format: A comma-separated list like `col_a,col_b:desc,col_c`.
     #[arg(short, long, help_heading = "Transformations")]
     pub sort_by: Option<SortSpec>,
 
@@ -1520,25 +1536,28 @@ pub struct TransformCommand {
     ///   - This coupling exists because both features degrade for high-cardinality data
     ///
     /// To force bloom filters ON regardless of dictionary decisions, specify explicit NDV:
-    ///   --parquet-bloom-column "high_card_col:ndv=100000"
+    ///
+    ///     --parquet-bloom-column "high_card_col:ndv=100000"
     ///
     /// NESTED TYPES (structs, lists, maps):
     /// Bloom filters apply to leaf columns within nested structures. The column path uses
     /// dot notation (e.g., "struct_col.field" or "list_col.element").
     ///
     /// Formats:
-    ///   --parquet-bloom-all                       # Use defaults (fpp=0.01, auto NDV)
-    ///   --parquet-bloom-all "fpp=VALUE"           # Custom false positive probability
-    ///   --parquet-bloom-all "ndv=VALUE"           # Force bloom on with explicit NDV
-    ///   --parquet-bloom-all "fpp=VALUE,ndv=VALUE" # Both custom
+    ///
+    ///     --parquet-bloom-all                       # Use defaults (fpp=0.01, auto NDV)
+    ///     --parquet-bloom-all "fpp=VALUE"           # Custom false positive probability
+    ///     --parquet-bloom-all "ndv=VALUE"           # Force bloom on with explicit NDV
+    ///     --parquet-bloom-all "fpp=VALUE,ndv=VALUE" # Both custom
     ///
     /// CONFLICTS: Cannot be used with --parquet-bloom-all-off.
     ///
     /// Examples:
-    ///   --parquet-bloom-all                                     # Bloom for low-cardinality columns
-    ///   --parquet-bloom-all "fpp=0.001"                         # Tighter false positive rate
-    ///   --parquet-bloom-all "ndv=10000"                         # Force bloom on ALL columns
-    ///   --parquet-bloom-all --parquet-bloom-column-off user_id  # Exclude user_id
+    ///
+    ///     --parquet-bloom-all                                     # Bloom for low-cardinality columns
+    ///     --parquet-bloom-all "fpp=0.001"                         # Tighter false positive rate
+    ///     --parquet-bloom-all "ndv=10000"                         # Force bloom on ALL columns
+    ///     --parquet-bloom-all --parquet-bloom-column-off user_id  # Exclude user_id
     #[arg(
         long,
         value_name = "[fpp=VALUE][,ndv=VALUE]",
@@ -1557,8 +1576,9 @@ pub struct TransformCommand {
     /// CONFLICTS: Cannot be used with --parquet-bloom-all.
     ///
     /// Examples:
-    ///   --parquet-bloom-all-off                                 # No bloom filters
-    ///   --parquet-bloom-all-off --parquet-bloom-column user_id  # Only user_id
+    ///
+    ///     --parquet-bloom-all-off                                 # No bloom filters
+    ///     --parquet-bloom-all-off --parquet-bloom-column user_id  # Only user_id
     #[arg(
         long = "parquet-bloom-all-off",
         conflicts_with = "parquet_bloom_all",
@@ -1581,19 +1601,21 @@ pub struct TransformCommand {
     /// all leaf columns under that path, so you don't need to know Parquet internal naming.
     ///
     /// Formats:
-    ///   COLUMN                     # Depends on dictionary decision
-    ///   COLUMN:fpp=VALUE           # Custom false positive probability
-    ///   COLUMN:ndv=VALUE           # Force bloom ON with explicit NDV
-    ///   COLUMN:fpp=VALUE,ndv=VALUE # Both custom
+    ///
+    ///     COLUMN                     # Depends on dictionary decision
+    ///     COLUMN:fpp=VALUE           # Custom false positive probability
+    ///     COLUMN:ndv=VALUE           # Force bloom ON with explicit NDV
+    ///     COLUMN:fpp=VALUE,ndv=VALUE # Both custom
     ///
     /// CONFLICTS: Cannot specify same column in both --parquet-bloom-column and
     /// --parquet-bloom-column-off.
     ///
     /// Examples:
-    ///   --parquet-bloom-column "region"                    # If region keeps dictionary
-    ///   --parquet-bloom-column "user.address"              # All leaves under user.address
-    ///   --parquet-bloom-column "user_id:ndv=1000000"       # Force bloom on high-card column
-    ///   --parquet-bloom-column "user_id:fpp=0.001"         # Tighter FPP
+    ///
+    ///     --parquet-bloom-column "region"                    # If region keeps dictionary
+    ///     --parquet-bloom-column "user.address"              # All leaves under user.address
+    ///     --parquet-bloom-column "user_id:ndv=1000000"       # Force bloom on high-card column
+    ///     --parquet-bloom-column "user_id:fpp=0.001"         # Tighter FPP
     #[arg(
         long,
         value_name = "COLUMN[:fpp=VALUE][,ndv=VALUE]",
@@ -1613,9 +1635,10 @@ pub struct TransformCommand {
     /// --parquet-bloom-column-off.
     ///
     /// Examples:
-    ///   --parquet-bloom-all --parquet-bloom-column-off user_id  # All except user_id
-    ///   --parquet-bloom-column-off "user.address"               # Disable for all user.address leaves
-    ///   --parquet-bloom-column-off col1 --parquet-bloom-column-off col2  # Disable multiple
+    ///
+    ///     --parquet-bloom-all --parquet-bloom-column-off user_id  # All except user_id
+    ///     --parquet-bloom-column-off "user.address"               # Disable for all user.address leaves
+    ///     --parquet-bloom-column-off col1 --parquet-bloom-column-off col2  # Disable multiple
     #[arg(
         long = "parquet-bloom-column-off",
         value_name = "COLUMN",
@@ -1679,9 +1702,10 @@ pub struct TransformCommand {
     /// --parquet-dictionary-column-off.
     ///
     /// Examples:
-    ///   --parquet-dictionary-column region:analyze       # Let analysis decide
-    ///   --parquet-dictionary-column region:always        # Force dictionary on
-    ///   --parquet-dictionary-column "user.address:always"   # All user.address leaves
+    ///
+    ///     --parquet-dictionary-column region:analyze       # Let analysis decide
+    ///     --parquet-dictionary-column region:always        # Force dictionary on
+    ///     --parquet-dictionary-column "user.address:always"   # All user.address leaves
     #[arg(
         long = "parquet-dictionary-column",
         value_name = "COLUMN:MODE",
@@ -1707,9 +1731,10 @@ pub struct TransformCommand {
     /// byte-stream-split
     ///
     /// Examples:
-    ///   --parquet-column-encoding id=delta-binary-packed      # Efficient for sorted integers
-    ///   --parquet-column-encoding name=delta-byte-array       # Efficient for strings
-    ///   --parquet-column-encoding price=byte-stream-split     # Efficient for floats
+    ///
+    ///     --parquet-column-encoding id=delta-binary-packed      # Efficient for sorted integers
+    ///     --parquet-column-encoding name=delta-byte-array       # Efficient for strings
+    ///     --parquet-column-encoding price=byte-stream-split     # Efficient for floats
     #[arg(
         long,
         value_name = "COLUMN=ENCODING",

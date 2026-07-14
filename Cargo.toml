@@ -1,14 +1,14 @@
 [package]
 name = "silk_chiffon"
 version = "0.1.0"
-edition = "2024"
 authors = ["Cora Sutton <cora@sutton.me>"]
-description = "Silky smooth conversion between columnar data formats 💝"
-license = "MIT"
-repository = "https://github.com/acuitymd/silk-chiffon"
-homepage = "https://github.com/acuitymd/silk-chiffon"
-readme = "README.md"
 categories = ["command line utilities", "data processing", "columnar data"]
+edition = "2024"
+homepage = "https://github.com/acuitymd/silk-chiffon"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/acuitymd/silk-chiffon"
+description = "Silky smooth conversion between columnar data formats 💝"
 
 [[bin]]
 name = "silk-chiffon"
@@ -17,18 +17,16 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "^1.0.102"
 apply_if = "^1.2.1"
-bytesize = "^2.3.1"
+arrow = { version = "^58.3.0", features = ["default", "ipc_compression"] }
 async-stream = "^0.3.6"
 async-trait = "^0.1.89"
-arrow = { version = "^58.3.0", features = ["default", "ipc_compression"] }
+bytesize = "^2.3.1"
 camino = { version = "^1.2.2", features = ["serde1"] }
 chrono = "^0.4.44"
 clap = { version = "^4.6.1", features = ["default", "derive"] }
+clap-markdown = { version = "^0.1.5", optional = true }
 clap_complete = "^4.6.5"
-datafusion = { version = "^53.1.0", features = [
-  "array_expressions",
-  "default",
-] }
+datafusion = { version = "^53.1.0", features = ["array_expressions", "default"] }
 futures = "^0.3.32"
 glob = "^0.3.3"
 humansize = "^2.1.3"
@@ -38,12 +36,7 @@ minijinja = "^2.20.0"
 num-format = "^0.4.4"
 owo-colors = "^4.3.0"
 parking_lot = "^0.12.5"
-parquet = { version = "^58.3.0", features = [
-  "default",
-  "async",
-  "json",
-  "arrow_canonical_extension_types",
-] }
+parquet = { version = "^58.3.0", features = ["default", "async", "json", "arrow_canonical_extension_types"] }
 percent-encoding = "^2.3.2"
 serde = { version = "^1.0.228", features = ["derive"] }
 serde_json = "^1.0.149"
@@ -51,13 +44,7 @@ strum_macros = "^0.28.0"
 sysinfo = "^0.39.2"
 tabled = { version = "^0.20.0", features = ["ansi"] }
 tempfile = "^3.27.0"
-tokio = { version = "^1.52.3", features = [
-  "rt-multi-thread",
-  "macros",
-  "io-util",
-  "fs",
-  "sync",
-] }
+tokio = { version = "^1.52.3", features = ["rt-multi-thread", "macros", "io-util", "fs", "sync"] }
 uuid = { version = "^1.23.1", features = ["v4"] }
 vortex = { version = "^0.71.0", features = ["tokio", "files"] }
 vortex-datafusion = "^0.71.0"
@@ -68,6 +55,9 @@ chrono-tz = "^0.10.4"
 
 [features]
 default = []
+# generates docs/CLI.md from the clap definitions; kept optional so clap-markdown
+# stays out of the release binary. Run `just docs` (or `just verify`).
+docs = ["dep:clap-markdown"]
 
 [dev-dependencies]
 assert_cmd = "^2.2.2"
@@ -86,6 +76,10 @@ harness = false
 [[bench]]
 name = "transform_to_parquet"
 harness = false
+
+[[example]]
+name = "gen-docs"
+required-features = ["docs"]
 
 [profile.release]
 lto = true

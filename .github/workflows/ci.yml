@@ -25,7 +25,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo fmt --check
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,dprint
+      - run: just fmt-check
   clippy:
     runs-on: ubuntu-latest
     steps:
@@ -57,7 +60,7 @@ jobs:
 
       - uses: taiki-e/install-action@v2
         with:
-          tool: nextest
+          tool: nextest,dprint
 
       - uses: Swatinem/rust-cache@v2
         with:
