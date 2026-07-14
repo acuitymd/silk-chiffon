@@ -42,9 +42,11 @@ alias check := type-check
 
 fmt-check:
     cargo fmt --check
+    dprint check
 
 fmt-fix:
     cargo fmt
+    dprint fmt
 
 alias fmt := fmt-fix
 
