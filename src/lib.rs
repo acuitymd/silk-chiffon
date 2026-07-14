@@ -301,6 +301,17 @@ pub struct Cli {
     pub command: Commands,
 }
 
+/// Render the full CLI reference as Markdown, used by `just docs` to regenerate
+/// `docs/CLI.md`. Behind the `docs` feature so `clap-markdown` stays out of the
+/// release binary.
+#[cfg(feature = "docs")]
+pub fn cli_markdown() -> String {
+    format!(
+        "<!-- Generated from the CLI by `just docs`; edit the clap definitions, not this file. -->\n\n{}",
+        clap_markdown::help_markdown::<Cli>()
+    )
+}
+
 #[derive(Subcommand, Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum Commands {

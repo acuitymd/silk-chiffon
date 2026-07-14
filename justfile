@@ -62,4 +62,7 @@ lint-fix-linux: _check-zigbuild
 
 alias lint := lint-fix
 
-verify: type-check fmt-fix lint-check
+docs:
+    cargo run --features docs --example gen-docs
+
+verify: type-check fmt-fix lint-check docs
