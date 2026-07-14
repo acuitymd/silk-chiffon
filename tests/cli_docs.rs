@@ -14,6 +14,8 @@ fn cli_docs_are_current() {
     // compare by hand rather than assert_eq! so a mismatch prints the fix, not
     // a many-KB diff of the whole reference
     if generated != committed {
-        panic!("docs/CLI.md is out of date. Run `just docs` (or `just verify`) and commit the result.");
+        panic!(
+            "docs/CLI.md is out of date. Run `just docs` (or `just verify`) and commit the result."
+        );
     }
 }
