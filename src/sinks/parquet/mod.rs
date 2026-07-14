@@ -12,6 +12,7 @@ pub const DEFAULT_MAX_ROW_GROUP_SIZE: usize = 1_048_576;
 pub const DEFAULT_WRITE_BATCH_SIZE: usize = 8192;
 pub const DEFAULT_DATA_PAGE_SIZE_LIMIT: usize = 100 * 1024 * 1024; // 100MiB (DuckDB MAX_UNCOMPRESSED_PAGE_SIZE)
 pub const DEFAULT_DICTIONARY_PAGE_SIZE_LIMIT: usize = 1024 * 1024 * 1024; // 1GiB (DuckDB MAX_UNCOMPRESSED_DICT_PAGE_SIZE)
+const PARQUET_CREATED_BY: &str = "silk-chiffon";
 
 use parquet::{
     basic::Compression,
@@ -361,7 +362,7 @@ impl ParquetSink {
         runtimes: Arc<ParquetRuntimes>,
     ) -> Result<Self> {
         let mut writer_builder = WriterProperties::builder()
-            .set_created_by(format!("silk-chiffon v{}", env!("SILK_CHIFFON_VERSION")))
+            .set_created_by(PARQUET_CREATED_BY.to_string())
             .set_max_row_group_row_count(Some(options.max_row_group_size))
             .set_compression(options.compression)
             .set_writer_version(options.writer_version.into())
@@ -838,6 +839,36 @@ mod tests {
 
             let file = read_entire_parquet_file(&output_path).unwrap();
             assert_eq!(file.row_groups.len(), 1);
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn test_default_file_metadata_is_stable() {
+            let temp_dir = tempdir().unwrap();
+            let output_path = temp_dir.path().join("output.parquet");
+
+            let schema = test_data::simple_schema();
+            let batch =
+                test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["a", "b", "c"]);
+
+            let mut sink = ParquetSink::create(
+                output_path.clone(),
+                &schema,
+                &ParquetSinkOptions::new(),
+                test_runtimes(),
+            )
+            .unwrap();
+
+            sink.write_batch(batch).await.unwrap();
+            sink.finish().await.unwrap();
+
+            let file = parquet::file::reader::SerializedFileReader::try_from(
+                std::fs::File::open(&output_path).unwrap(),
+            )
+            .unwrap();
+            let file_metadata = file.metadata().file_metadata();
+
+            assert_eq!(file_metadata.created_by(), Some(PARQUET_CREATED_BY));
+            assert!(file_metadata.key_value_metadata().is_none());
         }
 
         #[tokio::test(flavor = "multi_thread")]
