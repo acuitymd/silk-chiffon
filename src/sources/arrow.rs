@@ -63,8 +63,17 @@ impl DataSource for ArrowDataSource {
 
     async fn as_table_provider(&self, ctx: &mut SessionContext) -> Result<Arc<dyn TableProvider>> {
         let table_name = format!("arrow_{}", Uuid::new_v4().as_simple());
-        ctx.register_arrow(&table_name, &self.path, ArrowReadOptions::default())
-            .await?;
+        // datafusion 54 filters single-file registration by file_extension;
+        // "" disables that so an explicit --input-format works on any extension.
+        ctx.register_arrow(
+            &table_name,
+            &self.path,
+            ArrowReadOptions {
+                file_extension: "",
+                ..Default::default()
+            },
+        )
+        .await?;
         let table = ctx.table(&table_name).await?;
         Ok(table.into_view())
     }
