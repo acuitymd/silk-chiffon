@@ -12,6 +12,5 @@ pub mod style;
 pub mod vortex;
 
 pub mod magic;
-pub(crate) mod readers;
 pub use identify::{DetectedFormat, detect_format};
 pub use inspectable::Inspectable;

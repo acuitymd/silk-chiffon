@@ -11,6 +11,7 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
 use silk_chiffon::sinks::parquet::{AdaptiveParquetWriter, AdaptiveWriterConfig, ParquetRuntimes};
+use silk_chiffon::storage::{OutputPolicy, StorageContext};
 
 use tempfile::tempdir;
 use tokio::runtime::Runtime;
@@ -272,6 +273,14 @@ fn bench_adaptive(c: &mut Criterion) {
                         let temp_dir = tempdir().unwrap();
                         let path = temp_dir.path().join("test.parquet");
                         let props = WriterProperties::builder().build();
+                        let storage = StorageContext::new(Default::default()).unwrap();
+                        let output = storage
+                            .create_output(
+                                path.to_string_lossy().as_ref(),
+                                OutputPolicy::new(true, true),
+                            )
+                            .await
+                            .unwrap();
 
                         let writer_config = AdaptiveWriterConfig {
                             max_row_group_size: config.row_group_size,
@@ -285,7 +294,7 @@ fn bench_adaptive(c: &mut Criterion) {
                         };
 
                         let mut writer = AdaptiveParquetWriter::new(
-                            &path,
+                            output,
                             schema,
                             props,
                             Arc::clone(runtimes),

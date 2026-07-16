@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use crate::{
     AllColumnsBloomFilterConfig, BloomFilterConfig, DEFAULT_BLOOM_FILTER_FPP, DataFormat,
-    ListOutputsFormat, PartitionStrategy, SortSpec, TransformCommand, default_thread_budget,
+    ListOutputsFormat, PartitionStrategy, SortSpec, StorageConfig, TransformCommand,
+    default_thread_budget,
     io_strategies::{
         OutputFileInfo, input_strategy::InputStrategy, output_strategy::SinkFactory,
         path_template::PathTemplate,
@@ -12,7 +13,7 @@ use crate::{
     pipeline::Pipeline,
     sinks::{
         arrow::{ArrowSink, ArrowSinkOptions},
-        data_sink::DataSink,
+        data_sink::{DataSink, SinkResult},
         parquet::{ParquetRuntimes, ParquetSink, ParquetSinkOptions},
         vortex::{VortexSink, VortexSinkOptions},
     },
@@ -20,17 +21,34 @@ use crate::{
         arrow::ArrowDataSource, data_source::DataSource, parquet::ParquetDataSource,
         vortex::VortexDataSource,
     },
+    storage::{InputObject, ObjectLocation, OutputPolicy, StorageContext},
     utils::memory::{estimate_sort_spill_reservation, sample_avg_row_bytes},
 };
 use anyhow::{Result, anyhow};
 use apply_if::ApplyIf;
-use arrow::datatypes::SchemaRef;
-use camino::Utf8Path;
-use glob::glob;
+use arrow::{array::RecordBatch, datatypes::SchemaRef};
+use async_trait::async_trait;
+use bytes::Bytes;
+use futures::future::BoxFuture;
 use owo_colors::OwoColorize;
 use tabled::{builder::Builder, settings::Style};
 
 pub async fn run(args: TransformCommand) -> Result<()> {
+    run_with_storage(args, &StorageConfig::default()).await
+}
+
+pub async fn run_with_storage(
+    args: TransformCommand,
+    storage_config: &StorageConfig,
+) -> Result<()> {
+    let storage = Arc::new(StorageContext::new(*storage_config)?);
+    run_with_storage_context(args, storage).await
+}
+
+pub(crate) async fn run_with_storage_context(
+    args: TransformCommand,
+    storage: Arc<StorageContext>,
+) -> Result<()> {
     let TransformCommand {
         from,
         from_many,
@@ -190,66 +208,30 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         .with_spill_path(spill_path)
         .with_spill_compression(spill_compression);
 
-    let (input_paths, should_glob) = if let Some(single_input) = from {
-        (vec![single_input], false)
+    let (inputs, multiple) = if let Some(single_input) = from {
+        (vec![storage.resolve_input(&single_input).await?], false)
     } else {
-        (from_many, true)
+        (storage.resolve_inputs(&from_many).await?, true)
     };
 
-    // resolve input paths (glob-expand if needed), build sources, and create InputStrategy
-    let input_strategy = if !should_glob && input_paths.len() == 1 {
-        let input_path = &input_paths[0];
-        let source = make_source(input_path, input_format)?;
+    let input_strategy = if !multiple {
+        let source = make_source(&inputs[0], input_format)?;
         InputStrategy::Single(source)
     } else {
-        let mut expanded_paths = Vec::new();
-
-        for pattern in &input_paths {
-            for entry in glob(pattern)
-                .map_err(|e| anyhow!("Error expanding glob pattern {}: {}", pattern, e))?
-            {
-                expanded_paths.push(
-                    entry
-                        .map_err(|e| anyhow!("Error decoding file path: {}", e))?
-                        .to_string_lossy()
-                        .to_string(),
-                );
-            }
-        }
-
-        expanded_paths.sort();
-        expanded_paths.dedup();
-
-        if expanded_paths.is_empty() {
-            anyhow::bail!("No input files found matching patterns: {:?}", input_paths);
-        }
-
-        let mut sources: Vec<Box<dyn DataSource>> = Vec::new();
-        let mut schema: Option<SchemaRef> = None;
-        for input_path in &expanded_paths {
-            let source = make_source(input_path, input_format)?;
-            if let Some(ref schema) = schema {
-                let source_schema = source.schema()?;
-                if *schema != source_schema {
-                    anyhow::bail!(
-                        "Schema mismatch for input file {} (does not match other file(s))",
-                        input_path
-                    );
-                }
-            } else {
-                schema = Some(source.schema()?);
-            }
-            sources.push(source);
-        }
+        let sources: Vec<Box<dyn DataSource>> = inputs
+            .iter()
+            .map(|input| make_source(input, input_format))
+            .collect::<Result<_>>()?;
         InputStrategy::Multiple(sources)
     };
+    input_strategy.validate_schemas().await?;
 
     // sample rows to estimate sort spill reservation before handing strategy to pipeline
     if has_sort {
         let avg_row_bytes = sample_avg_row_bytes(&input_strategy, 100_000).await?;
 
         if avg_row_bytes > 0 {
-            let total_rows = input_strategy.row_count().unwrap_or(0);
+            let total_rows = input_strategy.row_count().await.unwrap_or(0);
             let total_in_memory_bytes = total_rows.saturating_mul(avg_row_bytes);
 
             let memory_limit = effective_memory_limit.unwrap_or(total_budget * 60 / 100);
@@ -377,7 +359,29 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         VortexSinkOptions::with_record_batch_size,
     );
 
+    let output_policy = OutputPolicy::new(overwrite, create_dirs);
+    let mut manifest_output = match (list_outputs_format, list_outputs_file.as_deref()) {
+        (Some(ListOutputsFormat::Text | ListOutputsFormat::Json), Some(path)) => {
+            Some(storage.create_output(path, output_policy).await?)
+        }
+        _ => None,
+    };
+    let manifest_location = manifest_output
+        .as_ref()
+        .map(|output| output.destination().clone());
+    let output_factory_context = OutputFactoryContext {
+        storage: Arc::clone(&storage),
+        policy: output_policy,
+        manifest: manifest_location.clone(),
+    };
+
+    if let (Some(manifest), Some(output_path)) = (&manifest_location, to.as_deref()) {
+        let data_output = storage.resolve(output_path)?;
+        ensure_distinct_outputs(manifest, &data_output)?;
+    }
+
     let sink_factory = create_sink_factory(
+        output_factory_context.clone(),
         output_format,
         arrow_opts.clone(),
         parquet_opts.clone(),
@@ -390,11 +394,15 @@ pub async fn run(args: TransformCommand) -> Result<()> {
             output_path,
             sink_factory,
             exclude_columns.clone(),
-            create_dirs,
-            overwrite,
         );
     } else if let Some(template) = to_many {
         let path_template = PathTemplate::new(template);
+        if let (Some(manifest), Some(output_path)) =
+            (&manifest_location, path_template.static_location())
+        {
+            let data_output = storage.resolve(output_path)?;
+            ensure_distinct_outputs(manifest, &data_output)?;
+        }
 
         if max_open_partitions.is_some() && partition_strategy != PartitionStrategy::NosortEvict {
             anyhow::bail!(
@@ -412,15 +420,13 @@ pub async fn run(args: TransformCommand) -> Result<()> {
                     path_template,
                     sink_factory,
                     exclude_columns.clone(),
-                    create_dirs,
-                    overwrite,
-                    list_outputs.unwrap_or_default(),
                 );
             }
             PartitionStrategy::NosortEvict => {
                 // each partition gets its own writer, so we minimize per-writer
                 // concurrency to avoid scheduling overhead from 100+ parallel pipelines
                 let evict_sink_factory = create_sink_factory(
+                    output_factory_context,
                     output_format,
                     arrow_opts,
                     parquet_opts
@@ -436,9 +442,6 @@ pub async fn run(args: TransformCommand) -> Result<()> {
                     path_template,
                     evict_sink_factory,
                     exclude_columns.clone(),
-                    create_dirs,
-                    overwrite,
-                    list_outputs.unwrap_or_default(),
                     max_open_partitions,
                 );
             }
@@ -448,9 +451,6 @@ pub async fn run(args: TransformCommand) -> Result<()> {
                     path_template,
                     sink_factory,
                     exclude_columns.clone(),
-                    create_dirs,
-                    overwrite,
-                    list_outputs.unwrap_or_default(),
                 );
             }
         }
@@ -467,22 +467,31 @@ pub async fn run(args: TransformCommand) -> Result<()> {
     let files = pipeline.execute().await?;
 
     if let Some(format) = list_outputs_format {
-        print_output_files(&files, format, list_outputs_file.as_deref())?;
+        let output = render_output_files(&files, format, manifest_output.is_none())?;
+        if let Some(mut manifest) = manifest_output.take() {
+            manifest.write(Bytes::from(output)).await?;
+            manifest.commit().await?;
+        } else if !output.is_empty() {
+            println!("{output}");
+        }
     }
 
     Ok(())
 }
 
-fn print_output_files(
+fn render_output_files(
     files: &[OutputFileInfo],
     format: ListOutputsFormat,
-    output_path: Option<&Utf8Path>,
-) -> Result<()> {
+    colors: bool,
+) -> Result<String> {
+    let mut sorted_files = files.to_vec();
+    sorted_files.sort_by(|left, right| left.path.cmp(&right.path));
+    let files = sorted_files.as_slice();
     let output = match format {
-        ListOutputsFormat::None => return Ok(()),
+        ListOutputsFormat::None => return Ok(String::new()),
         ListOutputsFormat::Text => {
             if files.is_empty() {
-                return Ok(());
+                return Ok(String::new());
             }
 
             let mut builder = Builder::default();
@@ -499,7 +508,7 @@ fn print_output_files(
             header.push("Path".to_string());
             header.push("Row Count".to_string());
 
-            if output_path.is_none() {
+            if colors {
                 // writing to stdout, so use colors
                 let colored_header: Vec<String> =
                     header.iter().map(|h| h.bold().to_string()).collect();
@@ -508,17 +517,13 @@ fn print_output_files(
                 builder.push_record(header);
             }
 
-            // sort by path for consistent output
-            let mut sorted_files = files.to_vec();
-            sorted_files.sort_by(|a, b| a.path.cmp(&b.path));
-
-            for file in &sorted_files {
+            for file in files {
                 let mut row: Vec<String> = file
                     .partition_values
                     .iter()
                     .map(|pv| {
                         let val = format_json_value(&pv.value);
-                        if output_path.is_none() {
+                        if colors {
                             // again, writing to stdout, so use colors
                             val.green().to_string()
                         } else {
@@ -528,7 +533,7 @@ fn print_output_files(
                     .collect();
                 row.push(file.path.clone());
                 let row_count = file.row_count.to_string();
-                if output_path.is_none() {
+                if colors {
                     // once again, writing to stdout, so use colors
                     row.push(row_count.cyan().to_string());
                 } else {
@@ -542,13 +547,7 @@ fn print_output_files(
         ListOutputsFormat::Json => serde_json::to_string_pretty(files)?,
     };
 
-    if let Some(path) = output_path {
-        std::fs::write(path, output)?;
-    } else {
-        println!("{}", output);
-    }
-
-    Ok(())
+    Ok(output)
 }
 
 fn format_json_value(value: &serde_json::Value) -> String {
@@ -574,22 +573,46 @@ fn to_title_case(s: &str) -> String {
         .join(" ")
 }
 
-fn make_source(path: &str, input_format: Option<DataFormat>) -> Result<Box<dyn DataSource>> {
-    let format = detect_format(path, input_format)?;
+fn make_source(
+    input: &InputObject,
+    input_format: Option<DataFormat>,
+) -> Result<Box<dyn DataSource>> {
+    let format = detect_input_format(input, input_format)?;
     Ok(match format {
-        DataFormat::Arrow => Box::new(ArrowDataSource::new(path.to_string())),
-        DataFormat::Parquet => Box::new(ParquetDataSource::new(path.to_string())),
-        DataFormat::Vortex => Box::new(VortexDataSource::new(path.to_string())),
+        DataFormat::Arrow => Box::new(ArrowDataSource::new(input.clone())),
+        DataFormat::Parquet => Box::new(ParquetDataSource::new(input.clone())),
+        DataFormat::Vortex => Box::new(VortexDataSource::new(input.clone())),
     })
 }
 
-fn detect_format(path: &str, explicit_format: Option<DataFormat>) -> Result<DataFormat> {
+fn detect_input_format(
+    input: &InputObject,
+    explicit_format: Option<DataFormat>,
+) -> Result<DataFormat> {
     if let Some(format) = explicit_format {
         return Ok(format);
     }
 
-    let path_obj = std::path::Path::new(path);
-    if let Some(ext) = path_obj.extension() {
+    match input.extension() {
+        Some(extension) if extension.eq_ignore_ascii_case("arrow") => Ok(DataFormat::Arrow),
+        Some(extension) if extension.eq_ignore_ascii_case("parquet") => Ok(DataFormat::Parquet),
+        Some(extension) if extension.eq_ignore_ascii_case("vortex") => Ok(DataFormat::Vortex),
+        _ => Err(anyhow!(
+            "Could not detect format from path '{}'. Use --input-format to specify explicitly.",
+            input.location().display()
+        )),
+    }
+}
+
+fn detect_output_format(
+    location: &ObjectLocation,
+    explicit_format: Option<DataFormat>,
+) -> Result<DataFormat> {
+    if let Some(format) = explicit_format {
+        return Ok(format);
+    }
+
+    if let Some(ext) = location.path().extension() {
         if ext.eq_ignore_ascii_case("arrow") {
             return Ok(DataFormat::Arrow);
         } else if ext.eq_ignore_ascii_case("parquet") {
@@ -601,11 +624,19 @@ fn detect_format(path: &str, explicit_format: Option<DataFormat>) -> Result<Data
 
     Err(anyhow!(
         "Could not detect format from path '{}'. Use --input-format or --output-format to specify explicitly.",
-        path
+        location.display()
     ))
 }
 
+#[derive(Clone)]
+struct OutputFactoryContext {
+    storage: Arc<StorageContext>,
+    policy: OutputPolicy,
+    manifest: Option<ObjectLocation>,
+}
+
 fn create_sink_factory(
+    context: OutputFactoryContext,
     output_format: Option<DataFormat>,
     arrow_opts: ArrowSinkOptions,
     parquet_opts: ParquetSinkOptions,
@@ -613,21 +644,197 @@ fn create_sink_factory(
     runtimes: Arc<ParquetRuntimes>,
 ) -> Result<SinkFactory> {
     Ok(Box::new(move |path: String, schema: SchemaRef| {
-        let detected_format = detect_format(&path, output_format)?;
-
-        let sink: Box<dyn DataSink> = match detected_format {
-            DataFormat::Arrow => {
-                Box::new(ArrowSink::create(path.into(), &schema, arrow_opts.clone())?)
+        let context = context.clone();
+        let arrow_opts = arrow_opts.clone();
+        let parquet_opts = parquet_opts.clone();
+        let runtimes = Arc::clone(&runtimes);
+        let future = Box::pin(async move {
+            let destination = context.storage.resolve(&path)?;
+            let detected_format = detect_output_format(&destination, output_format)?;
+            if let Some(manifest) = &context.manifest {
+                ensure_distinct_outputs(manifest, &destination)?;
             }
-            DataFormat::Parquet => Box::new(ParquetSink::create(
-                path.into(),
-                &schema,
-                &parquet_opts,
-                Arc::clone(&runtimes),
-            )?),
-            DataFormat::Vortex => Box::new(VortexSink::create(path.into(), &schema, vortex_opts)?),
+            let output = context
+                .storage
+                .create_output_at(destination, context.policy)
+                .await?;
+            let sink: Box<dyn DataSink> = match detected_format {
+                DataFormat::Arrow => Box::new(ArrowSink::create(output, &schema, arrow_opts)?),
+                DataFormat::Parquet => Box::new(ParquetSink::create(
+                    output,
+                    &schema,
+                    &parquet_opts,
+                    runtimes,
+                )?),
+                DataFormat::Vortex => Box::new(VortexSink::create(output, &schema, vortex_opts)?),
+            };
+            Ok(sink)
+        });
+        Ok(Box::new(PendingSink::new(future)))
+    }))
+}
+
+fn ensure_distinct_outputs(manifest: &ObjectLocation, data: &ObjectLocation) -> Result<()> {
+    if manifest.same_object(data) {
+        anyhow::bail!(
+            "output manifest '{}' collides with data output '{}'",
+            manifest.display(),
+            data.display()
+        );
+    }
+    Ok(())
+}
+
+type PendingSinkFuture = BoxFuture<'static, Result<Box<dyn DataSink>>>;
+
+// OutputStrategy's factory boundary is synchronous. Deferring the async
+// location resolution and ObjectOutput preflight keeps that API stable while
+// ensuring no sink opens before its first write or finish.
+struct PendingSink {
+    future: std::sync::Mutex<Option<PendingSinkFuture>>,
+    sink: Option<Box<dyn DataSink>>,
+}
+
+impl PendingSink {
+    fn new(future: PendingSinkFuture) -> Self {
+        Self {
+            future: std::sync::Mutex::new(Some(future)),
+            sink: None,
+        }
+    }
+
+    async fn ensure_sink(&mut self) -> Result<&mut Box<dyn DataSink>> {
+        if self.sink.is_none() {
+            let future = self
+                .future
+                .lock()
+                .map_err(|_| anyhow!("sink creation lock is poisoned"))?
+                .take()
+                .ok_or_else(|| anyhow!("sink creation already failed"))?;
+            self.sink = Some(future.await?);
+        }
+        self.sink
+            .as_mut()
+            .ok_or_else(|| anyhow!("sink was not created"))
+    }
+}
+
+#[async_trait]
+impl DataSink for PendingSink {
+    async fn write_batch(&mut self, batch: RecordBatch) -> Result<()> {
+        self.ensure_sink().await?.write_batch(batch).await
+    }
+
+    async fn finish(&mut self) -> Result<SinkResult> {
+        self.ensure_sink().await?.finish().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use arrow::{
+        array::{Int32Array, StringArray},
+        datatypes::{DataType, Field, Schema},
+    };
+    use tempfile::TempDir;
+
+    use crate::utils::test_helpers::file_helpers;
+
+    fn write_input(temp: &TempDir, names: &[&str]) -> String {
+        let path = temp.path().join("input.arrow");
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("name", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int32Array::from_iter_values(
+                    0..i32::try_from(names.len()).unwrap(),
+                )),
+                Arc::new(StringArray::from(names.to_vec())),
+            ],
+        )
+        .unwrap();
+        file_helpers::write_arrow_file(&path, &schema, vec![batch]).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    #[tokio::test]
+    async fn local_text_manifest_commits_after_partition_outputs() {
+        let temp = TempDir::new().unwrap();
+        let input = write_input(&temp, &["a"]);
+        let mut command = TransformCommand {
+            from: Some(input),
+            to: None,
+            to_many: Some(
+                temp.path()
+                    .join("output/{{name}}.arrow")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            by: Some("name".to_string()),
+            output_format: Some(DataFormat::Arrow),
+            list_outputs: Some(ListOutputsFormat::Text),
+            ..Default::default()
+        };
+        let manifest = temp.path().join("manifests/outputs.txt");
+        command.list_outputs_file = Some(manifest.to_string_lossy().into_owned());
+
+        run(command).await.unwrap();
+
+        let text = std::fs::read_to_string(manifest).unwrap();
+        assert!(text.contains("output/a.arrow"));
+    }
+
+    #[tokio::test]
+    async fn manifest_respects_local_directory_policy_before_pipeline_execution() {
+        let temp = TempDir::new().unwrap();
+        let input = write_input(&temp, &["a"]);
+        let output = temp.path().join("output/{{name}}.arrow");
+        let manifest = temp.path().join("missing/outputs.json");
+        let make_command = |create_dirs| TransformCommand {
+            from: Some(input.clone()),
+            to: None,
+            to_many: Some(output.to_string_lossy().into_owned()),
+            by: Some("name".to_string()),
+            output_format: Some(DataFormat::Arrow),
+            list_outputs: Some(ListOutputsFormat::Json),
+            list_outputs_file: Some(manifest.to_string_lossy().into_owned()),
+            create_dirs,
+            overwrite: true,
+            ..Default::default()
         };
 
-        Ok(sink)
-    }))
+        let error = run(make_command(false)).await.unwrap_err();
+        assert!(error.to_string().contains("parent directory"));
+        assert!(!temp.path().join("output/a.arrow").exists());
+        run(make_command(true)).await.unwrap();
+
+        assert!(manifest.exists());
+    }
+
+    #[tokio::test]
+    async fn static_manifest_collision_is_rejected_before_pipeline_execution() {
+        let temp = TempDir::new().unwrap();
+        let input = write_input(&temp, &["a"]);
+        let collision = temp.path().join("collision.arrow");
+        let command = TransformCommand {
+            from: Some(input),
+            to: None,
+            to_many: Some(collision.to_string_lossy().into_owned()),
+            by: Some("name".to_string()),
+            list_outputs: Some(ListOutputsFormat::Json),
+            list_outputs_file: Some(collision.to_string_lossy().into_owned()),
+            output_format: Some(DataFormat::Arrow),
+            ..Default::default()
+        };
+
+        let error = run(command).await.unwrap_err();
+
+        assert!(error.to_string().contains("collides with data output"));
+        assert!(!collision.exists());
+    }
 }

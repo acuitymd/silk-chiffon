@@ -13,6 +13,7 @@ use object_store::local::LocalFileSystem;
 use super::{
     StorageConfig,
     location::{ObjectLocation, ParsedLocation, StoreHandle, StoreKind},
+    output::{ObjectOutput, OutputPolicy},
 };
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -39,6 +40,18 @@ impl StorageContext {
 
     pub(crate) fn resolve_pattern(&self, value: &str) -> Result<ObjectLocation> {
         self.resolve_parsed(ParsedLocation::parse_pattern(value)?)
+    }
+
+    pub async fn create_output(&self, value: &str, policy: OutputPolicy) -> Result<ObjectOutput> {
+        ObjectOutput::open(self.resolve(value)?, self.config, policy).await
+    }
+
+    pub(crate) async fn create_output_at(
+        &self,
+        destination: ObjectLocation,
+        policy: OutputPolicy,
+    ) -> Result<ObjectOutput> {
+        ObjectOutput::open(destination, self.config, policy).await
     }
 
     fn resolve_parsed(&self, parsed: ParsedLocation) -> Result<ObjectLocation> {

@@ -16,7 +16,6 @@ use tabled::{
 };
 
 use crate::{
-    inspection::readers::{read_arrow_file_metadata, read_stream_metadata},
     inspection::{
         inspectable::{
             Inspectable, format_bytes, format_number, render_schema_fields, schema_to_json,
@@ -25,6 +24,7 @@ use crate::{
         magic::read_magic_edges,
         style::{apply_theme, dim, header},
     },
+    sources::arrow::{read_arrow_file_metadata, read_stream_metadata},
     storage::InputObject,
 };
 

@@ -33,7 +33,9 @@ fn main() -> Result<()> {
 
     runtime.block_on(async {
         match cli.command {
-            Commands::Transform(args) => commands::transform::run(args).await?,
+            Commands::Transform(args) => {
+                commands::transform::run_with_storage(args, &storage_config).await?
+            }
             Commands::Inspect(args) => {
                 commands::inspect::run_with_storage(args.command, &storage_config).await?
             }
