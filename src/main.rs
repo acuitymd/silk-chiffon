@@ -8,6 +8,7 @@ static GLOBAL: MiMalloc = MiMalloc;
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    let storage_config = cli.storage.resolve();
 
     if let Commands::Completions { shell } = &cli.command {
         Commands::generate_completions(*shell);
@@ -32,8 +33,12 @@ fn main() -> Result<()> {
 
     runtime.block_on(async {
         match cli.command {
-            Commands::Transform(args) => commands::transform::run(args).await?,
-            Commands::Inspect(args) => commands::inspect::run(args.command).await?,
+            Commands::Transform(args) => {
+                commands::transform::run_with_storage(args, &storage_config).await?
+            }
+            Commands::Inspect(args) => {
+                commands::inspect::run_with_storage(args.command, &storage_config).await?
+            }
             Commands::Completions { .. } => unreachable!(),
         };
         Ok(())

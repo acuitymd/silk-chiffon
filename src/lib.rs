@@ -5,7 +5,10 @@ pub mod operations;
 pub mod pipeline;
 pub mod sinks;
 pub mod sources;
+pub mod storage;
 pub mod utils;
+
+pub use storage::{StorageArgs, StorageConfig};
 
 use crate::utils::collections::{uniq, uniq_by};
 use anyhow::{Result, anyhow};
@@ -297,6 +300,9 @@ impl FromStr for PoolReserveSpec {
     long_about = None
 )]
 pub struct Cli {
+    #[command(flatten)]
+    pub storage: StorageArgs,
+
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -306,9 +312,9 @@ pub struct Cli {
 /// release binary.
 #[cfg(feature = "docs")]
 pub fn cli_markdown() -> String {
+    let help = clap_markdown::help_markdown::<Cli>().replace(['\u{2014}', '\u{2013}'], "-");
     format!(
-        "<!-- Generated from the CLI by `just docs`; edit the clap definitions, not this file. -->\n\n{}",
-        clap_markdown::help_markdown::<Cli>()
+        "<!-- Generated from the CLI by `just docs`. Edit the clap definitions, not this file. -->\n\n{help}"
     )
 }
 
@@ -316,52 +322,61 @@ pub fn cli_markdown() -> String {
 #[allow(clippy::large_enum_variant)]
 pub enum Commands {
     /// Transform data between formats with optional filtering, sorting, merging, and partitioning.
-    ///
-    /// Examples:
-    ///
-    ///     # Simple conversion
-    ///     silk-chiffon transform --from input.arrow --to output.parquet
-    ///
-    ///     # Merge multiple files
-    ///     silk-chiffon transform --from-many file1.arrow --from-many file2.arrow --to merged.parquet
-    ///
-    ///     # Partition into multiple files
-    ///     silk-chiffon transform --from input.arrow --to-many "{{region}}.parquet" --by region
-    ///
-    ///     # Merge and partition with glob
-    ///     silk-chiffon transform --from-many '*.arrow' --to-many "{{year}}/{{month}}.parquet" --by year,month
-    #[command(verbatim_doc_comment)]
+    #[command(
+        verbatim_doc_comment,
+        long_about = r#"Transform data between formats with optional filtering, sorting, merging, and partitioning.
+
+Examples:
+
+    # Simple conversion
+    silk-chiffon transform --from input.arrow --to output.parquet
+
+    # Merge multiple files
+    silk-chiffon transform --from-many file1.arrow --from-many file2.arrow --to merged.parquet
+
+    # Partition into multiple files
+    silk-chiffon transform --from input.arrow --to-many "{{region}}.parquet" --by region
+
+    # Merge and partition with glob
+    silk-chiffon transform --from-many '*.arrow' --to-many "{{year}}/{{month}}.parquet" --by year,month"#
+    )]
     Transform(TransformCommand),
 
     /// Inspect file metadata and structure.
-    ///
-    /// Examples:
-    ///
-    ///     # Identify format
-    ///     silk-chiffon inspect identify data.parquet
-    ///
-    ///     # Inspect Parquet file
-    ///     silk-chiffon inspect parquet data.parquet --pages
-    ///
-    ///     # Inspect Arrow file
-    ///     silk-chiffon inspect arrow data.arrow --batches
-    #[command(verbatim_doc_comment)]
+    #[command(
+        verbatim_doc_comment,
+        long_about = r#"Inspect file metadata and structure.
+
+Examples:
+
+    # Identify format
+    silk-chiffon inspect identify data.parquet
+
+    # Inspect Parquet file
+    silk-chiffon inspect parquet data.parquet --pages
+
+    # Inspect Arrow file
+    silk-chiffon inspect arrow data.arrow --batches"#
+    )]
     Inspect(InspectCommand),
 
     /// Generate shell completions for your shell.
-    ///
-    /// To add completions for your current shell session only:
-    ///
-    ///     zsh:  eval "$(silk-chiffon completions zsh)"
-    ///     bash: eval "$(silk-chiffon completions bash)"
-    ///     fish: silk-chiffon completions fish | source
-    ///
-    /// To persist completions across sessions:
-    ///
-    ///     zsh:  echo 'eval "$(silk-chiffon completions zsh)"' >> ~/.zshrc
-    ///     bash: echo 'eval "$(silk-chiffon completions bash)"' >> ~/.bashrc
-    ///     fish: silk-chiffon completions fish > ~/.config/fish/completions/silk-chiffon.fish
-    #[command(verbatim_doc_comment)]
+    #[command(
+        verbatim_doc_comment,
+        long_about = r#"Generate shell completions for your shell.
+
+To add completions for your current shell session only:
+
+    zsh:  eval "$(silk-chiffon completions zsh)"
+    bash: eval "$(silk-chiffon completions bash)"
+    fish: silk-chiffon completions fish | source
+
+To persist completions across sessions:
+
+    zsh:  echo 'eval "$(silk-chiffon completions zsh)"' >> ~/.zshrc
+    bash: echo 'eval "$(silk-chiffon completions bash)"' >> ~/.bashrc
+    fish: silk-chiffon completions fish > ~/.config/fish/completions/silk-chiffon.fish"#
+    )]
     Completions {
         /// Shell to generate completions for
         shell: Shell,
@@ -1282,7 +1297,7 @@ pub struct TransformCommand {
     //
     // ─── Input/Output ──────────────────────────────────────────────────────────────────
     //
-    /// Single input file path.
+    /// Single input as a local path, file:// URL, or gs:// URI.
     #[arg(
         long,
         conflicts_with_all = ["from_many"],
@@ -1291,7 +1306,7 @@ pub struct TransformCommand {
     )]
     pub from: Option<String>,
 
-    /// Multiple input file paths (supports glob patterns). Can be specified multiple times.
+    /// Inputs as local paths, file:// URLs, or gs:// URIs. Supports quoted glob patterns and may be repeated.
     #[arg(
         long,
         conflicts_with = "from",
@@ -1308,7 +1323,7 @@ pub struct TransformCommand {
     #[arg(long, value_enum, help_heading = "Input/Output")]
     pub output_format: Option<DataFormat>,
 
-    /// Single output file path.
+    /// Single output as a local path, file:// URL, or gs:// URI.
     #[arg(
         long,
         conflicts_with_all = ["to_many", "by"],
@@ -1317,7 +1332,7 @@ pub struct TransformCommand {
     )]
     pub to: Option<String>,
 
-    /// Output path template for partitioning (e.g., "{{region}}.parquet"). Requires --by.
+    /// Local or gs:// output template (e.g., "{{region}}.parquet"). Quote the template in the shell. Requires --by.
     #[arg(
         long,
         conflicts_with = "to",
@@ -1345,14 +1360,20 @@ pub struct TransformCommand {
     pub exclude_columns: Vec<String>,
 
     /// SQL query to apply to the data. The input data is available as table 'data'.
-    ///
-    /// Examples:
-    ///
-    ///     --query "SELECT * FROM data WHERE status = 'active'"
-    ///     --query "SELECT id, name, amount FROM data"
-    ///     --query "SELECT region, SUM(amount) FROM data GROUP BY region"
-    ///     --query "SELECT *, amount * 1.1 as adjusted FROM data"
-    #[arg(short, long, verbatim_doc_comment, help_heading = "Transformations")]
+    #[arg(
+        short,
+        long,
+        verbatim_doc_comment,
+        help_heading = "Transformations",
+        long_help = r#"SQL query to apply to the data. The input data is available as table 'data'.
+
+Examples:
+
+    --query "SELECT * FROM data WHERE status = 'active'"
+    --query "SELECT id, name, amount FROM data"
+    --query "SELECT region, SUM(amount) FROM data GROUP BY region"
+    --query "SELECT *, amount * 1.1 as adjusted FROM data""#
+    )]
     pub query: Option<String>,
 
     /// Sort the data by one or more columns before writing.
@@ -1374,7 +1395,7 @@ pub struct TransformCommand {
     ///
     /// Setting this too low may cause out-of-memory errors, since some
     /// internal buffers cannot spill to disk. The minimum depends on schema
-    /// width, batch size, and parallelism — there is no fixed floor.
+    /// width, batch size, and parallelism. There is no fixed floor.
     ///
     /// Default: 80% of total memory, container-aware on Linux.
     #[arg(long, help_heading = "Execution", value_parser = MemoryBudgetSpec::from_str, default_value = "total:80%")]
@@ -1426,7 +1447,7 @@ pub struct TransformCommand {
     #[arg(long, help_heading = "Execution", value_parser = parse_at_least_one)]
     pub target_partitions: Option<usize>,
 
-    /// Directory for spilling intermediate data when memory limit is exceeded.
+    /// Local directory only. gs:// is not supported for spilling intermediate data.
     ///
     /// When DataFusion operators (sort, group by, aggregation) exceed the memory
     /// limit, they spill to this path. Default: system temp directory.
@@ -1436,7 +1457,7 @@ pub struct TransformCommand {
     /// Compression for spilled intermediate data.
     ///
     /// Controls compression when DataFusion spills to disk. Lz4 is faster but
-    /// produces larger files; zstd achieves better compression but is slower.
+    /// produces larger files. Zstd achieves better compression but is slower.
     #[arg(long, value_enum, default_value_t = SpillCompression::default(), help_heading = "Execution")]
     pub spill_compression: SpillCompression,
 
@@ -1490,18 +1511,18 @@ pub struct TransformCommand {
     )]
     pub list_outputs: Option<ListOutputsFormat>,
 
-    /// Write output file listing to a file instead of stdout.
+    /// Write the output listing to a local path or gs:// URI instead of stdout. Remote manifests commit after data outputs.
     #[arg(long, requires = "list_outputs", help_heading = "Partitioning")]
-    pub list_outputs_file: Option<Utf8PathBuf>,
+    pub list_outputs_file: Option<String>,
 
     //
     // ─── Output Behavior ──────────────────────────────────────────────────────────────
     //
-    /// Create directories as needed.
+    /// Create local parent directories as needed. GCS prefixes need no directory creation.
     #[arg(long, default_value_t = true, help_heading = "Output Behavior")]
     pub create_dirs: bool,
 
-    /// Overwrite existing files.
+    /// Overwrite existing data and manifest objects. The default is race-safe create-only commit.
     #[arg(long, help_heading = "Output Behavior")]
     pub overwrite: bool,
 
@@ -1528,36 +1549,6 @@ pub struct TransformCommand {
     // ─── Parquet Options ───────────────────────────────────────────────────────────────
     //
     /// Enable bloom filters for columns (default behavior).
-    ///
-    /// DICTIONARY/BLOOM INTERACTION:
-    /// Bloom filters are coupled to dictionary encoding decisions:
-    ///   - Columns that KEEP dictionary encoding -> bloom filter enabled (using analyzed NDV)
-    ///   - Columns where dictionary is DISABLED (high cardinality) -> bloom filter disabled
-    ///   - This coupling exists because both features degrade for high-cardinality data
-    ///
-    /// To force bloom filters ON regardless of dictionary decisions, specify explicit NDV:
-    ///
-    ///     --parquet-bloom-column "high_card_col:ndv=100000"
-    ///
-    /// NESTED TYPES (structs, lists, maps):
-    /// Bloom filters apply to leaf columns within nested structures. The column path uses
-    /// dot notation (e.g., "struct_col.field" or "list_col.element").
-    ///
-    /// Formats:
-    ///
-    ///     --parquet-bloom-all                       # Use defaults (fpp=0.01, auto NDV)
-    ///     --parquet-bloom-all "fpp=VALUE"           # Custom false positive probability
-    ///     --parquet-bloom-all "ndv=VALUE"           # Force bloom on with explicit NDV
-    ///     --parquet-bloom-all "fpp=VALUE,ndv=VALUE" # Both custom
-    ///
-    /// CONFLICTS: Cannot be used with --parquet-bloom-all-off.
-    ///
-    /// Examples:
-    ///
-    ///     --parquet-bloom-all                                     # Bloom for low-cardinality columns
-    ///     --parquet-bloom-all "fpp=0.001"                         # Tighter false positive rate
-    ///     --parquet-bloom-all "ndv=10000"                         # Force bloom on ALL columns
-    ///     --parquet-bloom-all --parquet-bloom-column-off user_id  # Exclude user_id
     #[arg(
         long,
         value_name = "[fpp=VALUE][,ndv=VALUE]",
@@ -1565,85 +1556,119 @@ pub struct TransformCommand {
         num_args = 0..=1,
         default_missing_value = "",
         verbatim_doc_comment,
-        help_heading = "Parquet Options"
+        help_heading = "Parquet Options",
+        long_help = r#"Enable bloom filters for columns (default behavior).
+
+DICTIONARY/BLOOM INTERACTION:
+Bloom filters are coupled to dictionary encoding decisions:
+  - Columns that KEEP dictionary encoding -> bloom filter enabled (using analyzed NDV)
+  - Columns where dictionary is DISABLED (high cardinality) -> bloom filter disabled
+  - This coupling exists because both features degrade for high-cardinality data
+
+To force bloom filters ON regardless of dictionary decisions, specify explicit NDV:
+
+    --parquet-bloom-column "high_card_col:ndv=100000"
+
+NESTED TYPES (structs, lists, maps):
+Bloom filters apply to leaf columns within nested structures. The column path uses
+dot notation (e.g., "struct_col.field" or "list_col.element").
+
+Formats:
+
+    --parquet-bloom-all                       # Use defaults (fpp=0.01, auto NDV)
+    --parquet-bloom-all "fpp=VALUE"           # Custom false positive probability
+    --parquet-bloom-all "ndv=VALUE"           # Force bloom on with explicit NDV
+    --parquet-bloom-all "fpp=VALUE,ndv=VALUE" # Both custom
+
+CONFLICTS: Cannot be used with --parquet-bloom-all-off.
+
+Examples:
+
+    --parquet-bloom-all                                     # Bloom for low-cardinality columns
+    --parquet-bloom-all "fpp=0.001"                         # Tighter false positive rate
+    --parquet-bloom-all "ndv=10000"                         # Force bloom on ALL columns
+    --parquet-bloom-all --parquet-bloom-column-off user_id  # Exclude user_id"#
     )]
     pub parquet_bloom_all: Option<AllColumnsBloomFilterConfig>,
 
     /// Disable bloom filters for all columns.
-    ///
-    /// Use with --parquet-bloom-column to enable bloom filters for specific columns only.
-    ///
-    /// CONFLICTS: Cannot be used with --parquet-bloom-all.
-    ///
-    /// Examples:
-    ///
-    ///     --parquet-bloom-all-off                                 # No bloom filters
-    ///     --parquet-bloom-all-off --parquet-bloom-column user_id  # Only user_id
     #[arg(
         long = "parquet-bloom-all-off",
         conflicts_with = "parquet_bloom_all",
         verbatim_doc_comment,
-        help_heading = "Parquet Options"
+        help_heading = "Parquet Options",
+        long_help = r#"Disable bloom filters for all columns.
+
+Use with --parquet-bloom-column to enable bloom filters for specific columns only.
+
+CONFLICTS: Cannot be used with --parquet-bloom-all.
+
+Examples:
+
+    --parquet-bloom-all-off                                 # No bloom filters
+    --parquet-bloom-all-off --parquet-bloom-column user_id  # Only user_id"#
     )]
     pub parquet_bloom_all_off: bool,
 
     /// Enable or customize bloom filters for specific columns.
-    ///
-    /// Overrides --parquet-bloom-all-off for the specified columns.
-    ///
-    /// WITHOUT explicit NDV: bloom filter depends on dictionary decision (see --parquet-bloom-all).
-    /// WITH explicit NDV: bloom filter is FORCED ON regardless of dictionary encoding.
-    ///
-    /// Use explicit NDV to enable bloom filters on high-cardinality columns that won't
-    /// use dictionary encoding (e.g., UUIDs, timestamps).
-    ///
-    /// NESTED TYPES: Use dot notation for nested paths (e.g., "user.address"). This matches
-    /// all leaf columns under that path, so you don't need to know Parquet internal naming.
-    ///
-    /// Formats:
-    ///
-    ///     COLUMN                     # Depends on dictionary decision
-    ///     COLUMN:fpp=VALUE           # Custom false positive probability
-    ///     COLUMN:ndv=VALUE           # Force bloom ON with explicit NDV
-    ///     COLUMN:fpp=VALUE,ndv=VALUE # Both custom
-    ///
-    /// CONFLICTS: Cannot specify same column in both --parquet-bloom-column and
-    /// --parquet-bloom-column-off.
-    ///
-    /// Examples:
-    ///
-    ///     --parquet-bloom-column "region"                    # If region keeps dictionary
-    ///     --parquet-bloom-column "user.address"              # All leaves under user.address
-    ///     --parquet-bloom-column "user_id:ndv=1000000"       # Force bloom on high-card column
-    ///     --parquet-bloom-column "user_id:fpp=0.001"         # Tighter FPP
     #[arg(
         long,
         value_name = "COLUMN[:fpp=VALUE][,ndv=VALUE]",
         verbatim_doc_comment,
-        help_heading = "Parquet Options"
+        help_heading = "Parquet Options",
+        long_help = r#"Enable or customize bloom filters for specific columns.
+
+Overrides --parquet-bloom-all-off for the specified columns.
+
+WITHOUT explicit NDV: bloom filter depends on dictionary decision (see --parquet-bloom-all).
+WITH explicit NDV: bloom filter is FORCED ON regardless of dictionary encoding.
+
+Use explicit NDV to enable bloom filters on high-cardinality columns that won't
+use dictionary encoding (e.g., UUIDs, timestamps).
+
+NESTED TYPES: Use dot notation for nested paths (e.g., "user.address"). This matches
+all leaf columns under that path, so you don't need to know Parquet internal naming.
+
+Formats:
+
+    COLUMN                     # Depends on dictionary decision
+    COLUMN:fpp=VALUE           # Custom false positive probability
+    COLUMN:ndv=VALUE           # Force bloom ON with explicit NDV
+    COLUMN:fpp=VALUE,ndv=VALUE # Both custom
+
+CONFLICTS: Cannot specify same column in both --parquet-bloom-column and
+--parquet-bloom-column-off.
+
+Examples:
+
+    --parquet-bloom-column "region"                    # If region keeps dictionary
+    --parquet-bloom-column "user.address"              # All leaves under user.address
+    --parquet-bloom-column "user_id:ndv=1000000"       # Force bloom on high-card column
+    --parquet-bloom-column "user_id:fpp=0.001"         # Tighter FPP"#
     )]
     pub parquet_bloom_column: Vec<ColumnSpecificBloomFilterConfig>,
 
     /// Disable bloom filter for specific columns (repeatable).
-    ///
-    /// Overrides --parquet-bloom-all for the specified columns.
-    ///
-    /// NESTED TYPES: Use dot notation for nested paths (e.g., "user.address"). This disables
-    /// bloom filters for all leaf columns under that path.
-    ///
-    /// CONFLICTS: Cannot specify same column in both --parquet-bloom-column and
-    /// --parquet-bloom-column-off.
-    ///
-    /// Examples:
-    ///
-    ///     --parquet-bloom-all --parquet-bloom-column-off user_id  # All except user_id
-    ///     --parquet-bloom-column-off "user.address"               # Disable for all user.address leaves
-    ///     --parquet-bloom-column-off col1 --parquet-bloom-column-off col2  # Disable multiple
     #[arg(
         long = "parquet-bloom-column-off",
         value_name = "COLUMN",
         verbatim_doc_comment,
-        help_heading = "Parquet Options"
+        help_heading = "Parquet Options",
+        long_help = r#"Disable bloom filter for specific columns (repeatable).
+
+Overrides --parquet-bloom-all for the specified columns.
+
+NESTED TYPES: Use dot notation for nested paths (e.g., "user.address"). This disables
+bloom filters for all leaf columns under that path.
+
+CONFLICTS: Cannot specify same column in both --parquet-bloom-column and
+--parquet-bloom-column-off.
+
+Examples:
+
+    --parquet-bloom-all --parquet-bloom-column-off user_id  # All except user_id
+    --parquet-bloom-column-off "user.address"               # Disable for all user.address leaves
+    --parquet-bloom-column-off col1 --parquet-bloom-column-off col2  # Disable multiple"#
     )]
     pub parquet_bloom_column_off: Vec<String>,
 
@@ -1679,67 +1704,69 @@ pub struct TransformCommand {
     )]
     pub parquet_dictionary_all_off: bool,
 
-    /// Enable dictionary encoding for specific columns. Can be specified multiple times.
-    ///
-    /// Overrides --parquet-dictionary-all-off for the named columns.
-    ///
-    /// Format: COLUMN:MODE where MODE is:
-    ///   - analyze: Cardinality analysis decides per-row-group (disabled if >20% distinct)
-    ///   - always: Always attempt dictionary; parquet-rs handles overflow gracefully
-    ///
-    /// NON-ANALYZABLE TYPES:
-    /// Cardinality analysis only works on certain types. Non-analyzable types (nested types
-    /// like structs/lists/maps, and floats due to high cardinality) automatically use "always"
-    /// mode even if you specify "analyze". Use dot notation for nested paths (e.g., "user.address").
-    /// This enables dictionary for all leaf columns under that path.
-    ///
-    /// BLOOM FILTER INTERACTION:
-    /// The cardinality analysis from "analyze" mode also provides NDV for bloom filter sizing.
-    /// When dictionary is disabled (high cardinality), bloom filters are also disabled unless
-    /// you provide explicit NDV via --parquet-bloom-column.
-    ///
-    /// CONFLICTS: Cannot specify same column in both --parquet-dictionary-column and
-    /// --parquet-dictionary-column-off.
-    ///
-    /// Examples:
-    ///
-    ///     --parquet-dictionary-column region:analyze       # Let analysis decide
-    ///     --parquet-dictionary-column region:always        # Force dictionary on
-    ///     --parquet-dictionary-column "user.address:always"   # All user.address leaves
+    /// Enable dictionary encoding for specific columns.
     #[arg(
         long = "parquet-dictionary-column",
         value_name = "COLUMN:MODE",
         verbatim_doc_comment,
-        help_heading = "Parquet Options"
+        help_heading = "Parquet Options",
+        long_help = r#"Enable dictionary encoding for specific columns. Can be specified multiple times.
+
+Overrides --parquet-dictionary-all-off for the named columns.
+
+Format: COLUMN:MODE where MODE is:
+  - analyze: Cardinality analysis decides per-row-group (disabled if >20% distinct)
+  - always: Always attempt dictionary. parquet-rs handles overflow gracefully
+
+NON-ANALYZABLE TYPES:
+Cardinality analysis only works on certain types. Non-analyzable types (nested types
+like structs/lists/maps, and floats due to high cardinality) automatically use "always"
+mode even if you specify "analyze". Use dot notation for nested paths (e.g., "user.address").
+This enables dictionary for all leaf columns under that path.
+
+BLOOM FILTER INTERACTION:
+The cardinality analysis from "analyze" mode also provides NDV for bloom filter sizing.
+When dictionary is disabled (high cardinality), bloom filters are also disabled unless
+you provide explicit NDV via --parquet-bloom-column.
+
+CONFLICTS: Cannot specify same column in both --parquet-dictionary-column and
+--parquet-dictionary-column-off.
+
+Examples:
+
+    --parquet-dictionary-column region:analyze       # Let analysis decide
+    --parquet-dictionary-column region:always        # Force dictionary on
+    --parquet-dictionary-column "user.address:always"   # All user.address leaves"#
     )]
     pub parquet_dictionary_column: Vec<ColumnDictionaryConfig>,
 
-    /// Set data page encoding for specific columns. Can be specified multiple times.
-    ///
-    /// Overrides --parquet-encoding and automatic encoding selection for the named column.
-    ///
-    /// DICTIONARY INTERACTION:
-    ///   - Dictionary ENABLED: this encoding is used when dictionary overflows
-    ///   - Dictionary DISABLED: this encoding is used for all data
-    ///
-    /// NESTED TYPES: Use dot notation for nested paths (e.g., "user.address"). This sets
-    /// encoding for all leaf columns under that path.
-    ///
-    /// Format: COLUMN=ENCODING
-    ///
-    /// Options: plain, rle, delta-binary-packed, delta-length-byte-array, delta-byte-array,
-    /// byte-stream-split
-    ///
-    /// Examples:
-    ///
-    ///     --parquet-column-encoding id=delta-binary-packed      # Efficient for sorted integers
-    ///     --parquet-column-encoding name=delta-byte-array       # Efficient for strings
-    ///     --parquet-column-encoding price=byte-stream-split     # Efficient for floats
+    /// Set data page encoding for specific columns.
     #[arg(
         long,
         value_name = "COLUMN=ENCODING",
         verbatim_doc_comment,
-        help_heading = "Parquet Options"
+        help_heading = "Parquet Options",
+        long_help = r#"Set data page encoding for specific columns. Can be specified multiple times.
+
+Overrides --parquet-encoding and automatic encoding selection for the named column.
+
+DICTIONARY INTERACTION:
+  - Dictionary ENABLED: this encoding is used when dictionary overflows
+  - Dictionary DISABLED: this encoding is used for all data
+
+NESTED TYPES: Use dot notation for nested paths (e.g., "user.address"). This sets
+encoding for all leaf columns under that path.
+
+Format: COLUMN=ENCODING
+
+Options: plain, rle, delta-binary-packed, delta-length-byte-array, delta-byte-array,
+byte-stream-split
+
+Examples:
+
+    --parquet-column-encoding id=delta-binary-packed      # Efficient for sorted integers
+    --parquet-column-encoding name=delta-byte-array       # Efficient for strings
+    --parquet-column-encoding price=byte-stream-split     # Efficient for floats"#
     )]
     pub parquet_column_encoding: Vec<ColumnEncodingConfig>,
 
@@ -2039,9 +2066,9 @@ pub enum InspectSubcommand {
 
 #[derive(Args, Debug)]
 pub struct InspectIdentifyArgs {
-    /// Path to the file to identify
+    /// Local path, file URL, or GCS location to identify
     #[arg(value_hint = ValueHint::FilePath)]
-    pub file: Utf8PathBuf,
+    pub file: String,
     /// Output format (auto-detects based on TTY if not specified)
     #[arg(long, short = 'f', value_enum, default_value = "auto")]
     pub format: OutputFormat,
@@ -2049,9 +2076,9 @@ pub struct InspectIdentifyArgs {
 
 #[derive(Args, Debug)]
 pub struct InspectParquetArgs {
-    /// Path to the Parquet file
+    /// Local path, file URL, or GCS location of the Parquet file
     #[arg(value_hint = ValueHint::FilePath)]
-    pub file: Utf8PathBuf,
+    pub file: String,
     /// Output format (auto-detects based on TTY if not specified)
     #[arg(long, short = 'f', value_enum, default_value = "auto")]
     pub format: OutputFormat,
@@ -2065,25 +2092,25 @@ pub struct InspectParquetArgs {
 
 #[derive(Args, Debug)]
 pub struct InspectArrowArgs {
-    /// Path to the Arrow IPC file
+    /// Local path, file URL, or GCS location of the Arrow IPC file
     #[arg(value_hint = ValueHint::FilePath)]
-    pub file: Utf8PathBuf,
+    pub file: String,
     /// Show per-record-batch details
     #[arg(long)]
     pub batches: bool,
     /// Output format (auto-detects based on TTY if not specified)
     #[arg(long, short = 'f', value_enum, default_value = "auto")]
     pub format: OutputFormat,
-    /// Count total rows (requires reading entire file)
+    /// Count rows (Arrow streams are read sequentially)
     #[arg(long)]
     pub row_count: bool,
 }
 
 #[derive(Args, Debug)]
 pub struct InspectVortexArgs {
-    /// Path to the Vortex file
+    /// Local path, file URL, or GCS location of the Vortex file
     #[arg(value_hint = ValueHint::FilePath)]
-    pub file: Utf8PathBuf,
+    pub file: String,
     /// Show full schema details
     #[arg(long)]
     pub schema: bool,
@@ -2174,6 +2201,118 @@ impl FromStr for ArrowIPCFormat {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod storage_config_tests {
+        use super::*;
+        use clap::Parser;
+
+        #[test]
+        fn defaults_apply_to_transform_and_inspect() {
+            let cli = Cli::try_parse_from([
+                "silk-chiffon",
+                "transform",
+                "--from",
+                "input.parquet",
+                "--to",
+                "output.parquet",
+            ])
+            .unwrap();
+            assert_eq!(
+                cli.storage.resolve(),
+                StorageConfig {
+                    max_requests: 64,
+                    upload_part_size: 10 * 1024 * 1024,
+                    upload_concurrency: 8,
+                }
+            );
+
+            let cli = Cli::try_parse_from(["silk-chiffon", "inspect", "identify", "input.parquet"])
+                .unwrap();
+            assert_eq!(cli.storage.resolve(), StorageConfig::default());
+        }
+
+        #[test]
+        fn options_parse_before_and_after_subcommands() {
+            let cli = Cli::try_parse_from([
+                "silk-chiffon",
+                "--object-store-max-requests",
+                "12",
+                "transform",
+                "--from",
+                "input.parquet",
+                "--object-store-upload-part-size",
+                "16MiB",
+                "--to",
+                "output.parquet",
+                "--object-store-upload-concurrency",
+                "3",
+            ])
+            .unwrap();
+            assert_eq!(
+                cli.storage.resolve(),
+                StorageConfig {
+                    max_requests: 12,
+                    upload_part_size: 16 * 1024 * 1024,
+                    upload_concurrency: 3,
+                }
+            );
+
+            let cli = Cli::try_parse_from([
+                "silk-chiffon",
+                "inspect",
+                "identify",
+                "input.parquet",
+                "--object-store-max-requests",
+                "7",
+            ])
+            .unwrap();
+            assert_eq!(cli.storage.resolve().max_requests, 7);
+        }
+
+        #[test]
+        fn inspect_locations_accept_gcs_uris() {
+            for command in ["identify", "parquet", "arrow", "vortex"] {
+                let cli = Cli::try_parse_from([
+                    "silk-chiffon",
+                    "inspect",
+                    command,
+                    "gs://data-bucket/path/input.data",
+                ])
+                .unwrap();
+                let Commands::Inspect(inspect) = cli.command else {
+                    panic!("expected inspect command");
+                };
+                let file = match inspect.command {
+                    InspectSubcommand::Identify(args) => args.file,
+                    InspectSubcommand::Parquet(args) => args.file,
+                    InspectSubcommand::Arrow(args) => args.file,
+                    InspectSubcommand::Vortex(args) => args.file,
+                };
+                assert_eq!(file, "gs://data-bucket/path/input.data");
+            }
+        }
+
+        #[test]
+        fn zero_values_are_rejected() {
+            for (option, value) in [
+                ("--object-store-max-requests", "0"),
+                ("--object-store-upload-part-size", "0"),
+                ("--object-store-upload-concurrency", "0"),
+            ] {
+                let result = Cli::try_parse_from([
+                    "silk-chiffon",
+                    "transform",
+                    "--from",
+                    "input.parquet",
+                    "--to",
+                    "output.parquet",
+                    option,
+                    value,
+                ]);
+                assert!(result.is_err(), "{option} accepted zero");
+            }
+        }
+    }
 
     #[test]
     fn test_value_enum_from_str() {

@@ -2,8 +2,6 @@
 
 use std::{collections::HashMap, io::Write};
 
-use camino::Utf8Path;
-
 use anyhow::Result;
 use arrow::datatypes::SchemaRef;
 use humansize::{BINARY, FormatSizeOptions, format_size};
@@ -21,11 +19,6 @@ use crate::inspection::style::{
 
 /// Common trait for inspecting data files.
 pub trait Inspectable: Send + Sync {
-    /// Check if the file is this format. Only errors on I/O issues.
-    fn is_format(path: &Utf8Path) -> Result<bool>
-    where
-        Self: Sized;
-
     /// Format name (e.g., "Parquet", "Arrow IPC (file)")
     fn format_name(&self) -> &str;
 

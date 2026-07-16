@@ -1,6 +1,5 @@
 use arrow::array::{Array, Int32Array, Int64Array, RecordBatch, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
-use camino::Utf8PathBuf;
 use silk_chiffon::{
     AllColumnsBloomFilterConfig, ArrowCompression, ArrowIPCFormat, ColumnDictionaryConfig,
     ColumnSpecificBloomFilterConfig, DataFormat, DictionaryMode, ListOutputsFormat,
@@ -13,7 +12,6 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 mod test_helpers {
-    use camino::Utf8Path;
     use parquet::file::reader::FileReader;
     use silk_chiffon::inspection::parquet::ParquetInspector;
     use std::path::Path;
@@ -27,8 +25,13 @@ mod test_helpers {
         reader.metadata().row_group(idx).clone()
     }
 
-    pub fn inspect(path: &Path) -> ParquetInspector {
-        ParquetInspector::open(Utf8Path::from_path(path).unwrap()).unwrap()
+    pub async fn inspect(path: &Path) -> ParquetInspector {
+        let storage = silk_chiffon::storage::StorageContext::new(Default::default()).unwrap();
+        let input = storage
+            .resolve_input(path.to_string_lossy().as_ref())
+            .await
+            .unwrap();
+        ParquetInspector::open(&input).await.unwrap()
     }
 
     pub fn assert_has_dictionary(inspector: &ParquetInspector, col_name: &str) {
@@ -260,6 +263,68 @@ async fn test_transform_from_many_with_glob() {
     assert!(output.exists());
     let batches = TestFile::read_arrow_auto(&output);
     assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 2);
+}
+
+#[tokio::test]
+async fn test_transform_from_many_with_file_url_glob() {
+    let temp_dir = TempDir::new().unwrap();
+    let input1 = temp_dir.path().join("file1.arrow");
+    let input2 = temp_dir.path().join("file2.arrow");
+    let output = temp_dir.path().join("output.arrow");
+
+    TestFile::write_arrow_batch(&input1, &TestBatch::simple_with(&[1], &["a"]));
+    TestFile::write_arrow_batch(&input2, &TestBatch::simple_with(&[2], &["b"]));
+    let pattern = url::Url::from_file_path(temp_dir.path().join("file*.arrow"))
+        .unwrap()
+        .to_string();
+
+    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+        from: None,
+        from_many: vec![pattern],
+        to: Some(output.to_string_lossy().to_string()),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    let batches = TestFile::read_arrow_auto(&output);
+    assert_eq!(
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn test_transform_from_many_with_parent_relative_glob() {
+    let current = std::env::current_dir().unwrap();
+    let sibling = tempfile::Builder::new()
+        .prefix("silk-chiffon-parent-glob-")
+        .tempdir_in(current.parent().unwrap())
+        .unwrap();
+    let input = sibling.path().join("input.arrow");
+    let output_dir = TempDir::new().unwrap();
+    let output = output_dir.path().join("output.arrow");
+
+    TestFile::write_arrow_batch(&input, &TestBatch::simple_with(&[1, 2], &["a", "b"]));
+    let pattern = format!(
+        "../{}/*.arrow",
+        sibling.path().file_name().unwrap().to_string_lossy()
+    );
+
+    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+        from: None,
+        from_many: vec![pattern],
+        to: Some(output.to_string_lossy().to_string()),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    let batches = TestFile::read_arrow_auto(&output);
+    assert_eq!(
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        2
+    );
 }
 
 #[tokio::test]
@@ -2587,7 +2652,7 @@ async fn test_multi_column_partition_verifies_output_paths_arrow() {
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("year,month".to_string()),
         list_outputs: Some(ListOutputsFormat::Json),
-        list_outputs_file: Some(Utf8PathBuf::from_path_buf(list_output.clone()).unwrap()),
+        list_outputs_file: Some(list_output.to_string_lossy().into_owned()),
         output_format: Some(DataFormat::Arrow),
         ..Default::default()
     })
@@ -2703,7 +2768,7 @@ async fn test_multi_column_partition_verifies_output_paths_parquet() {
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("region,year".to_string()),
         list_outputs: Some(ListOutputsFormat::Json),
-        list_outputs_file: Some(Utf8PathBuf::from_path_buf(list_output.clone()).unwrap()),
+        list_outputs_file: Some(list_output.to_string_lossy().into_owned()),
         output_format: Some(DataFormat::Parquet),
         ..Default::default()
     })
@@ -3010,7 +3075,7 @@ async fn test_dictionary_prefix_matches_nested_columns() {
     .await
     .unwrap();
 
-    let inspector = test_helpers::inspect(&output);
+    let inspector = test_helpers::inspect(&output).await;
     test_helpers::assert_no_dictionary(&inspector, "id");
     test_helpers::assert_has_dictionary(&inspector, "person.name");
     test_helpers::assert_has_dictionary(&inspector, "person.age");
@@ -3040,7 +3105,7 @@ async fn test_dictionary_specific_path_in_nested_column() {
     .await
     .unwrap();
 
-    let inspector = test_helpers::inspect(&output);
+    let inspector = test_helpers::inspect(&output).await;
     test_helpers::assert_no_dictionary(&inspector, "id");
     test_helpers::assert_has_dictionary(&inspector, "person.name");
     test_helpers::assert_no_dictionary(&inspector, "person.age");
@@ -3072,7 +3137,7 @@ async fn test_bloom_filter_prefix_matches_nested_columns() {
     .await
     .unwrap();
 
-    let inspector = test_helpers::inspect(&output);
+    let inspector = test_helpers::inspect(&output).await;
     test_helpers::assert_no_bloom_filter(&inspector, "id");
     test_helpers::assert_has_bloom_filter(&inspector, "person.name");
     test_helpers::assert_has_bloom_filter(&inspector, "person.age");
@@ -3105,7 +3170,7 @@ async fn test_bloom_filter_prefix_with_exclusion() {
     .await
     .unwrap();
 
-    let inspector = test_helpers::inspect(&output);
+    let inspector = test_helpers::inspect(&output).await;
     test_helpers::assert_no_bloom_filter(&inspector, "id");
     test_helpers::assert_has_bloom_filter(&inspector, "person.name");
     test_helpers::assert_no_bloom_filter(&inspector, "person.age");

@@ -11,6 +11,26 @@ use std::fs::File;
 use std::sync::Arc;
 use tempfile::TempDir;
 
+async fn create_vortex_sink(
+    path: &std::path::Path,
+    schema: &SchemaRef,
+) -> silk_chiffon::sinks::vortex::VortexSink {
+    let storage = silk_chiffon::storage::StorageContext::new(Default::default()).unwrap();
+    let output = storage
+        .create_output(
+            path.to_string_lossy().as_ref(),
+            silk_chiffon::storage::OutputPolicy::new(true, true),
+        )
+        .await
+        .unwrap();
+    silk_chiffon::sinks::vortex::VortexSink::create(
+        output,
+        schema,
+        silk_chiffon::sinks::vortex::VortexSinkOptions::new(),
+    )
+    .unwrap()
+}
+
 // =============================================================================
 // Parquet inspection tests
 // =============================================================================
@@ -251,13 +271,11 @@ fn test_inspect_arrow_stream_json() {
 mod vortex_tests {
     use super::*;
     use silk_chiffon::sinks::data_sink::DataSink;
-    use silk_chiffon::sinks::vortex::{VortexSink, VortexSinkOptions};
 
     fn write_vortex_file(path: &std::path::Path, schema: &SchemaRef, batches: Vec<RecordBatch>) {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            let mut sink =
-                VortexSink::create(path.to_path_buf(), schema, VortexSinkOptions::new()).unwrap();
+            let mut sink = create_vortex_sink(path, schema).await;
             for batch in batches {
                 sink.write_batch(batch).await.unwrap();
             }
@@ -420,12 +438,10 @@ fn test_inspect_identify_vortex_file() {
     let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
 
     use silk_chiffon::sinks::data_sink::DataSink;
-    use silk_chiffon::sinks::vortex::{VortexSink, VortexSinkOptions};
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-        let mut sink =
-            VortexSink::create(file.to_path_buf(), &schema, VortexSinkOptions::new()).unwrap();
+        let mut sink = create_vortex_sink(&file, &schema).await;
         sink.write_batch(batch).await.unwrap();
         sink.finish().await.unwrap();
     });
@@ -687,7 +703,6 @@ mod parity_tests {
     #[test]
     fn test_vortex_parity() {
         use silk_chiffon::sinks::data_sink::DataSink;
-        use silk_chiffon::sinks::vortex::{VortexSink, VortexSinkOptions};
 
         let temp_dir = TempDir::new().unwrap();
         let file = temp_dir.path().join("test.vortex");
@@ -697,8 +712,7 @@ mod parity_tests {
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            let mut sink =
-                VortexSink::create(file.to_path_buf(), &schema, VortexSinkOptions::new()).unwrap();
+            let mut sink = create_vortex_sink(&file, &schema).await;
             sink.write_batch(batch).await.unwrap();
             sink.finish().await.unwrap();
         });
@@ -962,7 +976,6 @@ mod parity_tests {
     #[test]
     fn test_vortex_stats_parity() {
         use silk_chiffon::sinks::data_sink::DataSink;
-        use silk_chiffon::sinks::vortex::{VortexSink, VortexSinkOptions};
 
         let temp_dir = TempDir::new().unwrap();
         let file = temp_dir.path().join("test.vortex");
@@ -972,8 +985,7 @@ mod parity_tests {
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            let mut sink =
-                VortexSink::create(file.to_path_buf(), &schema, VortexSinkOptions::new()).unwrap();
+            let mut sink = create_vortex_sink(&file, &schema).await;
             sink.write_batch(batch).await.unwrap();
             sink.finish().await.unwrap();
         });
@@ -999,7 +1011,6 @@ mod parity_tests {
     #[test]
     fn test_vortex_layout_parity() {
         use silk_chiffon::sinks::data_sink::DataSink;
-        use silk_chiffon::sinks::vortex::{VortexSink, VortexSinkOptions};
 
         let temp_dir = TempDir::new().unwrap();
         let file = temp_dir.path().join("test.vortex");
@@ -1009,8 +1020,7 @@ mod parity_tests {
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            let mut sink =
-                VortexSink::create(file.to_path_buf(), &schema, VortexSinkOptions::new()).unwrap();
+            let mut sink = create_vortex_sink(&file, &schema).await;
             sink.write_batch(batch).await.unwrap();
             sink.finish().await.unwrap();
         });
@@ -1098,7 +1108,6 @@ mod parity_tests {
     #[test]
     fn test_vortex_all_flags_combined() {
         use silk_chiffon::sinks::data_sink::DataSink;
-        use silk_chiffon::sinks::vortex::{VortexSink, VortexSinkOptions};
 
         let temp_dir = TempDir::new().unwrap();
         let file = temp_dir.path().join("test.vortex");
@@ -1108,8 +1117,7 @@ mod parity_tests {
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            let mut sink =
-                VortexSink::create(file.to_path_buf(), &schema, VortexSinkOptions::new()).unwrap();
+            let mut sink = create_vortex_sink(&file, &schema).await;
             sink.write_batch(batch).await.unwrap();
             sink.finish().await.unwrap();
         });
