@@ -287,3 +287,149 @@ impl Inspectable for VortexInspector {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    use arrow::array::{Int32Array, RecordBatch, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use object_store::{ObjectStore, ObjectStoreExt, PutPayload, memory::InMemory, path::Path};
+    use tempfile::TempDir;
+
+    use crate::{
+        sinks::{
+            data_sink::DataSink,
+            vortex::{VortexSink, VortexSinkOptions},
+        },
+        storage::{InputObject, OutputPolicy, StorageConfig, StorageContext},
+        utils::test_helpers::object_store::{CountingStore, RequestLog},
+    };
+
+    fn simple_schema() -> SchemaRef {
+        Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("name", DataType::Utf8, false),
+        ]))
+    }
+
+    fn create_batch(schema: &SchemaRef) -> RecordBatch {
+        RecordBatch::try_new(
+            Arc::clone(schema),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 2, 3])),
+                Arc::new(StringArray::from(vec!["a", "b", "c"])),
+            ],
+        )
+        .unwrap()
+    }
+
+    async fn vortex_bytes() -> Vec<u8> {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("test.vortex");
+        let schema = simple_schema();
+        let storage = StorageContext::new(Default::default()).unwrap();
+        let output = storage
+            .create_output(
+                path.to_string_lossy().as_ref(),
+                OutputPolicy::new(true, true),
+            )
+            .await
+            .unwrap();
+        let mut sink = VortexSink::create(output, &schema, VortexSinkOptions::new()).unwrap();
+        sink.write_batch(create_batch(&schema)).await.unwrap();
+        sink.finish().await.unwrap();
+        std::fs::read(path).unwrap()
+    }
+
+    async fn remote_input(bytes: Vec<u8>) -> (InputObject, Arc<RequestLog>) {
+        let inner = InMemory::new();
+        inner
+            .put(&Path::from("nested/test.data"), PutPayload::from(bytes))
+            .await
+            .unwrap();
+        let (store, requests) = CountingStore::new(inner);
+        let store: Arc<dyn ObjectStore> = Arc::new(store);
+        let storage = StorageContext::with_gcs_store(StorageConfig::default(), store);
+        let input = storage
+            .resolve_input("gs://inspect-tests/nested/test.data")
+            .await
+            .unwrap();
+        (input, requests)
+    }
+
+    #[tokio::test]
+    async fn opens_remote_object_and_renders_all_views() {
+        let (input, requests) = remote_input(vortex_bytes().await).await;
+        let inspector = VortexInspector::open(&input).await.unwrap();
+
+        let mut default = Vec::new();
+        inspector.render_default(&mut default).unwrap();
+        let mut schema = Vec::new();
+        inspector.render_schema(&mut schema).unwrap();
+        let mut stats = Vec::new();
+        inspector.render_stats(&mut stats).unwrap();
+        let mut layout = Vec::new();
+        inspector.render_layout(&mut layout).unwrap();
+
+        assert!(
+            String::from_utf8(default)
+                .unwrap()
+                .contains("gs://inspect-tests/nested/test.data")
+        );
+        assert!(String::from_utf8(schema).unwrap().contains("Schema"));
+        assert!(
+            String::from_utf8(stats)
+                .unwrap()
+                .contains("Column Statistics")
+        );
+        assert!(
+            String::from_utf8(layout)
+                .unwrap()
+                .contains("Layout Segments")
+        );
+        assert_eq!(
+            inspector.to_json()["file"],
+            "gs://inspect-tests/nested/test.data"
+        );
+        assert_eq!(inspector.row_count(), Some(3));
+        assert_eq!(requests.full_gets.load(Ordering::SeqCst), 0);
+        assert!(!requests.ranges.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn local_and_remote_json_are_equal_except_for_location() {
+        let temp_dir = TempDir::new().unwrap();
+        let std_path = temp_dir.path().join("test.vortex");
+        let bytes = vortex_bytes().await;
+        std::fs::write(&std_path, &bytes).unwrap();
+        let storage = StorageContext::new(Default::default()).unwrap();
+        let local_input = storage
+            .resolve_input(std_path.to_string_lossy().as_ref())
+            .await
+            .unwrap();
+        let local = VortexInspector::open(&local_input).await.unwrap();
+        let (remote_input, _) = remote_input(bytes).await;
+        let remote = VortexInspector::open(&remote_input).await.unwrap();
+
+        let mut local_json = local.to_json();
+        let mut remote_json = remote.to_json();
+        local_json.as_object_mut().unwrap().remove("file");
+        remote_json.as_object_mut().unwrap().remove("file");
+        assert_eq!(local_json, remote_json);
+    }
+
+    #[tokio::test]
+    async fn truncated_remote_object_names_the_uri() {
+        let (input, _) = remote_input(b"VTXFbroken".to_vec()).await;
+
+        let error = VortexInspector::open(&input)
+            .await
+            .err()
+            .unwrap()
+            .to_string();
+
+        assert!(error.contains("gs://inspect-tests/nested/test.data"));
+    }
+}

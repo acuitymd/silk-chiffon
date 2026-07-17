@@ -1640,3 +1640,554 @@ impl Inspectable for ParquetInspector {
         self.to_json_impl(false, None)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicU64, Ordering},
+        },
+        time::Instant,
+    };
+
+    use arrow::array::{Int32Array, RecordBatch, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use object_store::{
+        GetRange, ObjectStore, ObjectStoreExt, PutPayload, memory::InMemory, path::Path,
+    };
+    use parquet::arrow::ArrowWriter;
+    use parquet::file::properties::WriterProperties;
+
+    use crate::{
+        storage::{InputObject, StorageConfig, StorageContext},
+        utils::test_helpers::object_store::{CountingStore, RequestLog},
+    };
+
+    fn simple_schema() -> SchemaRef {
+        Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("name", DataType::Utf8, false),
+        ]))
+    }
+
+    fn create_batch(schema: &SchemaRef) -> RecordBatch {
+        RecordBatch::try_new(
+            Arc::clone(schema),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 2, 3, 4])),
+                Arc::new(StringArray::from(vec!["a", "b", "c", "d"])),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn parquet_bytes() -> Vec<u8> {
+        parquet_bytes_from_batch(&create_batch(&simple_schema()))
+    }
+
+    fn parquet_bytes_from_batch(batch: &RecordBatch) -> Vec<u8> {
+        let properties = WriterProperties::builder()
+            .set_max_row_group_row_count(Some(2))
+            .build();
+        let mut bytes = Vec::new();
+        let mut writer =
+            ArrowWriter::try_new(&mut bytes, batch.schema(), Some(properties)).unwrap();
+        writer.write(batch).unwrap();
+        writer.close().unwrap();
+        bytes
+    }
+
+    async fn remote_input(
+        bytes: Vec<u8>,
+        range_delay: Option<std::time::Duration>,
+    ) -> (InputObject, Arc<RequestLog>) {
+        let inner = InMemory::new();
+        inner
+            .put(&Path::from("nested/people.data"), PutPayload::from(bytes))
+            .await
+            .unwrap();
+        let (store, requests) = match range_delay {
+            Some(delay) => CountingStore::new_with_range_delay(inner, delay),
+            None => CountingStore::new(inner),
+        };
+        let store: Arc<dyn ObjectStore> = Arc::new(store);
+        let storage = StorageContext::with_gcs_store(StorageConfig::default(), store);
+        let input = storage
+            .resolve_input("gs://inspect-tests/nested/people.data")
+            .await
+            .unwrap();
+        (input, requests)
+    }
+
+    #[tokio::test]
+    async fn metadata_text_uses_only_footer_ranges() {
+        let (input, requests) = remote_input(parquet_bytes(), None).await;
+        let inspector = ParquetInspector::open(&input).await.unwrap();
+        requests.ranges.lock().unwrap().clear();
+
+        let mut rendered = Vec::new();
+        inspector.render_with_row_group(&mut rendered, 0).unwrap();
+        let rendered = String::from_utf8(rendered).unwrap();
+
+        assert!(rendered.contains("gs://inspect-tests/nested/people.data"));
+        assert!(requests.ranges.lock().unwrap().is_empty());
+        assert_eq!(requests.full_gets.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn selected_pages_fetch_one_exact_offset_range() {
+        let bytes = parquet_bytes();
+        let file_size = bytes.len() as u64;
+        let (input, requests) = remote_input(bytes, None).await;
+        let mut inspector = ParquetInspector::open(&input).await.unwrap();
+        let expected = inspector.metadata.row_group(0).column(1).byte_range();
+        assert!(expected.0 > 0);
+        requests.ranges.lock().unwrap().clear();
+
+        inspector
+            .load_pages(Some(0), Some(&["name"]))
+            .await
+            .unwrap();
+
+        let ranges = requests.ranges.lock().unwrap();
+        assert_eq!(
+            ranges.as_slice(),
+            &[GetRange::Bounded(expected.0..expected.0 + expected.1)]
+        );
+        assert!(expected.1 < file_size);
+        assert!(inspector.row_groups[0].columns[0].page_encodings.is_none());
+        assert!(inspector.row_groups[0].columns[1].page_encodings.is_some());
+        let mut rendered = Vec::new();
+        inspector
+            .render_pages(&mut rendered, 0, Some(&["name"]))
+            .unwrap();
+        assert!(String::from_utf8(rendered).unwrap().contains("Pages"));
+    }
+
+    #[tokio::test]
+    async fn page_fetch_can_select_one_row_group() {
+        let (input, requests) = remote_input(parquet_bytes(), None).await;
+        let mut inspector = ParquetInspector::open(&input).await.unwrap();
+        requests.ranges.lock().unwrap().clear();
+
+        inspector.load_pages(Some(1), None).await.unwrap();
+
+        assert!(
+            inspector.row_groups[0]
+                .columns
+                .iter()
+                .all(|column| column.pages.is_none())
+        );
+        assert!(
+            inspector.row_groups[1]
+                .columns
+                .iter()
+                .all(|column| column.pages.is_some())
+        );
+        assert_eq!(
+            requests.ranges.lock().unwrap().len(),
+            inspector.row_groups[1].columns.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_pages_accept_full_paths_and_unambiguous_leaf_names() {
+        let batch = crate::utils::test_data::TestBatch::with_structs();
+        let (input, requests) = remote_input(parquet_bytes_from_batch(&batch), None).await;
+        let mut inspector = ParquetInspector::open(&input).await.unwrap();
+        requests.ranges.lock().unwrap().clear();
+
+        inspector
+            .load_pages(Some(0), Some(&["name", "person.age"]))
+            .await
+            .unwrap();
+
+        assert!(
+            inspector
+                .column_in_row_group(0, "person.name")
+                .unwrap()
+                .pages
+                .is_some()
+        );
+        assert!(
+            inspector
+                .column_in_row_group(0, "person.age")
+                .unwrap()
+                .pages
+                .is_some()
+        );
+        let mut rendered = Vec::new();
+        inspector
+            .render_pages(&mut rendered, 0, Some(&["name"]))
+            .unwrap();
+        assert!(String::from_utf8(rendered).unwrap().contains("person.name"));
+        let json = inspector.to_json_with_pages(Some(&["name"])).unwrap();
+        assert!(json["row_groups"][0]["columns"][1]["pages"].is_array());
+        assert!(json["row_groups"][0]["columns"][2]["pages"].is_null());
+        assert_eq!(requests.ranges.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn ambiguous_nested_leaf_names_require_full_paths() {
+        let batch = crate::utils::test_data::TestBatch::builder()
+            .column_struct("left", |fields| {
+                fields.field_string("name", &["a", "b", "c"])
+            })
+            .column_struct("right", |fields| {
+                fields.field_string("name", &["d", "e", "f"])
+            })
+            .build();
+        let (input, requests) = remote_input(parquet_bytes_from_batch(&batch), None).await;
+        let mut inspector = ParquetInspector::open(&input).await.unwrap();
+        requests.ranges.lock().unwrap().clear();
+
+        let error = inspector
+            .load_pages(Some(0), Some(&["name"]))
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("ambiguous"));
+        assert!(error.contains("left.name"));
+        assert!(error.contains("right.name"));
+        assert!(requests.ranges.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn json_page_data_preserves_existing_shape() {
+        let (input, requests) = remote_input(parquet_bytes(), None).await;
+        let mut inspector = ParquetInspector::open(&input).await.unwrap();
+        requests.ranges.lock().unwrap().clear();
+        inspector.load_pages(None, None).await.unwrap();
+
+        let json = inspector.to_json_with_pages(Some(&["name"])).unwrap();
+        assert_eq!(json["file"], "gs://inspect-tests/nested/people.data");
+        assert!(json["row_groups"][0]["columns"][0]["page_encodings"].is_object());
+        assert!(json["row_groups"][0]["columns"][0]["pages"].is_null());
+        assert!(json["row_groups"][0]["columns"][1]["pages"].is_array());
+        assert_eq!(requests.full_gets.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            requests.ranges.lock().unwrap().len(),
+            inspector
+                .row_groups
+                .iter()
+                .map(|row_group| row_group.columns.len())
+                .sum::<usize>()
+        );
+    }
+
+    #[tokio::test]
+    async fn local_and_remote_json_are_equal_except_for_location() {
+        let bytes = parquet_bytes();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("people.parquet");
+        std::fs::write(&path, &bytes).unwrap();
+        let storage = StorageContext::new(StorageConfig::default()).unwrap();
+        let local_input = storage
+            .resolve_input(path.to_string_lossy().as_ref())
+            .await
+            .unwrap();
+        let mut local = ParquetInspector::open(&local_input).await.unwrap();
+        local.load_pages(None, None).await.unwrap();
+        let (remote_input, _) = remote_input(bytes, None).await;
+        let mut remote = ParquetInspector::open(&remote_input).await.unwrap();
+        remote.load_pages(None, None).await.unwrap();
+
+        let mut local_json = local.to_json();
+        let mut remote_json = remote.to_json();
+        local_json.as_object_mut().unwrap().remove("file");
+        remote_json.as_object_mut().unwrap().remove("file");
+        assert_eq!(local_json, remote_json);
+    }
+
+    #[tokio::test]
+    async fn page_requests_are_concurrent_and_bounded() {
+        let (input, requests) =
+            remote_input(parquet_bytes(), Some(std::time::Duration::from_millis(20))).await;
+        let mut inspector = ParquetInspector::open(&input).await.unwrap();
+        requests.max_active_ranges.store(0, Ordering::SeqCst);
+
+        inspector.load_pages(None, None).await.unwrap();
+
+        let maximum = requests.max_active_ranges.load(Ordering::SeqCst);
+        assert!(
+            maximum > 1,
+            "expected concurrent page ranges, got {maximum}"
+        );
+        assert!(maximum <= PAGE_FETCH_CONCURRENCY);
+    }
+
+    #[tokio::test]
+    #[ignore = "deterministic request and memory instrumentation"]
+    async fn parquet_inspection_performance_profiles() {
+        const ROWS: usize = 100_000;
+        const ROW_GROUP_ROWS: usize = 10_000;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("category", DataType::Utf8, false),
+            Field::new("payload", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int32Array::from_iter_values(
+                    0..i32::try_from(ROWS).unwrap(),
+                )),
+                Arc::new(StringArray::from_iter_values(
+                    (0..ROWS).map(|index| format!("category-{}", index % 97)),
+                )),
+                Arc::new(StringArray::from_iter_values(
+                    (0..ROWS).map(deterministic_payload),
+                )),
+            ],
+        )
+        .unwrap();
+        let properties = WriterProperties::builder()
+            .set_max_row_group_row_count(Some(ROW_GROUP_ROWS))
+            .build();
+        let mut bytes = Vec::new();
+        let mut writer = ArrowWriter::try_new(&mut bytes, schema, Some(properties)).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        let object_size = u64::try_from(bytes.len()).unwrap();
+
+        for profile in [
+            InspectionProfile::FooterText,
+            InspectionProfile::DefaultJson,
+            InspectionProfile::AllPages,
+            InspectionProfile::SelectedPages,
+        ] {
+            let (input, requests) =
+                remote_input(bytes.clone(), Some(std::time::Duration::ZERO)).await;
+            let sampler = PeakRssSampler::start();
+            let started = Instant::now();
+            let mut inspector = ParquetInspector::open(&input).await.unwrap();
+            let selected_ranges = profile.selected_ranges(&inspector);
+            match profile {
+                InspectionProfile::FooterText => {
+                    let mut rendered = Vec::new();
+                    inspector.render_with_row_group(&mut rendered, 0).unwrap();
+                }
+                InspectionProfile::DefaultJson => {
+                    inspector.load_pages(None, None).await.unwrap();
+                    let mut rendered = Vec::new();
+                    inspector.render_to_json(&mut rendered).unwrap();
+                }
+                InspectionProfile::AllPages => {
+                    inspector.load_pages(Some(0), None).await.unwrap();
+                    let mut rendered = Vec::new();
+                    inspector.render_pages(&mut rendered, 0, None).unwrap();
+                }
+                InspectionProfile::SelectedPages => {
+                    inspector
+                        .load_pages(Some(0), Some(&["payload"]))
+                        .await
+                        .unwrap();
+                    let mut rendered = Vec::new();
+                    inspector
+                        .render_pages(&mut rendered, 0, Some(&["payload"]))
+                        .unwrap();
+                }
+            }
+            let elapsed = started.elapsed();
+            let peak_rss_bytes = sampler.finish();
+            let ranges = requests.ranges.lock().unwrap().clone();
+            let transferred_bytes = ranges
+                .iter()
+                .map(|range| range.as_range(object_size).unwrap())
+                .map(|range| range.end - range.start)
+                .sum::<u64>();
+            let largest_selected_chunk_bytes = selected_ranges
+                .iter()
+                .map(|range| range.end - range.start)
+                .max()
+                .unwrap_or(0);
+            let total_selected_chunk_bytes = selected_ranges
+                .iter()
+                .map(|range| range.end - range.start)
+                .sum::<u64>();
+            println!(
+                "{}",
+                serde_json::json!({
+                    "profile_kind": "deterministic_in_memory",
+                    "workload": profile.name(),
+                    "object_size_bytes": object_size,
+                    "rows": ROWS,
+                    "selected_columns": profile.selected_columns(),
+                    "target_partitions": 1,
+                    "request_limit": StorageConfig::default().max_requests,
+                    "upload_part_size_bytes": StorageConfig::default().upload_part_size,
+                    "upload_concurrency": StorageConfig::default().upload_concurrency,
+                    "request_count": ranges.len(),
+                    "request_concurrency": requests.max_active_ranges.load(Ordering::SeqCst),
+                    "transferred_bytes": transferred_bytes,
+                    "largest_selected_chunk_bytes": largest_selected_chunk_bytes,
+                    "total_selected_chunk_bytes": total_selected_chunk_bytes,
+                    "elapsed_ms": elapsed.as_millis(),
+                    "peak_rss_bytes": peak_rss_bytes,
+                })
+            );
+            assert_eq!(requests.full_gets.load(Ordering::SeqCst), 0);
+            assert!(requests.max_active_ranges.load(Ordering::SeqCst) <= PAGE_FETCH_CONCURRENCY);
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum InspectionProfile {
+        FooterText,
+        DefaultJson,
+        AllPages,
+        SelectedPages,
+    }
+
+    impl InspectionProfile {
+        const fn name(self) -> &'static str {
+            match self {
+                Self::FooterText => "parquet_inspect_footer_text",
+                Self::DefaultJson => "parquet_inspect_default_json",
+                Self::AllPages => "parquet_inspect_all_pages",
+                Self::SelectedPages => "parquet_inspect_selected_pages",
+            }
+        }
+
+        fn selected_columns(self) -> Vec<&'static str> {
+            match self {
+                Self::FooterText => Vec::new(),
+                Self::DefaultJson | Self::AllPages => vec!["id", "category", "payload"],
+                Self::SelectedPages => vec!["payload"],
+            }
+        }
+
+        fn selected_ranges(self, inspector: &ParquetInspector) -> Vec<std::ops::Range<u64>> {
+            match self {
+                Self::FooterText => Vec::new(),
+                Self::DefaultJson => inspector
+                    .metadata
+                    .row_groups()
+                    .iter()
+                    .flat_map(|row_group| row_group.columns())
+                    .map(column_range)
+                    .collect(),
+                Self::AllPages => inspector
+                    .metadata
+                    .row_group(0)
+                    .columns()
+                    .iter()
+                    .map(column_range)
+                    .collect(),
+                Self::SelectedPages => inspector
+                    .metadata
+                    .row_group(0)
+                    .columns()
+                    .iter()
+                    .filter(|column| {
+                        column
+                            .column_path()
+                            .parts()
+                            .last()
+                            .is_some_and(|name| name == "payload")
+                    })
+                    .map(column_range)
+                    .collect(),
+            }
+        }
+    }
+
+    fn column_range(column: &ColumnChunkMetaData) -> std::ops::Range<u64> {
+        let (start, length) = column.byte_range();
+        start..start + length
+    }
+
+    fn deterministic_payload(index: usize) -> String {
+        let mut state = u64::try_from(index).unwrap() ^ 0xd1b5_4a32_d192_ed03;
+        (0..96)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                char::from(b'a' + u8::try_from(state % 26).unwrap())
+            })
+            .collect()
+    }
+
+    struct PeakRssSampler {
+        stop: Arc<AtomicBool>,
+        peak: Arc<AtomicU64>,
+        thread: std::thread::JoinHandle<()>,
+    }
+
+    impl PeakRssSampler {
+        fn start() -> Self {
+            let stop = Arc::new(AtomicBool::new(false));
+            let peak = Arc::new(AtomicU64::new(0));
+            let thread_stop = Arc::clone(&stop);
+            let thread_peak = Arc::clone(&peak);
+            let thread = std::thread::spawn(move || {
+                let pid = sysinfo::get_current_pid().unwrap();
+                let mut system = sysinfo::System::new();
+                loop {
+                    system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
+                    if let Some(process) = system.process(pid) {
+                        thread_peak.fetch_max(process.memory(), Ordering::SeqCst);
+                    }
+                    if thread_stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            });
+            Self { stop, peak, thread }
+        }
+
+        fn finish(self) -> u64 {
+            self.stop.store(true, Ordering::SeqCst);
+            self.thread.join().unwrap();
+            self.peak.load(Ordering::SeqCst)
+        }
+    }
+
+    #[tokio::test]
+    async fn page_selection_reports_row_group_and_column_errors() {
+        let (input, _) = remote_input(parquet_bytes(), None).await;
+        let mut inspector = ParquetInspector::open(&input).await.unwrap();
+
+        let row_group = inspector.load_pages(Some(99), None).await.unwrap_err();
+        assert!(row_group.to_string().contains("row group 99"));
+        let column = inspector
+            .load_pages(Some(0), Some(&["missing"]))
+            .await
+            .unwrap_err();
+        assert!(column.to_string().contains("column missing"));
+    }
+
+    #[test]
+    fn offset_reader_rejects_requests_outside_the_fetched_chunk() {
+        let reader = OffsetChunkReader {
+            bytes: Bytes::from_static(b"abcdef"),
+            base: 4_096,
+            file_len: 8_192,
+        };
+
+        assert_eq!(
+            reader.get_bytes(4_098, 3).unwrap(),
+            Bytes::from_static(b"cde")
+        );
+        assert!(reader.get_bytes(4_095, 1).is_err());
+        assert!(reader.get_bytes(4_100, 3).is_err());
+    }
+
+    #[tokio::test]
+    async fn malformed_remote_footer_names_the_uri() {
+        let (input, _) = remote_input(b"PAR1brokenPAR1".to_vec(), None).await;
+
+        let error = ParquetInspector::open(&input)
+            .await
+            .err()
+            .unwrap()
+            .to_string();
+
+        assert!(error.contains("gs://inspect-tests/nested/people.data"));
+    }
+}

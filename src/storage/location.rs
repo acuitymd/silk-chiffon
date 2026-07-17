@@ -125,6 +125,12 @@ pub(crate) enum ParsedLocation {
         display: String,
         path: Path,
     },
+    Gcs {
+        original: String,
+        display: String,
+        bucket: String,
+        path: Path,
+    },
 }
 
 impl ParsedLocation {
@@ -133,14 +139,15 @@ impl ParsedLocation {
             bail!("object location cannot be empty");
         }
 
-        let Some((scheme, _)) = value.split_once("://") else {
+        let Some((scheme, remainder)) = value.split_once("://") else {
             return Self::local_path(value, value);
         };
 
         match scheme.to_ascii_lowercase().as_str() {
             "file" => Self::file_url(value),
+            "gs" => Self::gcs_url(value, remainder),
             unsupported => bail!(
-                "unsupported object-store scheme '{unsupported}'; the supported scheme is file"
+                "unsupported object-store scheme '{unsupported}'; supported schemes are file and gs"
             ),
         }
     }
@@ -150,14 +157,15 @@ impl ParsedLocation {
             bail!("object location cannot be empty");
         }
 
-        let Some((scheme, _)) = value.split_once("://") else {
+        let Some((scheme, remainder)) = value.split_once("://") else {
             return Self::local_pattern(value, value, split_local_pattern(value, value)?);
         };
 
         match scheme.to_ascii_lowercase().as_str() {
             "file" => Self::file_url_pattern(value),
+            "gs" => Self::gcs_url(value, remainder),
             unsupported => bail!(
-                "unsupported object-store scheme '{unsupported}'; the supported scheme is file"
+                "unsupported object-store scheme '{unsupported}'; supported schemes are file and gs"
             ),
         }
     }
@@ -231,6 +239,34 @@ impl ParsedLocation {
             return Self::file_url(value);
         }
         Self::local_pattern(value, value, parts)
+    }
+
+    fn gcs_url(value: &str, remainder: &str) -> Result<Self> {
+        let Some((bucket, encoded_key)) = remainder.split_once('/') else {
+            bail!("GCS location requires an object key after the bucket: '{value}'");
+        };
+        if bucket.is_empty() {
+            bail!("GCS location requires a bucket: '{value}'");
+        }
+        if encoded_key.is_empty() {
+            bail!("GCS location requires an object key after the bucket: '{value}'");
+        }
+
+        let key = percent_decode_str(encoded_key)
+            .decode_utf8()
+            .with_context(|| format!("GCS object key is not UTF-8: '{value}'"))?;
+        let path = Path::parse(key.as_ref())
+            .with_context(|| format!("invalid GCS object key in '{value}'"))?;
+        if path.is_root() {
+            bail!("GCS location requires an object key after the bucket: '{value}'");
+        }
+
+        Ok(Self::Gcs {
+            original: value.to_string(),
+            display: value.to_string(),
+            bucket: bucket.to_string(),
+            path,
+        })
     }
 }
 
@@ -374,7 +410,10 @@ mod tests {
     #[test]
     fn parses_relative_local_path() {
         let input = "data/input.parquet";
-        let ParsedLocation::Local { display, path, .. } = ParsedLocation::parse(input).unwrap();
+        let ParsedLocation::Local { display, path, .. } = ParsedLocation::parse(input).unwrap()
+        else {
+            panic!("expected local location");
+        };
 
         let expected = std::path::absolute(input).unwrap();
         assert_eq!(
@@ -390,7 +429,10 @@ mod tests {
     fn parses_absolute_local_path() {
         let input = std::env::temp_dir().join("silk-chiffon-location.parquet");
         let input = input.to_str().unwrap();
-        let ParsedLocation::Local { display, path, .. } = ParsedLocation::parse(input).unwrap();
+        let ParsedLocation::Local { display, path, .. } = ParsedLocation::parse(input).unwrap()
+        else {
+            panic!("expected local location");
+        };
 
         assert_eq!(display, input);
         let expected = std::fs::canonicalize(std::path::Path::new(input).parent().unwrap())
@@ -404,7 +446,10 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let output = temp.path().join("missing/output.parquet");
         let ParsedLocation::Local { path, .. } =
-            ParsedLocation::parse(output.to_str().unwrap()).unwrap();
+            ParsedLocation::parse(output.to_str().unwrap()).unwrap()
+        else {
+            panic!("expected local location");
+        };
         let expected = std::fs::canonicalize(temp.path())
             .unwrap()
             .join("missing/output.parquet");
@@ -415,7 +460,10 @@ mod tests {
     #[test]
     fn parses_file_url() {
         let ParsedLocation::Local { display, path, .. } =
-            ParsedLocation::parse("file:///tmp/input%20file.parquet").unwrap();
+            ParsedLocation::parse("file:///tmp/input%20file.parquet").unwrap()
+        else {
+            panic!("expected local location");
+        };
 
         assert_eq!(display, "file:///tmp/input%20file.parquet");
         let expected = std::fs::canonicalize("/tmp")
@@ -425,19 +473,55 @@ mod tests {
     }
 
     #[test]
-    fn rejects_remote_and_unsupported_schemes() {
+    fn parses_gcs_url_without_losing_key_characters() {
+        let input = "gs://data-bucket/folder/a b#c?.parquet";
+        let ParsedLocation::Gcs {
+            display,
+            bucket,
+            path,
+            ..
+        } = ParsedLocation::parse(input).unwrap()
+        else {
+            panic!("expected GCS location");
+        };
+
+        assert_eq!(display, input);
+        assert_eq!(bucket, "data-bucket");
+        assert_eq!(path.as_ref(), "folder/a b#c?.parquet");
+    }
+
+    #[test]
+    fn decodes_percent_escaped_gcs_key() {
+        let ParsedLocation::Gcs { path, .. } =
+            ParsedLocation::parse("gs://data-bucket/folder/a%20b%23c%3F.parquet").unwrap()
+        else {
+            panic!("expected GCS location");
+        };
+
+        assert_eq!(path.as_ref(), "folder/a b#c?.parquet");
+    }
+
+    #[test]
+    fn rejects_gcs_url_without_bucket_or_key() {
+        for input in ["gs:///key.parquet", "gs://data-bucket", "gs://data-bucket/"] {
+            let error = ParsedLocation::parse(input).unwrap_err().to_string();
+            assert!(
+                error.contains("bucket") || error.contains("object key"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_unsupported_schemes() {
         for input in [
-            "gs://bucket/key",
             "gcs://bucket/key",
             "s3://bucket/key",
             "az://bucket/key",
             "http://example.com/key",
         ] {
             let error = ParsedLocation::parse(input).unwrap_err().to_string();
-            assert!(
-                error.contains("unsupported") && error.contains("file"),
-                "{error}"
-            );
+            assert!(error.contains("file") && error.contains("gs"), "{error}");
         }
     }
 }
