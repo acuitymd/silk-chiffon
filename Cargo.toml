@@ -20,6 +20,7 @@ apply_if = "^1.2.1"
 arrow = { version = "^58.3.0", features = ["default", "ipc_compression"] }
 async-stream = "^0.3.6"
 async-trait = "^0.1.89"
+bytes = "^1.11.1"
 bytesize = "^2.3.1"
 camino = { version = "^1.2.2", features = ["serde1"] }
 chrono = "^0.4.44"
@@ -34,6 +35,7 @@ lru = "^0.18.0"
 mimalloc = "^0.1.50"
 minijinja = "^2.20.0"
 num-format = "^0.4.4"
+object_store = "=0.13.2"
 owo-colors = "^4.3.0"
 parking_lot = "^0.12.5"
 parquet = { version = "^58.3.0", features = ["default", "async", "json", "arrow_canonical_extension_types"] }
@@ -45,6 +47,7 @@ sysinfo = "^0.39.2"
 tabled = { version = "^0.21.0", features = ["ansi"] }
 tempfile = "^3.27.0"
 tokio = { version = "^1.52.3", features = ["rt-multi-thread", "macros", "io-util", "fs", "sync"] }
+url = "^2.5.8"
 uuid = { version = "^1.23.1", features = ["v4"] }
 vortex = { version = "^0.78.0", features = ["tokio", "files"] }
 vortex-datafusion = "^0.78.0"

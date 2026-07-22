@@ -5,7 +5,10 @@ pub mod operations;
 pub mod pipeline;
 pub mod sinks;
 pub mod sources;
+pub mod storage;
 pub mod utils;
+
+pub use storage::{StorageArgs, StorageConfig};
 
 use crate::utils::collections::{uniq, uniq_by};
 use anyhow::{Result, anyhow};
@@ -297,6 +300,9 @@ impl FromStr for PoolReserveSpec {
     long_about = None
 )]
 pub struct Cli {
+    #[command(flatten)]
+    pub storage: StorageArgs,
+
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -2041,7 +2047,7 @@ pub enum InspectSubcommand {
 pub struct InspectIdentifyArgs {
     /// Path to the file to identify
     #[arg(value_hint = ValueHint::FilePath)]
-    pub file: Utf8PathBuf,
+    pub file: String,
     /// Output format (auto-detects based on TTY if not specified)
     #[arg(long, short = 'f', value_enum, default_value = "auto")]
     pub format: OutputFormat,
@@ -2051,7 +2057,7 @@ pub struct InspectIdentifyArgs {
 pub struct InspectParquetArgs {
     /// Path to the Parquet file
     #[arg(value_hint = ValueHint::FilePath)]
-    pub file: Utf8PathBuf,
+    pub file: String,
     /// Output format (auto-detects based on TTY if not specified)
     #[arg(long, short = 'f', value_enum, default_value = "auto")]
     pub format: OutputFormat,
@@ -2067,7 +2073,7 @@ pub struct InspectParquetArgs {
 pub struct InspectArrowArgs {
     /// Path to the Arrow IPC file
     #[arg(value_hint = ValueHint::FilePath)]
-    pub file: Utf8PathBuf,
+    pub file: String,
     /// Show per-record-batch details
     #[arg(long)]
     pub batches: bool,
@@ -2083,7 +2089,7 @@ pub struct InspectArrowArgs {
 pub struct InspectVortexArgs {
     /// Path to the Vortex file
     #[arg(value_hint = ValueHint::FilePath)]
-    pub file: Utf8PathBuf,
+    pub file: String,
     /// Show full schema details
     #[arg(long)]
     pub schema: bool,

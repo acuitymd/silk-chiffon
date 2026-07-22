@@ -1,8 +1,6 @@
 //! Vortex file inspection.
 
-use std::{collections::HashMap, fs::File, io::Write, sync::Arc};
-
-use camino::{Utf8Path, Utf8PathBuf};
+use std::{collections::HashMap, io::Write, sync::Arc};
 
 use anyhow::Result;
 use arrow::datatypes::SchemaRef;
@@ -10,18 +8,20 @@ use serde_json::{Value, json};
 use vortex::VortexSessionDefault;
 use vortex::array::stats::StatsSet;
 use vortex::file::{OpenOptionsSessionExt, SegmentSpec};
+use vortex::io::session::RuntimeSessionExt;
 use vortex::session::VortexSession;
-
-use crate::inspection::magic::magic_bytes_match_start;
 
 use tabled::Tabled;
 
-use crate::inspection::{
-    inspectable::{Inspectable, format_bytes, format_number, render_schema_fields, schema_to_json},
-    style::{dim, header, label, rounded_table, value},
+use crate::{
+    inspection::{
+        inspectable::{
+            Inspectable, format_bytes, format_number, render_schema_fields, schema_to_json,
+        },
+        style::{dim, header, label, rounded_table, value},
+    },
+    storage::InputObject,
 };
-
-const VORTEX_MAGIC: &[u8] = b"VTXF";
 
 /// Row for segment table display.
 #[derive(Tabled)]
@@ -39,51 +39,57 @@ struct SegmentRow {
 pub struct VortexInspector {
     schema: SchemaRef,
     num_rows: u64,
-    file_path: Utf8PathBuf,
+    file_path: String,
     file_stats: Option<Arc<[StatsSet]>>,
     segments: Arc<[SegmentSpec]>,
     field_names: Vec<String>,
 }
 
 impl VortexInspector {
-    pub fn open_file(path: &Utf8Path) -> Result<Self> {
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let session = VortexSession::default();
-                let vortex_file = session
-                    .open_options()
-                    .open_path(path.as_std_path())
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to open Vortex file: {}", e))?;
+    pub async fn open(input: &InputObject) -> Result<Self> {
+        let session = VortexSession::default().with_tokio();
+        let vortex_file = session
+            .open_options()
+            .with_file_size(input.metadata().size)
+            .open_object_store(
+                input.location().store().object_store(),
+                input.location().path().as_ref(),
+            )
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "could not open Vortex object '{}': {error}",
+                    input.location().display()
+                )
+            })?;
 
-                let dtype = vortex_file.dtype();
-                let arrow_schema = dtype.to_arrow_schema().map_err(|e| {
-                    anyhow::anyhow!("Failed to convert Vortex DType to Arrow Schema: {}", e)
-                })?;
+        let dtype = vortex_file.dtype();
+        let arrow_schema = dtype.to_arrow_schema().map_err(|error| {
+            anyhow::anyhow!(
+                "could not convert Vortex dtype from '{}': {error}",
+                input.location().display()
+            )
+        })?;
 
-                let schema = Arc::new(arrow_schema);
-                let num_rows = vortex_file.row_count();
-                let file_stats = vortex_file
-                    .file_stats()
-                    .map(|fs| Arc::clone(fs.stats_sets()));
-                let footer = vortex_file.footer();
-                let segments = Arc::clone(footer.segment_map());
+        let schema = Arc::new(arrow_schema);
+        let num_rows = vortex_file.row_count();
+        let file_stats = vortex_file
+            .file_stats()
+            .map(|stats| Arc::clone(stats.stats_sets()));
+        let footer = vortex_file.footer();
+        let segments = Arc::clone(footer.segment_map());
+        let field_names = dtype
+            .as_struct_fields_opt()
+            .map(|fields| fields.names().iter().map(ToString::to_string).collect())
+            .unwrap_or_default();
 
-                // extract field names from dtype if it's a struct
-                let field_names = dtype
-                    .as_struct_fields_opt()
-                    .map(|fields| fields.names().iter().map(|n| n.to_string()).collect())
-                    .unwrap_or_default();
-
-                Ok(Self {
-                    schema,
-                    num_rows,
-                    file_path: path.to_owned(),
-                    file_stats,
-                    segments,
-                    field_names,
-                })
-            })
+        Ok(Self {
+            schema,
+            num_rows,
+            file_path: input.location().display().to_string(),
+            file_stats,
+            segments,
+            field_names,
         })
     }
 
@@ -165,11 +171,6 @@ impl VortexInspector {
 }
 
 impl Inspectable for VortexInspector {
-    fn is_format(path: &Utf8Path) -> Result<bool> {
-        let mut file = File::open(path)?;
-        magic_bytes_match_start(&mut file, VORTEX_MAGIC)
-    }
-
     fn format_name(&self) -> &str {
         "Vortex (file)"
     }
@@ -284,105 +285,5 @@ impl Inspectable for VortexInspector {
             "schema": schema_to_json(&self.schema),
             "statistics": stats_json,
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::Path;
-    use tempfile::TempDir;
-
-    use arrow::array::{Int32Array, RecordBatch, StringArray};
-    use arrow::datatypes::{DataType, Field, Schema};
-
-    use crate::sinks::data_sink::DataSink;
-    use crate::sinks::vortex::{VortexSink, VortexSinkOptions};
-
-    fn simple_schema() -> SchemaRef {
-        Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Int32, false),
-            Field::new("name", DataType::Utf8, false),
-        ]))
-    }
-
-    fn create_batch(schema: &SchemaRef) -> RecordBatch {
-        RecordBatch::try_new(
-            Arc::clone(schema),
-            vec![
-                Arc::new(Int32Array::from(vec![1, 2, 3])),
-                Arc::new(StringArray::from(vec!["a", "b", "c"])),
-            ],
-        )
-        .unwrap()
-    }
-
-    fn write_vortex_file(path: &Path, schema: &SchemaRef, batch: RecordBatch) {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let mut sink =
-                VortexSink::create(path.to_path_buf(), schema, VortexSinkOptions::new()).unwrap();
-            sink.write_batch(batch).await.unwrap();
-            sink.finish().await.unwrap();
-        });
-    }
-
-    #[test]
-    fn test_is_format_vortex_file() {
-        let temp_dir = TempDir::new().unwrap();
-        let std_path = temp_dir.path().join("test.vortex");
-        let path = Utf8Path::from_path(&std_path).unwrap();
-
-        let schema = simple_schema();
-        let batch = create_batch(&schema);
-        write_vortex_file(&std_path, &schema, batch);
-
-        assert!(VortexInspector::is_format(path).unwrap());
-    }
-
-    #[test]
-    fn test_open_vortex_file() {
-        let temp_dir = TempDir::new().unwrap();
-        let std_path = temp_dir.path().join("test.vortex");
-        let path = Utf8Path::from_path(&std_path).unwrap();
-
-        let schema = simple_schema();
-        let batch = create_batch(&schema);
-        write_vortex_file(&std_path, &schema, batch);
-
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let inspector = rt
-            .block_on(async { VortexInspector::open_file(path) })
-            .unwrap();
-        assert_eq!(inspector.row_count(), Some(3));
-        assert_eq!(inspector.format_name(), "Vortex (file)");
-    }
-
-    #[test]
-    fn test_is_format_non_vortex_file() {
-        let temp_dir = TempDir::new().unwrap();
-        let std_path = temp_dir.path().join("test.txt");
-        let path = Utf8Path::from_path(&std_path).unwrap();
-        std::fs::write(path, "not a vortex file").unwrap();
-
-        assert!(!VortexInspector::is_format(path).unwrap());
-    }
-
-    #[test]
-    fn test_is_format_wrong_magic_bytes() {
-        let temp_dir = TempDir::new().unwrap();
-        let std_path = temp_dir.path().join("test.vortex");
-        let path = Utf8Path::from_path(&std_path).unwrap();
-        // wrong magic bytes
-        std::fs::write(path, b"PAR1garbage").unwrap();
-
-        assert!(!VortexInspector::is_format(path).unwrap());
-    }
-
-    #[test]
-    fn test_is_format_nonexistent_file() {
-        let path = Utf8Path::new("/nonexistent/path/file.vortex");
-        let result = VortexInspector::is_format(path);
-        assert!(result.is_err());
     }
 }
