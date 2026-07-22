@@ -738,9 +738,10 @@ mod tests {
         array::{Int32Array, StringArray},
         datatypes::{DataType, Field, Schema},
     };
+    use object_store::{ObjectStoreExt, memory::InMemory, path::Path};
     use tempfile::TempDir;
 
-    use crate::utils::test_helpers::file_helpers;
+    use crate::utils::test_helpers::{file_helpers, object_store::CountingStore};
 
     fn write_input(temp: &TempDir, names: &[&str]) -> String {
         let path = temp.path().join("input.arrow");
@@ -760,6 +761,181 @@ mod tests {
         .unwrap();
         file_helpers::write_arrow_file(&path, &schema, vec![batch]).unwrap();
         path.to_string_lossy().into_owned()
+    }
+
+    fn gcs_context(memory: &InMemory) -> Arc<StorageContext> {
+        let (store, _) = CountingStore::new_gcs_013(memory.clone());
+        Arc::new(StorageContext::with_gcs_store(
+            StorageConfig {
+                upload_part_size: 64,
+                ..StorageConfig::default()
+            },
+            Arc::new(store),
+        ))
+    }
+
+    fn partition_command(input: String, strategy: PartitionStrategy) -> TransformCommand {
+        TransformCommand {
+            from: Some(input),
+            to: None,
+            to_many: Some("gs://bucket/output/{{name}}.arrow".to_string()),
+            by: Some("name".to_string()),
+            partition_strategy: strategy,
+            output_format: Some(DataFormat::Arrow),
+            create_dirs: false,
+            preserve_input_order: true,
+            ..Default::default()
+        }
+    }
+
+    async fn object_bytes(memory: &InMemory, path: &str) -> Bytes {
+        memory
+            .get(&Path::parse(path).unwrap())
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn single_gcs_output_uses_the_storage_context() {
+        let temp = TempDir::new().unwrap();
+        let memory = InMemory::new();
+        let input = write_input(&temp, &["a", "b"]);
+        let make_command = |overwrite| TransformCommand {
+            from: Some(input.clone()),
+            to: Some("gs://bucket/output.arrow".to_string()),
+            output_format: Some(DataFormat::Arrow),
+            create_dirs: false,
+            overwrite,
+            ..Default::default()
+        };
+
+        run_with_storage_context(make_command(false), gcs_context(&memory))
+            .await
+            .unwrap();
+        let error = run_with_storage_context(make_command(false), gcs_context(&memory))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("output.arrow' already exists"));
+        run_with_storage_context(make_command(true), gcs_context(&memory))
+            .await
+            .unwrap();
+        assert!(!object_bytes(&memory, "output.arrow").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn partition_strategies_write_gcs_objects() {
+        for strategy in [
+            PartitionStrategy::SortSingle,
+            PartitionStrategy::NosortMulti,
+        ] {
+            let temp = TempDir::new().unwrap();
+            let memory = InMemory::new();
+            let input = write_input(&temp, &["a", "b", "a/b"]);
+            let mut command = partition_command(input, strategy);
+            command.create_dirs = strategy == PartitionStrategy::NosortMulti;
+
+            run_with_storage_context(command, gcs_context(&memory))
+                .await
+                .unwrap();
+
+            assert!(!object_bytes(&memory, "output/a.arrow").await.is_empty());
+            assert!(!object_bytes(&memory, "output/b.arrow").await.is_empty());
+            assert!(!object_bytes(&memory, "output/a%2Fb.arrow").await.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn evicted_partition_writers_number_gcs_objects() {
+        let temp = TempDir::new().unwrap();
+        let memory = InMemory::new();
+        let input = write_input(&temp, &["a", "b", "a"]);
+        let mut command = partition_command(input, PartitionStrategy::NosortEvict);
+        command.max_open_partitions = Some(1);
+
+        run_with_storage_context(command, gcs_context(&memory))
+            .await
+            .unwrap();
+
+        assert!(!object_bytes(&memory, "output/a.arrow").await.is_empty());
+        assert!(!object_bytes(&memory, "output/b.arrow").await.is_empty());
+        assert!(!object_bytes(&memory, "output/a_1.arrow").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn json_manifest_commits_to_gcs_with_sorted_uris() {
+        let temp = TempDir::new().unwrap();
+        let memory = InMemory::new();
+        let input = write_input(&temp, &["b", "a"]);
+        let mut command = partition_command(input, PartitionStrategy::SortSingle);
+        command.list_outputs = Some(ListOutputsFormat::Json);
+        command.list_outputs_file = Some("gs://bucket/manifests/outputs.json".to_string());
+
+        run_with_storage_context(command, gcs_context(&memory))
+            .await
+            .unwrap();
+
+        let bytes = object_bytes(&memory, "manifests/outputs.json").await;
+        let values: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap();
+        let paths: Vec<_> = values
+            .iter()
+            .map(|value| value["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            paths,
+            ["gs://bucket/output/a.arrow", "gs://bucket/output/b.arrow"]
+        );
+    }
+
+    #[tokio::test]
+    async fn manifest_preflight_and_overwrite_follow_output_policy() {
+        let temp = TempDir::new().unwrap();
+        let memory = InMemory::new();
+        let input = write_input(&temp, &["a"]);
+        let make_command = |overwrite| {
+            let mut command = partition_command(input.clone(), PartitionStrategy::SortSingle);
+            command.list_outputs = Some(ListOutputsFormat::Text);
+            command.list_outputs_file = Some("gs://bucket/outputs.txt".to_string());
+            command.overwrite = overwrite;
+            command
+        };
+
+        run_with_storage_context(make_command(false), gcs_context(&memory))
+            .await
+            .unwrap();
+        let error = run_with_storage_context(make_command(false), gcs_context(&memory))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("outputs.txt' already exists"));
+        run_with_storage_context(make_command(true), gcs_context(&memory))
+            .await
+            .unwrap();
+
+        let manifest = object_bytes(&memory, "outputs.txt").await;
+        assert!(
+            std::str::from_utf8(&manifest)
+                .unwrap()
+                .contains("gs://bucket/output/a.arrow")
+        );
+    }
+
+    #[tokio::test]
+    async fn manifest_collision_is_rejected_before_opening_a_partition_sink() {
+        let temp = TempDir::new().unwrap();
+        let memory = InMemory::new();
+        let input = write_input(&temp, &["a"]);
+        let mut command = partition_command(input, PartitionStrategy::SortSingle);
+        command.list_outputs = Some(ListOutputsFormat::Json);
+        command.list_outputs_file = Some("gs://bucket/output/a.arrow".to_string());
+
+        let error = run_with_storage_context(command, gcs_context(&memory))
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("collides with data output"));
+        assert!(memory.head(&Path::from("output/a.arrow")).await.is_err());
     }
 
     #[tokio::test]

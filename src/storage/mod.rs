@@ -1,7 +1,11 @@
-//! Local object-store locations and clients.
+//! Local and Google Cloud Storage locations and clients.
 //!
-//! Accepted locations use bare local paths or `file://` URLs. Remote schemes
-//! (`gs://`) are added with the Google Cloud Storage backend in a later change.
+//! Accepted locations use bare local paths, `file://` URLs, or `gs://` URLs.
+//! Google clients are created on the first location resolved for a bucket, so
+//! local commands don't read Application Default Credentials. Each cache key
+//! includes the bucket, endpoint, authentication mode, credential source, and
+//! HTTP client settings. Credential values and bearer tokens are omitted from
+//! diagnostics.
 
 mod config;
 mod gcs;

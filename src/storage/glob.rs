@@ -231,3 +231,93 @@ fn literal_component(component: &str) -> Option<String> {
     }
     Some(literal)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::storage::{
+        StorageConfig,
+        gcs::{GcsEnvironment, GcsStoreFactory},
+    };
+    use object_store::{ObjectStore, memory::InMemory};
+
+    #[derive(Debug)]
+    struct MemoryFactory;
+
+    impl GcsStoreFactory for MemoryFactory {
+        fn build(
+            &self,
+            _bucket: &str,
+            _environment: &GcsEnvironment,
+        ) -> Result<Arc<dyn ObjectStore>> {
+            Ok(Arc::new(InMemory::new()))
+        }
+    }
+
+    fn storage() -> StorageContext {
+        StorageContext::with_parts(
+            StorageConfig::default(),
+            GcsEnvironment::from_pairs([("GOOGLE_SKIP_SIGNATURE", "true")]).unwrap(),
+            Arc::new(MemoryFactory),
+        )
+        .unwrap()
+    }
+
+    fn parsed(pattern: &str) -> ParsedGlob {
+        match ParsedInput::parse(&storage(), pattern).unwrap() {
+            ParsedInput::Exact(_) => panic!("expected glob"),
+            ParsedInput::Glob(pattern) => pattern,
+        }
+    }
+
+    #[test]
+    fn selects_longest_complete_literal_prefix() {
+        let pattern = parsed("gs://bucket/data/year=2025/part-*.parquet");
+
+        assert_eq!(pattern.list_prefix().as_ref(), "data/year=2025");
+    }
+
+    #[test]
+    fn supports_glob_expressions_and_recursive_patterns() {
+        let cases = [
+            ("gs://bucket/data/part-*.parquet", "data/part-12.parquet"),
+            ("gs://bucket/data/part-?.parquet", "data/part-1.parquet"),
+            ("gs://bucket/data/part-[12].parquet", "data/part-2.parquet"),
+            ("gs://bucket/data/**/part.parquet", "data/a/b/part.parquet"),
+        ];
+
+        for (pattern, value) in cases {
+            assert!(parsed(pattern).matches(&Path::from(value)), "{pattern}");
+        }
+    }
+
+    #[test]
+    fn escaped_tokens_are_literal_prefix_components() {
+        let pattern = parsed("gs://bucket/data/literal[*]/part-?.parquet");
+
+        assert_eq!(pattern.list_prefix().as_ref(), "data/literal*");
+        assert!(pattern.matches(&Path::parse("data/literal*/part-1.parquet").unwrap()));
+    }
+
+    #[test]
+    fn percent_escaped_tokens_stay_literal() {
+        assert!(matches!(
+            ParsedInput::parse(&storage(), "gs://bucket/data/literal%2A.parquet").unwrap(),
+            ParsedInput::Exact(_)
+        ));
+
+        let pattern = parsed("gs://bucket/data/literal%2A/part-?.parquet");
+        assert_eq!(pattern.list_prefix().as_ref(), "data/literal*");
+        assert!(pattern.matches(&Path::parse("data/literal*/part-1.parquet").unwrap()));
+    }
+
+    #[test]
+    fn star_does_not_cross_object_key_separators() {
+        let pattern = parsed("gs://bucket/data/*.parquet");
+
+        assert!(pattern.matches(&Path::from("data/a.parquet")));
+        assert!(!pattern.matches(&Path::from("data/nested/a.parquet")));
+    }
+}
