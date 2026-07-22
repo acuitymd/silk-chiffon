@@ -243,23 +243,27 @@ impl ParsedLocation {
 
     fn gcs_url(value: &str, remainder: &str) -> Result<Self> {
         let Some((bucket, encoded_key)) = remainder.split_once('/') else {
-            bail!("GCS location requires an object key after the bucket: '{value}'");
+            bail!("GCS location requires an object key after the bucket");
         };
         if bucket.is_empty() {
-            bail!("GCS location requires a bucket: '{value}'");
+            bail!("GCS location requires a bucket");
         }
         if encoded_key.is_empty() {
-            bail!("GCS location requires an object key after the bucket: '{value}'");
+            bail!("GCS location requires an object key after the bucket");
         }
 
-        let key = percent_decode_str(encoded_key)
-            .decode_utf8()
-            .with_context(|| format!("GCS object key is not UTF-8: '{value}'"))?;
-        let path = Path::parse(key.as_ref())
-            .with_context(|| format!("invalid GCS object key in '{value}'"))?;
-        if path.is_root() {
-            bail!("GCS location requires an object key after the bucket: '{value}'");
+        let mut decoded_parts = Vec::new();
+        for encoded_part in encoded_key.split('/') {
+            if encoded_part.is_empty() {
+                bail!("GCS object key cannot contain an empty path segment");
+            }
+            let decoded = percent_decode_str(encoded_part)
+                .decode_utf8()
+                .map_err(|_| anyhow::anyhow!("GCS object key is not UTF-8"))?;
+            decoded_parts.push(decoded.replace('/', "%2F"));
         }
+        let path = Path::parse(decoded_parts.join("/"))
+            .map_err(|_| anyhow::anyhow!("invalid GCS object key"))?;
 
         Ok(Self::Gcs {
             original: value.to_string(),
@@ -502,6 +506,17 @@ mod tests {
     }
 
     #[test]
+    fn preserves_hive_escaped_separator_in_gcs_key() {
+        let ParsedLocation::Gcs { path, .. } =
+            ParsedLocation::parse("gs://data-bucket/output/a%2Fb.parquet").unwrap()
+        else {
+            panic!("expected GCS location");
+        };
+
+        assert_eq!(path.as_ref(), "output/a%2Fb.parquet");
+    }
+
+    #[test]
     fn rejects_gcs_url_without_bucket_or_key() {
         for input in ["gs:///key.parquet", "gs://data-bucket", "gs://data-bucket/"] {
             let error = ParsedLocation::parse(input).unwrap_err().to_string();
@@ -510,6 +525,16 @@ mod tests {
                 "{error}"
             );
         }
+    }
+
+    #[test]
+    fn gcs_parse_errors_do_not_echo_input() {
+        let input = "gs://bucket\nforged-log-entry";
+
+        let error = ParsedLocation::parse(input).unwrap_err().to_string();
+
+        assert!(!error.contains(input));
+        assert!(!error.contains("forged-log-entry"));
     }
 
     #[test]

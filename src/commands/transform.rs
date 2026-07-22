@@ -790,7 +790,7 @@ mod tests {
 
     async fn object_bytes(memory: &InMemory, path: &str) -> Bytes {
         memory
-            .get(&Path::from(path))
+            .get(&Path::parse(path).unwrap())
             .await
             .unwrap()
             .bytes()
@@ -833,7 +833,7 @@ mod tests {
         ] {
             let temp = TempDir::new().unwrap();
             let memory = InMemory::new();
-            let input = write_input(&temp, &["a", "b", "a"]);
+            let input = write_input(&temp, &["a", "b", "a/b"]);
             let mut command = partition_command(input, strategy);
             command.create_dirs = strategy == PartitionStrategy::NosortMulti;
 
@@ -843,6 +843,7 @@ mod tests {
 
             assert!(!object_bytes(&memory, "output/a.arrow").await.is_empty());
             assert!(!object_bytes(&memory, "output/b.arrow").await.is_empty());
+            assert!(!object_bytes(&memory, "output/a%2Fb.arrow").await.is_empty());
         }
     }
 
