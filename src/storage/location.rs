@@ -242,6 +242,9 @@ impl ParsedLocation {
     }
 
     fn gcs_url(value: &str, remainder: &str) -> Result<Self> {
+        if value.chars().any(char::is_control) {
+            bail!("GCS location cannot contain control characters");
+        }
         let Some((bucket, encoded_key)) = remainder.split_once('/') else {
             bail!("GCS location requires an object key after the bucket");
         };
@@ -529,7 +532,7 @@ mod tests {
 
     #[test]
     fn gcs_parse_errors_do_not_echo_input() {
-        let input = "gs://bucket\nforged-log-entry";
+        let input = "gs://bucket/object\nforged-log-entry";
 
         let error = ParsedLocation::parse(input).unwrap_err().to_string();
 
