@@ -1,4 +1,12 @@
-use std::{collections::HashMap, fs::File, io::BufWriter, path::PathBuf, sync::Arc};
+//! Arrow IPC file and stream sinks backed by object storage.
+//!
+//! A blocking task owns the Arrow writer and sends part-sized byte chunks to a
+//! depth-one channel after each complete record batch. The async uploader owns
+//! `ObjectOutput`. It commits only after the Arrow writer emits its footer or
+//! stream terminator. Finish joins and aborts that uploader even when the writer
+//! task panics.
+
+use std::{collections::HashMap, io::Write, sync::Arc};
 
 use anyhow::{Context, Result};
 use arrow::{
@@ -15,7 +23,11 @@ use tokio::{sync::mpsc, task::JoinHandle};
 
 use crate::{
     ArrowCompression, ArrowIPCFormat,
-    sinks::data_sink::{DataSink, SinkResult},
+    sinks::{
+        data_sink::{DataSink, SinkResult},
+        object_writer::{DrainWriter, UploadHandle, join_object_upload, spawn_object_upload},
+    },
+    storage::ObjectOutput,
     utils::memory::estimate_row_bytes,
 };
 
@@ -84,13 +96,13 @@ impl ArrowSinkOptions {
 }
 
 struct WriterResult {
-    path: PathBuf,
     rows_written: u64,
 }
 
 pub struct ArrowSink {
     tx: Option<mpsc::Sender<RecordBatch>>,
     handle: Option<JoinHandle<Result<WriterResult>>>,
+    upload_handle: Option<UploadHandle>,
 }
 
 const DEFAULT_QUEUE_DEPTH: usize = 16;
@@ -114,27 +126,40 @@ fn resolve_arrow_queue_depth(options: &ArrowSinkOptions, schema: &SchemaRef) -> 
 }
 
 impl ArrowSink {
-    pub fn create(path: PathBuf, schema: &SchemaRef, options: ArrowSinkOptions) -> Result<Self> {
+    pub fn create(
+        output: ObjectOutput,
+        schema: &SchemaRef,
+        options: ArrowSinkOptions,
+    ) -> Result<Self> {
         let queue_depth = resolve_arrow_queue_depth(&options, schema);
         let (tx, rx) = mpsc::channel::<RecordBatch>(queue_depth);
+        let part_size = output.part_size();
+        let (upload_sender, upload_handle) = spawn_object_upload(output);
 
         let schema = Arc::clone(schema);
-        let handle = tokio::task::spawn_blocking(move || writer_task(path, &schema, options, rx));
+        let handle = tokio::task::spawn_blocking(move || {
+            writer_task(
+                DrainWriter::new(upload_sender, part_size),
+                &schema,
+                options,
+                rx,
+            )
+        });
 
         Ok(Self {
             tx: Some(tx),
             handle: Some(handle),
+            upload_handle: Some(upload_handle),
         })
     }
 }
 
 fn writer_task(
-    path: PathBuf,
+    drain: DrainWriter,
     schema: &SchemaRef,
     options: ArrowSinkOptions,
     mut rx: mpsc::Receiver<RecordBatch>,
 ) -> Result<WriterResult> {
-    let file = BufWriter::new(File::create(&path)?);
     let write_options = match options.compression {
         ArrowCompression::Zstd | ArrowCompression::Lz4 => {
             IpcWriteOptions::default().try_with_compression(options.compression.into())?
@@ -144,12 +169,12 @@ fn writer_task(
 
     let mut writer: Box<dyn ArrowRecordBatchWriter> = match options.format {
         ArrowIPCFormat::File => Box::new(FileWriter::try_new_with_options(
-            file,
+            drain,
             schema,
             write_options,
         )?),
         ArrowIPCFormat::Stream => Box::new(StreamWriter::try_new_with_options(
-            file,
+            drain,
             schema,
             write_options,
         )?),
@@ -167,20 +192,21 @@ fn writer_task(
 
         while let Some(completed_batch) = coalescer.next_completed_batch() {
             writer.write(&completed_batch)?;
+            writer.drain()?;
             rows_written += completed_batch.num_rows() as u64;
         }
     }
 
-    // flush remaining
     coalescer.finish_buffered_batch()?;
     if let Some(final_batch) = coalescer.next_completed_batch() {
         writer.write(&final_batch)?;
+        writer.drain()?;
         rows_written += final_batch.num_rows() as u64;
     }
 
     writer.finish()?;
 
-    Ok(WriterResult { path, rows_written })
+    Ok(WriterResult { rows_written })
 }
 
 #[async_trait]
@@ -205,21 +231,53 @@ impl DataSink for ArrowSink {
         self.tx.take();
 
         let handle = self.handle.take().context("sink already finished")?;
-        let result = handle.await.context("writer task panicked")??;
+        let upload_handle = self
+            .upload_handle
+            .take()
+            .context("sink uploader already finished")?;
+        let writer_result = handle.await;
+        let upload_result = join_object_upload(upload_handle).await;
+
+        let result = match writer_result {
+            Ok(Ok(result)) => result,
+            Ok(Err(primary)) => return abort_failed_writer(primary, upload_result).await,
+            Err(error) => {
+                let primary = anyhow::Error::new(error).context("writer task panicked");
+                return abort_failed_writer(primary, upload_result).await;
+            }
+        };
+        let mut output = upload_result?;
+        let destination = output.commit().await?;
 
         Ok(SinkResult {
-            files_written: vec![result.path],
+            files_written: vec![destination],
             rows_written: result.rows_written,
         })
+    }
+}
+
+async fn abort_failed_writer(
+    primary: anyhow::Error,
+    upload_result: Result<ObjectOutput>,
+) -> Result<SinkResult> {
+    match upload_result {
+        Ok(mut output) => {
+            if let Err(cleanup) = output.abort().await {
+                return Err(primary.context(format!("output cleanup also failed: {cleanup:#}")));
+            }
+            Err(primary)
+        }
+        Err(upload) => Err(upload.context(format!("encoder also failed: {primary:#}"))),
     }
 }
 
 pub trait ArrowRecordBatchWriter: RecordBatchWriter + Send {
     fn finish(&mut self) -> Result<(), ArrowError>;
     fn write_metadata(&mut self, key: &str, value: &str);
+    fn drain(&mut self) -> std::io::Result<()>;
 }
 
-impl ArrowRecordBatchWriter for FileWriter<BufWriter<File>> {
+impl ArrowRecordBatchWriter for FileWriter<DrainWriter> {
     fn finish(&mut self) -> Result<(), ArrowError> {
         self.finish()
     }
@@ -227,14 +285,22 @@ impl ArrowRecordBatchWriter for FileWriter<BufWriter<File>> {
     fn write_metadata(&mut self, key: &str, value: &str) {
         self.write_metadata(key, value);
     }
+
+    fn drain(&mut self) -> std::io::Result<()> {
+        self.get_mut().flush()
+    }
 }
-impl ArrowRecordBatchWriter for StreamWriter<BufWriter<File>> {
+impl ArrowRecordBatchWriter for StreamWriter<DrainWriter> {
     fn finish(&mut self) -> Result<(), ArrowError> {
         self.finish()
     }
 
     fn write_metadata(&mut self, _key: &str, _value: &str) {
         // NOOP for stream writer, they don't support metadata
+    }
+
+    fn drain(&mut self) -> std::io::Result<()> {
+        self.get_mut().flush()
     }
 }
 
@@ -243,9 +309,33 @@ mod tests {
     use super::*;
     use crate::{
         sources::data_source::DataSource,
+        storage::{OutputPolicy, StorageConfig, StorageContext},
         utils::test_helpers::{file_helpers, test_data, verify},
     };
     use tempfile::tempdir;
+
+    macro_rules! test_arrow_sink {
+        ($path:expr, $schema:expr, $options:expr $(,)?) => {{
+            let storage = StorageContext::new(StorageConfig::default()).unwrap();
+            let output = storage
+                .create_output(
+                    $path.to_string_lossy().as_ref(),
+                    OutputPolicy::new(true, true),
+                )
+                .await
+                .unwrap();
+            ArrowSink::create(output, $schema, $options)
+        }};
+    }
+
+    async fn arrow_source(path: &std::path::Path) -> crate::sources::arrow::ArrowDataSource {
+        let storage = crate::storage::StorageContext::new(Default::default()).unwrap();
+        let input = storage
+            .resolve_input(path.to_string_lossy().as_ref())
+            .await
+            .unwrap();
+        crate::sources::arrow::ArrowDataSource::new(input)
+    }
 
     mod arrow_sink_tests {
         use super::*;
@@ -260,7 +350,7 @@ mod tests {
                 test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["a", "b", "c"]);
 
             let mut sink =
-                ArrowSink::create(output_path.clone(), &schema, ArrowSinkOptions::new()).unwrap();
+                test_arrow_sink!(output_path.clone(), &schema, ArrowSinkOptions::new()).unwrap();
 
             sink.write_batch(batch).await.unwrap();
             let result = sink.finish().await.unwrap();
@@ -284,7 +374,7 @@ mod tests {
             let batch2 = test_data::create_batch_with_ids_and_names(&schema, &[3, 4], &["c", "d"]);
 
             let mut sink =
-                ArrowSink::create(output_path.clone(), &schema, ArrowSinkOptions::new()).unwrap();
+                test_arrow_sink!(output_path.clone(), &schema, ArrowSinkOptions::new()).unwrap();
 
             sink.write_batch(batch1).await.unwrap();
             sink.write_batch(batch2).await.unwrap();
@@ -307,7 +397,7 @@ mod tests {
             let batch2 = test_data::create_batch_with_ids_and_names(&schema, &[3, 4], &["c", "d"]);
             let batch3 = test_data::create_batch_with_ids_and_names(&schema, &[5], &["e"]);
 
-            let mut sink = ArrowSink::create(
+            let mut sink = test_arrow_sink!(
                 output_path.clone(),
                 &schema,
                 ArrowSinkOptions::new().with_record_batch_size(3),
@@ -336,7 +426,7 @@ mod tests {
             let batch =
                 test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["a", "b", "c"]);
 
-            let mut sink = ArrowSink::create(
+            let mut sink = test_arrow_sink!(
                 output_path.clone(),
                 &schema,
                 ArrowSinkOptions::new().with_format(ArrowIPCFormat::Stream),
@@ -386,7 +476,7 @@ mod tests {
                     ],
                 );
 
-                let mut compressed_sink = ArrowSink::create(
+                let mut compressed_sink = test_arrow_sink!(
                     output_path.clone(),
                     &schema,
                     ArrowSinkOptions::new().with_compression(compression),
@@ -398,7 +488,7 @@ mod tests {
                 let compressed_size = output_path.metadata().unwrap().len();
 
                 let mut uncompressed_sink =
-                    ArrowSink::create(output_path.clone(), &schema, ArrowSinkOptions::new())
+                    test_arrow_sink!(output_path.clone(), &schema, ArrowSinkOptions::new())
                         .unwrap();
                 uncompressed_sink.write_batch(batch).await.unwrap();
                 let uncompressed_result = uncompressed_sink.finish().await.unwrap();
@@ -425,7 +515,7 @@ mod tests {
             metadata.insert("key1".to_string(), "value1".to_string());
             metadata.insert("key2".to_string(), "value2".to_string());
 
-            let mut sink = ArrowSink::create(
+            let mut sink = test_arrow_sink!(
                 output_path.clone(),
                 &schema,
                 ArrowSinkOptions::new().with_metadata(metadata.clone()),
@@ -452,7 +542,7 @@ mod tests {
                 test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["a", "b", "c"]);
 
             let mut sink =
-                ArrowSink::create(output_path.clone(), &schema, ArrowSinkOptions::new()).unwrap();
+                test_arrow_sink!(output_path.clone(), &schema, ArrowSinkOptions::new()).unwrap();
 
             sink.write_batch(batch).await.unwrap();
             sink.finish().await.unwrap();
@@ -472,7 +562,7 @@ mod tests {
             let schema = test_data::simple_schema();
 
             let mut sink =
-                ArrowSink::create(output_path.clone(), &schema, ArrowSinkOptions::new()).unwrap();
+                test_arrow_sink!(output_path.clone(), &schema, ArrowSinkOptions::new()).unwrap();
 
             let result = sink.finish().await.unwrap();
 
@@ -496,13 +586,11 @@ mod tests {
 
             file_helpers::write_arrow_file(&input_path, &schema, vec![batch1, batch2]).unwrap();
 
-            let source = crate::sources::arrow::ArrowDataSource::new(
-                input_path.to_str().unwrap().to_string(),
-            );
+            let source = arrow_source(&input_path).await;
             let stream = source.as_stream().await.unwrap();
 
             let mut sink =
-                ArrowSink::create(output_path.clone(), &schema, ArrowSinkOptions::new()).unwrap();
+                test_arrow_sink!(output_path.clone(), &schema, ArrowSinkOptions::new()).unwrap();
 
             let result = sink.write_stream(stream).await.unwrap();
 
@@ -511,6 +599,184 @@ mod tests {
             let batches = verify::read_output_file(&output_path).unwrap();
             assert_eq!(batches.len(), 1);
             assert_eq!(batches[0].num_rows(), 5);
+        }
+
+        #[tokio::test]
+        async fn test_sink_round_trips_through_memory_store() {
+            use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory, path::Path};
+            use std::sync::atomic::Ordering;
+
+            let memory = InMemory::new();
+            let (counting, requests) =
+                crate::utils::test_helpers::object_store::CountingStore::new(memory.clone());
+            let store: Arc<dyn ObjectStore> = Arc::new(counting);
+            let output =
+                crate::sinks::object_writer::memory_output(store, "output.arrow", 64).await;
+            let schema = test_data::simple_schema();
+            let batch =
+                test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["a", "b", "c"]);
+            let mut sink = ArrowSink::create(output, &schema, ArrowSinkOptions::new()).unwrap();
+
+            sink.write_batch(batch).await.unwrap();
+            assert!(memory.head(&Path::from("output.arrow")).await.is_err());
+            let result = sink.finish().await.unwrap();
+
+            let bytes = memory
+                .get(&Path::from("output.arrow"))
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap();
+            let reader =
+                arrow::ipc::reader::FileReader::try_new(std::io::Cursor::new(bytes), None).unwrap();
+            let batches = reader.collect::<Result<Vec<_>, _>>().unwrap();
+            assert_eq!(result.files_written, vec!["gs://memory/output.arrow"]);
+            assert_eq!(batches[0].num_rows(), 3);
+            assert_eq!(requests.multiparts.load(Ordering::SeqCst), 1);
+            assert!(requests.parts.load(Ordering::SeqCst) > 1);
+        }
+
+        #[tokio::test]
+        async fn test_encoder_failure_aborts_object_output() {
+            use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory, path::Path};
+
+            let memory = InMemory::new();
+            let store: Arc<dyn ObjectStore> = Arc::new(memory.clone());
+            let output =
+                crate::sinks::object_writer::memory_output(store, "broken.arrow", 64).await;
+            let schema = test_data::simple_schema();
+            let wrong_schema = Arc::new(arrow::datatypes::Schema::new(vec![
+                arrow::datatypes::Field::new("wrong", arrow::datatypes::DataType::Int32, false),
+            ]));
+            let batch = RecordBatch::try_new(
+                wrong_schema,
+                vec![Arc::new(arrow::array::Int32Array::from(vec![1, 2, 3]))],
+            )
+            .unwrap();
+            let mut sink = ArrowSink::create(output, &schema, ArrowSinkOptions::new()).unwrap();
+
+            sink.write_batch(batch).await.unwrap();
+            let error = sink.finish().await.unwrap_err();
+
+            assert!(!error.to_string().is_empty());
+            assert!(memory.head(&Path::from("broken.arrow")).await.is_err());
+        }
+
+        #[tokio::test]
+        async fn test_uploader_failure_stops_encoder_and_aborts_upload() {
+            use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory, path::Path};
+            use std::sync::atomic::Ordering;
+
+            let memory = InMemory::new();
+            let (counting, requests) =
+                crate::utils::test_helpers::object_store::CountingStore::new(memory.clone());
+            requests.fail_parts.store(true, Ordering::SeqCst);
+            let store: Arc<dyn ObjectStore> = Arc::new(counting);
+            let output =
+                crate::sinks::object_writer::memory_output(store, "failed.arrow", 64).await;
+            let schema = test_data::simple_schema();
+            let ids = (0..1_000).collect::<Vec<_>>();
+            let names = (0..1_000).map(|_| "value").collect::<Vec<_>>();
+            let batch = test_data::create_batch_with_ids_and_names(&schema, &ids, &names);
+            let mut sink = ArrowSink::create(output, &schema, ArrowSinkOptions::new()).unwrap();
+
+            sink.write_batch(batch).await.unwrap();
+            let error = sink.finish().await.unwrap_err();
+
+            assert!(format!("{error:#}").contains("injected upload failure"));
+            assert!(memory.head(&Path::from("failed.arrow")).await.is_err());
+            assert_eq!(requests.aborts.load(Ordering::SeqCst), 1);
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn dropping_sink_aborts_a_started_multipart_upload() {
+            use futures::TryStreamExt;
+            use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory, path::Path};
+            use std::sync::atomic::Ordering;
+
+            let memory = InMemory::new();
+            let (counting, requests) =
+                crate::utils::test_helpers::object_store::CountingStore::new(memory.clone());
+            let store: Arc<dyn ObjectStore> = Arc::new(counting);
+            let output =
+                crate::sinks::object_writer::memory_output(store, "dropped.arrow", 64).await;
+            let schema = test_data::simple_schema();
+            let ids = (0..10_000).collect::<Vec<_>>();
+            let names = (0..10_000).map(|_| "value").collect::<Vec<_>>();
+            let batch = test_data::create_batch_with_ids_and_names(&schema, &ids, &names);
+            let mut sink = ArrowSink::create(
+                output,
+                &schema,
+                ArrowSinkOptions::new().with_record_batch_size(64),
+            )
+            .unwrap();
+
+            sink.write_batch(batch).await.unwrap();
+            crate::utils::test_helpers::object_store::wait_for_count(&requests.multiparts, 1).await;
+            drop(sink);
+            crate::utils::test_helpers::object_store::wait_for_count(&requests.aborts, 1).await;
+
+            assert!(memory.head(&Path::from("dropped.arrow")).await.is_err());
+            assert!(
+                memory
+                    .list(None)
+                    .try_collect::<Vec<_>>()
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(requests.aborts.load(Ordering::SeqCst), 1);
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn writer_panic_explicitly_cleans_the_started_upload() {
+            use futures::TryStreamExt;
+            use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory, path::Path};
+            use std::sync::atomic::Ordering;
+
+            let memory = InMemory::new();
+            let (counting, requests) =
+                crate::utils::test_helpers::object_store::CountingStore::new(memory.clone());
+            let store: Arc<dyn ObjectStore> = Arc::new(counting);
+            let output =
+                crate::sinks::object_writer::memory_output(store, "panicked.arrow", 64).await;
+            let schema = test_data::simple_schema();
+            let ids = (0..10_000).collect::<Vec<_>>();
+            let names = (0..10_000).map(|_| "value").collect::<Vec<_>>();
+            let batch = test_data::create_batch_with_ids_and_names(&schema, &ids, &names);
+            let mut sink = ArrowSink::create(
+                output,
+                &schema,
+                ArrowSinkOptions::new().with_record_batch_size(64),
+            )
+            .unwrap();
+
+            sink.write_batch(batch).await.unwrap();
+            crate::utils::test_helpers::object_store::wait_for_count(&requests.multiparts, 1).await;
+            let detached_writer = sink
+                .handle
+                .replace(tokio::task::spawn_blocking(|| {
+                    panic!("injected writer panic")
+                }))
+                .unwrap();
+            drop(detached_writer);
+
+            let error = sink.finish().await.unwrap_err();
+            crate::utils::test_helpers::object_store::wait_for_count(&requests.aborts, 1).await;
+
+            assert!(format!("{error:#}").contains("writer task panicked"));
+            assert!(sink.upload_handle.is_none());
+            assert!(memory.head(&Path::from("panicked.arrow")).await.is_err());
+            assert!(
+                memory
+                    .list(None)
+                    .try_collect::<Vec<_>>()
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(requests.aborts.load(Ordering::SeqCst), 1);
         }
     }
 
@@ -584,8 +850,8 @@ mod tests {
         #[test]
         fn test_budget_derives_queue_depth() {
             let schema = Arc::new(Schema::new(vec![Field::new("a", DataType::Int32, false)]));
-            // 4 bytes/row, batch size = 122880 rows → ~491520 bytes/batch
-            // budget 10MB = 10485760 → 10485760 / 491520 = 21
+            // 4 bytes/row, batch size = 122880 rows, or about 491520 bytes/batch
+            // budget 10MB = 10485760, so 10485760 / 491520 = 21
             let options = ArrowSinkOptions::new().with_memory_budget(Some(10 * 1024 * 1024));
             let depth = resolve_arrow_queue_depth(&options, &schema);
             assert_eq!(depth, 21);

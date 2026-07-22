@@ -178,8 +178,8 @@ pub async fn sample_avg_row_bytes(
     input_strategy: &InputStrategy,
     target_rows: usize,
 ) -> anyhow::Result<usize> {
-    let mut ctx = datafusion::prelude::SessionContext::new();
-    let mut stream = input_strategy.as_stream(&mut ctx).await?;
+    let ctx = datafusion::prelude::SessionContext::new();
+    let mut stream = input_strategy.as_stream(&ctx).await?;
 
     let mut total_bytes: usize = 0;
     let mut total_rows: usize = 0;
@@ -281,6 +281,14 @@ pub fn estimate_row_bytes(schema: &Schema) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn input(path: &std::path::Path) -> crate::storage::InputObject {
+        let storage = crate::storage::StorageContext::new(Default::default()).unwrap();
+        storage
+            .resolve_input(path.to_string_lossy().as_ref())
+            .await
+            .unwrap()
+    }
 
     #[test]
     fn test_total_memory_returns_nonzero() {
@@ -533,7 +541,7 @@ kernel 500";
         TestFile::write_arrow_batch(&path, &batch);
 
         let source: Box<dyn crate::sources::data_source::DataSource> =
-            Box::new(ArrowDataSource::new(path.to_string_lossy().to_string()));
+            Box::new(ArrowDataSource::new(input(&path).await));
         let strategy = InputStrategy::Single(source);
 
         let avg = sample_avg_row_bytes(&strategy, 100).await.unwrap();
@@ -555,8 +563,8 @@ kernel 500";
         TestFile::write_arrow_batch(&path2, &batch2);
 
         let sources: Vec<Box<dyn crate::sources::data_source::DataSource>> = vec![
-            Box::new(ArrowDataSource::new(path1.to_string_lossy().to_string())),
-            Box::new(ArrowDataSource::new(path2.to_string_lossy().to_string())),
+            Box::new(ArrowDataSource::new(input(&path1).await)),
+            Box::new(ArrowDataSource::new(input(&path2).await)),
         ];
         let strategy = InputStrategy::Multiple(sources);
 
@@ -579,7 +587,7 @@ kernel 500";
         TestFile::write_parquet_batch(&path, &batch);
 
         let source: Box<dyn crate::sources::data_source::DataSource> =
-            Box::new(ParquetDataSource::new(path.to_string_lossy().to_string()));
+            Box::new(ParquetDataSource::new(input(&path).await));
         let strategy = InputStrategy::Single(source);
 
         let avg = sample_avg_row_bytes(&strategy, 100).await.unwrap();
@@ -601,9 +609,7 @@ kernel 500";
             let names: Vec<&str> = (0..100).map(|_| "test_value").collect();
             let batch = TestBatch::simple_with(&ids, &names);
             TestFile::write_arrow_batch(&path, &batch);
-            sources.push(Box::new(ArrowDataSource::new(
-                path.to_string_lossy().to_string(),
-            )));
+            sources.push(Box::new(ArrowDataSource::new(input(&path).await)));
         }
 
         let strategy = InputStrategy::Multiple(sources);
@@ -625,9 +631,8 @@ kernel 500";
         let narrow_batch = TestBatch::builder().column_i32("x", &[1, 2, 3]).build();
         TestFile::write_arrow_batch(&narrow_path, &narrow_batch);
 
-        let narrow_strategy = InputStrategy::Single(Box::new(ArrowDataSource::new(
-            narrow_path.to_string_lossy().to_string(),
-        )));
+        let narrow_strategy =
+            InputStrategy::Single(Box::new(ArrowDataSource::new(input(&narrow_path).await)));
         let narrow_avg = sample_avg_row_bytes(&narrow_strategy, 100).await.unwrap();
 
         // wide: many columns including strings
@@ -641,9 +646,8 @@ kernel 500";
             .build();
         TestFile::write_arrow_batch(&wide_path, &wide_batch);
 
-        let wide_strategy = InputStrategy::Single(Box::new(ArrowDataSource::new(
-            wide_path.to_string_lossy().to_string(),
-        )));
+        let wide_strategy =
+            InputStrategy::Single(Box::new(ArrowDataSource::new(input(&wide_path).await)));
         let wide_avg = sample_avg_row_bytes(&wide_strategy, 100).await.unwrap();
 
         assert!(

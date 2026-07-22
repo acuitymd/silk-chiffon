@@ -17,6 +17,7 @@ use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::prelude::SessionContext;
 use rand::rngs::SmallRng;
 use rand::{Rng, RngExt, SeedableRng};
+use silk_chiffon::io_strategies::input_strategy::InputStrategy;
 use silk_chiffon::sinks::arrow::{ArrowSink, ArrowSinkOptions};
 use silk_chiffon::sinks::data_sink::DataSink;
 use silk_chiffon::sinks::parquet::ParquetSink;
@@ -27,6 +28,7 @@ use silk_chiffon::sources::arrow::ArrowDataSource;
 use silk_chiffon::sources::data_source::DataSource;
 use silk_chiffon::sources::parquet::ParquetDataSource;
 use silk_chiffon::sources::vortex::VortexDataSource;
+use silk_chiffon::storage::{StorageConfig, StorageContext};
 use tempfile::TempDir;
 
 const NUM_ROWS: usize = 10_000_000;
@@ -165,39 +167,47 @@ async fn row_count(ctx: &SessionContext, table: &str) -> usize {
 }
 
 async fn register_table(ctx: &mut SessionContext, name: &str, path: &Path, ext: &str) {
-    let path_str = path.to_string_lossy().to_string();
+    let storage = StorageContext::new(StorageConfig::default()).unwrap();
+    let input = storage
+        .resolve_input(path.to_string_lossy().as_ref())
+        .await
+        .unwrap();
     let source: Box<dyn DataSource> = match ext {
-        "arrow" => Box::new(ArrowDataSource::new(path_str)),
-        "parquet" => Box::new(ParquetDataSource::new(path_str)),
-        "vortex" => Box::new(VortexDataSource::new(path_str)),
+        "arrow" => Box::new(ArrowDataSource::new(input)),
+        "parquet" => Box::new(ParquetDataSource::new(input)),
+        "vortex" => Box::new(VortexDataSource::new(input)),
         _ => panic!("unsupported format: {ext}"),
     };
-    let provider = source.as_table_provider(ctx).await.unwrap();
+    let strategy = InputStrategy::Single(source);
+    let provider = strategy.as_table_provider(ctx, None).await.unwrap();
     ctx.register_table(name, provider).unwrap();
 }
 
 async fn write_test_data(path: &Path, schema: &SchemaRef, ext: &str) {
     // SmallRng is like 5x faster(!!) than the default RNG (ChaChaRng)
     let mut rng = SmallRng::from_rng(&mut rand::rng());
+    let storage = StorageContext::new(StorageConfig::default()).unwrap();
+    let output = storage
+        .create_output(
+            path.to_string_lossy().as_ref(),
+            silk_chiffon::storage::OutputPolicy::new(true, true),
+        )
+        .await
+        .unwrap();
     let mut sink: Box<dyn DataSink> = match ext {
-        "arrow" => Box::new(
-            ArrowSink::create(path.to_path_buf(), schema, ArrowSinkOptions::default()).unwrap(),
-        ),
+        "arrow" => {
+            Box::new(ArrowSink::create(output, schema, ArrowSinkOptions::default()).unwrap())
+        }
         "parquet" => {
             let runtimes = Arc::new(ParquetRuntimes::try_default().unwrap());
             Box::new(
-                ParquetSink::create(
-                    path.to_path_buf(),
-                    schema,
-                    &ParquetSinkOptions::default(),
-                    runtimes,
-                )
-                .unwrap(),
+                ParquetSink::create(output, schema, &ParquetSinkOptions::default(), runtimes)
+                    .unwrap(),
             )
         }
-        "vortex" => Box::new(
-            VortexSink::create(path.to_path_buf(), schema, VortexSinkOptions::default()).unwrap(),
-        ),
+        "vortex" => {
+            Box::new(VortexSink::create(output, schema, VortexSinkOptions::default()).unwrap())
+        }
         _ => panic!("unsupported format: {ext}"),
     };
     let num_batches = NUM_ROWS.div_ceil(BATCH_SIZE);

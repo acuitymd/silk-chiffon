@@ -1,4 +1,4 @@
-//! Benchmarks for full Arrow → Parquet transform using different writer strategies.
+//! Benchmarks for full Arrow-to-Parquet transforms using different writer strategies.
 //!
 //! This measures realistic end-to-end performance including reading from Arrow files.
 
@@ -15,6 +15,7 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
 use silk_chiffon::sinks::parquet::{AdaptiveParquetWriter, AdaptiveWriterConfig, ParquetRuntimes};
+use silk_chiffon::storage::{OutputPolicy, StorageContext};
 use tempfile::TempDir;
 use tokio::runtime::Runtime;
 
@@ -259,6 +260,14 @@ fn bench_transform(c: &mut Criterion) {
                                 writer.close().unwrap();
                             }
                             WriterStrategy::Adaptive => rt.block_on(async {
+                                let storage = StorageContext::new(Default::default()).unwrap();
+                                let output = storage
+                                    .create_output(
+                                        out_path.to_string_lossy().as_ref(),
+                                        OutputPolicy::new(true, true),
+                                    )
+                                    .await
+                                    .unwrap();
                                 let writer_config = AdaptiveWriterConfig {
                                     max_row_group_size: config.row_group_size,
                                     max_row_group_concurrency: 4,
@@ -270,7 +279,7 @@ fn bench_transform(c: &mut Criterion) {
                                     ..Default::default()
                                 };
                                 let mut writer = AdaptiveParquetWriter::new(
-                                    &out_path,
+                                    output,
                                     &schema,
                                     props,
                                     Arc::clone(runtimes),

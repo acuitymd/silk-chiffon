@@ -1,43 +1,24 @@
 //! Pipeline tasks for the adaptive Parquet writer.
 //!
-//! ## Pipeline Architecture
+//! ## Pipeline architecture
 //!
 //! ```text
-//! Main Runtime              CpuRuntime              IoRuntime
-//!      │                        │                       │
-//!      ├─► ingestion_task       │                       │
-//!      │        │               │                       │
-//!      │   tokio::mpsc          │                       │
-//!      │        │               │                       │
-//!      ├─► encoder_coordinator ─┼─► encode tasks        │
-//!      │   (FuturesOrdered)     │   (CPU work inline)   │
-//!      │        │               │        │              │
-//!      │   tokio::mpsc          │        │              │
-//!      │        ◄───────────────┼────────┘              │
-//!      │        │                                       │
-//!      └─► writer_task ─────────────────────────────────┼─► I/O tasks
-//!               │                                       │   (file ops)
-//!               └───────────────────────────────────────┘
+//! main runtime              CPU runtime             IO runtime
+//! ingestion_task
+//!      |
+//! encoder_coordinator ----> encode tasks
+//!      |
+//! writer_task -------------------------------------> blocking serializer
+//!      |
+//! bounded byte channel ----> ObjectOutput uploader
 //! ```
 //!
-//! ## Stages
-//!
-//! 1. **Source**: RecordBatches flow into the ingestion channel.
-//!
-//! 2. **Ingestion** (1 task): Accumulates batches into row groups. Two modes:
-//!    - **Pass-through**: Simple accumulation with `BatchCoalescer`.
-//!    - **Analyze**: Streams to background analysis for `dictionary: auto` columns.
-//!
-//! 3. **Encoder Coordinator** (1 task): Uses `FuturesOrdered` to spawn encoding tasks
-//!    on `CpuRuntime` (up to `max_row_group_concurrency`). Results come out in order.
-//!
-//! 4. **Writing** (1 task): Receives encoded row groups in order, writes to disk
-//!    via `IoRuntime`.
+//! `FuturesOrdered` returns encoded row groups in submission order. The writer
+//! serializes each row group on the IO runtime's blocking pool and waits for
+//! bounded channel capacity before accepting more serialized bytes.
 
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::BufWriter;
-use std::path::PathBuf;
+use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -63,7 +44,13 @@ use tokio::task::JoinSet;
 use super::analysis::{ColumnAnalysis, RowGroupAnalysisState};
 use super::config::{AdaptiveWriterConfig, ResolvedColumnConfigs};
 use super::encoding::build_row_group_properties;
-use crate::sinks::parquet::pools::ParquetRuntimes;
+use crate::{
+    sinks::{
+        object_writer::{DrainWriter, join_object_upload, spawn_object_upload},
+        parquet::pools::ParquetRuntimes,
+    },
+    storage::ObjectOutput,
+};
 
 pub(crate) struct RowGroupWork {
     pub batch: RecordBatch,
@@ -77,30 +64,13 @@ pub(crate) struct EncodedRowGroup {
     pub num_rows: usize,
 }
 
-pub(crate) async fn create_file(
-    path: PathBuf,
-    buffer_size: usize,
-    runtimes: &ParquetRuntimes,
-) -> Result<BufWriter<File>> {
-    let mut tasks = JoinSet::new();
-    tasks.spawn_on(
-        async move { Ok(BufWriter::with_capacity(buffer_size, File::create(&path)?)) },
-        runtimes.io.handle(),
-    );
-    tasks
-        .join_next()
-        .await
-        .ok_or_else(|| anyhow!("file create task set unexpectedly empty"))?
-        .context("file create task failed")?
-}
-
 pub(crate) fn create_arrow_writer(
-    file: BufWriter<File>,
+    drain: DrainWriter,
     schema: &SchemaRef,
     base_props: WriterProperties,
     skip_arrow_metadata: bool,
 ) -> Result<(
-    SerializedFileWriter<BufWriter<File>>,
+    SerializedFileWriter<DrainWriter>,
     SchemaDescPtr,
     WriterPropertiesPtr,
 )> {
@@ -109,7 +79,7 @@ pub(crate) fn create_arrow_writer(
         .convert(schema.as_ref())?;
 
     let arrow_writer = ArrowWriter::try_new_with_options(
-        file,
+        drain,
         Arc::clone(schema),
         ArrowWriterOptions::new()
             .with_properties(base_props.clone())
@@ -125,20 +95,31 @@ pub(crate) fn create_arrow_writer(
 }
 
 pub(crate) async fn run_pipeline(
-    path: PathBuf,
+    output: ObjectOutput,
     schema: SchemaRef,
     base_props: WriterProperties,
     runtimes: Arc<ParquetRuntimes>,
     config: AdaptiveWriterConfig,
     ingestion_rx: mpsc::Receiver<RecordBatch>,
 ) -> Result<u64> {
-    let file = create_file(path, config.buffer_size, &runtimes).await?;
+    let part_size = output.part_size();
+    let (upload_sender, upload_handle) = spawn_object_upload(output);
+    let drain_threshold = config.buffer_size.max(1).min(part_size);
+    let drain = DrainWriter::new(upload_sender, drain_threshold);
 
     let (encoding_tx, encoding_rx) = mpsc::channel::<RowGroupWork>(config.encoding_queue_size);
     let (writing_tx, writing_rx) = mpsc::channel::<EncodedRowGroup>(config.writing_queue_size);
 
-    let (file_writer, parquet_schema, base_props) =
-        create_arrow_writer(file, &schema, base_props, config.skip_arrow_metadata)?;
+    let writer_schema = Arc::clone(&schema);
+    let skip_arrow_metadata = config.skip_arrow_metadata;
+    let (file_writer, parquet_schema, base_props) = runtimes
+        .io
+        .handle()
+        .spawn_blocking(move || {
+            create_arrow_writer(drain, &writer_schema, base_props, skip_arrow_metadata)
+        })
+        .await
+        .context("parquet writer setup task failed")??;
 
     let total_rows = Arc::new(AtomicU64::new(0));
     let mut tasks: JoinSet<Result<()>> = JoinSet::new();
@@ -193,8 +174,23 @@ pub(crate) async fn run_pipeline(
         }
     }
 
+    let upload_result = join_object_upload(upload_handle).await;
+    if errors.is_empty() {
+        let mut output = upload_result?;
+        output.commit().await?;
+        return Ok(total_rows.load(Ordering::SeqCst));
+    }
+
+    match upload_result {
+        Ok(mut output) => {
+            if let Err(error) = output.abort().await {
+                errors.push(error.context("parquet output cleanup failed"));
+            }
+        }
+        Err(error) => errors.push(error),
+    }
+
     match errors.len() {
-        0 => Ok(total_rows.load(Ordering::SeqCst)),
         1 => Err(errors.pop().unwrap()),
         _ => Err(anyhow!(
             "pipeline failed with {} errors:\n{}",
@@ -476,7 +472,7 @@ async fn encoder_coordinator(
 
 async fn writer_task(
     mut encoded_rx: mpsc::Receiver<EncodedRowGroup>,
-    file_writer: SerializedFileWriter<BufWriter<File>>,
+    file_writer: SerializedFileWriter<DrainWriter>,
     io_handle: Handle,
     total_rows: Arc<AtomicU64>,
 ) -> Result<()> {
@@ -488,7 +484,10 @@ async fn writer_task(
     }
 
     io_handle
-        .spawn(async move { fw.close().map_err(|e| anyhow!(e)) })
+        .spawn_blocking(move || {
+            let drain = fw.into_inner().map_err(|e| anyhow!(e))?;
+            drain.finish().map_err(|e| anyhow!(e))
+        })
         .await
         .context("file close task failed")??;
 
@@ -497,17 +496,18 @@ async fn writer_task(
 
 async fn write_row_group(
     io_handle: &Handle,
-    fw: SerializedFileWriter<BufWriter<File>>,
+    fw: SerializedFileWriter<DrainWriter>,
     rg: EncodedRowGroup,
-) -> Result<SerializedFileWriter<BufWriter<File>>> {
+) -> Result<SerializedFileWriter<DrainWriter>> {
     io_handle
-        .spawn(async move {
+        .spawn_blocking(move || {
             let mut fw = fw;
             let mut row_group = fw.next_row_group()?;
             for chunk in rg.chunks {
                 chunk.append_to_row_group(&mut row_group)?;
             }
             row_group.close()?;
+            fw.inner_mut().flush()?;
             Ok(fw)
         })
         .await
