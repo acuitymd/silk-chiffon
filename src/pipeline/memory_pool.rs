@@ -10,6 +10,7 @@ use datafusion::execution::memory_pool::{
     MemoryConsumer, MemoryLimit, MemoryPool, MemoryReservation, human_readable_size,
 };
 use parking_lot::Mutex;
+use std::fmt::{self, Display, Formatter};
 
 /// A [`MemoryPool`] that guarantees a portion of capacity for non-spillable consumers.
 ///
@@ -76,6 +77,10 @@ impl ReservedSpillPool {
 }
 
 impl MemoryPool for ReservedSpillPool {
+    fn name(&self) -> &str {
+        "ReservedSpillPool"
+    }
+
     fn register(&self, consumer: &MemoryConsumer) {
         if consumer.can_spill() {
             self.state.lock().num_spill += 1;
@@ -173,6 +178,18 @@ impl MemoryPool for ReservedSpillPool {
 
     fn memory_limit(&self) -> MemoryLimit {
         MemoryLimit::Finite(self.pool_size)
+    }
+}
+
+impl Display for ReservedSpillPool {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}({} total, {} non-spillable reserve)",
+            self.name(),
+            human_readable_size(self.pool_size),
+            human_readable_size(self.reserve_for_non_spillable)
+        )
     }
 }
 
