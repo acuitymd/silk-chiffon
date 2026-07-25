@@ -4,11 +4,11 @@ version = "0.1.0"
 authors = ["Cora Sutton <cora@sutton.me>"]
 categories = ["command line utilities", "data processing", "columnar data"]
 edition = "2024"
-rust-version = "1.95"
 homepage = "https://github.com/acuitymd/silk-chiffon"
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/acuitymd/silk-chiffon"
+rust-version = "1.95"
 description = "Silky smooth conversion between columnar data formats 💝"
 
 [[bin]]
