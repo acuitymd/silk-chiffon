@@ -1,0 +1,14 @@
+[package]
+name = "silk-chiffon-core"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+publish = false
+repository.workspace = true
+rust-version.workspace = true
+description = "Format-independent processing for Silk Chiffon"
+
+[lints]
+workspace = true
