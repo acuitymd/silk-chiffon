@@ -1,14 +1,34 @@
-[package]
-name = "silk_chiffon"
+[workspace]
+members = [
+  "crates/silk-chiffon-core",
+  "crates/silk-chiffon-storage",
+]
+resolver = "2"
+
+[workspace.package]
 version = "0.1.0"
 authors = ["Cora Sutton <cora@sutton.me>"]
 categories = ["command line utilities", "data processing", "columnar data"]
 edition = "2024"
 homepage = "https://github.com/acuitymd/silk-chiffon"
 license = "MIT"
-readme = "README.md"
 repository = "https://github.com/acuitymd/silk-chiffon"
 rust-version = "1.95"
+
+[workspace.dependencies]
+object_store = { version = "^0.13.2", default-features = false }
+
+[package]
+name = "silk_chiffon"
+version.workspace = true
+authors.workspace = true
+categories.workspace = true
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+readme = "README.md"
+repository.workspace = true
+rust-version.workspace = true
 description = "Silky smooth conversion between columnar data formats 💝"
 
 [[bin]]
@@ -103,7 +123,7 @@ debug = true
 [profile.native]
 inherits = "release"
 
-[lints.clippy]
+[workspace.lints.clippy]
 case_sensitive_file_extension_comparisons = "warn"
 cast_lossless = "warn"
 cast_possible_truncation = "warn"
@@ -115,3 +135,6 @@ clone_on_ref_ptr = "warn"
 needless_pass_by_value = "warn"
 option_as_ref_cloned = "warn"
 similar_names = "warn"
+
+[lints]
+workspace = true

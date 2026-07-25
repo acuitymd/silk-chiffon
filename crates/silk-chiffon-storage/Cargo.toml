@@ -1,0 +1,21 @@
+[package]
+name = "silk-chiffon-storage"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+publish = false
+repository.workspace = true
+rust-version.workspace = true
+description = "Object storage integration for Silk Chiffon"
+
+[features]
+default = ["local"]
+local = ["object_store/fs"]
+
+[dependencies]
+object_store.workspace = true
+
+[lints]
+workspace = true
