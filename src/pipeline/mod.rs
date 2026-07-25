@@ -8,6 +8,7 @@ use bytesize::ByteSize;
 use camino::Utf8PathBuf;
 use datafusion::execution::memory_pool::{FairSpillPool, MemoryPool, TrackConsumersPool};
 use datafusion::prelude::{SessionConfig, SessionContext};
+use silk_chiffon_storage::ResolvedLocation;
 use tempfile::TempDir;
 
 use memory_pool::ReservedSpillPool;
@@ -57,6 +58,7 @@ pub struct Pipeline {
     input_strategy: Option<InputStrategy>,
     operations: Vec<Box<dyn DataOperation>>,
     output_strategy: Option<OutputStrategy>,
+    storage_locations: Vec<ResolvedLocation>,
     config: PipelineConfig,
     /// temp directory for spilling when memory_limit is set - kept alive until Pipeline drops
     spill_path: Option<TempDir>,
@@ -75,6 +77,11 @@ impl Pipeline {
     pub fn with_operation(mut self, operation: Box<dyn DataOperation>) -> Self {
         self.operations.push(operation);
 
+        self
+    }
+
+    pub fn with_storage_location(mut self, location: ResolvedLocation) -> Self {
+        self.storage_locations.push(location);
         self
     }
 
@@ -316,10 +323,12 @@ impl Pipeline {
             .with_memory_pool(pool)
             .build()?;
 
-        Ok(SessionContext::new_with_config_rt(
-            cfg,
-            std::sync::Arc::new(runtime),
-        ))
+        let context = SessionContext::new_with_config_rt(cfg, std::sync::Arc::new(runtime));
+        for location in &self.storage_locations {
+            location.register_with_datafusion(context.runtime_env().as_ref());
+        }
+
+        Ok(context)
     }
 }
 

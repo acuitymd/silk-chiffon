@@ -3,7 +3,7 @@ members = [
   "crates/silk-chiffon-core",
   "crates/silk-chiffon-storage",
 ]
-resolver = "2"
+resolver = "3"
 
 [workspace.package]
 version = "0.1.0"
@@ -16,7 +16,11 @@ repository = "https://github.com/acuitymd/silk-chiffon"
 rust-version = "1.95"
 
 [workspace.dependencies]
+datafusion = { version = "^54.1.0", features = ["array_expressions", "default"] }
+datafusion-execution = { version = "^54.1.0", default-features = false }
 object_store = { version = "^0.13.2", default-features = false }
+thiserror = "^2.0.19"
+url = "^2.5.8"
 
 [package]
 name = "silk_chiffon"
@@ -47,7 +51,7 @@ chrono = "^0.4.45"
 clap = { version = "^4.6.4", features = ["default", "derive"] }
 clap-markdown = { version = "^0.1.5", optional = true }
 clap_complete = "^4.6.7"
-datafusion = { version = "^54.1.0", features = ["array_expressions", "default"] }
+datafusion.workspace = true
 futures = "^0.3.33"
 glob = "^0.3.4"
 humansize = "^2.1.3"
@@ -61,6 +65,7 @@ parquet = { version = "^58.4.0", features = ["default", "async", "json", "arrow_
 percent-encoding = "^2.3.2"
 serde = { version = "^1.0.229", features = ["derive"] }
 serde_json = "^1.0.151"
+silk-chiffon-storage = { path = "crates/silk-chiffon-storage" }
 strum_macros = "^0.28.0"
 sysinfo = "^0.39.6"
 tabled = { version = "^0.21.0", features = ["ansi"] }
@@ -85,6 +90,7 @@ assert_cmd = "^2.2.2"
 criterion = { version = "^0.8.2", features = ["html_reports"] }
 predicates = "^3.1.4"
 rand = "^0.10.2"
+url.workspace = true
 
 [[bench]]
 name = "parquet_writer"
