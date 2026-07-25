@@ -9,6 +9,7 @@ use arrow::datatypes::SchemaRef;
 use serde_json::{Value, json};
 use vortex::VortexSessionDefault;
 use vortex::array::stats::StatsSet;
+use vortex::arrow::ToArrowType;
 use vortex::file::{OpenOptionsSessionExt, SegmentSpec};
 use vortex::session::VortexSession;
 

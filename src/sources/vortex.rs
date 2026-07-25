@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use datafusion::catalog::TableProvider;
 use datafusion::prelude::SessionContext;
 use vortex::VortexSessionDefault;
+use vortex::arrow::ToArrowType;
 use vortex::file::OpenOptionsSessionExt;
 use vortex::io::session::RuntimeSessionExt;
 use vortex::session::VortexSession;

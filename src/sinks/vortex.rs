@@ -11,10 +11,9 @@ use tokio::sync::mpsc;
 use tokio::{fs::File, sync::Mutex};
 use vortex::VortexSessionDefault;
 use vortex::array::ArrayRef;
-use vortex::array::arrow::FromArrowArray;
 use vortex::array::stream::ArrayStreamAdapter;
+use vortex::arrow::{FromArrowArray, FromArrowType};
 use vortex::dtype::DType;
-use vortex::dtype::arrow::FromArrowType;
 use vortex::file::WriteOptionsSessionExt;
 use vortex::session::VortexSession;
 

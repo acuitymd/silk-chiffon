@@ -1,5 +1,6 @@
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Result, bail};
@@ -63,8 +64,16 @@ impl DataSource for ArrowDataSource {
 
     async fn as_table_provider(&self, ctx: &mut SessionContext) -> Result<Arc<dyn TableProvider>> {
         let table_name = format!("arrow_{}", Uuid::new_v4().as_simple());
-        ctx.register_arrow(&table_name, &self.path, ArrowReadOptions::default())
-            .await?;
+        let file_extension = Path::new(&self.path)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(|extension| format!(".{extension}"))
+            .unwrap_or_default();
+        let options = ArrowReadOptions {
+            file_extension: &file_extension,
+            ..ArrowReadOptions::default()
+        };
+        ctx.register_arrow(&table_name, &self.path, options).await?;
         let table = ctx.table(&table_name).await?;
         Ok(table.into_view())
     }
