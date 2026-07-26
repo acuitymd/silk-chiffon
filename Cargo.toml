@@ -16,9 +16,15 @@ repository = "https://github.com/acuitymd/silk-chiffon"
 rust-version = "1.95"
 
 [workspace.dependencies]
-datafusion = { version = "^54.1.0", features = ["array_expressions", "default"] }
+anyhow = "^1.0.104"
+arrow = { version = "^58.4.0", features = ["default"] }
+async-trait = "^0.1.91"
+clap = { version = "^4.6.4", features = ["default", "derive"] }
+datafusion = { version = "^54.1.0", default-features = false }
 datafusion-execution = { version = "^54.1.0", default-features = false }
+futures = "^0.3.33"
 object_store = { version = "^0.13.2", default-features = false }
+serde_json = "^1.0.151"
 thiserror = "^2.0.19"
 url = "^2.5.8"
 
@@ -40,19 +46,19 @@ name = "silk-chiffon"
 path = "src/main.rs"
 
 [dependencies]
-anyhow = "^1.0.104"
+anyhow.workspace = true
 apply_if = "^1.2.1"
-arrow = { version = "^58.4.0", features = ["default", "ipc_compression"] }
+arrow = { workspace = true, features = ["ipc_compression"] }
 async-stream = "^0.3.6"
-async-trait = "^0.1.91"
+async-trait.workspace = true
 bytesize = "^2.4.2"
 camino = { version = "^1.2.4", features = ["serde1"] }
 chrono = "^0.4.45"
-clap = { version = "^4.6.4", features = ["default", "derive"] }
+clap.workspace = true
 clap-markdown = { version = "^0.1.5", optional = true }
 clap_complete = "^4.6.7"
-datafusion.workspace = true
-futures = "^0.3.33"
+datafusion = { workspace = true, features = ["array_expressions", "default"] }
+futures.workspace = true
 glob = "^0.3.4"
 humansize = "^2.1.3"
 lru = "^0.18.1"
@@ -64,7 +70,7 @@ parking_lot = "^0.12.5"
 parquet = { version = "^58.4.0", features = ["default", "async", "json", "arrow_canonical_extension_types"] }
 percent-encoding = "^2.3.2"
 serde = { version = "^1.0.229", features = ["derive"] }
-serde_json = "^1.0.151"
+serde_json.workspace = true
 silk-chiffon-storage = { path = "crates/silk-chiffon-storage" }
 strum_macros = "^0.28.0"
 sysinfo = "^0.39.6"
