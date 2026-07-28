@@ -62,6 +62,8 @@ pub enum StorageError {
     UserInfoNotSupported(String),
     #[error("invalid percent encoding in storage URL: {0}")]
     InvalidPercentEncoding(String),
+    #[error("storage URL path contains a character that must be percent-encoded: {0}")]
+    UnencodedUrlPath(String),
     #[error("filesystem path cannot be represented as a local file URL: {0}")]
     InvalidFilePath(PathBuf),
     #[error("invalid object path: {0}")]
@@ -80,6 +82,8 @@ pub struct Location {
 
 impl Location {
     /// Parses a bare local path or canonical `file:///` URL against an absolute working directory.
+    ///
+    /// Bare paths retain filesystem characters. URL paths must encode characters disallowed by URL syntax.
     pub fn parse(
         input: impl AsRef<str>,
         working_directory: impl AsRef<FilePath>,
@@ -171,6 +175,7 @@ fn parse_provider_url(input: &str, scheme: &str) -> Result<Url, StorageError> {
     if !url.username().is_empty() || url.password().is_some() {
         return Err(StorageError::UserInfoNotSupported(input.to_owned()));
     }
+    validate_url_path_encoding(input, raw_path, &url)?;
     ObjectPath::from_url_path(url.path())?;
     Ok(url)
 }
@@ -220,10 +225,18 @@ fn parse_file_url(input: &str, raw_path: &str) -> Result<Url, StorageError> {
         input: input.to_owned(),
         source,
     })?;
+    validate_url_path_encoding(input, raw_path, &url)?;
     url.to_file_path()
         .map_err(|()| StorageError::InvalidFilePath(PathBuf::from(input)))?;
 
     Ok(url)
+}
+
+fn validate_url_path_encoding(input: &str, raw_path: &str, url: &Url) -> Result<(), StorageError> {
+    if url.path().strip_prefix('/').unwrap_or(url.path()) != raw_path {
+        return Err(StorageError::UnencodedUrlPath(input.to_owned()));
+    }
+    Ok(())
 }
 
 fn has_valid_percent_encoding(input: &str) -> bool {

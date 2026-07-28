@@ -36,6 +36,31 @@ fn absolute_path_becomes_a_file_url_without_requiring_the_path_to_exist() -> Res
 }
 
 #[test]
+fn bare_paths_accept_characters_that_require_encoding_in_urls() -> Result<(), StorageError> {
+    let working_directory = TempDir::new().unwrap();
+    let resolver = StorageResolver::new().unwrap();
+
+    for input in [
+        "data set.parquet",
+        "snapshot?#100%.parquet",
+        "literal%20name.parquet",
+        "résumé.parquet",
+    ] {
+        let location = location(input, working_directory.path())?;
+        let expected = working_directory.path().join(input);
+        let resolved = resolver.resolve_input(&location)?;
+        assert_eq!(location.url().to_file_path().unwrap(), expected);
+        assert_eq!(resolved.local_path()?, expected);
+        assert_eq!(
+            resolved.path,
+            object_store::path::Path::from_absolute_path(&expected).unwrap()
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
 fn canonical_file_urls_map_absolute_paths_to_store_keys() -> Result<(), Box<dyn std::error::Error>>
 {
     for (input, filesystem_path, object_path) in [
@@ -48,6 +73,11 @@ fn canonical_file_urls_map_absolute_paths_to_store_keys() -> Result<(), Box<dyn 
             "file:///tmp/data%20set.parquet",
             "/tmp/data set.parquet",
             "tmp/data set.parquet",
+        ),
+        (
+            "file:///tmp/r%C3%A9sum%C3%A9.parquet",
+            "/tmp/résumé.parquet",
+            "tmp/résumé.parquet",
         ),
     ] {
         let location = location(input, Path::new("/work"))?;
@@ -65,6 +95,16 @@ fn canonical_file_urls_map_absolute_paths_to_store_keys() -> Result<(), Box<dyn 
     }
 
     Ok(())
+}
+
+#[test]
+fn url_paths_require_percent_encoding() {
+    for input in ["file:///tmp/data set.parquet", "file:///tmp/résumé.parquet"] {
+        assert!(matches!(
+            Location::parse(input, Path::new("/work")),
+            Err(StorageError::UnencodedUrlPath(rejected)) if rejected == input
+        ));
+    }
 }
 
 #[test]

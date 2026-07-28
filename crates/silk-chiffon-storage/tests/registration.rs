@@ -196,13 +196,30 @@ fn registered_arguments_contribute_help_bind_typed_settings_and_resolve_declared
     assert_eq!(encoded.url.as_str(), "mem://bucket/data%20set");
     assert_eq!(encoded.path.as_ref(), "data set");
 
+    let unicode_location = registry
+        .parse_location("mem://bucket/r%C3%A9sum%C3%A9", FilePath::new("/work"))
+        .unwrap();
+    let unicode = resolver.resolve_input(&unicode_location).unwrap();
+    assert_eq!(unicode.url.as_str(), "mem://bucket/r%C3%A9sum%C3%A9");
+    assert_eq!(unicode.path.as_ref(), "résumé");
+
     assert!(matches!(
         registry.parse_location("other://bucket/object", FilePath::new("/work")),
         Err(StorageError::UnsupportedScheme(scheme)) if scheme == "other"
     ));
+    assert!(matches!(
+        registry.parse_location("MEM://bucket/object", FilePath::new("/work")),
+        Err(StorageError::NonCanonicalProviderUrl { scheme, input })
+            if scheme == "mem" && input == "MEM://bucket/object"
+    ));
+    for invalid in ["mem://bucket/data set", "mem://bucket/résumé"] {
+        assert!(matches!(
+            registry.parse_location(invalid, FilePath::new("/work")),
+            Err(StorageError::UnencodedUrlPath(rejected)) if rejected == invalid
+        ));
+    }
     for invalid in [
         "mem:/bucket/object",
-        "MEM://bucket/object",
         "mem://bucket/object?version=1",
         "mem://bucket/object#fragment",
         "mem://user:password@bucket/object",

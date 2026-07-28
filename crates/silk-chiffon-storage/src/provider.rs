@@ -324,7 +324,7 @@ impl StorageRegistry {
         working_directory: impl AsRef<FilePath>,
     ) -> Result<Location, StorageError> {
         Location::parse_registered(input, working_directory, |scheme| {
-            self.schemes.contains_key(scheme)
+            self.by_scheme(scheme).is_some()
         })
     }
 

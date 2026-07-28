@@ -79,19 +79,19 @@ A local-only registry omits the group. Providers that do not opt in receive no r
 | `/data/input.parquet`        | A bare absolute filesystem path                                                           |
 | `file:///data/input.parquet` | A canonical local file URL                                                                |
 
-Local file URL input must use lowercase `file:` followed by exactly three slashes. Alternate spellings such as `file:/data`, `file://localhost/data`, `FILE:///data`, and `file:////data` are rejected rather than normalized.
+### Bare paths
 
-Both parsers reject:
+Bare input is a filesystem path, not URL source text. It may contain spaces and Unicode. Literal `%`, `?`, and `#` characters are also accepted. Converting the path to the internal absolute `file:///` URL applies the necessary percent encoding without changing the filesystem path. For example, the `%20` sequence in the bare filename `literal%20name.parquet` remains literal and does not name `literal name.parquet`.
 
-- empty input
-- noncanonical local file URLs
-- unsupported, malformed, ambiguous, or noncanonical scheme-like input
-- query strings and fragments
-- embedded user information
-- invalid percent encoding
-- paths that cannot become upstream object paths
+### URLs
 
-A registered URL scheme must be lowercase and followed by `://`. A filename that resembles a scheme can be made unambiguous with an explicit relative prefix such as `./name:value.parquet`.
+Input with a scheme is URL source text. Its path must percent-encode characters that URL syntax does not allow literally. For example, a URL uses `data%20set.parquet` rather than `data set.parquet`, while a bare path accepts either filename as written.
+
+Local file URLs must use lowercase `file:` followed by exactly three slashes. Alternate spellings such as `file:/data`, `file://localhost/data`, `FILE:///data`, and `file:////data` are rejected rather than normalized. URL input rejects query strings, fragments, and embedded user information. It also rejects malformed percent encoding and unencoded URL-path characters.
+
+### Shared validation
+
+All inputs reject empty locations and invalid upstream object paths. Scheme-like text must be registered, well-formed, unambiguous, and canonical. A registered URL scheme must be lowercase and followed by `://`. A filename that resembles a scheme can be made unambiguous with an explicit relative prefix such as `./name:value.parquet`.
 
 Path handling is lexical and does not call `canonicalize`, resolve symlinks, or require the target to exist. Converting a bare path to a URL performs only the encoding and URL path processing needed for an absolute local file URL. Once a canonical `file:///` input passes the spelling check, URL parsing may decode valid percent encoding.
 
