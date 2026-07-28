@@ -3975,9 +3975,11 @@ name = "silk-chiffon-storage"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "clap",
  "datafusion",
  "datafusion-execution",
  "futures",
+ "humantime",
  "object_store",
  "tempfile",
  "thiserror",

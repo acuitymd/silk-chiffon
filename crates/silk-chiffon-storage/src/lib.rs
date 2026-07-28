@@ -1,3 +1,7 @@
+//! Strict locations and registered `object_store` providers for Silk Chiffon.
+//!
+//! A [`StorageRegistry`] composes ordinary Clap argument structs and binds their concrete values into a command-scoped [`StorageResolver`]. Each provider declares input and output resolution independently. The resolver caches clients by location authority and effective configuration so direct I/O and DataFusion can share the same upstream store.
+
 use std::{
     collections::BTreeMap,
     path::{Path as FilePath, PathBuf},
@@ -6,13 +10,20 @@ use std::{
 
 #[cfg(feature = "local")]
 use datafusion_execution::runtime_env::RuntimeEnv;
-#[cfg(feature = "local")]
-use object_store::local::LocalFileSystem;
 use object_store::{ObjectMeta, ObjectStore, ObjectStoreExt, path::Path as ObjectPath};
-#[cfg(feature = "local")]
-use std::{collections::HashMap, sync::Mutex};
 use thiserror::Error;
 use url::Url;
+
+pub mod local;
+mod provider;
+mod retry;
+
+pub use provider::{
+    ProviderResolution, ProviderResolver, StorageDirection, StorageProviderRegistration,
+    StorageProviderRegistrationBuilder, StorageRegistry, StorageRegistryBuilder,
+    StorageRegistryError, StorageResolver, StorageResolverBuildError,
+};
+pub use retry::{RetryArgs, RetryConfiguration, RetryConfigurationError};
 
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -24,8 +35,18 @@ pub enum StorageError {
     AmbiguousLocation(String),
     #[error("unsupported storage scheme: {0}")]
     UnsupportedScheme(String),
-    #[error("storage support is disabled for scheme: {0}")]
-    SchemeDisabled(String),
+    #[error("storage URL must use the exact lowercase {scheme}:// form: {input}")]
+    NonCanonicalProviderUrl { scheme: String, input: String },
+    #[error("storage provider {provider} is disabled: {diagnostic}")]
+    ProviderDisabled {
+        provider: &'static str,
+        diagnostic: &'static str,
+    },
+    #[error("{direction} resolution is unsupported for storage provider: {provider}")]
+    DirectionUnsupported {
+        provider: &'static str,
+        direction: StorageDirection,
+    },
     #[error("local file URL must use the exact lowercase file:/// form: {0}")]
     NonCanonicalFileUrl(String),
     #[error("invalid storage URL {input}: {source}")]
@@ -37,6 +58,8 @@ pub enum StorageError {
     QueryNotSupported(String),
     #[error("storage URLs cannot contain fragments: {0}")]
     FragmentNotSupported(String),
+    #[error("storage URLs cannot contain user information: {0}")]
+    UserInfoNotSupported(String),
     #[error("invalid percent encoding in storage URL: {0}")]
     InvalidPercentEncoding(String),
     #[error("filesystem path cannot be represented as a local file URL: {0}")]
@@ -50,14 +73,24 @@ pub enum StorageError {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+/// One exact object location, parsed without touching storage.
 pub struct Location {
     url: Url,
 }
 
 impl Location {
+    /// Parses a bare local path or canonical `file:///` URL against an absolute working directory.
     pub fn parse(
         input: impl AsRef<str>,
         working_directory: impl AsRef<FilePath>,
+    ) -> Result<Self, StorageError> {
+        Self::parse_registered(input, working_directory, |_| false)
+    }
+
+    pub(crate) fn parse_registered(
+        input: impl AsRef<str>,
+        working_directory: impl AsRef<FilePath>,
+        is_registered: impl Fn(&str) -> bool,
     ) -> Result<Self, StorageError> {
         let input = input.as_ref();
         if input.is_empty() {
@@ -81,19 +114,21 @@ impl Location {
                 Some(scheme) if scheme.eq_ignore_ascii_case("file") => {
                     return Err(StorageError::NonCanonicalFileUrl(input.to_owned()));
                 }
+                Some(scheme) if is_registered(scheme) => parse_provider_url(input, scheme)?,
                 Some(scheme) => {
                     return Err(StorageError::UnsupportedScheme(scheme.to_ascii_lowercase()));
                 }
-                None => {}
+                None => {
+                    let path = FilePath::new(input);
+                    let absolute = if path.is_absolute() {
+                        path.to_path_buf()
+                    } else {
+                        working_directory.join(path)
+                    };
+                    Url::from_file_path(&absolute)
+                        .map_err(|()| StorageError::InvalidFilePath(absolute))?
+                }
             }
-
-            let path = FilePath::new(input);
-            let absolute = if path.is_absolute() {
-                path.to_path_buf()
-            } else {
-                working_directory.join(path)
-            };
-            Url::from_file_path(&absolute).map_err(|()| StorageError::InvalidFilePath(absolute))?
         };
 
         ObjectPath::from_url_path(url.path())?;
@@ -103,6 +138,41 @@ impl Location {
     pub fn url(&self) -> &Url {
         &self.url
     }
+}
+
+fn parse_provider_url(input: &str, scheme: &str) -> Result<Url, StorageError> {
+    let normalized_scheme = scheme.to_ascii_lowercase();
+    if scheme != normalized_scheme || !input.starts_with(&format!("{scheme}://")) {
+        return Err(StorageError::NonCanonicalProviderUrl {
+            scheme: normalized_scheme,
+            input: input.to_owned(),
+        });
+    }
+    if !has_valid_percent_encoding(input) {
+        return Err(StorageError::InvalidPercentEncoding(input.to_owned()));
+    }
+    if input.contains('?') {
+        return Err(StorageError::QueryNotSupported(input.to_owned()));
+    }
+    if input.contains('#') {
+        return Err(StorageError::FragmentNotSupported(input.to_owned()));
+    }
+
+    let remainder = &input[scheme.len() + 3..];
+    let raw_path = remainder
+        .split_once('/')
+        .map_or("", |(_, raw_path)| raw_path);
+    ObjectPath::from_url_path(raw_path)?;
+
+    let url = Url::parse(input).map_err(|source| StorageError::InvalidUrl {
+        input: input.to_owned(),
+        source,
+    })?;
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(StorageError::UserInfoNotSupported(input.to_owned()));
+    }
+    ObjectPath::from_url_path(url.path())?;
+    Ok(url)
 }
 
 fn scheme_like_prefix(input: &str) -> Result<Option<&str>, StorageError> {
@@ -176,6 +246,7 @@ fn has_valid_percent_encoding(input: &str) -> bool {
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
+/// The configuration identity of one cached object-store client.
 pub struct StoreCacheKey {
     scheme: String,
     authority: String,
@@ -183,17 +254,21 @@ pub struct StoreCacheKey {
 }
 
 impl StoreCacheKey {
-    #[cfg(feature = "local")]
-    fn local() -> Self {
+    pub(crate) fn new(
+        scheme: impl Into<String>,
+        authority: impl Into<String>,
+        configuration: BTreeMap<String, String>,
+    ) -> Self {
         Self {
-            scheme: "file".to_owned(),
-            authority: String::new(),
-            configuration: BTreeMap::new(),
+            scheme: scheme.into(),
+            authority: authority.into(),
+            configuration,
         }
     }
 }
 
 #[derive(Clone)]
+/// An exact location paired with its upstream object-store client and object path.
 pub struct ResolvedLocation {
     pub url: Url,
     pub store: Arc<dyn ObjectStore>,
@@ -233,51 +308,6 @@ impl ResolvedLocation {
     #[cfg(feature = "local")]
     pub fn register_with_datafusion(&self, runtime: &RuntimeEnv) {
         runtime.register_object_store(&self.store_url, Arc::clone(&self.store));
-    }
-}
-
-#[derive(Clone, Default)]
-pub struct StorageResolver {
-    #[cfg(feature = "local")]
-    stores: Arc<Mutex<HashMap<StoreCacheKey, Arc<dyn ObjectStore>>>>,
-}
-
-impl StorageResolver {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn resolve(&self, location: &Location) -> Result<ResolvedLocation, StorageError> {
-        #[cfg(not(feature = "local"))]
-        {
-            let _ = location;
-            Err(StorageError::SchemeDisabled("file".to_owned()))
-        }
-
-        #[cfg(feature = "local")]
-        {
-            let path = ObjectPath::from_url_path(location.url.path())?;
-            let cache_key = StoreCacheKey::local();
-            let mut stores = self
-                .stores
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let store = Arc::clone(
-                stores
-                    .entry(cache_key.clone())
-                    .or_insert_with(|| Arc::new(LocalFileSystem::new()) as Arc<dyn ObjectStore>),
-            );
-            let mut store_url = location.url.clone();
-            store_url.set_path("/");
-
-            Ok(ResolvedLocation {
-                url: location.url.clone(),
-                store,
-                path,
-                store_url,
-                cache_key,
-            })
-        }
     }
 }
 

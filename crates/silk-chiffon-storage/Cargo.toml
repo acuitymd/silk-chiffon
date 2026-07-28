@@ -16,7 +16,9 @@ default = ["local"]
 local = ["dep:datafusion-execution", "object_store/fs"]
 
 [dependencies]
+clap.workspace = true
 datafusion-execution = { workspace = true, optional = true }
+humantime.workspace = true
 object_store.workspace = true
 thiserror.workspace = true
 url.workspace = true

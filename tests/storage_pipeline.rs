@@ -8,7 +8,10 @@ use tempfile::TempDir;
 fn pipeline_registers_the_resolved_store_with_datafusion() {
     let working_directory = TempDir::new().unwrap();
     let location = Location::parse("data.parquet", working_directory.path()).unwrap();
-    let resolved = StorageResolver::new().resolve(&location).unwrap();
+    let resolved = StorageResolver::new()
+        .unwrap()
+        .resolve_input(&location)
+        .unwrap();
     let expected_store = Arc::clone(&resolved.store);
     let expected_url = resolved.url.clone();
 

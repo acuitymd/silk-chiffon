@@ -36,7 +36,8 @@ fn absolute_path_becomes_a_file_url_without_requiring_the_path_to_exist() -> Res
 }
 
 #[test]
-fn canonical_file_urls_map_absolute_paths_to_store_keys() -> Result<(), StorageError> {
+fn canonical_file_urls_map_absolute_paths_to_store_keys() -> Result<(), Box<dyn std::error::Error>>
+{
     for (input, filesystem_path, object_path) in [
         (
             "file:///tmp/data.parquet",
@@ -50,7 +51,7 @@ fn canonical_file_urls_map_absolute_paths_to_store_keys() -> Result<(), StorageE
         ),
     ] {
         let location = location(input, Path::new("/work"))?;
-        let resolved = StorageResolver::new().resolve(&location)?;
+        let resolved = StorageResolver::new()?.resolve_input(&location)?;
 
         assert_eq!(location.url().as_str(), input);
         assert_eq!(
@@ -117,10 +118,10 @@ fn equivalent_locations_share_the_cached_store() {
     let working_directory = TempDir::new().unwrap();
     let relative = location("data.parquet", working_directory.path()).unwrap();
     let file_url = location(relative.url().as_str(), working_directory.path()).unwrap();
-    let resolver = StorageResolver::new();
+    let resolver = StorageResolver::new().unwrap();
 
-    let first = resolver.resolve(&relative).unwrap();
-    let second = resolver.resolve(&file_url).unwrap();
+    let first = resolver.resolve_input(&relative).unwrap();
+    let second = resolver.resolve_input(&file_url).unwrap();
 
     assert!(Arc::ptr_eq(&first.store, &second.store));
 }
@@ -129,7 +130,10 @@ fn equivalent_locations_share_the_cached_store() {
 fn resolution_preserves_the_upstream_object_path() {
     let working_directory = TempDir::new().unwrap();
     let location = location("nested/data%20set.parquet", working_directory.path()).unwrap();
-    let resolved = StorageResolver::new().resolve(&location).unwrap();
+    let resolved = StorageResolver::new()
+        .unwrap()
+        .resolve_input(&location)
+        .unwrap();
 
     assert_eq!(
         resolved.path,
@@ -144,7 +148,10 @@ fn resolution_preserves_the_upstream_object_path() {
 async fn absent_object_resolution_is_separate_from_input_validation() {
     let working_directory = TempDir::new().unwrap();
     let location = location("absent.parquet", working_directory.path()).unwrap();
-    let resolved = StorageResolver::new().resolve(&location).unwrap();
+    let resolved = StorageResolver::new()
+        .unwrap()
+        .resolve_input(&location)
+        .unwrap();
 
     assert!(validate_input(&resolved).await.is_err());
 }
@@ -153,7 +160,10 @@ async fn absent_object_resolution_is_separate_from_input_validation() {
 async fn absent_output_passes_preflight() {
     let working_directory = TempDir::new().unwrap();
     let location = location("absent.parquet", working_directory.path()).unwrap();
-    let resolved = StorageResolver::new().resolve(&location).unwrap();
+    let resolved = StorageResolver::new()
+        .unwrap()
+        .resolve_output(&location)
+        .unwrap();
 
     preflight_output(&resolved, false).await.unwrap();
 }
@@ -162,7 +172,10 @@ async fn absent_output_passes_preflight() {
 async fn existing_output_requires_overwrite() {
     let working_directory = TempDir::new().unwrap();
     let location = location("existing.parquet", working_directory.path()).unwrap();
-    let resolved = StorageResolver::new().resolve(&location).unwrap();
+    let resolved = StorageResolver::new()
+        .unwrap()
+        .resolve_output(&location)
+        .unwrap();
     resolved
         .store
         .put(&resolved.path, Bytes::from_static(b"existing").into())
@@ -177,7 +190,10 @@ async fn existing_output_requires_overwrite() {
 async fn local_store_supports_object_operations() {
     let working_directory = TempDir::new().unwrap();
     let location = location("nested/data.bin", working_directory.path()).unwrap();
-    let resolved = StorageResolver::new().resolve(&location).unwrap();
+    let resolved = StorageResolver::new()
+        .unwrap()
+        .resolve_output(&location)
+        .unwrap();
 
     resolved
         .store
@@ -221,7 +237,10 @@ async fn local_store_supports_object_operations() {
 async fn datafusion_uses_the_same_store_for_local_scans() {
     let working_directory = TempDir::new().unwrap();
     let location = location("data.csv", working_directory.path()).unwrap();
-    let resolved = StorageResolver::new().resolve(&location).unwrap();
+    let resolved = StorageResolver::new()
+        .unwrap()
+        .resolve_input(&location)
+        .unwrap();
     resolved
         .store
         .put(
