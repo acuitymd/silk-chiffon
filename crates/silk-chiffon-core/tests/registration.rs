@@ -26,9 +26,9 @@ use datafusion::{
 use futures::StreamExt;
 use silk_chiffon_core::{
     DataSink, DataSinkFactory, DataSource, DataSourceCapabilities, FormatCapability, FormatFuture,
-    FormatInspection, FormatRegistration, FormatRegistry, FormatRegistryError, FormatRuntimeError,
-    FormatTransform, Identification, InputAccess, InspectionOutput, OutputSortColumn, RowCount,
-    SinkFactoryContext, SinkResult, SortDirection, StreamBoundedness,
+    FormatInspection, FormatInvocationError, FormatRegistration, FormatRegistry,
+    FormatRegistryError, FormatTransform, Identification, InputAccess, InspectionOutput,
+    OutputSortColumn, RowCount, SinkFactoryContext, SinkResult, SortDirection, StreamBoundedness,
 };
 use silk_chiffon_storage::{Location, ResolvedLocation, StorageResolver};
 
@@ -46,12 +46,6 @@ struct TestInspectionArgs {
     /// Includes details in test-format inspection output.
     #[arg(long)]
     test_format_details: bool,
-}
-
-#[derive(Args, Clone, Debug)]
-struct OtherFormatArgs {
-    #[arg(long)]
-    other_format_option: bool,
 }
 
 #[derive(Args, Clone, Debug)]
@@ -294,11 +288,10 @@ fn registration(name: &'static str) -> FormatRegistration {
 fn parse_transform(registry: &FormatRegistry, arguments: &[&str]) -> usize {
     let command = registry.augment_transform_args(Command::new("test"));
     let matches = command.try_get_matches_from(arguments).unwrap();
-    let settings = registry.parse_transform_cli(&matches).unwrap();
-    let registration = registry.get("test").unwrap();
+    let configured = registry.bind_transform_args(&matches).unwrap();
+    let transform = configured.get("test").unwrap();
     let location = resolved_location("input.test");
-    let source =
-        futures::executor::block_on(registration.create_source(&location, &settings)).unwrap();
+    let source = futures::executor::block_on(transform.create_source(&location)).unwrap();
     source.name().rsplit_once(':').unwrap().1.parse().unwrap()
 }
 
@@ -356,10 +349,11 @@ fn inspection_args_are_scoped_to_the_typed_inspector_callback() {
     let matches = command
         .try_get_matches_from(["inspect-test", "--test-format-details"])
         .unwrap();
-    let settings = registration.parse_inspection_cli(&matches).unwrap();
+    let configured = registration.bind_inspection_args(&matches).unwrap();
     let location = resolved_location("input.test");
 
-    let output = futures::executor::block_on(registration.inspect(&location, &settings)).unwrap();
+    assert_eq!(configured.format(), "test");
+    let output = futures::executor::block_on(configured.inspect(&location)).unwrap();
 
     assert_eq!(
         output,
@@ -378,6 +372,16 @@ fn names_aliases_and_extensions_are_case_insensitive() {
     assert_eq!(registry.get("T").unwrap().name(), "test");
     assert_eq!(registry.by_extension("TEST").unwrap().name(), "test");
     assert_eq!(registry.by_extension(".test").unwrap().name(), "test");
+
+    let matches = registry
+        .augment_transform_args(Command::new("test"))
+        .try_get_matches_from(["test"])
+        .unwrap();
+    let configured = registry.bind_transform_args(&matches).unwrap();
+    assert_eq!(configured.get("TEST").unwrap().format(), "test");
+    assert_eq!(configured.get("T").unwrap().format(), "test");
+    assert_eq!(configured.by_extension(".TEST").unwrap().format(), "test");
+    assert_eq!(configured.formats().count(), 1);
 }
 
 #[test]
@@ -520,8 +524,9 @@ fn explicit_async_capability_outputs_preserve_typed_settings_and_context() {
         .augment_transform_args(Command::new("test"))
         .try_get_matches_from(["test", "--test-format-workers", "6"])
         .unwrap();
-    let settings = registry.parse_transform_cli(&matches).unwrap();
+    let configured = registry.bind_transform_args(&matches).unwrap();
     let registration = registry.get("test").unwrap();
+    let transform = configured.get(registration.name()).unwrap();
     let location = resolved_location("input.test");
 
     let identified = futures::executor::block_on(registration.identify(&location))
@@ -530,8 +535,7 @@ fn explicit_async_capability_outputs_preserve_typed_settings_and_context() {
     assert_eq!(identified.format(), "test");
     assert_eq!(identified.variant(), Some("test-stream"));
 
-    let source =
-        futures::executor::block_on(registration.create_source(&location, &settings)).unwrap();
+    let source = futures::executor::block_on(transform.create_source(&location)).unwrap();
     assert_eq!(source.name(), format!("{}:6", location.url));
     assert!(
         futures::executor::block_on(source.schema())
@@ -551,8 +555,7 @@ fn explicit_async_capability_outputs_preserve_typed_settings_and_context() {
     );
 
     let context = SinkFactoryContext::new(NonZeroUsize::new(2).unwrap(), false, vec![]);
-    let factory =
-        futures::executor::block_on(registration.create_sink_factory(&context, &settings)).unwrap();
+    let factory = futures::executor::block_on(transform.create_sink_factory(&context)).unwrap();
     let schema = Arc::new(arrow::datatypes::Schema::empty());
     let mut sink = futures::executor::block_on(factory.create(location.clone(), schema)).unwrap();
     let result = futures::executor::block_on(sink.finish()).unwrap();
@@ -626,8 +629,8 @@ fn one_typed_sink_factory_shares_state_across_output_sinks() {
         .augment_transform_args(Command::new("test"))
         .try_get_matches_from(["test", "--test-format-workers", "6"])
         .unwrap();
-    let settings = registry.parse_transform_cli(&matches).unwrap();
-    let registration = registry.get("test").unwrap();
+    let configured = registry.bind_transform_args(&matches).unwrap();
+    let transform = configured.get("test").unwrap();
     let context = SinkFactoryContext::new(
         NonZeroUsize::new(3).unwrap(),
         true,
@@ -636,8 +639,7 @@ fn one_typed_sink_factory_shares_state_across_output_sinks() {
             OutputSortColumn::new("event_time", SortDirection::Descending),
         ],
     );
-    let factory =
-        futures::executor::block_on(registration.create_sink_factory(&context, &settings)).unwrap();
+    let factory = futures::executor::block_on(transform.create_sink_factory(&context)).unwrap();
     let schema = Arc::new(arrow::datatypes::Schema::empty());
     let first_location = resolved_location("first.test");
     let second_location = resolved_location("second.test");
@@ -658,68 +660,6 @@ fn one_typed_sink_factory_shares_state_across_output_sinks() {
 }
 
 #[test]
-fn runtime_invocation_reports_settings_mismatches_without_panicking() {
-    let registry = FormatRegistry::builder()
-        .register(registration("test"))
-        .build()
-        .unwrap();
-    let matches = registry
-        .augment_transform_args(Command::new("test"))
-        .try_get_matches_from(["test"])
-        .unwrap();
-    let settings = registry.parse_transform_cli(&matches).unwrap();
-    let mismatched = FormatRegistration::builder("test")
-        .transform(
-            FormatTransform::with_args::<OtherFormatArgs>()
-                .source(|_, _| {
-                    Box::pin(async {
-                        unreachable!("the typed callback must not run with mismatched settings")
-                    })
-                })
-                .build(),
-        )
-        .build();
-    let location = resolved_location("input.test");
-
-    let error = futures::executor::block_on(mismatched.create_source(&location, &settings))
-        .err()
-        .unwrap();
-    assert!(matches!(
-        error,
-        FormatRuntimeError::SettingsTypeMismatch { format } if format == "test"
-    ));
-}
-
-#[test]
-fn inspection_invocation_reports_settings_mismatches_without_panicking() {
-    let registration = registration("test");
-    let matches = registration
-        .augment_inspection_args(Command::new("inspect-test"))
-        .try_get_matches_from(["inspect-test"])
-        .unwrap();
-    let settings = registration.parse_inspection_cli(&matches).unwrap();
-    let mismatched = FormatRegistration::builder("test")
-        .inspection(FormatInspection::with_args::<OtherFormatArgs>(
-            |_, settings| {
-                let _ = settings.other_format_option;
-                Box::pin(async {
-                    unreachable!("the typed callback must not run with mismatched settings")
-                })
-            },
-        ))
-        .build();
-    let location = resolved_location("input.test");
-
-    let error = futures::executor::block_on(mismatched.inspect(&location, &settings))
-        .err()
-        .unwrap();
-    assert!(matches!(
-        error,
-        FormatRuntimeError::SettingsTypeMismatch { format } if format == "test"
-    ));
-}
-
-#[test]
 fn unavailable_capabilities_return_structured_errors() {
     let registry = FormatRegistry::builder()
         .register(FormatRegistration::builder("empty").build())
@@ -729,16 +669,16 @@ fn unavailable_capabilities_return_structured_errors() {
         .augment_transform_args(Command::new("test"))
         .try_get_matches_from(["test"])
         .unwrap();
-    let settings = registry.parse_transform_cli(&matches).unwrap();
-    let registration = registry.get("empty").unwrap();
+    let configured = registry.bind_transform_args(&matches).unwrap();
+    let transform = configured.get("empty").unwrap();
     let location = resolved_location("input.test");
 
-    let error = futures::executor::block_on(registration.create_source(&location, &settings))
+    let error = futures::executor::block_on(transform.create_source(&location))
         .err()
         .unwrap();
     assert!(matches!(
         error,
-        FormatRuntimeError::CapabilityUnavailable {
+        FormatInvocationError::CapabilityUnavailable {
             format: "empty",
             capability: FormatCapability::Source,
         }
@@ -746,7 +686,7 @@ fn unavailable_capabilities_return_structured_errors() {
 }
 
 #[test]
-fn type_erasure_is_private_to_the_registration_adapter() {
+fn registration_binds_settings_without_any() {
     let library = include_str!("../src/lib.rs");
     let registration = include_str!("../src/registration.rs");
     let source_contract = include_str!("../src/data_source.rs");
@@ -767,6 +707,7 @@ fn type_erasure_is_private_to_the_registration_adapter() {
         "get_any",
         "CapabilityResult",
         "Box<dyn Any",
+        "SettingsTypeMismatch",
     ] {
         assert!(
             !public_sources.contains(forbidden),
@@ -774,9 +715,11 @@ fn type_erasure_is_private_to_the_registration_adapter() {
         );
     }
 
-    let adapter = include_str!("../src/registration/erased.rs");
-    assert!(adapter.contains("std::any::Any"));
-    assert!(adapter.contains("Box<dyn Any + Send + Sync>"));
+    let binding = include_str!("../src/registration/binding.rs");
+    assert!(!binding.contains("std::any::Any"));
+    assert!(!binding.contains("dyn Any"));
+    assert!(binding.contains("dyn InvokeTransform"));
+    assert!(binding.contains("dyn InvokeInspection"));
 }
 
 #[test]

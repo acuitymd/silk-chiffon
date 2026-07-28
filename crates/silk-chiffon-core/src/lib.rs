@@ -9,9 +9,9 @@ pub use data_source::{
 };
 pub use inspection::InspectionOutput;
 pub use registration::{
-    FormatCapability, FormatFuture, FormatInspection, FormatInspectionSettings, FormatRegistration,
-    FormatRegistrationBuilder, FormatRegistry, FormatRegistryBuilder, FormatRegistryError,
-    FormatRuntimeError, FormatRuntimeSettings, FormatTransform, FormatTransformBuilder,
-    Identification, IdentifiedFormat, Identifier, Inspector, OutputSortColumn, SinkFactory,
-    SinkFactoryContext, SortDirection, SourceFactory,
+    ConfiguredFormat, ConfiguredFormats, ConfiguredInspection, FormatCapability, FormatFuture,
+    FormatInspection, FormatInvocationError, FormatRegistration, FormatRegistrationBuilder,
+    FormatRegistry, FormatRegistryBuilder, FormatRegistryError, FormatTransform,
+    FormatTransformBuilder, Identification, IdentifiedFormat, Identifier, Inspector,
+    OutputSortColumn, SinkFactory, SinkFactoryContext, SortDirection, SourceFactory,
 };

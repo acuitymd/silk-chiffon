@@ -2,11 +2,11 @@
 //!
 //! A format contributes ordinary [`clap::Args`] types for each CLI scope it supports. Format-owned long options follow the `--{format}-...` convention, such as `--parquet-row-group-size`. Shared or global arguments may remain unprefixed. Registry construction rejects colliding transform argument IDs, long names, and short names.
 //!
-//! Each runtime callback returns a boxed `Send` future and receives the concrete argument type registered for its scope. Identification has no CLI settings. Source and sink callbacks share one transform argument type, while inspection may register a different argument type.
+//! Parsed arguments remain bound to their format callbacks, so callers cannot pair one format's settings with another format. Each callback returns a boxed `Send` future. Identification has no CLI settings. Source and sink callbacks share one transform argument type, while inspection may register a different argument type.
 //!
 //! The sink callback creates one command-scoped [`DataSinkFactory`] that can retain state across every output sink.
 
-mod erased;
+mod binding;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -169,11 +169,7 @@ impl fmt::Display for FormatCapability {
 
 /// A format invocation failure detected at the registration boundary.
 #[derive(Debug, Error)]
-pub enum FormatRuntimeError {
-    #[error("runtime settings are unavailable for format: {format}")]
-    MissingSettings { format: &'static str },
-    #[error("runtime settings have the wrong type for format: {format}")]
-    SettingsTypeMismatch { format: &'static str },
+pub enum FormatInvocationError {
     #[error("{capability} capability is unavailable for format: {format}")]
     CapabilityUnavailable {
         format: &'static str,
@@ -191,8 +187,7 @@ pub enum FormatRuntimeError {
 /// A format's transform CLI contribution and optional source and sink factories.
 #[derive(Clone)]
 pub struct FormatTransform {
-    cli: erased::CliContribution,
-    runtime: Arc<dyn erased::TransformRuntime>,
+    binder: Arc<dyn binding::BindTransform>,
 }
 
 impl FormatTransform {
@@ -201,7 +196,7 @@ impl FormatTransform {
         T: Args + FromArgMatches + Send + Sync + 'static,
     {
         FormatTransformBuilder {
-            cli: erased::CliContribution::for_args::<T>(),
+            args: binding::ArgsParser::for_args(),
             source: None,
             sink: None,
             settings: PhantomData,
@@ -210,7 +205,7 @@ impl FormatTransform {
 
     pub fn without_args() -> FormatTransformBuilder<()> {
         FormatTransformBuilder {
-            cli: erased::CliContribution::unit(),
+            args: binding::ArgsParser::unit(),
             source: None,
             sink: None,
             settings: PhantomData,
@@ -220,7 +215,7 @@ impl FormatTransform {
 
 /// Builds transform capabilities that share one concrete argument type.
 pub struct FormatTransformBuilder<T> {
-    cli: erased::CliContribution,
+    args: binding::ArgsParser<T>,
     source: Option<SourceFactory<T>>,
     sink: Option<SinkFactory<T>>,
     settings: PhantomData<fn() -> T>,
@@ -242,8 +237,11 @@ where
 
     pub fn build(self) -> FormatTransform {
         FormatTransform {
-            cli: self.cli,
-            runtime: Arc::new(erased::TypedTransform::new(self.source, self.sink)),
+            binder: Arc::new(binding::TransformDefinition::new(
+                self.args,
+                self.source,
+                self.sink,
+            )),
         }
     }
 }
@@ -251,8 +249,7 @@ where
 /// A format's inspection CLI contribution and typed callback.
 #[derive(Clone)]
 pub struct FormatInspection {
-    cli: erased::CliContribution,
-    runtime: Arc<dyn erased::InspectionRuntime>,
+    binder: Arc<dyn binding::BindInspection>,
 }
 
 impl FormatInspection {
@@ -261,20 +258,24 @@ impl FormatInspection {
         T: Args + FromArgMatches + Send + Sync + 'static,
     {
         Self {
-            cli: erased::CliContribution::for_args::<T>(),
-            runtime: Arc::new(erased::TypedInspection::new(inspector)),
+            binder: Arc::new(binding::InspectionDefinition::new(
+                binding::ArgsParser::for_args(),
+                inspector,
+            )),
         }
     }
 
     pub fn without_args(inspector: Inspector<()>) -> Self {
         Self {
-            cli: erased::CliContribution::unit(),
-            runtime: Arc::new(erased::TypedInspection::new(inspector)),
+            binder: Arc::new(binding::InspectionDefinition::new(
+                binding::ArgsParser::unit(),
+                inspector,
+            )),
         }
     }
 }
 
-/// Declares one format's names and independently optional runtime capabilities.
+/// Declares one format's names and independently optional capabilities.
 #[derive(Clone)]
 pub struct FormatRegistration {
     name: &'static str,
@@ -320,13 +321,13 @@ impl FormatRegistration {
     pub fn has_source(&self) -> bool {
         self.transform
             .as_ref()
-            .is_some_and(|transform| transform.runtime.has_source())
+            .is_some_and(|transform| transform.binder.has_source())
     }
 
     pub fn has_sink(&self) -> bool {
         self.transform
             .as_ref()
-            .is_some_and(|transform| transform.runtime.has_sink())
+            .is_some_and(|transform| transform.binder.has_sink())
     }
 
     pub fn has_inspector(&self) -> bool {
@@ -336,17 +337,17 @@ impl FormatRegistration {
     pub async fn identify(
         &self,
         location: &ResolvedLocation,
-    ) -> Result<Option<IdentifiedFormat>, FormatRuntimeError> {
+    ) -> Result<Option<IdentifiedFormat>, FormatInvocationError> {
         let identifier = self
             .identifier
-            .ok_or(FormatRuntimeError::CapabilityUnavailable {
+            .ok_or(FormatInvocationError::CapabilityUnavailable {
                 format: self.name,
                 capability: FormatCapability::Identification,
             })?;
         let identification =
             identifier(location)
                 .await
-                .map_err(|source| FormatRuntimeError::CallbackFailed {
+                .map_err(|source| FormatInvocationError::CallbackFailed {
                     format: self.name,
                     capability: FormatCapability::Identification,
                     source,
@@ -357,102 +358,52 @@ impl FormatRegistration {
         }))
     }
 
-    pub async fn create_source(
-        &self,
-        location: &ResolvedLocation,
-        settings: &FormatRuntimeSettings,
-    ) -> Result<Box<dyn DataSource>, FormatRuntimeError> {
-        let transform =
-            self.transform
-                .as_ref()
-                .ok_or(FormatRuntimeError::CapabilityUnavailable {
-                    format: self.name,
-                    capability: FormatCapability::Source,
-                })?;
-        if !transform.runtime.has_source() {
-            return Err(FormatRuntimeError::CapabilityUnavailable {
-                format: self.name,
-                capability: FormatCapability::Source,
-            });
-        }
-        let settings = settings
-            .settings
-            .get(&self.name.to_ascii_lowercase())
-            .ok_or(FormatRuntimeError::MissingSettings { format: self.name })?;
-        transform
-            .runtime
-            .create_source(self.name, location, settings)
-            .await
-    }
-
-    pub async fn create_sink_factory(
-        &self,
-        context: &SinkFactoryContext,
-        settings: &FormatRuntimeSettings,
-    ) -> Result<Box<dyn DataSinkFactory>, FormatRuntimeError> {
-        let transform =
-            self.transform
-                .as_ref()
-                .ok_or(FormatRuntimeError::CapabilityUnavailable {
-                    format: self.name,
-                    capability: FormatCapability::Sink,
-                })?;
-        if !transform.runtime.has_sink() {
-            return Err(FormatRuntimeError::CapabilityUnavailable {
-                format: self.name,
-                capability: FormatCapability::Sink,
-            });
-        }
-        let settings = settings
-            .settings
-            .get(&self.name.to_ascii_lowercase())
-            .ok_or(FormatRuntimeError::MissingSettings { format: self.name })?;
-        transform
-            .runtime
-            .create_sink_factory(self.name, context, settings)
-            .await
-    }
-
     pub fn augment_inspection_args(&self, command: Command) -> Command {
         match &self.inspection {
-            Some(inspection) => inspection.cli.augment(command),
+            Some(inspection) => inspection.binder.augment(command),
             None => command,
         }
     }
 
-    pub fn parse_inspection_cli(
+    pub fn bind_inspection_args(
         &self,
         matches: &ArgMatches,
-    ) -> Result<FormatInspectionSettings, clap::Error> {
-        let settings = match &self.inspection {
-            Some(inspection) => inspection.cli.parse(matches)?,
-            None => erased::Settings::unit(),
-        };
-        Ok(FormatInspectionSettings {
+    ) -> Result<ConfiguredInspection, clap::Error> {
+        let callbacks = self
+            .inspection
+            .as_ref()
+            .map(|inspection| inspection.binder.bind(matches))
+            .transpose()?;
+        Ok(ConfiguredInspection {
             format: self.name,
-            settings,
+            callbacks,
         })
+    }
+}
+
+/// One format's inspection callback bound to its parsed CLI arguments.
+pub struct ConfiguredInspection {
+    format: &'static str,
+    callbacks: Option<Arc<dyn binding::InvokeInspection>>,
+}
+
+impl ConfiguredInspection {
+    pub fn format(&self) -> &'static str {
+        self.format
     }
 
     pub async fn inspect(
         &self,
         location: &ResolvedLocation,
-        settings: &FormatInspectionSettings,
-    ) -> Result<InspectionOutput, FormatRuntimeError> {
-        let inspection =
-            self.inspection
+    ) -> Result<InspectionOutput, FormatInvocationError> {
+        let callbacks =
+            self.callbacks
                 .as_ref()
-                .ok_or(FormatRuntimeError::CapabilityUnavailable {
-                    format: self.name,
+                .ok_or(FormatInvocationError::CapabilityUnavailable {
+                    format: self.format,
                     capability: FormatCapability::Inspection,
                 })?;
-        if settings.format != self.name {
-            return Err(FormatRuntimeError::SettingsTypeMismatch { format: self.name });
-        }
-        inspection
-            .runtime
-            .inspect(self.name, location, &settings.settings)
-            .await
+        callbacks.inspect(self.format, location).await
     }
 }
 
@@ -565,7 +516,7 @@ impl FormatRegistry {
             }
 
             if let Some(transform) = &registration.transform {
-                for (key, argument) in transform.cli.argument_keys() {
+                for (key, argument) in transform.binder.argument_keys() {
                     if !cli_arguments.insert(key) {
                         return Err(FormatRegistryError::DuplicateCliArgument(argument));
                     }
@@ -613,36 +564,109 @@ impl FormatRegistry {
     pub fn augment_transform_args(&self, mut command: Command) -> Command {
         for registration in &self.registrations {
             if let Some(transform) = &registration.transform {
-                command = transform.cli.augment(command);
+                command = transform.binder.augment(command);
             }
         }
         command
     }
 
-    pub fn parse_transform_cli(
+    pub fn bind_transform_args(
         &self,
         matches: &ArgMatches,
-    ) -> Result<FormatRuntimeSettings, clap::Error> {
-        let mut settings = HashMap::new();
+    ) -> Result<ConfiguredFormats, clap::Error> {
+        let mut formats = Vec::with_capacity(self.registrations.len());
         for registration in &self.registrations {
-            if let Some(transform) = &registration.transform {
-                settings.insert(
-                    registration.name.to_ascii_lowercase(),
-                    transform.cli.parse(matches)?,
-                );
-            }
+            let callbacks = registration
+                .transform
+                .as_ref()
+                .map(|transform| transform.binder.bind(matches))
+                .transpose()?;
+            formats.push(ConfiguredFormat {
+                format: registration.name,
+                callbacks,
+            });
         }
-        Ok(FormatRuntimeSettings { settings })
+        Ok(ConfiguredFormats {
+            formats,
+            names: self.names.clone(),
+            extensions: self.extensions.clone(),
+        })
     }
 }
 
-/// Parsed transform settings keyed by canonical format name.
-pub struct FormatRuntimeSettings {
-    settings: HashMap<String, erased::Settings>,
+/// One format's source and sink callbacks bound to their shared CLI arguments.
+pub struct ConfiguredFormat {
+    format: &'static str,
+    callbacks: Option<Arc<dyn binding::InvokeTransform>>,
 }
 
-/// Parsed settings for one format's inspection CLI scope.
-pub struct FormatInspectionSettings {
-    format: &'static str,
-    settings: erased::Settings,
+impl ConfiguredFormat {
+    pub fn format(&self) -> &'static str {
+        self.format
+    }
+
+    pub fn has_source(&self) -> bool {
+        self.callbacks
+            .as_ref()
+            .is_some_and(|callbacks| callbacks.has_source())
+    }
+
+    pub fn has_sink(&self) -> bool {
+        self.callbacks
+            .as_ref()
+            .is_some_and(|callbacks| callbacks.has_sink())
+    }
+
+    pub async fn create_source(
+        &self,
+        location: &ResolvedLocation,
+    ) -> Result<Box<dyn DataSource>, FormatInvocationError> {
+        let callbacks =
+            self.callbacks
+                .as_ref()
+                .ok_or(FormatInvocationError::CapabilityUnavailable {
+                    format: self.format,
+                    capability: FormatCapability::Source,
+                })?;
+        callbacks.create_source(self.format, location).await
+    }
+
+    pub async fn create_sink_factory(
+        &self,
+        context: &SinkFactoryContext,
+    ) -> Result<Box<dyn DataSinkFactory>, FormatInvocationError> {
+        let callbacks =
+            self.callbacks
+                .as_ref()
+                .ok_or(FormatInvocationError::CapabilityUnavailable {
+                    format: self.format,
+                    capability: FormatCapability::Sink,
+                })?;
+        callbacks.create_sink_factory(self.format, context).await
+    }
+}
+
+/// CLI-bound source and sink callbacks for every registered format.
+pub struct ConfiguredFormats {
+    formats: Vec<ConfiguredFormat>,
+    names: HashMap<String, usize>,
+    extensions: HashMap<String, usize>,
+}
+
+impl ConfiguredFormats {
+    pub fn formats(&self) -> impl Iterator<Item = &ConfiguredFormat> {
+        self.formats.iter()
+    }
+
+    pub fn get(&self, name_or_alias: &str) -> Option<&ConfiguredFormat> {
+        self.names
+            .get(&name_or_alias.to_ascii_lowercase())
+            .map(|index| &self.formats[*index])
+    }
+
+    pub fn by_extension(&self, extension: &str) -> Option<&ConfiguredFormat> {
+        self.extensions
+            .get(&extension.trim_start_matches('.').to_ascii_lowercase())
+            .map(|index| &self.formats[*index])
+    }
 }
