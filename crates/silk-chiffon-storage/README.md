@@ -90,7 +90,7 @@ Bare input is a filesystem path, not URL source text. It may contain spaces and 
 
 Input with a scheme is URL source text. Its path must percent-encode characters that URL syntax does not allow literally. For example, a URL uses `data%20set.parquet` rather than `data set.parquet`, while a bare path accepts either filename as written.
 
-Local file URLs must use lowercase `file:` followed by exactly three slashes. Other storage URLs must use a lowercase scheme followed by `://`. Alternate file spellings such as `file:/data`, `file://localhost/data`, `FILE:///data`, and `file:////data` are rejected rather than normalized. URL input preserves query strings for the provider or downstream consumer. It rejects fragments, embedded user information, malformed percent encoding, and unencoded URL-path characters.
+Local file URLs must use lowercase `file:` followed by exactly three slashes. Other storage URLs must use a lowercase scheme followed by `://`. Alternate file spellings such as `file:/data`, `file://localhost/data`, `FILE:///data`, and `file:////data` are rejected rather than normalized. URL input preserves query strings for the provider or downstream consumer. It rejects fragments, embedded user information, malformed percent encoding, and paths that require implicit encoding or normalization.
 
 A query is separate from the object path. `s3://bucket/data?version=1` resolves the path `data` and preserves `version=1` on the URL. A provider may interpret, pass through, ignore, or reject that query. Bare paths remain filesystem paths, so `data?version=1` names a file containing `?`.
 

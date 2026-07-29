@@ -104,16 +104,22 @@ fn canonical_file_urls_map_absolute_paths_to_store_keys() -> Result<(), Box<dyn 
 }
 
 #[test]
-fn url_paths_require_percent_encoding() {
+fn noncanonical_url_paths_report_their_source() {
     for input in [
         "file:///tmp/data set.parquet",
         "file:///tmp/résumé.parquet",
+        "file:///tmp/../object",
+        "file:///tmp/./object",
+        "file:///tmp/%2E%2E/object",
         "s3://bucket/data set.parquet",
         "s3://bucket/résumé.parquet",
+        "s3://bucket/a/../object",
+        "s3://bucket/a/./object",
+        "s3://bucket/a/%2E%2E/object",
     ] {
         assert!(matches!(
             Location::parse(input, Path::new("/work")),
-            Err(StorageError::UnencodedUrlPath(rejected)) if rejected == input
+            Err(StorageError::NonCanonicalUrlPath(rejected)) if rejected == input
         ));
     }
 }
@@ -189,13 +195,10 @@ fn storage_urls_preserve_queries() {
 }
 
 #[test]
-fn storage_urls_reject_fragments_user_information_and_noncanonical_paths() {
+fn storage_urls_reject_fragments_user_information_and_invalid_percent_encoding() {
     for input in [
         "s3://bucket/object#fragment",
         "s3://user:password@bucket/object",
-        "s3://bucket/a/../object",
-        "s3://bucket/a/./object",
-        "s3://bucket/a/%2E%2E/object",
         "s3://bucket/%ZZ",
     ] {
         assert!(
@@ -236,9 +239,6 @@ fn strict_parser_rejects_malformed_or_ambiguous_locations() {
         "",
         "relative:object",
         "file:///tmp/object#fragment",
-        "file:///tmp/../object",
-        "file:///tmp/./object",
-        "file:///tmp/%2E%2E/object",
         "file:///tmp/%ZZ",
     ] {
         assert!(

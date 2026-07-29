@@ -65,8 +65,8 @@ pub enum StorageError {
     UserInfoNotSupported(String),
     #[error("invalid percent encoding in storage URL: {0}")]
     InvalidPercentEncoding(String),
-    #[error("storage URL path contains a character that must be percent-encoded: {0}")]
-    UnencodedUrlPath(String),
+    #[error("storage URL path is not canonical: {0}")]
+    NonCanonicalUrlPath(String),
     #[error("filesystem path cannot be represented as a local file URL: {0}")]
     InvalidFilePath(PathBuf),
     #[error(transparent)]
@@ -163,7 +163,7 @@ fn parse_storage_url(input: &str, scheme: &str) -> Result<Url, StorageError> {
     if !url.username().is_empty() || url.password().is_some() {
         return Err(StorageError::UserInfoNotSupported(input.to_owned()));
     }
-    validate_url_path_encoding(input, raw_path, &url)?;
+    validate_canonical_url_path(input, raw_path, &url)?;
     Ok(url)
 }
 
@@ -210,16 +210,16 @@ fn parse_file_url(input: &str, raw_path: &str) -> Result<Url, StorageError> {
         input: input.to_owned(),
         source,
     })?;
-    validate_url_path_encoding(input, raw_path, &url)?;
+    validate_canonical_url_path(input, raw_path, &url)?;
     url.to_file_path()
         .map_err(|()| StorageError::InvalidFilePath(PathBuf::from(input)))?;
 
     Ok(url)
 }
 
-fn validate_url_path_encoding(input: &str, raw_path: &str, url: &Url) -> Result<(), StorageError> {
+fn validate_canonical_url_path(input: &str, raw_path: &str, url: &Url) -> Result<(), StorageError> {
     if url.path().strip_prefix('/').unwrap_or(url.path()) != raw_path {
-        return Err(StorageError::UnencodedUrlPath(input.to_owned()));
+        return Err(StorageError::NonCanonicalUrlPath(input.to_owned()));
     }
     Ok(())
 }
