@@ -8,17 +8,14 @@ pub fn registration() -> StorageProviderRegistration {
     {
         StorageProviderRegistration::without_args("local")
             .schemes(["file"])
-            .input(resolve)
-            .output(resolve)
-            .build()
+            .enabled(crate::StorageAccess::ReadWrite, resolve)
     }
 
     #[cfg(not(feature = "local"))]
     {
         StorageProviderRegistration::without_args("local")
             .schemes(["file"])
-            .feature_disabled_diagnostic("rebuild silk-chiffon-storage with the local feature")
-            .build()
+            .disabled("rebuild silk-chiffon-storage with the local feature")
     }
 }
 
@@ -26,18 +23,14 @@ pub fn registration() -> StorageProviderRegistration {
 fn resolve(
     location: &crate::Location,
     _settings: &(),
-    _retry: Option<&crate::RetryConfiguration>,
-) -> Result<crate::ProviderResolution, crate::StorageError> {
+    _retry: Option<&crate::RetryConfig>,
+) -> anyhow::Result<crate::ProviderResolution> {
     use std::sync::Arc;
 
     use object_store::{ObjectStore, local::LocalFileSystem, path::Path as ObjectPath};
 
     let path = ObjectPath::from_url_path(location.url().path())?;
-    let mut store_url = location.url().clone();
-    store_url.set_path("/");
-    Ok(crate::ProviderResolution::from_factory(
-        store_url,
-        path,
-        || Ok(Arc::new(LocalFileSystem::new()) as Arc<dyn ObjectStore>),
-    ))
+    Ok(crate::ProviderResolution::from_factory(path, || {
+        Ok(Arc::new(LocalFileSystem::new()) as Arc<dyn ObjectStore>)
+    }))
 }

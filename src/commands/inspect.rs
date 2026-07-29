@@ -129,7 +129,7 @@ fn run_vortex(args: &InspectVortexArgs) -> Result<()> {
 fn resolve_local_path(input: &Utf8Path) -> Result<Utf8PathBuf> {
     let working_directory = std::env::current_dir()?;
     let location = Location::parse(input.as_str(), &working_directory)?;
-    let resolved = StorageResolver::new()?.resolve_input(&location)?;
+    let resolved = StorageResolver::local()?.resolve_input(&location)?;
     Utf8PathBuf::from_path_buf(resolved.local_path()?)
         .map_err(|path: PathBuf| anyhow!("Local path is not valid UTF-8: {}", path.display()))
 }

@@ -8,7 +8,7 @@ use tempfile::TempDir;
 fn pipeline_registers_the_resolved_store_with_datafusion() {
     let working_directory = TempDir::new().unwrap();
     let location = Location::parse("data.parquet", working_directory.path()).unwrap();
-    let resolved = StorageResolver::new()
+    let resolved = StorageResolver::local()
         .unwrap()
         .resolve_input(&location)
         .unwrap();

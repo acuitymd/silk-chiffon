@@ -182,7 +182,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         .map(|(spec, pool_size)| spec.resolve(pool_size))
         .transpose()?;
 
-    let storage_resolver = StorageResolver::new()?;
+    let storage_resolver = StorageResolver::local()?;
     let working_directory = std::env::current_dir()?;
 
     let mut pipeline = Pipeline::new()

@@ -1,63 +1,46 @@
 //! Typed storage-provider registration and command-scoped resolution.
 //!
-//! Each registration binds one concrete Clap argument type to its callbacks. The registry can therefore hold heterogeneous providers without separating settings from the callback that understands them.
+//! Each registration binds one concrete Clap argument type to its resolver. The registry can hold heterogeneous providers without separating settings from the resolver that understands them.
 
 mod binding;
 
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     fmt,
     marker::PhantomData,
-    path::Path as FilePath,
     sync::{Arc, Mutex},
 };
 
 use clap::{ArgMatches, Args, Command, FromArgMatches};
-use object_store::{ObjectStore, path::Path as ObjectPath};
+use object_store::{ObjectStore, RetryConfig, path::Path as ObjectPath};
 use thiserror::Error;
 use url::Url;
 
-use crate::{
-    Location, ResolvedLocation, RetryArgs, RetryConfiguration, RetryConfigurationError,
-    StorageError, StoreCacheKey,
-};
+use crate::{Location, ResolvedLocation, RetryArgs, RetryConfigurationError, StorageError};
 
 /// Resolves one provider location using settings registered as `T`.
 pub type ProviderResolver<T> = fn(
     location: &Location,
     settings: &T,
-    retry: Option<&RetryConfiguration>,
-) -> Result<ProviderResolution, StorageError>;
+    retry: Option<&RetryConfig>,
+) -> anyhow::Result<ProviderResolution>;
 
-/// A provider's object path, lazy client factory, and cache configuration.
-///
-/// Every setting that can change client behavior belongs in the cache configuration.
+/// A provider's object path and lazy client factory.
 pub struct ProviderResolution {
-    store_url: Url,
-    store_factory: Box<dyn FnOnce() -> Result<Arc<dyn ObjectStore>, StorageError> + Send>,
+    store_factory: Box<dyn FnOnce() -> anyhow::Result<Arc<dyn ObjectStore>> + Send>,
     path: ObjectPath,
-    configuration: BTreeMap<String, String>,
 }
 
 impl ProviderResolution {
     /// Creates a resolution whose client is constructed only after a cache miss.
     pub fn from_factory(
-        store_url: Url,
         path: ObjectPath,
-        factory: impl FnOnce() -> Result<Arc<dyn ObjectStore>, StorageError> + Send + 'static,
+        factory: impl FnOnce() -> anyhow::Result<Arc<dyn ObjectStore>> + Send + 'static,
     ) -> Self {
         Self {
-            store_url,
             store_factory: Box::new(factory),
             path,
-            configuration: BTreeMap::new(),
         }
-    }
-
-    /// Adds one effective provider setting to the store-cache identity.
-    pub fn with_configuration(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.configuration.insert(key.into(), value.into());
-        self
     }
 }
 
@@ -76,14 +59,41 @@ impl fmt::Display for StorageDirection {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StorageAccess {
+    ReadOnly,
+    WriteOnly,
+    ReadWrite,
+}
+
+impl StorageAccess {
+    const fn supports(self, direction: StorageDirection) -> bool {
+        matches!(
+            (self, direction),
+            (Self::ReadOnly | Self::ReadWrite, StorageDirection::Input)
+                | (Self::WriteOnly | Self::ReadWrite, StorageDirection::Output)
+        )
+    }
+}
+
 #[derive(Clone)]
-/// One provider's identity, argument contribution, and typed resolver callbacks.
+enum ProviderRegistration {
+    Enabled {
+        access: StorageAccess,
+        binder: Arc<dyn binding::BindProvider>,
+    },
+    Disabled {
+        diagnostic: &'static str,
+        arguments: Arc<dyn binding::RegisterProviderArguments>,
+    },
+}
+
+#[derive(Clone)]
+/// One provider's identity, argument contribution, access, and typed resolver.
 pub struct StorageProviderRegistration {
     name: &'static str,
-    aliases: Vec<&'static str>,
     schemes: Vec<&'static str>,
-    binder: Arc<dyn binding::BindProvider>,
-    feature_disabled_diagnostic: Option<&'static str>,
+    provider: ProviderRegistration,
     uses_shared_retries: bool,
 }
 
@@ -94,12 +104,8 @@ impl StorageProviderRegistration {
     {
         StorageProviderRegistrationBuilder {
             name,
-            aliases: Vec::new(),
             schemes: Vec::new(),
             args: binding::ArgsParser::for_args(),
-            input: None,
-            output: None,
-            feature_disabled_diagnostic: None,
             uses_shared_retries: false,
             settings: PhantomData,
         }
@@ -108,12 +114,8 @@ impl StorageProviderRegistration {
     pub fn without_args(name: &'static str) -> StorageProviderRegistrationBuilder<()> {
         StorageProviderRegistrationBuilder {
             name,
-            aliases: Vec::new(),
             schemes: Vec::new(),
             args: binding::ArgsParser::unit(),
-            input: None,
-            output: None,
-            feature_disabled_diagnostic: None,
             uses_shared_retries: false,
             settings: PhantomData,
         }
@@ -123,35 +125,41 @@ impl StorageProviderRegistration {
         self.name
     }
 
-    pub fn aliases(&self) -> &[&'static str] {
-        &self.aliases
-    }
-
     pub fn schemes(&self) -> &[&'static str] {
         &self.schemes
     }
 
     pub fn has_input(&self) -> bool {
-        self.binder.has_input()
+        matches!(&self.provider, ProviderRegistration::Enabled { access, .. } if access.supports(StorageDirection::Input))
     }
 
     pub fn has_output(&self) -> bool {
-        self.binder.has_output()
+        matches!(&self.provider, ProviderRegistration::Enabled { access, .. } if access.supports(StorageDirection::Output))
     }
 
     pub const fn uses_shared_retries(&self) -> bool {
         self.uses_shared_retries
     }
+
+    fn augment_args(&self, command: Command) -> Command {
+        match &self.provider {
+            ProviderRegistration::Enabled { binder, .. } => binder.augment(command),
+            ProviderRegistration::Disabled { arguments, .. } => arguments.augment(command),
+        }
+    }
+
+    fn argument_keys(&self) -> Vec<(String, String)> {
+        match &self.provider {
+            ProviderRegistration::Enabled { binder, .. } => binder.argument_keys(),
+            ProviderRegistration::Disabled { arguments, .. } => arguments.argument_keys(),
+        }
+    }
 }
 
 pub struct StorageProviderRegistrationBuilder<T> {
     name: &'static str,
-    aliases: Vec<&'static str>,
     schemes: Vec<&'static str>,
     args: binding::ArgsParser<T>,
-    input: Option<ProviderResolver<T>>,
-    output: Option<ProviderResolver<T>>,
-    feature_disabled_diagnostic: Option<&'static str>,
     uses_shared_retries: bool,
     settings: PhantomData<fn() -> T>,
 }
@@ -160,49 +168,41 @@ impl<T> StorageProviderRegistrationBuilder<T>
 where
     T: Send + Sync + 'static,
 {
-    pub fn aliases(mut self, aliases: impl IntoIterator<Item = &'static str>) -> Self {
-        self.aliases.extend(aliases);
-        self
-    }
-
     pub fn schemes(mut self, schemes: impl IntoIterator<Item = &'static str>) -> Self {
         self.schemes.extend(schemes);
         self
     }
 
-    pub fn input(mut self, resolver: ProviderResolver<T>) -> Self {
-        self.input = Some(resolver);
-        self
-    }
-
-    pub fn output(mut self, resolver: ProviderResolver<T>) -> Self {
-        self.output = Some(resolver);
-        self
-    }
-
-    /// Supplies the error guidance used when this registration has no callbacks.
-    pub fn feature_disabled_diagnostic(mut self, diagnostic: &'static str) -> Self {
-        self.feature_disabled_diagnostic = Some(diagnostic);
-        self
-    }
-
-    /// Passes the registry's shared retry configuration to this provider's callbacks.
+    /// Passes the registry's shared retry configuration to this provider's resolver.
     pub fn shared_retries(mut self) -> Self {
         self.uses_shared_retries = true;
         self
     }
 
-    pub fn build(self) -> StorageProviderRegistration {
+    pub fn enabled(
+        self,
+        access: StorageAccess,
+        resolver: ProviderResolver<T>,
+    ) -> StorageProviderRegistration {
         StorageProviderRegistration {
             name: self.name,
-            aliases: self.aliases,
             schemes: self.schemes,
-            binder: Arc::new(binding::ProviderDefinition::new(
-                self.args,
-                self.input,
-                self.output,
-            )),
-            feature_disabled_diagnostic: self.feature_disabled_diagnostic,
+            provider: ProviderRegistration::Enabled {
+                access,
+                binder: Arc::new(binding::ProviderDefinition::new(self.args, resolver)),
+            },
+            uses_shared_retries: self.uses_shared_retries,
+        }
+    }
+
+    pub fn disabled(self, diagnostic: &'static str) -> StorageProviderRegistration {
+        StorageProviderRegistration {
+            name: self.name,
+            schemes: self.schemes,
+            provider: ProviderRegistration::Disabled {
+                diagnostic,
+                arguments: Arc::new(binding::ProviderArguments::new(self.args)),
+            },
             uses_shared_retries: self.uses_shared_retries,
         }
     }
@@ -212,8 +212,6 @@ where
 pub enum StorageRegistryError {
     #[error("duplicate storage provider name: {0}")]
     DuplicateName(String),
-    #[error("duplicate storage provider alias: {0}")]
-    DuplicateAlias(String),
     #[error("duplicate storage scheme: {0}")]
     DuplicateScheme(String),
     #[error("duplicate storage CLI argument: {0}")]
@@ -238,7 +236,6 @@ impl StorageRegistryBuilder {
 /// Provider definitions, scheme lookup, and CLI composition for one executable.
 pub struct StorageRegistry {
     registrations: Vec<StorageProviderRegistration>,
-    names: HashMap<String, usize>,
     schemes: HashMap<String, usize>,
     uses_shared_retries: bool,
 }
@@ -272,13 +269,6 @@ impl StorageRegistry {
                 return Err(StorageRegistryError::DuplicateName(name));
             }
 
-            for alias in &registration.aliases {
-                let alias = alias.to_ascii_lowercase();
-                if names.insert(alias.clone(), index).is_some() {
-                    return Err(StorageRegistryError::DuplicateAlias(alias));
-                }
-            }
-
             for scheme in &registration.schemes {
                 let scheme = scheme.to_ascii_lowercase();
                 if schemes.insert(scheme.clone(), index).is_some() {
@@ -286,7 +276,7 @@ impl StorageRegistry {
                 }
             }
 
-            for (key, argument) in registration.binder.argument_keys() {
+            for (key, argument) in registration.argument_keys() {
                 if !cli_arguments.insert(key) {
                     return Err(StorageRegistryError::DuplicateCliArgument(argument));
                 }
@@ -295,7 +285,6 @@ impl StorageRegistry {
 
         Ok(Self {
             registrations,
-            names,
             schemes,
             uses_shared_retries,
         })
@@ -305,27 +294,10 @@ impl StorageRegistry {
         self.registrations.iter()
     }
 
-    pub fn get(&self, name_or_alias: &str) -> Option<&StorageProviderRegistration> {
-        self.names
-            .get(&name_or_alias.to_ascii_lowercase())
-            .map(|index| &self.registrations[*index])
-    }
-
     pub fn by_scheme(&self, scheme: &str) -> Option<&StorageProviderRegistration> {
         self.schemes
             .get(&scheme.to_ascii_lowercase())
             .map(|index| &self.registrations[*index])
-    }
-
-    /// Parses a bare local path or URL whose scheme belongs to this registry.
-    pub fn parse_location(
-        &self,
-        input: impl AsRef<str>,
-        working_directory: impl AsRef<FilePath>,
-    ) -> Result<Location, StorageError> {
-        Location::parse_registered(input, working_directory, |scheme| {
-            self.by_scheme(scheme).is_some()
-        })
     }
 
     /// Adds shared retry arguments and every provider's ordinary Clap arguments.
@@ -334,7 +306,7 @@ impl StorageRegistry {
             command = RetryArgs::augment_args(command);
         }
         for registration in &self.registrations {
-            command = registration.binder.augment(command);
+            command = registration.augment_args(command);
         }
         command
     }
@@ -345,20 +317,24 @@ impl StorageRegistry {
         matches: &ArgMatches,
     ) -> Result<StorageResolver, StorageResolverBuildError> {
         let retry = if self.uses_shared_retries {
-            Some(RetryConfiguration::try_from(RetryArgs::from_arg_matches(
-                matches,
-            )?)?)
+            Some(RetryArgs::from_arg_matches(matches)?.into_retry_config()?)
         } else {
             None
         };
 
         let mut providers = Vec::with_capacity(self.registrations.len());
         for registration in &self.registrations {
-            providers.push(BoundProvider {
-                name: registration.name,
-                callbacks: registration.binder.bind(matches)?,
-                feature_disabled_diagnostic: registration.feature_disabled_diagnostic,
-                uses_shared_retries: registration.uses_shared_retries,
+            providers.push(match &registration.provider {
+                ProviderRegistration::Enabled { access, binder } => BoundProvider::Enabled {
+                    name: registration.name,
+                    access: *access,
+                    resolver: binder.bind(matches)?,
+                    uses_shared_retries: registration.uses_shared_retries,
+                },
+                ProviderRegistration::Disabled { diagnostic, .. } => BoundProvider::Disabled {
+                    name: registration.name,
+                    diagnostic,
+                },
             });
         }
 
@@ -371,25 +347,31 @@ impl StorageRegistry {
     }
 }
 
-struct BoundProvider {
-    name: &'static str,
-    callbacks: Arc<dyn binding::ResolveProvider>,
-    feature_disabled_diagnostic: Option<&'static str>,
-    uses_shared_retries: bool,
+enum BoundProvider {
+    Enabled {
+        name: &'static str,
+        access: StorageAccess,
+        resolver: Arc<dyn binding::ResolveProvider>,
+        uses_shared_retries: bool,
+    },
+    Disabled {
+        name: &'static str,
+        diagnostic: &'static str,
+    },
 }
 
 #[derive(Clone)]
-/// Provider callbacks, retry settings, and cached clients bound to one command.
+/// Provider resolvers, retry settings, and cached clients bound to one command.
 pub struct StorageResolver {
     providers: Arc<Vec<BoundProvider>>,
     schemes: Arc<HashMap<String, usize>>,
-    retry: Option<RetryConfiguration>,
-    stores: Arc<Mutex<HashMap<StoreCacheKey, Arc<dyn ObjectStore>>>>,
+    retry: Option<RetryConfig>,
+    stores: Arc<Mutex<HashMap<Url, Arc<dyn ObjectStore>>>>,
 }
 
 impl StorageResolver {
     /// Builds a resolver containing the default local provider registration.
-    pub fn new() -> Result<Self, StorageResolverBuildError> {
+    pub fn local() -> Result<Self, StorageResolverBuildError> {
         let registry = StorageRegistry::builder()
             .register(crate::local::registration())
             .build()?;
@@ -398,7 +380,7 @@ impl StorageResolver {
         registry.bind_args(&matches)
     }
 
-    pub fn retry_configuration(&self) -> Option<&RetryConfiguration> {
+    pub fn retry_configuration(&self) -> Option<&RetryConfig> {
         self.retry.as_ref()
     }
 
@@ -422,48 +404,57 @@ impl StorageResolver {
             .map(|index| &self.providers[*index])
             .ok_or_else(|| StorageError::UnsupportedScheme(scheme.to_owned()))?;
 
-        let has_direction = match direction {
-            StorageDirection::Input => provider.callbacks.has_input(),
-            StorageDirection::Output => provider.callbacks.has_output(),
+        let (provider_name, access, resolver, uses_shared_retries) = match provider {
+            BoundProvider::Enabled {
+                name,
+                access,
+                resolver,
+                uses_shared_retries,
+            } => (*name, *access, resolver, *uses_shared_retries),
+            BoundProvider::Disabled { name, diagnostic } => {
+                return Err(StorageError::ProviderDisabled {
+                    provider: name,
+                    diagnostic,
+                });
+            }
         };
-        let provider_enabled = provider.callbacks.has_input() || provider.callbacks.has_output();
-        if !has_direction
-            && !provider_enabled
-            && let Some(diagnostic) = provider.feature_disabled_diagnostic
-        {
-            return Err(StorageError::ProviderDisabled {
-                provider: provider.name,
-                diagnostic,
+        if !access.supports(direction) {
+            return Err(StorageError::DirectionUnsupported {
+                provider: provider_name,
+                direction,
             });
         }
 
-        let retry = if provider.uses_shared_retries {
+        let retry = if uses_shared_retries {
             self.retry.as_ref()
         } else {
             None
         };
-        let mut resolution =
-            provider
-                .callbacks
-                .resolve(provider.name, direction, location, retry)?;
-        if let Some(retry) = retry {
-            retry.append_cache_configuration(&mut resolution.configuration);
-        }
+        let resolution = resolver.resolve(location, retry).map_err(|source| {
+            StorageError::ProviderResolution {
+                provider: provider_name,
+                direction,
+                source,
+            }
+        })?;
 
-        let cache_key = StoreCacheKey::new(
-            location.url().scheme(),
-            authority(location.url()),
-            resolution.configuration,
-        );
+        let store_url = store_url(location.url());
         let mut stores = self
             .stores
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // Construction stays under the cache lock so concurrent resolutions create one client.
-        let store = match stores.entry(cache_key.clone()) {
+        // Holding the lock through construction prevents duplicate clients for one origin.
+        let store = match stores.entry(store_url.clone()) {
             std::collections::hash_map::Entry::Occupied(entry) => Arc::clone(entry.get()),
             std::collections::hash_map::Entry::Vacant(entry) => {
-                Arc::clone(entry.insert((resolution.store_factory)()?))
+                let store = (resolution.store_factory)().map_err(|source| {
+                    StorageError::ProviderResolution {
+                        provider: provider_name,
+                        direction,
+                        source,
+                    }
+                })?;
+                Arc::clone(entry.insert(store))
             }
         };
 
@@ -471,8 +462,7 @@ impl StorageResolver {
             url: location.url().clone(),
             store,
             path: resolution.path,
-            store_url: resolution.store_url,
-            cache_key,
+            store_url,
         })
     }
 }
@@ -506,10 +496,10 @@ where
     keys
 }
 
-fn authority(url: &Url) -> String {
-    match (url.host_str(), url.port()) {
-        (Some(host), Some(port)) => format!("{host}:{port}"),
-        (Some(host), None) => host.to_owned(),
-        (None, _) => String::new(),
-    }
+fn store_url(url: &Url) -> Url {
+    let mut store_url = url.clone();
+    store_url.set_path("/");
+    store_url.set_query(None);
+    store_url.set_fragment(None);
+    store_url
 }

@@ -1,6 +1,7 @@
-use std::{collections::BTreeMap, time::Duration};
+use std::time::Duration;
 
 use clap::Args;
+use object_store::{BackoffConfig, RetryConfig};
 use thiserror::Error;
 
 #[derive(Args, Clone, Debug)]
@@ -35,100 +36,54 @@ pub struct RetryArgs {
     backoff_base: f64,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-/// Validated retry settings passed to each participating provider callback.
-pub struct RetryConfiguration {
-    max_retries: usize,
-    retry_timeout: Duration,
-    initial_backoff: Duration,
-    max_backoff: Duration,
-    backoff_base: f64,
-}
-
-impl RetryConfiguration {
-    pub const fn max_retries(&self) -> usize {
-        self.max_retries
-    }
-
-    pub const fn retry_timeout(&self) -> Duration {
-        self.retry_timeout
-    }
-
-    pub const fn initial_backoff(&self) -> Duration {
-        self.initial_backoff
-    }
-
-    pub const fn max_backoff(&self) -> Duration {
-        self.max_backoff
-    }
-
-    pub const fn backoff_base(&self) -> f64 {
-        self.backoff_base
-    }
-
-    pub(crate) fn append_cache_configuration(&self, configuration: &mut BTreeMap<String, String>) {
-        configuration.insert("retry.max-retries".to_owned(), self.max_retries.to_string());
-        configuration.insert(
-            "retry.timeout-nanos".to_owned(),
-            self.retry_timeout.as_nanos().to_string(),
-        );
-        configuration.insert(
-            "retry.initial-backoff-nanos".to_owned(),
-            self.initial_backoff.as_nanos().to_string(),
-        );
-        configuration.insert(
-            "retry.max-backoff-nanos".to_owned(),
-            self.max_backoff.as_nanos().to_string(),
-        );
-        configuration.insert(
-            "retry.backoff-base-bits".to_owned(),
-            self.backoff_base.to_bits().to_string(),
-        );
-    }
-}
-
-impl TryFrom<RetryArgs> for RetryConfiguration {
-    type Error = RetryConfigurationError;
-
-    fn try_from(args: RetryArgs) -> Result<Self, Self::Error> {
-        let configuration = Self {
-            max_retries: args.max_retries,
-            retry_timeout: args.retry_timeout,
-            initial_backoff: args.initial_backoff,
-            max_backoff: args.max_backoff,
-            backoff_base: args.backoff_base,
-        };
-
-        if configuration.max_retries == 0 {
-            return Ok(configuration);
+impl RetryArgs {
+    pub fn into_retry_config(self) -> Result<RetryConfig, RetryConfigurationError> {
+        if self.max_retries == 0 {
+            return Ok(RetryConfig {
+                max_retries: self.max_retries,
+                retry_timeout: self.retry_timeout,
+                backoff: BackoffConfig {
+                    init_backoff: self.initial_backoff,
+                    max_backoff: self.max_backoff,
+                    base: self.backoff_base,
+                },
+            });
         }
-        if configuration.retry_timeout.is_zero() {
+        if self.retry_timeout.is_zero() {
             return Err(RetryConfigurationError::ZeroRetryTimeout);
         }
-        if configuration.initial_backoff.is_zero() {
+        if self.initial_backoff.is_zero() {
             return Err(RetryConfigurationError::ZeroInitialBackoff);
         }
-        if configuration.max_backoff.is_zero() {
+        if self.max_backoff.is_zero() {
             return Err(RetryConfigurationError::ZeroMaximumBackoff);
         }
-        if !configuration.backoff_base.is_finite() {
+        if !self.backoff_base.is_finite() {
             return Err(RetryConfigurationError::NonFiniteBackoffBase(
-                configuration.backoff_base,
+                self.backoff_base,
             ));
         }
-        if configuration.backoff_base < 1.0 {
-            return Err(RetryConfigurationError::BackoffBaseBelowOne(
-                configuration.backoff_base,
+        if self.backoff_base <= 1.0 {
+            return Err(RetryConfigurationError::BackoffBaseNotGreaterThanOne(
+                self.backoff_base,
             ));
         }
-        if configuration.initial_backoff > configuration.max_backoff {
+        if self.initial_backoff > self.max_backoff {
             return Err(RetryConfigurationError::InitialBackoffExceedsMaximum {
-                initial: configuration.initial_backoff,
-                maximum: configuration.max_backoff,
+                initial: self.initial_backoff,
+                maximum: self.max_backoff,
             });
         }
 
-        Ok(configuration)
+        Ok(RetryConfig {
+            max_retries: self.max_retries,
+            retry_timeout: self.retry_timeout,
+            backoff: BackoffConfig {
+                init_backoff: self.initial_backoff,
+                max_backoff: self.max_backoff,
+                base: self.backoff_base,
+            },
+        })
     }
 }
 
@@ -142,8 +97,8 @@ pub enum RetryConfigurationError {
     ZeroMaximumBackoff,
     #[error("storage retry backoff base must be finite: {0}")]
     NonFiniteBackoffBase(f64),
-    #[error("storage retry backoff base must be at least 1.0: {0}")]
-    BackoffBaseBelowOne(f64),
+    #[error("storage retry backoff base must be greater than 1.0: {0}")]
+    BackoffBaseNotGreaterThanOne(f64),
     #[error("storage retry initial backoff {initial:?} exceeds maximum backoff {maximum:?}")]
     InitialBackoffExceedsMaximum {
         initial: Duration,

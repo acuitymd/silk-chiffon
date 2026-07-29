@@ -297,7 +297,7 @@ fn parse_transform(registry: &FormatRegistry, arguments: &[&str]) -> usize {
 
 fn resolved_location(path: &str) -> ResolvedLocation {
     let location = Location::parse(path, std::env::current_dir().unwrap()).unwrap();
-    StorageResolver::new()
+    StorageResolver::local()
         .unwrap()
         .resolve_input(&location)
         .unwrap()

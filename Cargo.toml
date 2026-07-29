@@ -21,7 +21,6 @@ arrow = { version = "^58.4.0", features = ["default"] }
 async-trait = "^0.1.91"
 clap = { version = "^4.6.4", features = ["default", "derive"] }
 datafusion = { version = "^54.1.0", default-features = false }
-datafusion-execution = { version = "^54.1.0", default-features = false }
 futures = "^0.3.33"
 humantime = "^2.4.0"
 object_store = { version = "^0.13.2", default-features = false }

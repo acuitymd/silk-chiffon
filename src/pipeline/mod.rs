@@ -325,7 +325,9 @@ impl Pipeline {
 
         let context = SessionContext::new_with_config_rt(cfg, std::sync::Arc::new(runtime));
         for location in &self.storage_locations {
-            location.register_with_datafusion(context.runtime_env().as_ref());
+            context
+                .runtime_env()
+                .register_object_store(location.store_url(), Arc::clone(&location.store));
         }
 
         Ok(context)

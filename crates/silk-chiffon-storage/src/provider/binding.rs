@@ -2,8 +2,10 @@ use std::sync::Arc;
 
 use clap::{ArgMatches, Args, Command, FromArgMatches};
 
-use super::{ProviderResolution, ProviderResolver, StorageDirection};
-use crate::{Location, RetryConfiguration, StorageError};
+use object_store::RetryConfig;
+
+use super::{ProviderResolution, ProviderResolver};
+use crate::Location;
 
 #[derive(Clone, Copy)]
 pub(super) struct ArgsParser<T> {
@@ -56,64 +58,39 @@ impl ArgsParser<()> {
     }
 }
 
-pub(super) trait BindProvider: Send + Sync {
-    fn has_input(&self) -> bool;
-
-    fn has_output(&self) -> bool;
-
+pub(super) trait RegisterProviderArguments: Send + Sync {
     fn augment(&self, command: Command) -> Command;
 
     fn argument_keys(&self) -> Vec<(String, String)>;
+}
 
+pub(super) trait BindProvider: RegisterProviderArguments {
     fn bind(&self, matches: &ArgMatches) -> Result<Arc<dyn ResolveProvider>, clap::Error>;
 }
 
 pub(super) trait ResolveProvider: Send + Sync {
-    fn has_input(&self) -> bool;
-
-    fn has_output(&self) -> bool;
-
     fn resolve(
         &self,
-        provider: &'static str,
-        direction: StorageDirection,
         location: &Location,
-        retry: Option<&RetryConfiguration>,
-    ) -> Result<ProviderResolution, StorageError>;
+        retry: Option<&RetryConfig>,
+    ) -> anyhow::Result<ProviderResolution>;
 }
 
 pub(super) struct ProviderDefinition<T> {
     args: ArgsParser<T>,
-    input: Option<ProviderResolver<T>>,
-    output: Option<ProviderResolver<T>>,
+    resolver: ProviderResolver<T>,
 }
 
 impl<T> ProviderDefinition<T> {
-    pub(super) fn new(
-        args: ArgsParser<T>,
-        input: Option<ProviderResolver<T>>,
-        output: Option<ProviderResolver<T>>,
-    ) -> Self {
-        Self {
-            args,
-            input,
-            output,
-        }
+    pub(super) fn new(args: ArgsParser<T>, resolver: ProviderResolver<T>) -> Self {
+        Self { args, resolver }
     }
 }
 
-impl<T> BindProvider for ProviderDefinition<T>
+impl<T> RegisterProviderArguments for ProviderDefinition<T>
 where
     T: Send + Sync + 'static,
 {
-    fn has_input(&self) -> bool {
-        self.input.is_some()
-    }
-
-    fn has_output(&self) -> bool {
-        self.output.is_some()
-    }
-
     fn augment(&self, command: Command) -> Command {
         self.args.augment(command)
     }
@@ -121,50 +98,57 @@ where
     fn argument_keys(&self) -> Vec<(String, String)> {
         self.args.argument_keys()
     }
+}
 
+impl<T> BindProvider for ProviderDefinition<T>
+where
+    T: Send + Sync + 'static,
+{
     fn bind(&self, matches: &ArgMatches) -> Result<Arc<dyn ResolveProvider>, clap::Error> {
         Ok(Arc::new(BoundProvider {
             settings: self.args.parse(matches)?,
-            input: self.input,
-            output: self.output,
+            resolver: self.resolver,
         }))
     }
 }
 
 struct BoundProvider<T> {
     settings: T,
-    input: Option<ProviderResolver<T>>,
-    output: Option<ProviderResolver<T>>,
+    resolver: ProviderResolver<T>,
 }
 
 impl<T> ResolveProvider for BoundProvider<T>
 where
     T: Send + Sync + 'static,
 {
-    fn has_input(&self) -> bool {
-        self.input.is_some()
-    }
-
-    fn has_output(&self) -> bool {
-        self.output.is_some()
-    }
-
     fn resolve(
         &self,
-        provider: &'static str,
-        direction: StorageDirection,
         location: &Location,
-        retry: Option<&RetryConfiguration>,
-    ) -> Result<ProviderResolution, StorageError> {
-        let resolver = match direction {
-            StorageDirection::Input => self.input,
-            StorageDirection::Output => self.output,
-        }
-        .ok_or(StorageError::DirectionUnsupported {
-            provider,
-            direction,
-        })?;
+        retry: Option<&RetryConfig>,
+    ) -> anyhow::Result<ProviderResolution> {
+        (self.resolver)(location, &self.settings, retry)
+    }
+}
 
-        resolver(location, &self.settings, retry)
+pub(super) struct ProviderArguments<T> {
+    args: ArgsParser<T>,
+}
+
+impl<T> ProviderArguments<T> {
+    pub(super) fn new(args: ArgsParser<T>) -> Self {
+        Self { args }
+    }
+}
+
+impl<T> RegisterProviderArguments for ProviderArguments<T>
+where
+    T: Send + Sync + 'static,
+{
+    fn augment(&self, command: Command) -> Command {
+        self.args.augment(command)
+    }
+
+    fn argument_keys(&self) -> Vec<(String, String)> {
+        self.args.argument_keys()
     }
 }
