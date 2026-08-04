@@ -1,8 +1,15 @@
+//! Built-in storage provider for canonical `file:///` locations.
+//!
+//! The registration exists with or without the `local` Cargo feature so the `file` scheme has a
+//! stable owner across feature sets.
+
 use crate::StorageProviderRegistration;
 
 /// Registers canonical `file:///` locations for input and output.
 ///
-/// Without the `local` Cargo feature, the registration retains the scheme and returns guidance when resolution is attempted.
+/// With the `local` feature, locations resolve through `object_store::local::LocalFileSystem`.
+/// Without it, resolution returns [`crate::StorageError::ProviderDisabled`] with instructions to
+/// rebuild `silk-chiffon-storage` with the feature.
 pub fn registration() -> StorageProviderRegistration {
     #[cfg(feature = "local")]
     {
@@ -20,6 +27,7 @@ pub fn registration() -> StorageProviderRegistration {
 }
 
 #[cfg(feature = "local")]
+/// Defers store construction so the command-scoped cache creates at most one filesystem client.
 fn resolve(
     location: &crate::Location,
     _settings: &(),

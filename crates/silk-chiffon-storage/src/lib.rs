@@ -1,6 +1,14 @@
-//! Strict locations and registered `object_store` providers for Silk Chiffon.
+//! Storage locations and registered `object_store` providers for Silk Chiffon.
 //!
-//! A [`StorageRegistry`] composes ordinary Clap argument structs and binds their concrete values into a command-scoped [`StorageResolver`]. Each provider declares its access separately from its location resolver. The resolver caches one client per URL origin so direct I/O and DataFusion can share the same upstream store.
+//! [`Location`] handles syntax: it turns a bare filesystem path or canonical storage URL into one
+//! canonical URL without contacting storage. A [`StorageRegistry`] composes providers and their
+//! provider-specific Clap arguments, then binds one command's parsed settings into a
+//! [`StorageResolver`].
+//!
+//! Resolution selects a provider, enforces its declared [`StorageAccess`], and translates the URL
+//! into an object path. It reuses one client per URL origin (scheme, host, and port) and does not
+//! impose existence or overwrite policy. Call [`validate_input`] and [`preflight_output`] when a
+//! command needs those checks.
 
 use std::{
     path::{Path as FilePath, PathBuf},
@@ -23,60 +31,95 @@ pub use provider::{
 };
 pub use retry::{RetryArgs, RetryConfigurationError};
 
+/// Errors produced while parsing, resolving, or checking a storage location.
 #[derive(Debug, Error)]
 pub enum StorageError {
+    /// The input location is empty.
     #[error("storage location cannot be empty")]
     EmptyLocation,
+    /// The working directory supplied for a relative path is not absolute.
     #[error("working directory must be absolute: {0}")]
     RelativeWorkingDirectory(PathBuf),
+    /// The colon comes before the first path separator, but the prefix is not a valid URL scheme.
     #[error("ambiguous storage location: {0}")]
     AmbiguousLocation(String),
+    /// No provider is registered for the location's URL scheme.
     #[error("unsupported storage scheme: {0}")]
     UnsupportedScheme(String),
+    /// A storage URL does not use the required lowercase scheme and `://` separator.
     #[error("storage URL must use the exact lowercase {scheme}:// form: {input}")]
-    NonCanonicalStorageUrl { scheme: String, input: String },
+    NonCanonicalStorageUrl {
+        /// The lowercase scheme spelling required by the parser.
+        scheme: String,
+        /// The rejected URL source text.
+        input: String,
+    },
+    /// The scheme belongs to a provider that is unavailable in this build.
     #[error("storage provider {provider} is disabled: {diagnostic}")]
     ProviderDisabled {
+        /// The registered provider name.
         provider: &'static str,
+        /// The provider's build or configuration guidance.
         diagnostic: &'static str,
     },
+    /// The provider does not support the requested input or output direction.
     #[error("{direction} resolution is unsupported for storage provider: {provider}")]
     DirectionUnsupported {
+        /// The registered provider name.
         provider: &'static str,
+        /// The direction rejected by the provider's access declaration.
         direction: StorageDirection,
     },
+    /// The provider callback or its lazy store factory failed.
     #[error("storage provider {provider} failed to resolve {direction}: {source}")]
     ProviderResolution {
+        /// The registered provider name.
         provider: &'static str,
+        /// The direction being resolved when the provider failed.
         direction: StorageDirection,
+        /// The provider-specific failure.
         #[source]
         source: anyhow::Error,
     },
+    /// A local file URL does not use the exact lowercase `file:///` form.
     #[error("local file URL must use the exact lowercase file:/// form: {0}")]
     NonCanonicalFileUrl(String),
+    /// The URL parser rejected the supplied source text.
     #[error("invalid storage URL {input}: {source}")]
     InvalidUrl {
+        /// The rejected URL source text.
         input: String,
+        /// The URL parser's error.
         source: url::ParseError,
     },
+    /// A storage URL contains a fragment.
     #[error("storage URLs cannot contain fragments: {0}")]
     FragmentNotSupported(String),
+    /// A storage URL contains embedded user information.
     #[error("storage URLs cannot contain user information: {0}")]
     UserInfoNotSupported(String),
+    /// A percent escape is incomplete or contains non-hexadecimal digits.
     #[error("invalid percent encoding in storage URL: {0}")]
     InvalidPercentEncoding(String),
+    /// URL parsing would encode or normalize the supplied path.
     #[error("storage URL path is not canonical: {0}")]
     NonCanonicalUrlPath(String),
+    /// A filesystem path or file URL cannot be represented in the other form.
     #[error("filesystem path cannot be represented as a local file URL: {0}")]
     InvalidFilePath(PathBuf),
+    /// An operation against the upstream object store failed.
     #[error(transparent)]
     ObjectStore(#[from] object_store::Error),
+    /// Output preflight found an existing object while overwrite was disabled.
     #[error("output already exists: {0}")]
     OutputAlreadyExists(Url),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
 /// One parsed storage location with a canonical URL representation.
+///
+/// A location contains syntax only. Parsing does not require a registered provider and does not
+/// contact the target store.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Location {
     url: Url,
 }
@@ -84,7 +127,14 @@ pub struct Location {
 impl Location {
     /// Parses a bare local path or canonical storage URL against an absolute working directory.
     ///
-    /// Bare paths retain filesystem characters. URL paths must encode characters disallowed by URL syntax.
+    /// Bare paths retain filesystem characters and become absolute `file:///` URLs. URL paths must
+    /// encode characters disallowed by URL syntax.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] when the input is empty or ambiguous, the working directory is
+    /// relative, or URL source text is malformed or violates the supported scheme and path
+    /// canonicality rules.
     pub fn parse(
         input: impl AsRef<str>,
         working_directory: impl AsRef<FilePath>,
@@ -128,6 +178,7 @@ impl Location {
         Ok(Self { url })
     }
 
+    /// Returns the canonical URL, including any query supplied in URL source text.
     pub fn url(&self) -> &Url {
         &self.url
     }
@@ -243,11 +294,17 @@ fn has_valid_percent_encoding(input: &str) -> bool {
     true
 }
 
-#[derive(Clone)]
 /// An exact location paired with its upstream object-store client and object path.
+///
+/// The exact [`Self::url`] remains suitable for user-facing results. [`Self::store_url`] is the
+/// resolver's cache key and the URL callers use to register [`Self::store`] with DataFusion.
+#[derive(Clone)]
 pub struct ResolvedLocation {
+    /// The canonical URL for the exact object, including its path and query.
     pub url: Url,
+    /// The provider's client for the URL origin.
     pub store: Arc<dyn ObjectStore>,
+    /// The provider-specific path passed to operations on [`Self::store`].
     pub path: ObjectPath,
     store_url: Url,
 }
@@ -265,21 +322,50 @@ impl std::fmt::Debug for ResolvedLocation {
 }
 
 impl ResolvedLocation {
+    /// Converts a resolved `file:` URL back into a filesystem path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::InvalidFilePath`] when this location is not a representable local
+    /// file URL.
     pub fn local_path(&self) -> Result<PathBuf, StorageError> {
         self.url
             .to_file_path()
             .map_err(|()| StorageError::InvalidFilePath(PathBuf::from(self.url.as_str())))
     }
 
+    /// Returns the URL origin used to cache this store and register it with DataFusion.
+    ///
+    /// The returned URL retains the scheme, host, and port and has `/` as its path with no query or
+    /// fragment. This crate exposes the URL. The caller performs any DataFusion registration.
     pub fn store_url(&self) -> &Url {
         &self.store_url
     }
 }
 
+/// Requires the resolved input object to exist and returns its metadata.
+///
+/// This performs one [`ObjectStoreExt::head`] request. Resolution itself deliberately omits this
+/// policy so callers can resolve locations that they intend to create.
+///
+/// # Errors
+///
+/// Returns [`StorageError::ObjectStore`] when the object is absent or the metadata request
+/// otherwise fails.
 pub async fn validate_input(location: &ResolvedLocation) -> Result<ObjectMeta, StorageError> {
     Ok(location.store.head(&location.path).await?)
 }
 
+/// Checks whether a resolved output may be created under the caller's overwrite policy.
+///
+/// When `overwrite` is `true`, this returns without contacting storage. Otherwise it performs one
+/// [`ObjectStoreExt::head`] request, accepts a not-found response, and rejects an existing object.
+/// The check is advisory and does not reserve the destination against another writer.
+///
+/// # Errors
+///
+/// Returns [`StorageError::OutputAlreadyExists`] for an existing object or
+/// [`StorageError::ObjectStore`] when the metadata request fails for another reason.
 pub async fn preflight_output(
     location: &ResolvedLocation,
     overwrite: bool,
