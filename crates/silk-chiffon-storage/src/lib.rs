@@ -330,6 +330,11 @@ impl ResolvedLocation {
     /// Returns [`StorageError::InvalidFilePath`] when this location is not a representable local
     /// file URL.
     pub fn local_path(&self) -> Result<PathBuf, StorageError> {
+        if self.url.scheme() != "file" {
+            return Err(StorageError::InvalidFilePath(PathBuf::from(
+                self.url.as_str(),
+            )));
+        }
         self.url
             .to_file_path()
             .map_err(|()| StorageError::InvalidFilePath(PathBuf::from(self.url.as_str())))

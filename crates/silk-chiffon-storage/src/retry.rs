@@ -54,7 +54,7 @@ impl RetryArgs {
     /// # Errors
     ///
     /// Returns [`RetryConfigurationError`] when retries are enabled and a duration is zero, the
-    /// initial delay exceeds the maximum, or the multiplier is non-finite or no greater than one.
+    /// initial delay exceeds the maximum, or the multiplier cannot produce a valid backoff range.
     pub fn into_retry_config(self) -> Result<RetryConfig, RetryConfigurationError> {
         if self.max_retries == 0 {
             return Ok(RetryConfig {
@@ -89,6 +89,12 @@ impl RetryArgs {
         if self.initial_backoff > self.max_backoff {
             return Err(RetryConfigurationError::InitialBackoffExceedsMaximum {
                 initial: self.initial_backoff,
+                maximum: self.max_backoff,
+            });
+        }
+        if !(self.max_backoff.as_secs_f64() * self.backoff_base).is_finite() {
+            return Err(RetryConfigurationError::BackoffRangeOverflow {
+                base: self.backoff_base,
                 maximum: self.max_backoff,
             });
         }
@@ -128,6 +134,16 @@ pub enum RetryConfigurationError {
     InitialBackoffExceedsMaximum {
         /// The configured first retry delay.
         initial: Duration,
+        /// The configured maximum delay between retries.
+        maximum: Duration,
+    },
+    /// The multiplier would overflow the retry policy's random backoff upper bound.
+    #[error(
+        "storage retry backoff base {base} with maximum backoff {maximum:?} produces a non-finite range"
+    )]
+    BackoffRangeOverflow {
+        /// The configured exponential backoff multiplier.
+        base: f64,
         /// The configured maximum delay between retries.
         maximum: Duration,
     },

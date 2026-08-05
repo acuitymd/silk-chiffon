@@ -304,7 +304,7 @@ pub enum StorageRegistryError {
     /// A URL scheme is claimed more than once, ignoring ASCII case.
     #[error("duplicate storage scheme: {0}")]
     DuplicateScheme(String),
-    /// Provider or retry arguments reuse a Clap ID or primary long or short option.
+    /// Provider or retry arguments reuse a Clap argument or group ID, or a primary option name.
     #[error("duplicate storage CLI argument: {0}")]
     DuplicateCliArgument(String),
 }
@@ -642,7 +642,7 @@ pub enum StorageResolverBuildError {
     Retry(#[from] RetryConfigurationError),
 }
 
-/// Returns collision keys for each Clap ID and primary long and short option contributed by `T`.
+/// Returns collision keys for each Clap argument or group ID and primary option contributed by `T`.
 fn argument_keys<T>(name: &'static str) -> Vec<(String, String)>
 where
     T: Args,
@@ -658,6 +658,10 @@ where
         if let Some(short) = argument.get_short() {
             keys.push((format!("short:{short}"), id.clone()));
         }
+    }
+    for group in command.get_groups() {
+        let id = group.get_id().as_str().to_owned();
+        keys.push((format!("id:{id}"), id.clone()));
     }
     keys
 }

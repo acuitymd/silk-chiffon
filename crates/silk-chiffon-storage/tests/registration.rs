@@ -62,6 +62,26 @@ struct DuplicateShortArgs {
 }
 
 #[derive(Args, Clone)]
+#[group(id = "shared_group")]
+struct SharedGroupArgs {
+    #[arg(long = "first-group-option")]
+    first_group_option: bool,
+}
+
+#[derive(Args, Clone)]
+#[group(id = "shared_group")]
+struct DuplicateGroupArgs {
+    #[arg(long = "second-group-option")]
+    second_group_option: bool,
+}
+
+#[derive(Args, Clone)]
+struct GroupIdAsArgumentArgs {
+    #[arg(id = "shared_group", long = "group-id-as-argument")]
+    group_id_as_argument: bool,
+}
+
+#[derive(Args, Clone)]
 struct SharedRetryCollisionArgs {
     #[arg(long = "storage-max-retries")]
     storage_max_retries: bool,
@@ -210,6 +230,22 @@ fn registered_arguments_contribute_help_bind_typed_settings_and_resolve_declared
 }
 
 #[test]
+fn local_path_rejects_non_file_schemes_that_have_path_shaped_urls() {
+    let registry = StorageRegistry::builder()
+        .register(unit_registration("memory", "mem"))
+        .build()
+        .unwrap();
+    let resolver = bind_defaults(&registry);
+    let location = Location::parse("mem:///tmp/object", FilePath::new("/work")).unwrap();
+    let object = resolver.resolve_input(&location).unwrap();
+
+    assert!(matches!(
+        object.local_path(),
+        Err(StorageError::InvalidFilePath(path)) if path == FilePath::new("mem:///tmp/object")
+    ));
+}
+
+#[test]
 fn registry_rejects_duplicate_provider_names_and_schemes() {
     let duplicate_name = StorageRegistry::builder()
         .register(unit_registration("memory", "mem"))
@@ -295,6 +331,43 @@ fn registry_rejects_duplicate_cli_ids_long_options_and_short_options() {
         shared_retry_collision,
         Err(StorageRegistryError::DuplicateCliArgument(argument))
             if argument == "storage_max_retries"
+    ));
+}
+
+#[test]
+fn registry_rejects_duplicate_group_ids_and_argument_group_id_collisions() {
+    let duplicate_group = StorageRegistry::builder()
+        .register(
+            StorageProviderRegistration::with_args::<SharedGroupArgs>("first")
+                .schemes(["first"])
+                .disabled("unused"),
+        )
+        .register(
+            StorageProviderRegistration::with_args::<DuplicateGroupArgs>("second")
+                .schemes(["second"])
+                .disabled("unused"),
+        )
+        .build();
+    assert!(matches!(
+        duplicate_group,
+        Err(StorageRegistryError::DuplicateCliArgument(argument)) if argument == "shared_group"
+    ));
+
+    let argument_group_collision = StorageRegistry::builder()
+        .register(
+            StorageProviderRegistration::with_args::<SharedGroupArgs>("first")
+                .schemes(["first"])
+                .disabled("unused"),
+        )
+        .register(
+            StorageProviderRegistration::with_args::<GroupIdAsArgumentArgs>("second")
+                .schemes(["second"])
+                .disabled("unused"),
+        )
+        .build();
+    assert!(matches!(
+        argument_group_collision,
+        Err(StorageRegistryError::DuplicateCliArgument(argument)) if argument == "shared_group"
     ));
 }
 
@@ -536,6 +609,26 @@ fn enabled_retries_reject_each_invalid_retry_dimension() {
             "{error:?} should contain {expected:?}"
         );
     }
+
+    let finite_base_with_infinite_range = f64::MAX.to_string();
+    let command = registry.augment_args(Command::new("storage-test"));
+    let matches = command
+        .try_get_matches_from([
+            "storage-test",
+            "--storage-backoff-base",
+            finite_base_with_infinite_range.as_str(),
+        ])
+        .unwrap();
+    let error = match registry.bind_args(&matches) {
+        Ok(_) => panic!("a retry multiplier that overflows the jitter range should not bind"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        silk_chiffon_storage::StorageResolverBuildError::Retry(
+            RetryConfigurationError::BackoffRangeOverflow { base, .. }
+        ) if base == f64::MAX
+    ));
 }
 
 #[test]

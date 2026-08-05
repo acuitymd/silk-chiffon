@@ -217,7 +217,7 @@ impl<T> ArgsParser<T> {
         (self.parse)(matches)
     }
 
-    /// Extracts each argument's Clap ID and primary long and short option names.
+    /// Extracts each argument and group ID plus each primary long and short option name.
     ///
     /// [`Args`] exposes this metadata through a [`Command`], so this method augments a scratch
     /// command and converts its arguments into registry collision keys. Aliases are absent because
@@ -234,6 +234,10 @@ impl<T> ArgsParser<T> {
             if let Some(short) = argument.get_short() {
                 keys.push((format!("short:{short}"), id.clone()));
             }
+        }
+        for group in command.get_groups() {
+            let id = group.get_id().as_str().to_owned();
+            keys.push((format!("id:{id}"), id.clone()));
         }
         keys
     }
