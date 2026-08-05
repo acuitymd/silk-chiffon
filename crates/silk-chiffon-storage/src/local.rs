@@ -5,7 +5,7 @@
 
 use crate::StorageProviderRegistration;
 
-/// Registers canonical `file:///` locations for input and output.
+/// Registers the built-in owner of canonical `file:///` locations.
 ///
 /// With the `local` feature, locations resolve through `object_store::local::LocalFileSystem`.
 /// Without it, resolution returns [`crate::StorageError::ProviderDisabled`] with instructions to

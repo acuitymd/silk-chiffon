@@ -6,7 +6,7 @@
 //! [`StorageResolver`].
 //!
 //! Resolution selects a provider, enforces its declared [`StorageAccess`], and translates the URL
-//! into an object path. It reuses one client per URL origin (scheme, host, and port) and does not
+//! into an object path. It reuses one client per store root (scheme, host, and port) and does not
 //! impose existence or overwrite policy. Call [`validate_input`] and [`preflight_output`] when a
 //! command needs those checks.
 
@@ -37,7 +37,7 @@ pub enum StorageError {
     /// The input location is empty.
     #[error("storage location cannot be empty")]
     EmptyLocation,
-    /// The working directory supplied for a relative path is not absolute.
+    /// The supplied working directory is not absolute.
     #[error("working directory must be absolute: {0}")]
     RelativeWorkingDirectory(PathBuf),
     /// The colon comes before the first path separator, but the prefix is not a valid URL scheme.
@@ -104,7 +104,7 @@ pub enum StorageError {
     /// URL parsing would encode or normalize the supplied path.
     #[error("storage URL path is not canonical: {0}")]
     NonCanonicalUrlPath(String),
-    /// A filesystem path or file URL cannot be represented in the other form.
+    /// A filesystem path cannot become a `file:` URL, or a resolved URL cannot become a local path.
     #[error("filesystem path cannot be represented as a local file URL: {0}")]
     InvalidFilePath(PathBuf),
     /// An operation against the upstream object store failed.
@@ -296,13 +296,14 @@ fn has_valid_percent_encoding(input: &str) -> bool {
 
 /// An exact location paired with its upstream object-store client and object path.
 ///
-/// The exact [`Self::url`] remains suitable for user-facing results. [`Self::store_url`] is the
-/// resolver's cache key and the URL callers use to register [`Self::store`] with DataFusion.
+/// [`Self::url`] preserves the canonical exact-location URL, including its query.
+/// [`Self::store_url`] is the resolver's cache key and the URL callers use to register
+/// [`Self::store`] with DataFusion.
 #[derive(Clone)]
 pub struct ResolvedLocation {
     /// The canonical URL for the exact object, including its path and query.
     pub url: Url,
-    /// The provider's client for the URL origin.
+    /// The provider's client for the store root.
     pub store: Arc<dyn ObjectStore>,
     /// The provider-specific path passed to operations on [`Self::store`].
     pub path: ObjectPath,
@@ -334,7 +335,7 @@ impl ResolvedLocation {
             .map_err(|()| StorageError::InvalidFilePath(PathBuf::from(self.url.as_str())))
     }
 
-    /// Returns the URL origin used to cache this store and register it with DataFusion.
+    /// Returns the root URL used to cache this store and register it with DataFusion.
     ///
     /// The returned URL retains the scheme, host, and port and has `/` as its path with no query or
     /// fragment. This crate exposes the URL. The caller performs any DataFusion registration.
@@ -345,8 +346,9 @@ impl ResolvedLocation {
 
 /// Requires the resolved input object to exist and returns its metadata.
 ///
-/// This performs one [`ObjectStoreExt::head`] request. Resolution itself deliberately omits this
-/// policy so callers can resolve locations that they intend to create.
+/// This invokes `ObjectStoreExt::head` once. The provider may retry the underlying request.
+/// Resolution itself deliberately omits this policy so callers can resolve locations that they
+/// intend to create.
 ///
 /// # Errors
 ///
@@ -358,9 +360,10 @@ pub async fn validate_input(location: &ResolvedLocation) -> Result<ObjectMeta, S
 
 /// Checks whether a resolved output may be created under the caller's overwrite policy.
 ///
-/// When `overwrite` is `true`, this returns without contacting storage. Otherwise it performs one
-/// [`ObjectStoreExt::head`] request, accepts a not-found response, and rejects an existing object.
-/// The check is advisory and does not reserve the destination against another writer.
+/// When `overwrite` is `true`, this returns without contacting storage. Otherwise it invokes
+/// `ObjectStoreExt::head` once, accepts a not-found response, and rejects an existing object. The
+/// provider may retry the underlying request. The check is advisory and does not reserve the
+/// destination against another writer.
 ///
 /// # Errors
 ///

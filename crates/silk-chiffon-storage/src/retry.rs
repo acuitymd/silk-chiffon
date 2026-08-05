@@ -22,7 +22,7 @@ pub struct RetryArgs {
     /// Maximum retries for one provider request.
     #[arg(long = "storage-max-retries", default_value_t = 10)]
     max_retries: usize,
-    /// Total retry window for one provider request.
+    /// Elapsed-time limit checked after each failed attempt, measured from the initial request.
     #[arg(
         long = "storage-retry-timeout",
         default_value = "3m",

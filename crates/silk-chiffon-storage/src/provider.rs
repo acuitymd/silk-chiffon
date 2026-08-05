@@ -48,7 +48,7 @@ pub type ProviderResolver<T> = fn(
 ///
 /// [`ProviderResolver`] runs for every location because the object path can change.
 /// [`StorageResolver`] invokes the returned factory only when its command-scoped cache has no
-/// client for the URL origin.
+/// client for the store root.
 pub struct ProviderResolution {
     store_factory: Box<dyn FnOnce() -> anyhow::Result<Arc<dyn ObjectStore>> + Send>,
     path: ObjectPath,
@@ -60,7 +60,7 @@ impl ProviderResolution {
     /// `path` must use the namespace expected by the store returned from `factory`. Factory
     /// failures receive provider and direction context from [`StorageResolver`]. Stores are cached
     /// by scheme, host, and port, so the factory must create an equivalent client for every path
-    /// and query under the same origin.
+    /// and query under the same store root.
     pub fn from_factory(
         path: ObjectPath,
         factory: impl FnOnce() -> anyhow::Result<Arc<dyn ObjectStore>> + Send + 'static,
@@ -301,7 +301,7 @@ pub enum StorageRegistryError {
     /// Two registrations use the same provider name, ignoring ASCII case.
     #[error("duplicate storage provider name: {0}")]
     DuplicateName(String),
-    /// Two registrations claim the same URL scheme, ignoring ASCII case.
+    /// A URL scheme is claimed more than once, ignoring ASCII case.
     #[error("duplicate storage scheme: {0}")]
     DuplicateScheme(String),
     /// Provider or retry arguments reuse a Clap ID or primary long or short option.
@@ -412,7 +412,7 @@ impl StorageRegistry {
 
     /// Adds shared retry arguments and every provider's Clap arguments.
     ///
-    /// The returned command should be used to produce the [`ArgMatches`] later passed to
+    /// The returned command should be used to produce the `ArgMatches` later passed to
     /// [`Self::bind_args`]. Disabled providers still contribute their arguments. Registry
     /// validation does not inspect arguments already present on `command`, so those IDs and option
     /// spellings must not collide with storage arguments.
@@ -486,9 +486,9 @@ enum BoundProvider {
 
 /// Provider resolvers, retry settings, and cached clients bound to one command.
 ///
-/// Cloning a resolver shares the bound provider settings and client cache. Stores are keyed by URL
-/// origin, so paths and queries under the same scheme, host, and port reuse one [`ObjectStore`]
-/// client.
+/// Cloning a resolver shares the bound provider settings and client cache. Stores are keyed by a
+/// root URL derived from the scheme, host, and port, so paths and queries under that root reuse one
+/// `ObjectStore` client.
 #[derive(Clone)]
 pub struct StorageResolver {
     providers: Arc<Vec<BoundProvider>>,
@@ -526,9 +526,9 @@ impl StorageResolver {
     /// Resolves a location for reading.
     ///
     /// Scheme selection and read access are checked before the provider callback runs. The resolver
-    /// layer issues no metadata request. Provider callbacks and factories execute as part of
-    /// resolution. Use [`crate::validate_input`] when the caller requires an explicit existence
-    /// check after resolution.
+    /// layer issues no metadata request. The provider callback executes as part of resolution, and
+    /// its returned factory executes only on a cache miss. Use [`crate::validate_input`] when the
+    /// caller requires an explicit existence check after resolution.
     ///
     /// # Errors
     ///
@@ -541,9 +541,9 @@ impl StorageResolver {
     /// Resolves a location for writing.
     ///
     /// Scheme selection and write access are checked before the provider callback runs. The
-    /// resolver layer applies no overwrite policy. Provider callbacks and factories execute as
-    /// part of resolution. Use [`crate::preflight_output`] when the caller needs an explicit check
-    /// after resolution.
+    /// resolver layer applies no overwrite policy. The provider callback executes as part of
+    /// resolution, and its returned factory executes only on a cache miss. Use
+    /// [`crate::preflight_output`] when the caller needs an explicit check after resolution.
     ///
     /// # Errors
     ///
@@ -604,7 +604,7 @@ impl StorageResolver {
             .stores
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // Holding the lock through construction prevents duplicate clients for one origin.
+        // Holding the lock through construction prevents duplicate clients for one store root.
         let store = match stores.entry(store_url.clone()) {
             std::collections::hash_map::Entry::Occupied(entry) => Arc::clone(entry.get()),
             std::collections::hash_map::Entry::Vacant(entry) => {
@@ -662,7 +662,7 @@ where
     keys
 }
 
-/// Reduces an exact location URL to the origin used for client caching and DataFusion registration.
+/// Reduces an exact location URL to the root URL used for caching and DataFusion registration.
 fn store_url(url: &Url) -> Url {
     let mut store_url = url.clone();
     store_url.set_path("/");
