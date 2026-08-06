@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::{Result, anyhow};
 use camino::{Utf8Path, Utf8PathBuf};
-use silk_chiffon_storage::{LocationInput, StorageResolver};
+use silk_chiffon_storage::{LocationInput, local};
 
 use crate::{
     InspectArrowArgs, InspectIdentifyArgs, InspectParquetArgs, InspectSubcommand,
@@ -128,7 +128,7 @@ fn run_vortex(args: &InspectVortexArgs) -> Result<()> {
 
 fn resolve_local_path(input: &Utf8Path) -> Result<Utf8PathBuf> {
     let location = LocationInput::parse(input.as_str())?;
-    let resolved = StorageResolver::local()?.resolve_input(&location)?;
-    Utf8PathBuf::from_path_buf(resolved.local_path()?)
+    let handle = local::session()?.input_handle(&location)?;
+    Utf8PathBuf::from_path_buf(handle.local_path()?)
         .map_err(|path: PathBuf| anyhow!("Local path is not valid UTF-8: {}", path.display()))
 }

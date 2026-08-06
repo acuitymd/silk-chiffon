@@ -1,55 +1,85 @@
-//! Built-in storage provider for canonical `file:///` locations.
+//! Built-in storage backend for canonical `file:///` locations.
 //!
-//! The `local` Cargo feature enables explicit `file:` locations. The `local-bare-paths` feature
-//! additionally assigns schemeless input to this provider.
+//! The `local` Cargo feature exposes [`backend`] and [`session`] for explicit `file:` URLs. The
+//! separate `local-bare-paths` feature also makes this backend interpret schemeless input as a
+//! filesystem path.
 
 #[cfg(feature = "local")]
-use crate::StorageProviderRegistration;
+use std::sync::Arc;
 
-/// Registers the built-in owner of canonical `file:///` locations.
+#[cfg(feature = "local")]
+use clap::Command;
+#[cfg(feature = "local")]
+use object_store::{ObjectStore, local::LocalFileSystem, path::Path as ObjectPath};
+
+#[cfg(feature = "local")]
+use crate::{
+    Location, StorageAccess, StorageBackend, StorageBackendBuildError, StorageRegistry,
+    StorageSession, StorageSessionCreationError,
+};
+
+/// Builds the built-in local backend definition for canonical `file:///` locations.
 ///
-/// Locations resolve through `object_store::local::LocalFileSystem`. When `local-bare-paths` is
-/// enabled, the provider also interprets schemeless input as a filesystem path relative to the
-/// process working directory.
+/// With `local-bare-paths`, the same definition also claims schemeless input and maps relative
+/// paths against the process working directory.
+///
+/// # Errors
+///
+/// Returns [`StorageBackendBuildError`] if the built-in definition violates backend invariants.
 #[cfg(feature = "local")]
-pub fn registration() -> StorageProviderRegistration {
-    let builder = StorageProviderRegistration::without_args(
-        "local",
-        "file",
-        crate::StorageAccess::ReadWrite,
-        resolve,
-    );
+pub fn backend() -> Result<StorageBackend, StorageBackendBuildError> {
+    let builder = StorageBackend::without_args()
+        .name("local")
+        .schemes(["file"])
+        .access(StorageAccess::ReadWrite)
+        .object_path_mapper(map_object_path)
+        .object_store_factory(create_object_store);
 
     #[cfg(feature = "local-bare-paths")]
-    let builder = builder.bare_locations(map_bare_location);
+    let builder = builder.bare_location_mapper(map_bare_location);
 
     builder.build()
 }
 
-/// Defers store construction so the command-scoped cache creates at most one filesystem client.
+/// Creates a storage session containing only the built-in local backend.
+///
+/// This shortcut uses default host arguments. Applications that compose multiple backends should
+/// build a [`StorageRegistry`] and pass their own parsed matches to
+/// [`StorageRegistry::create_session`].
+///
+/// # Errors
+///
+/// Returns [`StorageSessionCreationError`] if the backend, registry, or default session arguments
+/// cannot be created.
 #[cfg(feature = "local")]
-fn resolve(
-    location: &crate::Location,
+pub fn session() -> Result<StorageSession, StorageSessionCreationError> {
+    let registry = StorageRegistry::builder().register(backend()?).build()?;
+    let command = registry.augment_args(Command::new("storage"));
+    let matches = command.try_get_matches_from(["storage"])?;
+    registry.create_session(&matches)
+}
+
+#[cfg(feature = "local")]
+fn map_object_path(location: &Location, _settings: &()) -> anyhow::Result<ObjectPath> {
+    Ok(ObjectPath::from_url_path(location.url().path())?)
+}
+
+#[cfg(feature = "local")]
+fn create_object_store(
+    _store_url: &url::Url,
     _settings: &(),
     _retry: Option<&crate::RetryConfig>,
-) -> anyhow::Result<crate::ProviderResolution> {
-    use std::sync::Arc;
-
-    use object_store::{ObjectStore, local::LocalFileSystem, path::Path as ObjectPath};
-
-    let path = ObjectPath::from_url_path(location.url().path())?;
-    Ok(crate::ProviderResolution::from_factory(path, || {
-        Ok(Arc::new(LocalFileSystem::new()) as Arc<dyn ObjectStore>)
-    }))
+) -> anyhow::Result<Arc<dyn ObjectStore>> {
+    Ok(Arc::new(LocalFileSystem::new()))
 }
 
 #[cfg(feature = "local-bare-paths")]
-fn map_bare_location(input: &str, _settings: &()) -> anyhow::Result<crate::Location> {
+fn map_bare_location(input: &str, _settings: &()) -> anyhow::Result<Location> {
     let path = std::path::Path::new(input);
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
         std::env::current_dir()?.join(path)
     };
-    Ok(crate::Location::from_file_path(absolute)?)
+    Ok(Location::from_file_path(absolute)?)
 }

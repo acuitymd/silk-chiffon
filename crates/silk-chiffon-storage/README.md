@@ -1,35 +1,40 @@
 # Silk Chiffon storage
 
-`silk-chiffon-storage` classifies exact location input, routes it through explicitly registered storage providers, and resolves it to upstream `object_store` clients and object paths. It owns strict URL parsing, typed provider registration, shared retry settings, and command-scoped client caching without assigning filesystem semantics to generic schemeless input.
+`silk-chiffon-storage` turns exact storage locations into object-store handles. It routes locations through typed backend settings and caches object-store clients within each command session. It does not assume that schemeless input names a local file.
 
-## Resolve a local location
+## Create a local handle
 
-`LocationInput` preserves the distinction between an explicit URL and schemeless text. With the default feature set, the built-in local registration claims schemeless input and maps a bare filesystem path to an absolute `file:///` `Location` during resolution.
+`LocationInput` preserves the distinction between an explicit URL and a bare string, meaning input with no URL scheme. With the default feature set, the built-in local backend claims bare strings and interprets them as filesystem paths.
 
 ```rust
-use silk_chiffon_storage::{LocationInput, StorageResolver};
+use silk_chiffon_storage::{LocationInput, local};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let location = LocationInput::parse("data/input.parquet")?;
-    let resolver = StorageResolver::local()?;
-    let resolved = resolver.resolve_input(&location)?;
+    let storage = local::session()?;
+    let handle = storage.input_handle(&location)?;
 
-    assert_eq!(resolved.url.scheme(), "file");
+    assert_eq!(handle.url().scheme(), "file");
     Ok(())
 }
 ```
 
-`ResolvedLocation` contains the absolute `url`, the upstream `Arc<dyn ObjectStore>`, and the upstream `object_store::path::Path`. `local_path` adapts the resolved URL for code that requires a filesystem path.
+A `StorageHandle` keeps the canonical location URL, an `Arc<dyn ObjectStore>`, the backend-defined object path, and the root URL that identifies the cached client. Its fields are private so values from different handle requests cannot be mixed accidentally. `StorageHandle::local_path` adapts a `file:` handle for code that still requires a filesystem path.
 
-## Compose and bind providers
+Handle creation selects and invokes a backend. It does not check whether an input exists or whether an output may be overwritten.
 
-A `StorageProviderRegistration` declares one available provider's name, URL schemes, ordinary Clap argument type, access, and resolver. `StorageAccess` declares read-only, write-only, or read-write support separately from URL resolution. Asking a read-only provider to resolve an output returns `StorageError::DirectionUnsupported` before its resolver runs.
+## Understand the lifecycle
 
-The host executable controls availability by choosing which registrations to include. An omitted provider contributes no schemes or CLI arguments, does not appear in registry introspection, and cannot collide with a registered provider. Resolving one of its URLs returns `StorageError::UnsupportedScheme`.
+The public types separate configuration that lasts for the executable from state that lasts for one command invocation.
 
-One registration may call `bare_locations(mapper)` to claim all schemeless input. The mapper receives the original text and the provider's parsed settings, then returns a canonical `Location` using one of that registration's schemes. Registry construction rejects a second claimant, and resolution rejects a mapper result whose scheme belongs to another provider or to no provider.
+| Type              | Lifetime and responsibility                                                                                                              |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `StorageBackend`  | One immutable backend definition: registry name, schemes, access, Clap behavior, and typed callbacks.                                    |
+| `StorageRegistry` | One validated and indexed collection of the backends available in this build. It contains no parsed command settings.                    |
+| `StorageSession`  | One command invocation's parsed backend settings, retry configuration, routing indexes, and object-store cache. Clones share this state. |
+| `StorageHandle`   | One canonical location paired with the object store and object path needed to access it.                                                 |
 
-The executable builds a registry explicitly, adds its arguments to a Clap command, and binds one command's matches:
+The host executable chooses which backends exist, lets the registry augment its Clap command, parses the complete host command, and gives those matches back to the registry:
 
 ```rust
 use clap::Command;
@@ -37,97 +42,132 @@ use silk_chiffon_storage::{LocationInput, StorageRegistry, local};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let registry = StorageRegistry::builder()
-        .register(local::registration())
+        .register(local::backend()?)
         .build()?;
+
     let command = registry.augment_args(Command::new("storage-example"));
     let matches = command.try_get_matches_from(["storage-example"])?;
-    let resolver = registry.bind_args(&matches)?;
+    let storage = registry.create_session(&matches)?;
 
     let location = LocationInput::parse("data/input.parquet")?;
-    let input = resolver.resolve_input(&location)?;
-    let output = resolver.resolve_output(&location)?;
+    let input = storage.input_handle(&location)?;
+    let output = storage.output_handle(&location)?;
 
-    assert!(std::sync::Arc::ptr_eq(&input.store, &output.store));
+    assert!(std::sync::Arc::ptr_eq(
+        &input.object_store(),
+        &output.object_store(),
+    ));
     Ok(())
 }
 ```
 
-Binding parses each provider's concrete argument type once and stores the value with the resolver and optional bare-location mapper that accept that type. The command-scoped resolver holds each typed group behind a private behavior trait so providers with different argument types can share one registry. Settings never pass through `Any` or downcasting.
+`StorageRegistry::augment_args` only adds storage arguments to the command the host owns. The registry never parses process arguments. `StorageRegistry::create_session` receives the host-parsed `ArgMatches`, parses one settings value per backend, parses shared retry settings when needed, and starts a fresh object-store cache.
 
-Provider-owned long options follow the `--{provider}-*` convention, such as `--gcs-endpoint` or `--s3-region`. Shared options may use a global name. Registry construction rejects collisions across provider names, schemes, the bare-location claim, and every Clap identifier.
+Calling `create_session` again produces independently parsed settings and a fresh cache. Cloning one session shares its settings and cache.
+
+## Define a backend
+
+A backend crate starts with `StorageBackend::with_args::<T>()` when it contributes a Clap `Args` type, or `StorageBackend::without_args()` when it has no settings. Setters may be called in any order. The final `build` validates that all required pieces are present and that the definition is internally unambiguous.
+
+```rust,ignore
+let backend = StorageBackend::with_args::<CloudArgs>()
+    .name("example-cloud")
+    .schemes(["example"])
+    .access(StorageAccess::ReadWrite)
+    .bare_location_mapper(map_bare_location)
+    .object_path_mapper(map_object_path)
+    .object_store_factory(create_object_store)
+    .shared_retries()
+    .build()?;
+```
+
+The settings type `T` stays coupled to the parser and every callback that accepts `&T`. The registry can therefore store backends from unrelated crates without putting settings into `Any` or asking callers to downcast them. The backend definition retains functions typed over `T`. Creating a session produces a backend binding: that backend's parsed `T` paired with its typed callbacks. Private behavior traits let `StorageRegistry` store definitions and `StorageSession` invoke bindings without naming each concrete settings type.
+
+The callbacks divide handle creation into three backend-owned decisions:
+
+- `BareLocationMapper<T>` is an optional callback. When configured, it maps the original schemeless text to a canonical `Location` and claims the registry's single bare-location route.
+- `ObjectPathMapper<T>` maps a canonical location into the namespace expected by that backend's object store. It runs after successful routing, access checks, bare mapping, and mapped-scheme validation, including on cache hits.
+- `ObjectStoreFactory<T>` creates a client for one store-root URL. It runs only on a session cache miss and receives shared retry configuration only when the backend opted in.
+
+`StorageAccess` declares read-only, write-only, or read-write support independently of those callbacks. A session rejects an unsupported direction before any mapper or factory runs.
+
+## Registry invariants
+
+Registration means availability. A backend omitted by a Cargo feature or by the host claims no schemes or CLI arguments, appears in no registry introspection, and cannot participate in a collision. A URL using a scheme claimed only by an omitted backend returns `StorageError::UnsupportedScheme`.
+
+Backend construction validates its own name, schemes, required callbacks, access declaration, and contributed Clap keys. Registry construction then rejects conflicts across the complete available set:
+
+- backend names must be unique;
+- every claimed URL scheme has exactly one registered owner;
+- every Clap ID, long option, long alias, short option, and short alias has exactly one storage contributor; and
+- at most one backend may claim bare locations.
+
+`StorageRegistry::backends` preserves registration order. `by_scheme` performs exact lowercase lookup, and `bare_location_backend` exposes the optional bare-route owner.
+
+Backend-specific long options should follow the `--{backend}-*` convention, such as `--gcs-endpoint` or `--s3-region`. Shared arguments may use global names.
+
+## Bare locations
+
+A bare location is source text with no explicit URL scheme. `LocationInput::parse` preserves that text exactly, and a session gives it only to the backend that claimed the bare route. That backend may interpret it using its own parsed settings before returning a canonical `Location` under one of its registered schemes.
+
+This route is not inherently local. A future backend could interpret a bare string relative to a configured bucket, namespace, working root, or another command option. The registry rejects a second claimant, and the session rejects a mapper result whose scheme is not owned by the selected backend.
+
+With `local-bare-paths`, the local mapper treats bare input as a filesystem path. Relative paths use the process working directory, and absolute paths stay absolute. It converts the absolute path with `Url::from_file_path`; it does not call `canonicalize`, resolve symlinks, or require the target to exist.
+
+Bare text preserves spaces, Unicode, and literal `%`, `?`, and `#` characters. For example, `literal%20name.parquet` remains a filename containing those three literal characters rather than naming `literal name.parquet`.
+
+## Accepted URL syntax
+
+`LocationInput::parse` classifies nonempty input without consulting the registry. Canonical explicit URLs become `LocationInput::Url(Location)`. Input without a colon before its first path separator becomes `LocationInput::Bare(String)`. A colon in that position starts URL-like syntax: a valid scheme prefix is parsed as an explicit URL, while an invalid prefix is rejected as ambiguous.
+
+| Input                        | Meaning                                                                       |
+| ---------------------------- | ----------------------------------------------------------------------------- |
+| `data/input.parquet`         | Bare text whose meaning belongs to the registered bare backend.               |
+| `/data/input.parquet`        | Bare text; the default local mapper treats it as an absolute filesystem path. |
+| `file:///data/input.parquet` | A canonical local file URL.                                                   |
+| `s3://bucket/input.parquet`  | A canonical storage URL routed by its scheme.                                 |
+
+Local file URLs must use lowercase `file:` followed by exactly three slashes. Other storage URLs must use a lowercase scheme followed by `://`. Rejected variants are not silently normalized. Explicit URLs reject fragments, embedded user information, malformed percent encoding, and paths that require implicit encoding or normalization.
+
+A query remains on the canonical URL and is syntactically separate from the URL path. The object-path mapper receives the full `Location`, so a backend may use, ignore, or reject the query. In bare input, `?` remains an ordinary character for the selected backend to interpret.
+
+Glob patterns have a separate contract because wildcard characters do not mean the same thing in URL syntax. They do not pass through `LocationInput::parse`.
 
 ## Shared retries
 
-A provider opts into shared retry settings with `StorageProviderRegistrationBuilder::shared_retries`. If at least one registration opts in, the registry contributes this argument group once:
+A backend opts into shared retry settings with `StorageBackendBuilder::shared_retries`. If at least one registered backend opts in, the registry contributes this argument group once:
 
 | Argument                    | Default | Meaning                                      |
 | --------------------------- | ------- | -------------------------------------------- |
-| `--storage-max-retries`     | `10`    | Maximum retries for one provider request     |
-| `--storage-retry-timeout`   | `3m`    | Total retry window for one provider request  |
-| `--storage-initial-backoff` | `100ms` | First delay before a retry                   |
-| `--storage-max-backoff`     | `15s`   | Maximum delay between retries                |
-| `--storage-backoff-base`    | `2`     | Multiplier used by the provider retry policy |
+| `--storage-max-retries`     | `10`    | Maximum retries for one backend request.     |
+| `--storage-retry-timeout`   | `3m`    | Elapsed-time limit checked after a failure.  |
+| `--storage-initial-backoff` | `100ms` | First delay before a retry.                  |
+| `--storage-max-backoff`     | `15s`   | Maximum delay between retries.               |
+| `--storage-backoff-base`    | `2`     | Multiplier used by the backend retry policy. |
 
-Durations use `humantime` syntax. With retries enabled, time values must be nonzero, the initial backoff cannot exceed the maximum, and the base must be finite and greater than `1.0`. Setting `--storage-max-retries=0` disables those semantic checks. Clap still rejects values it cannot parse.
+Durations use `humantime` syntax. With retries enabled, time values must be nonzero, the initial backoff cannot exceed the maximum, and the base must be finite and greater than `1.0`. Setting `--storage-max-retries=0` disables those semantic checks, though Clap still rejects values it cannot parse.
 
-A local-only registry omits the group. Providers that do not opt in receive no retry configuration. Participating resolvers receive `object_store::RetryConfig`, including its `BackoffConfig`, so they can pass the validated settings directly to an upstream store builder.
-
-## Accepted location grammar
-
-`LocationInput::parse` classifies nonempty input without consulting the registry. Canonical explicit URLs become `LocationInput::Url(Location)`. Input without URL syntax becomes `LocationInput::Bare(String)` and is preserved exactly until the registered bare-location provider interprets it.
-
-| Input                        | Meaning                                                                           |
-| ---------------------------- | --------------------------------------------------------------------------------- |
-| `data/input.parquet`         | Schemless text; the registered bare-location provider decides what it means       |
-| `/data/input.parquet`        | Schemless text; the default local mapper treats it as an absolute filesystem path |
-| `file:///data/input.parquet` | A canonical local file URL                                                        |
-| `s3://bucket/input.parquet`  | A canonical storage URL whose scheme is checked during resolution                 |
-
-### Bare locations
-
-Core does not assume that schemeless input names a file. It preserves spaces, Unicode, and literal `%`, `?`, and `#` characters in the `String` passed to the claiming provider. A provider may interpret that text using its own typed command-line settings before mapping it to one of its explicit URL schemes.
-
-With `local-bare-paths`, the local provider treats bare input as a filesystem path. Relative paths use the process working directory, and absolute paths stay absolute. Mapping applies the encoding needed for an absolute `file:///` URL without changing the filesystem path. For example, the `%20` sequence in the bare filename `literal%20name.parquet` remains literal and does not name `literal name.parquet`.
-
-### URLs
-
-Input with a scheme is URL source text. Its path must percent-encode characters that URL syntax does not allow literally. For example, a URL uses `data%20set.parquet` rather than `data set.parquet`, while a bare location preserves either spelling for its provider to interpret.
-
-Local file URLs must use lowercase `file:` followed by exactly three slashes. Other storage URLs must use a lowercase scheme followed by `://`. Alternate file spellings such as `file:/data`, `file://localhost/data`, `FILE:///data`, and `file:////data` are rejected rather than normalized. URL input preserves query strings for the provider or downstream consumer. It rejects fragments, embedded user information, malformed percent encoding, and paths that require implicit encoding or normalization.
-
-A query is separate from the object path. `s3://bucket/data?version=1` resolves the path `data` and preserves `version=1` on the URL. A provider may interpret, pass through, ignore, or reject that query. The local bare-location mapper treats `data?version=1` as a filename containing `?` because bare input never passes through URL parsing.
-
-### Validation layers
-
-Validation is split by layer:
-
-- `LocationInput::parse` rejects empty, malformed, ambiguous, or noncanonical explicit URL input. It preserves other input without requiring a registered provider or imposing `object_store` path rules.
-- `StorageResolver` rejects unregistered schemes, bare input without a claimant, unsupported directions, and bare mappers that return a scheme the selected provider does not own.
-- Bare-location mappers own the meaning assigned to schemeless text. Provider resolvers own authority and object-path validation after every input has a canonical `Location`.
-
-Local path handling is lexical and does not call `canonicalize`, resolve symlinks, or require the target to exist. Mapping a bare local path to a URL performs only the encoding and URL path processing needed for an absolute local file URL. Once a canonical `file:///` input passes the spelling check, URL parsing may decode valid percent encoding.
-
-Provider resolvers accept `Location` rather than raw input; only a provider's optional `BareLocationMapper<T>` sees schemeless source text. A bare location that resembles a scheme can be made syntactically unambiguous with a separator before its colon, such as `./name:value.parquet`.
-
-Glob patterns have a separate contract because `?` has a different meaning in a URL. They do not pass through `LocationInput::parse`.
+Backends that do not opt in receive no retry configuration. Participating object-store factories receive the validated upstream `object_store::RetryConfig` and may pass it directly to an upstream store builder.
 
 ## Store identity and DataFusion
 
-Each call to `StorageRegistry::bind_args` creates a command-scoped `StorageResolver`. The resolver caches one store for each URL origin: scheme, host, and port. Paths and queries do not create another store because DataFusion uses the same origin identity for object-store registration. Provider settings and retry settings are fixed for the lifetime of a bound resolver. Different bound commands do not share clients.
+A session caches one object-store client per store-root URL: scheme, host, and port, with the path reset to `/` and the query and fragment removed. After successful routing and validation, the object-path mapper still runs on cache hits. The object-store factory runs only on a cache miss while the cache lock is held, so concurrent requests cannot create duplicate clients for the same root.
 
-`ResolvedLocation::store_url` exposes the origin URL. The pipeline registers the resolved `Arc<dyn ObjectStore>` with DataFusion, while this crate remains independent of DataFusion.
+`StorageHandle::store_url` exposes the cache key, and `StorageHandle::object_store` returns a cheap clone of the shared client pointer. The pipeline registers that pair with DataFusion. This crate itself remains independent of DataFusion.
 
 ## Existence and output policy
 
-Resolution does not check storage:
+Handle creation performs neither an object-existence check nor an overwrite check. Those policies remain explicit:
 
-- `validate_input` requires `head` to find an existing object.
-- `preflight_output` allows an absent object, rejects an existing object when overwrite is disabled, and skips `head` when overwrite is enabled.
+- `validate_input` calls `head` and requires the input object to exist.
+- `preflight_output` permits an absent object, rejects an existing object when overwrite is disabled, and skips `head` when overwrite is enabled.
 
-Keeping these checks separate lets callers resolve a destination before writing a new object.
+Keeping these checks separate lets callers create an input handle without forcing an eager existence check and create an output handle before its object exists.
 
 ## Cargo features
 
-The `local` feature enables `object_store/fs` and exposes the built-in registration for explicit `file:///` URLs. `local-bare-paths` depends on `local` and makes that provider claim schemeless input. It is the default feature so existing bare local paths continue to work.
+The `local` feature enables `object_store/fs` and exposes `local::backend` and `local::session` for explicit `file:///` locations. `local-bare-paths` depends on `local` and also makes that backend claim bare input. It is the default feature.
 
-Use `default-features = false, features = ["local"]` to keep explicit `file:///` support while leaving the bare-location route available for another provider. With neither local feature, the crate contributes no `file:` registration, so that scheme is unsupported unless the host registers another owner. Location parsing and provider registration remain available. The crate enables `object_store/cloud` for shared retry types but does not enable a concrete cloud backend.
+Use `default-features = false, features = ["local"]` to keep explicit local URLs while leaving the bare route available for another backend. With neither feature, the crate exposes no built-in local backend functions. A host may still define and register other backends.
+
+The crate enables `object_store/cloud` for shared retry types but does not register a concrete cloud backend.

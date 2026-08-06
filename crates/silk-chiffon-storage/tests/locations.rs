@@ -7,8 +7,6 @@ use bytes::Bytes;
 use futures::TryStreamExt;
 #[cfg(feature = "local-bare-paths")]
 use object_store::ObjectStoreExt;
-#[cfg(feature = "local")]
-use silk_chiffon_storage::StorageResolver;
 use silk_chiffon_storage::{Location, LocationInput, StorageError};
 #[cfg(feature = "local-bare-paths")]
 use silk_chiffon_storage::{preflight_output, validate_input};
@@ -54,18 +52,22 @@ fn local_mapper_interprets_bare_locations_as_filesystem_paths() -> Result<(), St
     ] {
         let expected = working_directory.path().join(name);
         let input = location(expected.to_str().unwrap())?;
-        let resolved = StorageResolver::local().unwrap().resolve_input(&input)?;
-        assert_eq!(resolved.local_path()?, expected);
+        let handle = silk_chiffon_storage::local::session()
+            .unwrap()
+            .input_handle(&input)?;
+        assert_eq!(handle.local_path()?, expected);
         assert_eq!(
-            resolved.path,
-            object_store::path::Path::from_absolute_path(&expected).unwrap()
+            handle.object_path(),
+            &object_store::path::Path::from_absolute_path(&expected).unwrap()
         );
     }
 
     let relative = location("relative/data.parquet")?;
-    let resolved = StorageResolver::local().unwrap().resolve_input(&relative)?;
+    let handle = silk_chiffon_storage::local::session()
+        .unwrap()
+        .input_handle(&relative)?;
     assert_eq!(
-        resolved.local_path()?,
+        handle.local_path()?,
         std::env::current_dir()
             .unwrap()
             .join("relative/data.parquet")
@@ -96,17 +98,18 @@ fn canonical_file_urls_map_absolute_paths_to_store_keys() -> Result<(), Box<dyn 
         ),
     ] {
         let location = Location::parse_url(input)?;
-        let resolved = StorageResolver::local()?.resolve_input(&location.clone().into())?;
+        let handle =
+            silk_chiffon_storage::local::session()?.input_handle(&location.clone().into())?;
 
         assert_eq!(location.url().as_str(), input);
         assert_eq!(
             location.url().to_file_path().unwrap(),
             Path::new(filesystem_path)
         );
-        assert_eq!(resolved.url, *location.url());
-        assert_eq!(resolved.local_path()?, Path::new(filesystem_path));
-        assert_eq!(resolved.store_url().as_str(), "file:///");
-        assert_eq!(resolved.path.as_ref(), object_path);
+        assert_eq!(handle.url(), location.url());
+        assert_eq!(handle.local_path()?, Path::new(filesystem_path));
+        assert_eq!(handle.store_url().as_str(), "file:///");
+        assert_eq!(handle.object_path().as_ref(), object_path);
     }
 
     Ok(())
@@ -134,7 +137,7 @@ fn noncanonical_url_paths_report_their_source() {
 }
 
 #[test]
-fn canonical_provider_urls_parse_before_scheme_resolution() {
+fn canonical_storage_urls_parse_before_backend_selection() {
     let input = LocationInput::parse("s3://bucket/object").unwrap();
     let LocationInput::Url(location) = &input else {
         panic!("an explicit URL should not parse as a bare location");
@@ -143,7 +146,7 @@ fn canonical_provider_urls_parse_before_scheme_resolution() {
     assert_eq!(location.url().as_str(), "s3://bucket/object");
     #[cfg(feature = "local")]
     assert!(
-        matches!(StorageResolver::local().unwrap().resolve_input(&input), Err(
+        matches!(silk_chiffon_storage::local::session().unwrap().input_handle(&input), Err(
         StorageError::UnsupportedScheme(scheme)
     ) if scheme == "s3")
     );
@@ -151,14 +154,14 @@ fn canonical_provider_urls_parse_before_scheme_resolution() {
 
 #[test]
 #[cfg(feature = "local-bare-paths")]
-fn object_store_path_validation_happens_during_resolution() {
+fn object_path_validation_happens_during_handle_creation() {
     let location = LocationInput::parse("bad\0path").unwrap();
 
     assert!(matches!(
-        StorageResolver::local().unwrap().resolve_input(&location),
-        Err(StorageError::ProviderResolution {
-            provider: "local",
-            direction: silk_chiffon_storage::StorageDirection::Input,
+        silk_chiffon_storage::local::session().unwrap().input_handle(&location),
+        Err(StorageError::ObjectPathMapping {
+            backend: "local",
+            location: _,
             source,
         }) if source.downcast_ref::<object_store::path::Error>().is_some()
     ));
@@ -171,6 +174,20 @@ fn noncanonical_storage_urls_are_rejected() {
             LocationInput::parse(input),
             Err(StorageError::NonCanonicalStorageUrl { scheme, input: rejected })
                 if scheme == "s3" && rejected == input
+        ));
+    }
+}
+
+#[test]
+fn storage_urls_reject_authority_and_query_normalization() {
+    for input in [
+        "https://EXAMPLE.COM:443",
+        "https://example.com/object?query=has a space",
+    ] {
+        assert!(matches!(
+            LocationInput::parse(input),
+            Err(StorageError::NonCanonicalStorageUrl { input: rejected, .. })
+                if rejected == input
         ));
     }
 }
@@ -195,14 +212,14 @@ fn storage_urls_preserve_queries() {
     #[cfg(feature = "local")]
     {
         let file = LocationInput::parse("file:///tmp/object?version=1").unwrap();
-        let resolved = StorageResolver::local()
+        let handle = silk_chiffon_storage::local::session()
             .unwrap()
-            .resolve_input(&file)
+            .input_handle(&file)
             .unwrap();
-        assert_eq!(resolved.url.query(), Some("version=1"));
-        assert_eq!(resolved.path.as_ref(), "tmp/object");
-        assert_eq!(resolved.local_path().unwrap(), Path::new("/tmp/object"));
-        assert_eq!(resolved.store_url().as_str(), "file:///");
+        assert_eq!(handle.url().query(), Some("version=1"));
+        assert_eq!(handle.object_path().as_ref(), "tmp/object");
+        assert_eq!(handle.local_path().unwrap(), Path::new("/tmp/object"));
+        assert_eq!(handle.store_url().as_str(), "file:///");
     }
 }
 
@@ -211,6 +228,7 @@ fn storage_urls_reject_fragments_user_information_and_invalid_percent_encoding()
     for input in [
         "s3://bucket/object#fragment",
         "s3://user:password@bucket/object",
+        "https://:@example.com/object",
         "s3://bucket/%ZZ",
     ] {
         assert!(
@@ -262,29 +280,29 @@ fn equivalent_locations_share_the_cached_store() {
     let working_directory = TempDir::new().unwrap();
     let path = working_directory.path().join("data.parquet");
     let bare = location(path.to_str().unwrap()).unwrap();
-    let resolver = StorageResolver::local().unwrap();
+    let storage = silk_chiffon_storage::local::session().unwrap();
 
-    let first = resolver.resolve_input(&bare).unwrap();
-    let file_url = location(first.url.as_str()).unwrap();
-    let second = resolver.resolve_input(&file_url).unwrap();
+    let first = storage.input_handle(&bare).unwrap();
+    let file_url = location(first.url().as_str()).unwrap();
+    let second = storage.input_handle(&file_url).unwrap();
 
-    assert!(Arc::ptr_eq(&first.store, &second.store));
+    assert!(Arc::ptr_eq(&first.object_store(), &second.object_store(),));
 }
 
 #[test]
 #[cfg(feature = "local-bare-paths")]
-fn resolution_preserves_the_upstream_object_path() {
+fn storage_handle_preserves_the_upstream_object_path() {
     let working_directory = TempDir::new().unwrap();
     let path = working_directory.path().join("nested/data%20set.parquet");
     let location = location(path.to_str().unwrap()).unwrap();
-    let resolved = StorageResolver::local()
+    let handle = silk_chiffon_storage::local::session()
         .unwrap()
-        .resolve_input(&location)
+        .input_handle(&location)
         .unwrap();
 
     assert_eq!(
-        resolved.path,
-        object_store::path::Path::from_absolute_path(
+        handle.object_path(),
+        &object_store::path::Path::from_absolute_path(
             working_directory.path().join("nested/data%20set.parquet")
         )
         .unwrap()
@@ -293,16 +311,16 @@ fn resolution_preserves_the_upstream_object_path() {
 
 #[tokio::test]
 #[cfg(feature = "local-bare-paths")]
-async fn absent_object_resolution_is_separate_from_input_validation() {
+async fn absent_object_handle_creation_is_separate_from_input_validation() {
     let working_directory = TempDir::new().unwrap();
     let path = working_directory.path().join("absent.parquet");
     let location = location(path.to_str().unwrap()).unwrap();
-    let resolved = StorageResolver::local()
+    let handle = silk_chiffon_storage::local::session()
         .unwrap()
-        .resolve_input(&location)
+        .input_handle(&location)
         .unwrap();
 
-    assert!(validate_input(&resolved).await.is_err());
+    assert!(validate_input(&handle).await.is_err());
 }
 
 #[tokio::test]
@@ -311,12 +329,12 @@ async fn absent_output_passes_preflight() {
     let working_directory = TempDir::new().unwrap();
     let path = working_directory.path().join("absent.parquet");
     let location = location(path.to_str().unwrap()).unwrap();
-    let resolved = StorageResolver::local()
+    let handle = silk_chiffon_storage::local::session()
         .unwrap()
-        .resolve_output(&location)
+        .output_handle(&location)
         .unwrap();
 
-    preflight_output(&resolved, false).await.unwrap();
+    preflight_output(&handle, false).await.unwrap();
 }
 
 #[tokio::test]
@@ -325,18 +343,18 @@ async fn existing_output_requires_overwrite() {
     let working_directory = TempDir::new().unwrap();
     let path = working_directory.path().join("existing.parquet");
     let location = location(path.to_str().unwrap()).unwrap();
-    let resolved = StorageResolver::local()
+    let handle = silk_chiffon_storage::local::session()
         .unwrap()
-        .resolve_output(&location)
+        .output_handle(&location)
         .unwrap();
-    resolved
-        .store
-        .put(&resolved.path, Bytes::from_static(b"existing").into())
+    handle
+        .object_store()
+        .put(handle.object_path(), Bytes::from_static(b"existing").into())
         .await
         .unwrap();
 
-    assert!(preflight_output(&resolved, false).await.is_err());
-    preflight_output(&resolved, true).await.unwrap();
+    assert!(preflight_output(&handle, false).await.is_err());
+    preflight_output(&handle, true).await.unwrap();
 }
 
 #[tokio::test]
@@ -345,20 +363,19 @@ async fn local_store_supports_object_operations() {
     let working_directory = TempDir::new().unwrap();
     let path = working_directory.path().join("nested/data.bin");
     let location = location(path.to_str().unwrap()).unwrap();
-    let resolved = StorageResolver::local()
+    let handle = silk_chiffon_storage::local::session()
         .unwrap()
-        .resolve_output(&location)
+        .output_handle(&location)
         .unwrap();
+    let object_store = handle.object_store();
 
-    resolved
-        .store
-        .put(&resolved.path, Bytes::from_static(b"abcdef").into())
+    object_store
+        .put(handle.object_path(), Bytes::from_static(b"abcdef").into())
         .await
         .unwrap();
     assert_eq!(
-        resolved
-            .store
-            .get(&resolved.path)
+        object_store
+            .get(handle.object_path())
             .await
             .unwrap()
             .bytes()
@@ -367,23 +384,21 @@ async fn local_store_supports_object_operations() {
         Bytes::from_static(b"abcdef")
     );
     assert_eq!(
-        resolved
-            .store
-            .get_range(&resolved.path, 1..4)
+        object_store
+            .get_range(handle.object_path(), 1..4)
             .await
             .unwrap(),
         Bytes::from_static(b"bcd")
     );
 
-    let listed = resolved
-        .store
-        .list(resolved.path.parent().as_ref())
+    let listed = object_store
+        .list(handle.object_path().parent().as_ref())
         .try_collect::<Vec<_>>()
         .await
         .unwrap();
     assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0].location, resolved.path);
+    assert_eq!(&listed[0].location, handle.object_path());
 
-    resolved.store.delete(&resolved.path).await.unwrap();
-    assert!(resolved.store.head(&resolved.path).await.is_err());
+    object_store.delete(handle.object_path()).await.unwrap();
+    assert!(object_store.head(handle.object_path()).await.is_err());
 }

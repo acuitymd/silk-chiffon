@@ -1,10 +1,8 @@
-//! Shared retry arguments for storage providers.
+//! Shared retry arguments for storage backends.
 //!
-//! A provider opts into these settings with
-//! [`crate::StorageProviderRegistrationBuilder::shared_retries`]. The registry contributes the
-//! arguments once, validates them when command matches are bound, and passes the resulting
-//! [`RetryConfig`] only to participating provider resolvers. Each participating provider is
-//! responsible for applying the configuration to its object-store client.
+//! A backend opts into these settings with [`crate::StorageBackendBuilder::shared_retries`]. The
+//! registry contributes the arguments once and validates them during session creation. Only
+//! participating object-store factories receive the resulting [`RetryConfig`].
 
 use std::time::Duration;
 
@@ -12,14 +10,14 @@ use clap::Args;
 use object_store::{BackoffConfig, RetryConfig};
 use thiserror::Error;
 
-/// Clap arguments contributed once when any provider opts into shared retries.
+/// Clap arguments contributed once when any backend opts into shared retries.
 ///
 /// Setting `--storage-max-retries=0` disables retries and skips all timing and multiplier
 /// validation. When retries are enabled, [`Self::into_retry_config`] enforces this crate's shared
 /// retry policy.
 #[derive(Args, Clone, Debug)]
 pub struct RetryArgs {
-    /// Maximum retries for one provider request.
+    /// Maximum retries for one backend request.
     #[arg(long = "storage-max-retries", default_value_t = 10)]
     max_retries: usize,
     /// Elapsed-time limit checked after each failed attempt, measured from the initial request.
@@ -43,7 +41,7 @@ pub struct RetryArgs {
         value_parser = parse_duration
     )]
     max_backoff: Duration,
-    /// Multiplier used by the provider retry policy.
+    /// Multiplier used by the backend retry policy.
     #[arg(long = "storage-backoff-base", default_value_t = 2.0)]
     backoff_base: f64,
 }
@@ -114,39 +112,25 @@ impl RetryArgs {
 /// Invalid combinations of shared storage retry arguments.
 #[derive(Debug, Error)]
 pub enum RetryConfigurationError {
-    /// The total retry window is zero while retries are enabled.
     #[error("storage retry timeout must be greater than zero when retries are enabled")]
     ZeroRetryTimeout,
-    /// The first retry delay is zero while retries are enabled.
     #[error("storage retry initial backoff must be greater than zero when retries are enabled")]
     ZeroInitialBackoff,
-    /// The maximum delay between retries is zero while retries are enabled.
     #[error("storage retry maximum backoff must be greater than zero when retries are enabled")]
     ZeroMaximumBackoff,
-    /// The exponential backoff multiplier is NaN or infinite.
     #[error("storage retry backoff base must be finite: {0}")]
     NonFiniteBackoffBase(f64),
-    /// The exponential backoff multiplier is no greater than one.
     #[error("storage retry backoff base must be greater than 1.0: {0}")]
     BackoffBaseNotGreaterThanOne(f64),
-    /// The first retry delay exceeds the configured maximum delay.
     #[error("storage retry initial backoff {initial:?} exceeds maximum backoff {maximum:?}")]
     InitialBackoffExceedsMaximum {
-        /// The configured first retry delay.
         initial: Duration,
-        /// The configured maximum delay between retries.
         maximum: Duration,
     },
-    /// The multiplier would overflow the retry policy's random backoff upper bound.
     #[error(
         "storage retry backoff base {base} with maximum backoff {maximum:?} produces a non-finite range"
     )]
-    BackoffRangeOverflow {
-        /// The configured exponential backoff multiplier.
-        base: f64,
-        /// The configured maximum delay between retries.
-        maximum: Duration,
-    },
+    BackoffRangeOverflow { base: f64, maximum: Duration },
 }
 
 fn parse_duration(input: &str) -> Result<Duration, String> {

@@ -28,7 +28,7 @@ use arrow::datatypes::SchemaRef;
 use camino::Utf8Path;
 use glob::glob;
 use owo_colors::OwoColorize;
-use silk_chiffon_storage::{LocationInput, ResolvedLocation, StorageDirection, StorageResolver};
+use silk_chiffon_storage::{LocationInput, StorageDirection, StorageHandle, StorageSession, local};
 use tabled::{builder::Builder, settings::Style};
 
 pub async fn run(args: TransformCommand) -> Result<()> {
@@ -182,7 +182,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         .map(|(spec, pool_size)| spec.resolve(pool_size))
         .transpose()?;
 
-    let storage_resolver = StorageResolver::local()?;
+    let storage = local::session()?;
     let mut pipeline = Pipeline::new()
         .with_query_dialect(dialect)
         .with_memory_limit(effective_memory_limit)
@@ -198,11 +198,10 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         (from_many, true)
     };
 
-    // resolve input paths (glob-expand if needed), build sources, and create InputStrategy
     let input_strategy = if !should_glob && input_paths.len() == 1 {
-        let (input_path, resolved) =
-            resolve_local_path(&input_paths[0], &storage_resolver, StorageDirection::Input)?;
-        pipeline = pipeline.with_storage_location(resolved);
+        let (input_path, handle) =
+            local_path_and_handle(&input_paths[0], &storage, StorageDirection::Input)?;
+        pipeline = pipeline.with_storage_handle(handle);
         let source = make_source(&input_path, input_format)?;
         InputStrategy::Single(source)
     } else {
@@ -231,9 +230,9 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         let mut sources: Vec<Box<dyn DataSource>> = Vec::new();
         let mut schema: Option<SchemaRef> = None;
         for input_path in &expanded_paths {
-            let (local_path, resolved) =
-                resolve_local_path(input_path, &storage_resolver, StorageDirection::Input)?;
-            pipeline = pipeline.with_storage_location(resolved);
+            let (local_path, handle) =
+                local_path_and_handle(input_path, &storage, StorageDirection::Input)?;
+            pipeline = pipeline.with_storage_handle(handle);
             let source = make_source(&local_path, input_format)?;
             if let Some(ref schema) = schema {
                 let source_schema = source.schema()?;
@@ -393,9 +392,9 @@ pub async fn run(args: TransformCommand) -> Result<()> {
     )?;
 
     if let Some(output_path) = to {
-        let (output_path, resolved) =
-            resolve_local_path(&output_path, &storage_resolver, StorageDirection::Output)?;
-        pipeline = pipeline.with_storage_location(resolved);
+        let (output_path, handle) =
+            local_path_and_handle(&output_path, &storage, StorageDirection::Output)?;
+        pipeline = pipeline.with_storage_handle(handle);
         pipeline = pipeline.with_output_strategy_with_single_sink(
             output_path,
             sink_factory,
@@ -593,18 +592,18 @@ fn make_source(path: &str, input_format: Option<DataFormat>) -> Result<Box<dyn D
     })
 }
 
-fn resolve_local_path(
+fn local_path_and_handle(
     input: &str,
-    storage: &StorageResolver,
+    storage: &StorageSession,
     direction: StorageDirection,
-) -> Result<(String, ResolvedLocation)> {
+) -> Result<(String, StorageHandle)> {
     let location = LocationInput::parse(input)?;
-    let resolved_location = match direction {
-        StorageDirection::Input => storage.resolve_input(&location)?,
-        StorageDirection::Output => storage.resolve_output(&location)?,
+    let handle = match direction {
+        StorageDirection::Input => storage.input_handle(&location)?,
+        StorageDirection::Output => storage.output_handle(&location)?,
     };
     let path = if input.starts_with("file:///") {
-        resolved_location
+        handle
             .local_path()?
             .into_os_string()
             .into_string()
@@ -613,7 +612,7 @@ fn resolve_local_path(
         input.to_owned()
     };
 
-    Ok((path, resolved_location))
+    Ok((path, handle))
 }
 
 fn detect_format(path: &str, explicit_format: Option<DataFormat>) -> Result<DataFormat> {
