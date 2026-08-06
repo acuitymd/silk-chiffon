@@ -11,7 +11,9 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::file::reader::{FileReader as _, SerializedFileReader};
 use uuid::Uuid;
 
-use crate::sources::data_source::DataSource;
+use crate::sources::data_source::{
+    DataSource, DataSourceCapabilities, InputAccess, RowCount, StreamBoundedness,
+};
 
 #[derive(Debug)]
 pub struct ParquetDataSource {
@@ -30,18 +32,24 @@ impl DataSource for ParquetDataSource {
         "parquet"
     }
 
-    fn schema(&self) -> Result<SchemaRef> {
+    fn capabilities(&self) -> DataSourceCapabilities {
+        DataSourceCapabilities::new(StreamBoundedness::Finite, InputAccess::RandomAccess)
+    }
+
+    async fn schema(&self) -> Result<SchemaRef> {
         let file = File::open(&self.path)?;
         let reader = ParquetRecordBatchReaderBuilder::try_new(file)?;
         Ok(Arc::clone(reader.schema()))
     }
 
     #[allow(clippy::cast_sign_loss)]
-    fn row_count(&self) -> Result<usize> {
+    async fn row_count(&self) -> Result<RowCount> {
         let file = File::open(&self.path)?;
         let reader = SerializedFileReader::new(file)?;
         #[allow(clippy::cast_possible_truncation)]
-        Ok(reader.metadata().file_metadata().num_rows() as usize)
+        Ok(RowCount::Exact(
+            reader.metadata().file_metadata().num_rows() as u64,
+        ))
     }
 
     async fn as_table_provider(&self, ctx: &mut SessionContext) -> Result<Arc<dyn TableProvider>> {
@@ -50,10 +58,6 @@ impl DataSource for ParquetDataSource {
             .await?;
         let table = ctx.table(&table_name).await?;
         Ok(table.into_view())
-    }
-
-    fn supports_table_provider(&self) -> bool {
-        true
     }
 }
 
@@ -104,7 +108,8 @@ mod tests {
     #[tokio::test]
     async fn test_as_stream() {
         let source = ParquetDataSource::new(TEST_PARQUET_PATH.to_string());
-        let mut stream = source.as_stream().await.unwrap();
+        let mut ctx = SessionContext::new();
+        let mut stream = source.as_stream(&mut ctx).await.unwrap();
 
         assert!(!stream.schema().fields().is_empty());
         let batch = stream.next().await.unwrap().unwrap();
@@ -115,19 +120,20 @@ mod tests {
     #[tokio::test]
     async fn test_row_count() {
         let source = ParquetDataSource::new(TEST_PARQUET_PATH.to_string());
-        let count = source.row_count().unwrap();
+        let count = source.row_count().await.unwrap();
 
         // verify against actually streaming all rows
-        let mut stream = source.as_stream().await.unwrap();
+        let mut ctx = SessionContext::new();
+        let mut stream = source.as_stream(&mut ctx).await.unwrap();
         let mut streamed = 0;
         while let Some(batch) = stream.next().await {
             streamed += batch.unwrap().num_rows();
         }
-        assert_eq!(count, streamed);
+        assert_eq!(count, RowCount::Exact(streamed as u64));
     }
 
-    #[test]
-    fn test_row_count_written_file() {
+    #[tokio::test]
+    async fn test_row_count_written_file() {
         use crate::utils::test_data::{TestBatch, TestFile};
 
         let dir = tempfile::tempdir().unwrap();
@@ -139,6 +145,6 @@ mod tests {
         TestFile::write_parquet_batch(&path, &batch);
 
         let source = ParquetDataSource::new(path.to_string_lossy().to_string());
-        assert_eq!(source.row_count().unwrap(), 5);
+        assert_eq!(source.row_count().await.unwrap(), RowCount::Exact(5));
     }
 }

@@ -206,9 +206,12 @@ impl DataSink for ArrowSink {
 
         let handle = self.handle.take().context("sink already finished")?;
         let result = handle.await.context("writer task panicked")??;
+        let url = url::Url::from_file_path(&result.path).map_err(|()| {
+            anyhow::anyhow!("output path is not absolute: {}", result.path.display())
+        })?;
 
         Ok(SinkResult {
-            files_written: vec![result.path],
+            files_written: vec![url],
             rows_written: result.rows_written,
         })
     }
@@ -267,7 +270,10 @@ mod tests {
 
             assert_eq!(result.rows_written, 3);
             assert_eq!(result.files_written.len(), 1);
-            assert_eq!(result.files_written[0], output_path);
+            assert_eq!(
+                result.files_written[0],
+                url::Url::from_file_path(&output_path).unwrap()
+            );
 
             let batches = verify::read_output_file(&output_path).unwrap();
             assert_eq!(batches.len(), 1);
@@ -499,7 +505,8 @@ mod tests {
             let source = crate::sources::arrow::ArrowDataSource::new(
                 input_path.to_str().unwrap().to_string(),
             );
-            let stream = source.as_stream().await.unwrap();
+            let mut ctx = datafusion::prelude::SessionContext::new();
+            let stream = source.as_stream(&mut ctx).await.unwrap();
 
             let mut sink =
                 ArrowSink::create(output_path.clone(), &schema, ArrowSinkOptions::new()).unwrap();

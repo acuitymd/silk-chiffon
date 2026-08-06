@@ -2,33 +2,27 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use crate::{
-    AllColumnsBloomFilterConfig, BloomFilterConfig, DEFAULT_BLOOM_FILTER_FPP, DataFormat,
-    ListOutputsFormat, PartitionStrategy, SortSpec, TransformCommand, default_thread_budget,
+    ListOutputsFormat, PartitionStrategy, SortDirection, SortSpec, TransformCommand,
+    default_thread_budget,
     io_strategies::{
         OutputFileInfo, input_strategy::InputStrategy, output_strategy::SinkFactory,
         path_template::PathTemplate,
     },
     operations::{query::QueryOperation, sort::SortOperation},
     pipeline::Pipeline,
-    sinks::{
-        arrow::{ArrowSink, ArrowSinkOptions},
-        data_sink::DataSink,
-        parquet::{ParquetRuntimes, ParquetSink, ParquetSinkOptions},
-        vortex::{VortexSink, VortexSinkOptions},
-    },
-    sources::{
-        arrow::ArrowDataSource, data_source::DataSource, parquet::ParquetDataSource,
-        vortex::VortexDataSource,
-    },
+    sources::data_source::{DataSource, InputAccess, RowCount},
     utils::memory::{estimate_sort_spill_reservation, sample_avg_row_bytes},
 };
 use anyhow::{Result, anyhow};
-use apply_if::ApplyIf;
 use arrow::datatypes::SchemaRef;
 use camino::Utf8Path;
 use glob::glob;
 use owo_colors::OwoColorize;
-use silk_chiffon_storage::{LocationInput, StorageDirection, StorageHandle, StorageSession, local};
+use silk_chiffon_core::{
+    ConfiguredFormat, ConfiguredFormats, DataSinkFactory, OutputSortColumn, SinkFactoryContext,
+    SortDirection as CoreSortDirection,
+};
+use silk_chiffon_storage::{LocationInput, StorageHandle, StorageSession};
 use tabled::{builder::Builder, settings::Style};
 
 pub async fn run(args: TransformCommand) -> Result<()> {
@@ -55,99 +49,20 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         target_partitions,
         input_format,
         output_format,
-        arrow_compression,
-        arrow_format,
-        arrow_record_batch_size,
-        arrow_writing_queue_size,
-        parquet_bloom_all,
-        parquet_bloom_all_off,
-        parquet_bloom_column,
-        parquet_bloom_column_off,
-        parquet_buffer_size,
-        parquet_dictionary_column,
-        parquet_column_encoding,
-        parquet_column_encoding_threads,
-        parquet_dictionary_column_off,
-        parquet_compression,
-        parquet_compression_level,
-        parquet_ingestion_queue_size,
-        parquet_encoding_queue_size,
-        parquet_writing_queue_size,
-        parquet_encoding,
-        parquet_io_threads,
-        parquet_dictionary_all_off,
-        parquet_row_group_concurrency,
-        parquet_row_group_size,
-        parquet_sorted_metadata,
-        parquet_statistics,
-        parquet_writer_version,
-        parquet_data_page_size,
-        parquet_data_page_row_limit,
-        parquet_dictionary_page_size,
-        parquet_write_batch_size,
-        parquet_offset_index,
-        parquet_page_header_statistics,
-        parquet_arrow_metadata,
         thread_budget,
         spill_path,
         spill_compression,
-        vortex_record_batch_size,
+        formats,
+        storage,
     } = args;
 
     let usable_cpus = thread_budget
         .map(|spec| spec.resolve())
         .unwrap_or_else(default_thread_budget);
-    let quarter_cpus = (usable_cpus / 4).max(1);
     let three_quarter_cpus = (usable_cpus * 3 / 4).max(1);
 
-    // allocate threads based on workload:
-    // - sorting is CPU-intensive in DataFusion, so give encoding fewer threads
-    // - without sorting, encoding is the bottleneck, so give it more threads
-    // NOTE: output partitioning with sort-single strategy requires sorting by partition columns
     let has_sort =
         sort_by.is_some() || (by.is_some() && partition_strategy == PartitionStrategy::SortSingle);
-    let default_encoding_threads = if has_sort {
-        quarter_cpus
-    } else {
-        three_quarter_cpus
-    };
-    let runtimes = Arc::new(ParquetRuntimes::try_new(
-        parquet_column_encoding_threads.unwrap_or(default_encoding_threads),
-        parquet_io_threads.unwrap_or(1),
-    )?);
-
-    for disabled_col in &parquet_bloom_column_off {
-        if parquet_bloom_column.iter().any(|c| &c.name == disabled_col) {
-            anyhow::bail!(
-                "column '{}' specified in both --parquet-bloom-column-off and --parquet-bloom-column",
-                disabled_col
-            );
-        }
-    }
-
-    for disabled_col in &parquet_dictionary_column_off {
-        if parquet_dictionary_column
-            .iter()
-            .any(|c| &c.name == disabled_col)
-        {
-            anyhow::bail!(
-                "column '{}' specified in both --parquet-dictionary-column-off and --parquet-dictionary-column",
-                disabled_col
-            );
-        }
-    }
-
-    let all_enabled = if parquet_bloom_all_off {
-        None
-    } else {
-        parquet_bloom_all.or(Some(AllColumnsBloomFilterConfig {
-            fpp: DEFAULT_BLOOM_FILTER_FPP,
-            ndv: None,
-        }))
-    };
-    let bloom_filter =
-        BloomFilterConfig::try_new(all_enabled, parquet_bloom_column, parquet_bloom_column_off)
-            .map_err(anyhow::Error::msg)?;
 
     if preserve_input_order && from.is_none() {
         anyhow::bail!("--preserve-input-order requires --from (single input file)");
@@ -182,7 +97,6 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         .map(|(spec, pool_size)| spec.resolve(pool_size))
         .transpose()?;
 
-    let storage = local::session()?;
     let mut pipeline = Pipeline::new()
         .with_query_dialect(dialect)
         .with_memory_limit(effective_memory_limit)
@@ -199,10 +113,16 @@ pub async fn run(args: TransformCommand) -> Result<()> {
     };
 
     let input_strategy = if !should_glob && input_paths.len() == 1 {
-        let (input_path, handle) =
-            local_path_and_handle(&input_paths[0], &storage, StorageDirection::Input)?;
+        let handle = input_handle(&input_paths[0], &storage)?;
+        let format = format_for_handle(
+            &formats,
+            input_format.as_deref(),
+            &handle,
+            &input_paths[0],
+            "input",
+        )?;
+        let source = format.create_source(&handle).await?;
         pipeline = pipeline.with_storage_handle(handle);
-        let source = make_source(&input_path, input_format)?;
         InputStrategy::Single(source)
     } else {
         let mut expanded_paths = Vec::new();
@@ -230,12 +150,17 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         let mut sources: Vec<Box<dyn DataSource>> = Vec::new();
         let mut schema: Option<SchemaRef> = None;
         for input_path in &expanded_paths {
-            let (local_path, handle) =
-                local_path_and_handle(input_path, &storage, StorageDirection::Input)?;
-            pipeline = pipeline.with_storage_handle(handle);
-            let source = make_source(&local_path, input_format)?;
+            let handle = input_handle(input_path, &storage)?;
+            let format = format_for_handle(
+                &formats,
+                input_format.as_deref(),
+                &handle,
+                input_path,
+                "input",
+            )?;
+            let source = format.create_source(&handle).await?;
             if let Some(ref schema) = schema {
-                let source_schema = source.schema()?;
+                let source_schema = source.schema().await?;
                 if *schema != source_schema {
                     anyhow::bail!(
                         "Schema mismatch for input file {} (does not match other file(s))",
@@ -243,37 +168,13 @@ pub async fn run(args: TransformCommand) -> Result<()> {
                     );
                 }
             } else {
-                schema = Some(source.schema()?);
+                schema = Some(source.schema().await?);
             }
+            pipeline = pipeline.with_storage_handle(handle);
             sources.push(source);
         }
         InputStrategy::Multiple(sources)
     };
-
-    // sample rows to estimate sort spill reservation before handing strategy to pipeline
-    if has_sort {
-        let avg_row_bytes = sample_avg_row_bytes(&input_strategy, 100_000).await?;
-
-        if avg_row_bytes > 0 {
-            let total_rows = input_strategy.row_count().unwrap_or(0);
-            let total_in_memory_bytes = total_rows.saturating_mul(avg_row_bytes);
-
-            let memory_limit = effective_memory_limit.unwrap_or(total_budget * 60 / 100);
-            let partitions = effective_target_partitions.unwrap_or(three_quarter_cpus);
-            let memory_per_partition = memory_limit / partitions.max(1);
-
-            let reservation = estimate_sort_spill_reservation(
-                avg_row_bytes,
-                total_in_memory_bytes,
-                memory_per_partition,
-                8192, // DataFusion default batch size
-            );
-
-            pipeline = pipeline.with_sort_spill_reservation_bytes(reservation);
-        }
-    }
-
-    pipeline = pipeline.with_input_strategy(input_strategy);
 
     let list_outputs_format = list_outputs;
 
@@ -319,81 +220,96 @@ pub async fn run(args: TransformCommand) -> Result<()> {
     let user_sort_spec_without_partition_cols =
         user_sort_spec.without_columns_named(&partition_columns);
 
-    let parquet_sort_spec =
-        if parquet_sorted_metadata && !user_sort_spec_without_partition_cols.is_empty() {
-            Some(user_sort_spec_without_partition_cols.clone())
-        } else {
-            None
-        };
-
     let mut full_sort_spec = partition_sort_spec.clone();
     full_sort_spec.extend(&user_sort_spec_without_partition_cols);
 
-    let arrow_opts = ArrowSinkOptions::new()
-        .with_compression(arrow_compression)
-        .with_format(arrow_format)
-        .with_record_batch_size(arrow_record_batch_size)
-        .with_queue_depth(arrow_writing_queue_size);
+    if let Some(q) = &query {
+        pipeline = pipeline.with_operation(Box::new(QueryOperation::new(q.clone())));
+    }
 
-    let parquet_opts = ParquetSinkOptions::new()
-        .with_parquet_compression(parquet_compression, parquet_compression_level)?
-        .with_statistics(parquet_statistics)
-        .with_writer_version(parquet_writer_version)
-        .with_ingestion_queue_size(parquet_ingestion_queue_size)
-        .with_encoding_queue_size(parquet_encoding_queue_size)
-        .with_writing_queue_size(parquet_writing_queue_size)
-        .with_no_dictionary(parquet_dictionary_all_off)
-        .with_dictionary_configs(&parquet_dictionary_column)
-        .with_column_no_dictionary(parquet_dictionary_column_off)
-        .with_encoding(parquet_encoding)
-        .with_column_encodings(parquet_column_encoding)
-        .with_bloom_filters(bloom_filter)
-        .with_offset_index_enabled(parquet_offset_index)
-        .with_skip_arrow_metadata(!parquet_arrow_metadata)
-        .with_page_header_statistics(parquet_page_header_statistics)
-        .apply_if_some(parquet_buffer_size, ParquetSinkOptions::with_buffer_size)
-        .apply_if_some(
-            parquet_row_group_size,
-            ParquetSinkOptions::with_max_row_group_size,
-        )
-        .apply_if_some(
-            parquet_row_group_concurrency,
-            ParquetSinkOptions::with_max_row_group_concurrency,
-        )
-        .apply_if_some(
-            parquet_data_page_size,
-            ParquetSinkOptions::with_data_page_size_limit,
-        )
-        .apply_if_some(
-            parquet_data_page_row_limit,
-            ParquetSinkOptions::with_data_page_row_count_limit,
-        )
-        .apply_if_some(
-            parquet_dictionary_page_size,
-            ParquetSinkOptions::with_dictionary_page_size_limit,
-        )
-        .apply_if_some(
-            parquet_write_batch_size,
-            ParquetSinkOptions::with_write_batch_size,
-        )
-        .apply_if_some(parquet_sort_spec, ParquetSinkOptions::with_sort_spec);
+    if !full_sort_spec.is_empty() {
+        pipeline =
+            pipeline.with_operation(Box::new(SortOperation::new(full_sort_spec.columns.clone())));
+    }
 
-    let vortex_opts = VortexSinkOptions::new().apply_if_some(
-        vortex_record_batch_size,
-        VortexSinkOptions::with_record_batch_size,
+    pipeline.validate_input_plan(&input_strategy).await?;
+
+    if has_sort && input_strategy.capabilities().input_access() == InputAccess::RandomAccess {
+        let avg_row_bytes = sample_avg_row_bytes(&input_strategy, 100_000).await?;
+        if avg_row_bytes > 0 {
+            let total_rows = match input_strategy
+                .row_count()
+                .await
+                .unwrap_or(RowCount::Unknown)
+            {
+                RowCount::Exact(rows) | RowCount::Estimated(rows) => {
+                    usize::try_from(rows).unwrap_or(usize::MAX)
+                }
+                RowCount::Unknown => 100_000,
+            };
+            let total_in_memory_bytes = total_rows.saturating_mul(avg_row_bytes);
+            let memory_limit = effective_memory_limit.unwrap_or(total_budget * 60 / 100);
+            let partitions = effective_target_partitions.unwrap_or(three_quarter_cpus);
+            let memory_per_partition = memory_limit / partitions.max(1);
+            let reservation = estimate_sort_spill_reservation(
+                avg_row_bytes,
+                total_in_memory_bytes,
+                memory_per_partition,
+                8192,
+            );
+            pipeline = pipeline.with_sort_spill_reservation_bytes(reservation);
+        }
+    }
+
+    pipeline = pipeline.with_input_strategy(input_strategy);
+
+    let output_location = to
+        .as_deref()
+        .or(to_many.as_deref())
+        .expect("Clap requires output");
+    let output_handle = to
+        .as_deref()
+        .map(|output| output_handle(output, &storage))
+        .transpose()?;
+    let output_format = match &output_handle {
+        Some(handle) => format_for_handle(
+            &formats,
+            output_format.as_deref(),
+            handle,
+            output_location,
+            "output",
+        )?,
+        None => format_for_path(
+            &formats,
+            output_format.as_deref(),
+            output_location,
+            "output",
+        )?,
+    };
+    let output_ordering = user_sort_spec_without_partition_cols
+        .columns
+        .iter()
+        .map(|column| {
+            OutputSortColumn::new(
+                column.name.clone(),
+                match column.direction {
+                    SortDirection::Ascending => CoreSortDirection::Ascending,
+                    SortDirection::Descending => CoreSortDirection::Descending,
+                },
+            )
+        })
+        .collect();
+    let sink_context = SinkFactoryContext::new(
+        NonZeroUsize::new(usable_cpus).expect("the thread budget is always positive"),
+        has_sort,
+        output_ordering,
     );
-
-    let sink_factory = create_sink_factory(
-        output_format,
-        arrow_opts.clone(),
-        parquet_opts.clone(),
-        vortex_opts,
-        Arc::clone(&runtimes),
-    )?;
+    let sink_factory = output_format.create_sink_factory(&sink_context).await?;
+    let sink_factory = registered_sink_factory(storage.clone(), sink_factory);
 
     if let Some(output_path) = to {
-        let (output_path, handle) =
-            local_path_and_handle(&output_path, &storage, StorageDirection::Output)?;
+        let handle = output_handle.expect("an exact output creates a handle");
+        let output_path = local_output_path(&output_path, &handle)?;
         pipeline = pipeline.with_storage_handle(handle);
         pipeline = pipeline.with_output_strategy_with_single_sink(
             output_path,
@@ -427,23 +343,10 @@ pub async fn run(args: TransformCommand) -> Result<()> {
                 );
             }
             PartitionStrategy::NosortEvict => {
-                // each partition gets its own writer, so we minimize per-writer
-                // concurrency to avoid scheduling overhead from 100+ parallel pipelines
-                let evict_sink_factory = create_sink_factory(
-                    output_format,
-                    arrow_opts,
-                    parquet_opts
-                        .with_ingestion_queue_size(1)
-                        .with_encoding_queue_size(1)
-                        .with_writing_queue_size(1)
-                        .with_max_row_group_concurrency(1),
-                    vortex_opts,
-                    runtimes,
-                )?;
                 pipeline = pipeline.with_evict_writer_partitioned_sink(
                     partition_columns,
                     path_template,
-                    evict_sink_factory,
+                    sink_factory,
                     exclude_columns.clone(),
                     create_dirs,
                     overwrite,
@@ -463,14 +366,6 @@ pub async fn run(args: TransformCommand) -> Result<()> {
                 );
             }
         }
-    }
-
-    if let Some(q) = query {
-        pipeline = pipeline.with_operation(Box::new(QueryOperation::new(q)));
-    }
-
-    if !full_sort_spec.is_empty() {
-        pipeline = pipeline.with_operation(Box::new(SortOperation::new(full_sort_spec.columns)));
     }
 
     let files = pipeline.execute().await?;
@@ -583,83 +478,91 @@ fn to_title_case(s: &str) -> String {
         .join(" ")
 }
 
-fn make_source(path: &str, input_format: Option<DataFormat>) -> Result<Box<dyn DataSource>> {
-    let format = detect_format(path, input_format)?;
-    Ok(match format {
-        DataFormat::Arrow => Box::new(ArrowDataSource::new(path.to_string())),
-        DataFormat::Parquet => Box::new(ParquetDataSource::new(path.to_string())),
-        DataFormat::Vortex => Box::new(VortexDataSource::new(path.to_string())),
-    })
-}
-
-fn local_path_and_handle(
-    input: &str,
-    storage: &StorageSession,
-    direction: StorageDirection,
-) -> Result<(String, StorageHandle)> {
+fn input_handle(input: &str, storage: &StorageSession) -> Result<StorageHandle> {
     let location = LocationInput::parse(input)?;
-    let handle = match direction {
-        StorageDirection::Input => storage.input_handle(&location)?,
-        StorageDirection::Output => storage.output_handle(&location)?,
-    };
-    let path = if input.starts_with("file:///") {
-        handle
-            .local_path()?
-            .into_os_string()
-            .into_string()
-            .map_err(|path| anyhow!("Local path is not valid UTF-8: {}", path.to_string_lossy()))?
-    } else {
-        input.to_owned()
-    };
-
-    Ok((path, handle))
+    Ok(storage.input_handle(&location)?)
 }
 
-fn detect_format(path: &str, explicit_format: Option<DataFormat>) -> Result<DataFormat> {
+fn output_handle(output: &str, storage: &StorageSession) -> Result<StorageHandle> {
+    let location = LocationInput::parse(output)?;
+    Ok(storage.output_handle(&location)?)
+}
+
+fn format_for_handle<'a>(
+    formats: &'a ConfiguredFormats,
+    explicit_format: Option<&str>,
+    handle: &StorageHandle,
+    display_path: &str,
+    direction: &str,
+) -> Result<&'a ConfiguredFormat> {
     if let Some(format) = explicit_format {
-        return Ok(format);
+        return formats
+            .get(format)
+            .ok_or_else(|| anyhow!("format is not registered: {format}"));
     }
-
-    let path_obj = std::path::Path::new(path);
-    if let Some(ext) = path_obj.extension() {
-        if ext.eq_ignore_ascii_case("arrow") {
-            return Ok(DataFormat::Arrow);
-        } else if ext.eq_ignore_ascii_case("parquet") {
-            return Ok(DataFormat::Parquet);
-        } else if ext.eq_ignore_ascii_case("vortex") {
-            return Ok(DataFormat::Vortex);
-        }
-    }
-
-    Err(anyhow!(
-        "Could not detect format from path '{}'. Use --input-format or --output-format to specify explicitly.",
-        path
-    ))
+    let extension = std::path::Path::new(handle.url().path())
+        .extension()
+        .and_then(std::ffi::OsStr::to_str);
+    format_for_extension(formats, extension, display_path, direction)
 }
 
-fn create_sink_factory(
-    output_format: Option<DataFormat>,
-    arrow_opts: ArrowSinkOptions,
-    parquet_opts: ParquetSinkOptions,
-    vortex_opts: VortexSinkOptions,
-    runtimes: Arc<ParquetRuntimes>,
-) -> Result<SinkFactory> {
-    Ok(Box::new(move |path: String, schema: SchemaRef| {
-        let detected_format = detect_format(&path, output_format)?;
+fn format_for_path<'a>(
+    formats: &'a ConfiguredFormats,
+    explicit_format: Option<&str>,
+    path: &str,
+    direction: &str,
+) -> Result<&'a ConfiguredFormat> {
+    if let Some(format) = explicit_format {
+        return formats
+            .get(format)
+            .ok_or_else(|| anyhow!("format is not registered: {format}"));
+    }
+    let extension = std::path::Path::new(path)
+        .extension()
+        .and_then(std::ffi::OsStr::to_str);
+    format_for_extension(formats, extension, path, direction)
+}
 
-        let sink: Box<dyn DataSink> = match detected_format {
-            DataFormat::Arrow => {
-                Box::new(ArrowSink::create(path.into(), &schema, arrow_opts.clone())?)
-            }
-            DataFormat::Parquet => Box::new(ParquetSink::create(
-                path.into(),
-                &schema,
-                &parquet_opts,
-                Arc::clone(&runtimes),
-            )?),
-            DataFormat::Vortex => Box::new(VortexSink::create(path.into(), &schema, vortex_opts)?),
-        };
+fn format_for_extension<'a>(
+    formats: &'a ConfiguredFormats,
+    extension: Option<&str>,
+    path: &str,
+    direction: &str,
+) -> Result<&'a ConfiguredFormat> {
+    extension
+        .and_then(|extension| formats.by_extension(extension))
+        .ok_or_else(|| {
+            anyhow!(
+                "Could not detect format from path '{}'. Use --{}-format to specify explicitly.",
+                path,
+                direction
+            )
+        })
+}
 
-        Ok(sink)
-    }))
+fn local_output_path(output: &str, handle: &StorageHandle) -> Result<String> {
+    if !output.starts_with("file:///") {
+        return Ok(output.to_owned());
+    }
+    handle
+        .local_path()?
+        .into_os_string()
+        .into_string()
+        .map_err(|path| anyhow!("Local path is not valid UTF-8: {}", path.to_string_lossy()))
+}
+
+fn registered_sink_factory(
+    storage: StorageSession,
+    sink_factory: Box<dyn DataSinkFactory>,
+) -> SinkFactory {
+    let sink_factory: Arc<dyn DataSinkFactory> = sink_factory.into();
+    Box::new(move |path, schema| {
+        let storage = storage.clone();
+        let sink_factory = Arc::clone(&sink_factory);
+        Box::pin(async move {
+            let location = LocationInput::parse(&path)?;
+            let handle = storage.output_handle(&location)?;
+            sink_factory.create(handle, schema).await
+        })
+    })
 }

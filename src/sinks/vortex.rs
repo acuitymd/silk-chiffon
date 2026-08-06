@@ -174,9 +174,11 @@ impl DataSink for VortexSink {
             .await
             .map_err(|e| anyhow!("error joining writer task: {e}"))?
             .map_err(|e| anyhow!("writer task errored: {e}"))?;
+        let url = url::Url::from_file_path(&self.path)
+            .map_err(|()| anyhow!("output path is not absolute: {}", self.path.display()))?;
 
         Ok(SinkResult {
-            files_written: vec![self.path.clone()],
+            files_written: vec![url],
             rows_written: inner.rows_written,
         })
     }

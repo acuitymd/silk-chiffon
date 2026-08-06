@@ -266,6 +266,22 @@ impl Pipeline {
         Ok(files)
     }
 
+    pub async fn validate_input_plan(&mut self, input_strategy: &InputStrategy) -> Result<()> {
+        let mut ctx = self.build_session_context()?;
+        let table_provider = input_strategy
+            .as_table_provider(&mut ctx, self.config.working_directory.clone())
+            .await?;
+        let mut data_frame = ctx.read_table(table_provider)?;
+        for operation in &self.operations {
+            data_frame = operation.apply(&mut ctx, data_frame).await?;
+        }
+        let plan = data_frame.create_physical_plan().await?;
+        if plan.properties().boundedness.is_unbounded() {
+            anyhow::bail!("current output formats require a bounded input plan");
+        }
+        Ok(())
+    }
+
     pub fn build_session_context(&mut self) -> Result<SessionContext> {
         let mut cfg = SessionConfig::new();
 

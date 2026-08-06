@@ -1,5 +1,4 @@
 use anyhow::Result;
-use clap::Parser;
 use mimalloc::MiMalloc;
 use silk_chiffon::{Cli, Commands, commands, default_thread_budget};
 
@@ -33,7 +32,7 @@ fn main() -> Result<()> {
     runtime.block_on(async {
         match cli.command {
             Commands::Transform(args) => commands::transform::run(args).await?,
-            Commands::Inspect(args) => commands::inspect::run(args.command).await?,
+            Commands::Inspect(args) => commands::inspect::run(args).await?,
             Commands::Completions { .. } => unreachable!(),
         };
         Ok(())

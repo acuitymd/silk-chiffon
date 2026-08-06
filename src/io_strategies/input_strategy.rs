@@ -12,7 +12,9 @@ use datafusion::{
 };
 use futures::stream::{SelectAll, Stream, select_all};
 
-use crate::sources::data_source::DataSource;
+use crate::sources::data_source::{
+    DataSource, DataSourceCapabilities, InputAccess, RowCount, StreamBoundedness,
+};
 
 struct MergedSendableRecordBatchStreams {
     schema: SchemaRef,
@@ -68,33 +70,66 @@ impl InputStrategy {
         }
     }
 
-    pub fn row_count(&self) -> Result<usize> {
-        match self {
-            InputStrategy::Single(source) => source.row_count(),
+    pub fn capabilities(&self) -> DataSourceCapabilities {
+        let sources: Box<dyn Iterator<Item = &dyn DataSource> + '_> = match self {
+            InputStrategy::Single(source) => Box::new(std::iter::once(source.as_ref())),
             InputStrategy::Multiple(sources) => {
-                let mut total = 0;
+                Box::new(sources.iter().map(|source| source.as_ref()))
+            }
+        };
+        let mut boundedness = StreamBoundedness::Finite;
+        let mut input_access = InputAccess::RandomAccess;
+        for source in sources {
+            let capabilities = source.capabilities();
+            if capabilities.boundedness() == StreamBoundedness::Infinite {
+                boundedness = StreamBoundedness::Infinite;
+            }
+            if capabilities.input_access() == InputAccess::Sequential {
+                input_access = InputAccess::Sequential;
+            }
+        }
+        DataSourceCapabilities::new(boundedness, input_access)
+    }
+
+    pub async fn row_count(&self) -> Result<RowCount> {
+        match self {
+            InputStrategy::Single(source) => source.row_count().await,
+            InputStrategy::Multiple(sources) => {
+                let mut total = 0_u64;
+                let mut estimated = false;
                 for source in sources {
-                    total += source.row_count()?;
+                    match source.row_count().await? {
+                        RowCount::Exact(count) => total = total.saturating_add(count),
+                        RowCount::Estimated(count) => {
+                            total = total.saturating_add(count);
+                            estimated = true;
+                        }
+                        RowCount::Unknown => return Ok(RowCount::Unknown),
+                    }
                 }
-                Ok(total)
+                if estimated {
+                    Ok(RowCount::Estimated(total))
+                } else {
+                    Ok(RowCount::Exact(total))
+                }
             }
         }
     }
 
     pub async fn as_stream(&self, ctx: &mut SessionContext) -> Result<SendableRecordBatchStream> {
         match self {
-            InputStrategy::Single(source) => source.as_stream_with_session_context(ctx).await,
+            InputStrategy::Single(source) => source.as_stream(ctx).await,
             InputStrategy::Multiple(sources) => {
                 if sources.is_empty() {
                     anyhow::bail!("No sources provided");
                 }
 
-                let first_stream = sources[0].as_stream_with_session_context(ctx).await?;
+                let first_stream = sources[0].as_stream(ctx).await?;
                 let schema = first_stream.schema();
 
                 let mut streams = vec![first_stream];
                 for source in &sources[1..] {
-                    let stream = source.as_stream_with_session_context(ctx).await?;
+                    let stream = source.as_stream(ctx).await?;
                     if stream.schema() != schema {
                         anyhow::bail!("Schemas do not match");
                     }

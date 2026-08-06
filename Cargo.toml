@@ -72,12 +72,14 @@ parquet = { version = "^58.4.0", features = ["default", "async", "json", "arrow_
 percent-encoding = "^2.3.2"
 serde = { version = "^1.0.229", features = ["derive"] }
 serde_json.workspace = true
-silk-chiffon-storage = { path = "crates/silk-chiffon-storage" }
+silk-chiffon-core = { path = "crates/silk-chiffon-core" }
+silk-chiffon-storage = { path = "crates/silk-chiffon-storage", default-features = false }
 strum_macros = "^0.28.0"
 sysinfo = "^0.39.6"
 tabled = { version = "^0.21.0", features = ["ansi"] }
 tempfile = "^3.27.0"
 tokio = { version = "^1.53.1", features = ["rt-multi-thread", "macros", "io-util", "fs", "sync"] }
+url.workspace = true
 uuid = { version = "^1.24.0", features = ["v4"] }
 vortex = { version = "^0.83.0", features = ["tokio", "files"] }
 vortex-datafusion = "^0.83.0"
@@ -87,7 +89,9 @@ chrono = "^0.4.45"
 chrono-tz = "^0.10.4"
 
 [features]
-default = []
+default = ["local-bare-paths"]
+local = ["silk-chiffon-storage/local"]
+local-bare-paths = ["local", "silk-chiffon-storage/local-bare-paths"]
 # generates docs/CLI.md from the clap definitions; kept optional so clap-markdown
 # stays out of the release binary. Run `just docs` (or `just verify`).
 docs = ["dep:clap-markdown"]
@@ -97,7 +101,6 @@ assert_cmd = "^2.2.2"
 criterion = { version = "^0.8.2", features = ["html_reports"] }
 predicates = "^3.1.4"
 rand = "^0.10.2"
-url.workspace = true
 
 [[bench]]
 name = "parquet_writer"

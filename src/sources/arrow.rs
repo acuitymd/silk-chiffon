@@ -13,7 +13,9 @@ use datafusion::{
 };
 use uuid::Uuid;
 
-use crate::sources::data_source::DataSource;
+use crate::sources::data_source::{
+    DataSource, DataSourceCapabilities, InputAccess, RowCount, StreamBoundedness,
+};
 
 const CONTINUATION_MARKER: [u8; 4] = [0xff; 4];
 
@@ -34,7 +36,11 @@ impl DataSource for ArrowDataSource {
         "arrow"
     }
 
-    fn schema(&self) -> Result<SchemaRef> {
+    fn capabilities(&self) -> DataSourceCapabilities {
+        DataSourceCapabilities::new(StreamBoundedness::Finite, InputAccess::RandomAccess)
+    }
+
+    async fn schema(&self) -> Result<SchemaRef> {
         if let Ok(reader) = FileReader::try_new(File::open(&self.path)?, None) {
             return Ok(reader.schema());
         }
@@ -46,17 +52,17 @@ impl DataSource for ArrowDataSource {
         anyhow::bail!("Could not read Arrow file: {}", self.path)
     }
 
-    fn row_count(&self) -> Result<usize> {
+    async fn row_count(&self) -> Result<RowCount> {
         let mut file = File::open(&self.path)?;
 
         if let Some(count) = file_format_row_count(&mut file)? {
-            return Ok(count);
+            return Ok(RowCount::Exact(count as u64));
         }
 
         // rewind and try stream format
         file.seek(SeekFrom::Start(0))?;
         if let Some(count) = stream_format_row_count(&mut file)? {
-            return Ok(count);
+            return Ok(RowCount::Exact(count as u64));
         }
 
         bail!("Could not read Arrow file: {}", self.path)
@@ -76,10 +82,6 @@ impl DataSource for ArrowDataSource {
         ctx.register_arrow(&table_name, &self.path, options).await?;
         let table = ctx.table(&table_name).await?;
         Ok(table.into_view())
-    }
-
-    fn supports_table_provider(&self) -> bool {
-        true
     }
 }
 
@@ -309,7 +311,8 @@ mod tests {
     #[tokio::test]
     async fn test_as_stream_file_format() {
         let source = ArrowDataSource::new(TEST_ARROW_FILE_PATH.to_string());
-        let mut stream = source.as_stream().await.unwrap();
+        let mut ctx = SessionContext::new();
+        let mut stream = source.as_stream(&mut ctx).await.unwrap();
 
         assert!(!stream.schema().fields().is_empty());
         let batch = stream.next().await.unwrap().unwrap();
@@ -320,7 +323,8 @@ mod tests {
     #[tokio::test]
     async fn test_as_stream_stream_format() {
         let source = ArrowDataSource::new(TEST_ARROW_STREAM_PATH.to_string());
-        let mut stream = source.as_stream().await.unwrap();
+        let mut ctx = SessionContext::new();
+        let mut stream = source.as_stream(&mut ctx).await.unwrap();
 
         assert!(!stream.schema().fields().is_empty());
         let batch = stream.next().await.unwrap().unwrap();
@@ -331,32 +335,34 @@ mod tests {
     #[tokio::test]
     async fn test_row_count_file_format() {
         let source = ArrowDataSource::new(TEST_ARROW_FILE_PATH.to_string());
-        let count = source.row_count().unwrap();
+        let count = source.row_count().await.unwrap();
 
         // verify against actually streaming all rows
-        let mut stream = source.as_stream().await.unwrap();
+        let mut ctx = SessionContext::new();
+        let mut stream = source.as_stream(&mut ctx).await.unwrap();
         let mut streamed = 0;
         while let Some(batch) = stream.next().await {
             streamed += batch.unwrap().num_rows();
         }
-        assert_eq!(count, streamed);
+        assert_eq!(count, RowCount::Exact(streamed as u64));
     }
 
     #[tokio::test]
     async fn test_row_count_stream_format() {
         let source = ArrowDataSource::new(TEST_ARROW_STREAM_PATH.to_string());
-        let count = source.row_count().unwrap();
+        let count = source.row_count().await.unwrap();
 
-        let mut stream = source.as_stream().await.unwrap();
+        let mut ctx = SessionContext::new();
+        let mut stream = source.as_stream(&mut ctx).await.unwrap();
         let mut streamed = 0;
         while let Some(batch) = stream.next().await {
             streamed += batch.unwrap().num_rows();
         }
-        assert_eq!(count, streamed);
+        assert_eq!(count, RowCount::Exact(streamed as u64));
     }
 
-    #[test]
-    fn test_row_count_written_file_format() {
+    #[tokio::test]
+    async fn test_row_count_written_file_format() {
         use arrow::ipc::writer::FileWriter;
 
         let dir = tempfile::tempdir().unwrap();
@@ -389,11 +395,11 @@ mod tests {
         writer.finish().unwrap();
 
         let source = ArrowDataSource::new(path.to_string_lossy().to_string());
-        assert_eq!(source.row_count().unwrap(), 5);
+        assert_eq!(source.row_count().await.unwrap(), RowCount::Exact(5));
     }
 
-    #[test]
-    fn test_row_count_written_stream_format() {
+    #[tokio::test]
+    async fn test_row_count_written_stream_format() {
         use arrow::ipc::writer::StreamWriter;
 
         let dir = tempfile::tempdir().unwrap();
@@ -426,6 +432,6 @@ mod tests {
         writer.finish().unwrap();
 
         let source = ArrowDataSource::new(path.to_string_lossy().to_string());
-        assert_eq!(source.row_count().unwrap(), 7);
+        assert_eq!(source.row_count().await.unwrap(), RowCount::Exact(7));
     }
 }

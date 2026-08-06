@@ -1,7 +1,9 @@
 use std::{
     collections::{HashMap, hash_map::Entry},
+    future::Future,
     num::NonZeroUsize,
     path::Path,
+    pin::Pin,
     sync::Arc,
 };
 
@@ -29,7 +31,11 @@ use crate::{
 
 pub type TableName = String;
 
-pub type SinkFactory = Box<dyn Fn(TableName, SchemaRef) -> Result<Box<dyn DataSink>>>;
+pub type SinkFactory = Box<
+    dyn Fn(TableName, SchemaRef) -> Pin<Box<dyn Future<Output = Result<Box<dyn DataSink>>> + Send>>
+        + Send
+        + Sync,
+>;
 
 struct OpenSink {
     sink: Box<dyn DataSink>,
@@ -165,7 +171,7 @@ impl OutputStrategy {
                     None => stream,
                 };
 
-                let mut sink = sink_factory(path.clone(), Arc::clone(&stream.schema()))?;
+                let mut sink = sink_factory(path.clone(), Arc::clone(&stream.schema())).await?;
 
                 let result = sink.write_stream(stream).await?;
 
@@ -224,7 +230,7 @@ impl OutputStrategy {
                     if current.is_none() {
                         let path = template.resolve(&partition_values);
                         prepare_output_path(&path, *overwrite, *create_dirs).await?;
-                        let sink = sink_factory(path.clone(), Arc::clone(&batch.schema()))?;
+                        let sink = sink_factory(path.clone(), Arc::clone(&batch.schema())).await?;
                         current = Some(OpenSink::new(sink, path, partition_values.clone()));
                     }
 
@@ -270,7 +276,8 @@ impl OutputStrategy {
                             let path = template.resolve(&partition_values);
                             prepare_output_path(&path, *overwrite, *create_dirs).await?;
                             let sink =
-                                sink_factory(path.clone(), Arc::clone(&ctx.projected_schema))?;
+                                sink_factory(path.clone(), Arc::clone(&ctx.projected_schema))
+                                    .await?;
                             e.insert(OpenSink::new(sink, path, partition_values.clone()))
                         }
                     };
@@ -313,7 +320,8 @@ impl OutputStrategy {
                         *file_idx += 1;
 
                         prepare_output_path(&path, *overwrite, *create_dirs).await?;
-                        let sink = sink_factory(path.clone(), Arc::clone(&ctx.projected_schema))?;
+                        let sink =
+                            sink_factory(path.clone(), Arc::clone(&ctx.projected_schema)).await?;
                         let new_sink = OpenSink::new(sink, path, partition_values.clone());
 
                         if let Some((_, mut evicted)) = cache.push(key.clone(), new_sink) {
@@ -409,6 +417,17 @@ mod tests {
 
     use super::*;
 
+    fn test_sink_factory<F>(factory: F) -> SinkFactory
+    where
+        F: Fn(String, SchemaRef) -> Result<Box<dyn DataSink>> + Send + Sync + 'static,
+    {
+        let factory = Arc::new(factory);
+        Box::new(move |name, schema| {
+            let result = factory(name, schema);
+            Box::pin(async move { result })
+        })
+    }
+
     // mock sink for testing
     struct MockSink {
         name: String,
@@ -432,7 +451,9 @@ mod tests {
                 .lock()
                 .map_err(|e| anyhow!("Failed to lock finished: {}", e))? = true;
             Ok(SinkResult {
-                files_written: vec![self.name.clone().into()],
+                files_written: vec![
+                    url::Url::from_file_path(std::path::Path::new("/").join(&self.name)).unwrap(),
+                ],
                 rows_written: 0,
             })
         }
@@ -469,7 +490,7 @@ mod tests {
         let batches_clone = Arc::clone(&batches_written);
         let finished_clone = Arc::clone(&finished);
 
-        let sink_factory: SinkFactory = Box::new(move |name, _schema| {
+        let sink_factory = test_sink_factory(move |name, _schema| {
             Ok(Box::new(MockSink {
                 name,
                 batches: Arc::clone(&batches_clone),
@@ -515,7 +536,7 @@ mod tests {
         let batches_written = Arc::new(Mutex::new(Vec::new()));
         let batches_clone = Arc::clone(&batches_written);
 
-        let sink_factory: SinkFactory = Box::new(move |_name, _schema| {
+        let sink_factory = test_sink_factory(move |_name, _schema| {
             Ok(Box::new(MockSink {
                 name: _name,
                 batches: Arc::clone(&batches_clone),
@@ -563,7 +584,7 @@ mod tests {
         let batches_written = Arc::new(Mutex::new(Vec::new()));
         let batches_clone = Arc::clone(&batches_written);
 
-        let sink_factory: SinkFactory = Box::new(move |_name, _schema| {
+        let sink_factory = test_sink_factory(move |_name, _schema| {
             Ok(Box::new(MockSink {
                 name: _name,
                 batches: Arc::clone(&batches_clone),
@@ -611,7 +632,7 @@ mod tests {
         let batches_written = Arc::new(Mutex::new(Vec::new()));
         let batches_clone = Arc::clone(&batches_written);
 
-        let sink_factory: SinkFactory = Box::new(move |_name, _schema| {
+        let sink_factory = test_sink_factory(move |_name, _schema| {
             Ok(Box::new(MockSink {
                 name: _name,
                 batches: Arc::clone(&batches_clone),
@@ -667,7 +688,7 @@ mod tests {
         let batches_written = Arc::new(Mutex::new(Vec::new()));
         let batches_clone = Arc::clone(&batches_written);
 
-        let sink_factory: SinkFactory = Box::new(move |_name, _schema| {
+        let sink_factory = test_sink_factory(move |_name, _schema| {
             Ok(Box::new(MockSink {
                 name: _name,
                 batches: Arc::clone(&batches_clone),
@@ -722,7 +743,7 @@ mod tests {
         let call_count = Arc::new(Mutex::new(0));
         let call_count_clone = Arc::clone(&call_count);
 
-        let sink_factory: SinkFactory = Box::new(move |name, _schema| {
+        let sink_factory = test_sink_factory(move |name, _schema| {
             let mut count = call_count_clone.lock().unwrap();
             *count += 1;
             let finished_flag = match *count {
@@ -807,7 +828,7 @@ mod tests {
         };
 
         let mut strategy = OutputStrategy::PartitionedSingleWriter {
-            sink_factory: Box::new(sink_factory),
+            sink_factory: test_sink_factory(sink_factory),
             columns: vec!["region".to_string()],
             template: Box::new(PathTemplate::new("output/{{region}}.parquet".to_string())),
             exclude_columns: vec![],
@@ -862,7 +883,7 @@ mod tests {
         };
 
         let mut strategy = OutputStrategy::PartitionedSingleWriter {
-            sink_factory: Box::new(sink_factory),
+            sink_factory: test_sink_factory(sink_factory),
             columns: vec!["nonexistent_column".to_string()],
             template: Box::new(PathTemplate::new(
                 "output/{{nonexistent_column}}.parquet".to_string(),
@@ -927,7 +948,7 @@ mod tests {
         };
 
         let mut strategy = OutputStrategy::PartitionedSingleWriter {
-            sink_factory: Box::new(sink_factory),
+            sink_factory: test_sink_factory(sink_factory),
             columns: vec!["region".to_string()],
             template: Box::new(PathTemplate::new("output/{{region}}.parquet".to_string())),
             exclude_columns: vec![],
@@ -982,7 +1003,7 @@ mod tests {
         let batches_clone = Arc::clone(&batches_written);
         let finished_clone = Arc::clone(&finished);
 
-        let sink_factory: SinkFactory = Box::new(move |name, _schema| {
+        let sink_factory = test_sink_factory(move |name, _schema| {
             Ok(Box::new(MockSink {
                 name,
                 batches: Arc::clone(&batches_clone),
@@ -1032,7 +1053,7 @@ mod tests {
         let batches_clone = Arc::clone(&batches_written);
         let finished_count_clone = Arc::clone(&finished_count);
 
-        let sink_factory: SinkFactory = Box::new(move |name, _schema| {
+        let sink_factory = test_sink_factory(move |name, _schema| {
             let batches = Arc::clone(&batches_clone);
             let finished_count = Arc::clone(&finished_count_clone);
 
@@ -1093,7 +1114,7 @@ mod tests {
         let batches_written = Arc::new(Mutex::new(Vec::new()));
         let batches_clone = Arc::clone(&batches_written);
 
-        let sink_factory: SinkFactory = Box::new(move |name, _schema| {
+        let sink_factory = test_sink_factory(move |name, _schema| {
             Ok(Box::new(MockSink {
                 name,
                 batches: Arc::clone(&batches_clone),
@@ -1153,7 +1174,7 @@ mod tests {
         let batches_written = Arc::new(Mutex::new(Vec::new()));
         let batches_clone = Arc::clone(&batches_written);
 
-        let sink_factory: SinkFactory = Box::new(move |name, _schema| {
+        let sink_factory = test_sink_factory(move |name, _schema| {
             *sink_create_count_clone.lock().unwrap() += 1;
             Ok(Box::new(MockSink {
                 name,
@@ -1208,7 +1229,9 @@ mod tests {
         async fn finish(&mut self) -> Result<SinkResult> {
             (self.on_finish)();
             Ok(SinkResult {
-                files_written: vec![self.name.clone().into()],
+                files_written: vec![
+                    url::Url::from_file_path(std::path::Path::new("/").join(&self.name)).unwrap(),
+                ],
                 rows_written: 0,
             })
         }
@@ -1234,7 +1257,7 @@ mod tests {
         let sink_create_count = Arc::new(Mutex::new(0usize));
         let sink_create_count_clone = Arc::clone(&sink_create_count);
 
-        let sink_factory: SinkFactory = Box::new(move |name, _schema| {
+        let sink_factory = test_sink_factory(move |name, _schema| {
             *sink_create_count_clone.lock().unwrap() += 1;
             Ok(Box::new(MockSink {
                 name,
@@ -1281,7 +1304,7 @@ mod tests {
         let created_paths = Arc::new(Mutex::new(Vec::new()));
         let created_paths_clone = Arc::clone(&created_paths);
 
-        let sink_factory: SinkFactory = Box::new(move |name, _schema| {
+        let sink_factory = test_sink_factory(move |name, _schema| {
             created_paths_clone.lock().unwrap().push(name.clone());
             Ok(Box::new(MockSink {
                 name,
@@ -1335,7 +1358,7 @@ mod tests {
         let created_paths = Arc::new(Mutex::new(Vec::new()));
         let created_paths_clone = Arc::clone(&created_paths);
 
-        let sink_factory: SinkFactory = Box::new(move |name, _schema| {
+        let sink_factory = test_sink_factory(move |name, _schema| {
             created_paths_clone.lock().unwrap().push(name.clone());
             Ok(Box::new(MockSink {
                 name,
@@ -1386,7 +1409,7 @@ mod tests {
         let finished_names = Arc::new(Mutex::new(Vec::new()));
         let finished_names_clone = Arc::clone(&finished_names);
 
-        let sink_factory: SinkFactory = Box::new(move |name, _schema| {
+        let sink_factory = test_sink_factory(move |name, _schema| {
             let finished_names = Arc::clone(&finished_names_clone);
             let name_for_finish = name.clone();
             Ok(Box::new(MockSinkWithCallback {

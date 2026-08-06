@@ -646,9 +646,11 @@ impl DataSink for ParquetSink {
             .ok_or_else(|| anyhow!("Writer already closed"))?;
 
         let rows_written = writer.close().await?;
+        let url = url::Url::from_file_path(&inner.path)
+            .map_err(|()| anyhow!("output path is not absolute: {}", inner.path.display()))?;
 
         Ok(SinkResult {
-            files_written: vec![inner.path.clone()],
+            files_written: vec![url],
             rows_written,
         })
     }
@@ -832,7 +834,10 @@ mod tests {
 
             assert_eq!(result.rows_written, 3);
             assert_eq!(result.files_written.len(), 1);
-            assert_eq!(result.files_written[0], output_path);
+            assert_eq!(
+                result.files_written[0],
+                url::Url::from_file_path(&output_path).unwrap()
+            );
 
             let batches = verify::read_parquet_file(&output_path).unwrap();
             verify::assert_id_name_batch_data_matches(&batches[0], &[1, 2, 3], &["a", "b", "c"]);
@@ -1030,7 +1035,8 @@ mod tests {
             let source = crate::sources::arrow::ArrowDataSource::new(
                 input_path.to_str().unwrap().to_string(),
             );
-            let stream = source.as_stream().await.unwrap();
+            let mut ctx = datafusion::prelude::SessionContext::new();
+            let stream = source.as_stream(&mut ctx).await.unwrap();
 
             let mut sink = ParquetSink::create(
                 output_path.clone(),
