@@ -19,6 +19,18 @@ fn location(input: &str) -> Result<LocationInput, StorageError> {
     LocationInput::parse(input)
 }
 
+#[cfg(windows)]
+#[test]
+fn windows_drive_root_is_bare() {
+    for input in [r"C:\data\object", "C:/data/object"] {
+        assert_eq!(location(input).unwrap(), LocationInput::Bare(input.into()));
+    }
+    assert!(matches!(
+        location("c://host/object").unwrap(),
+        LocationInput::Url(_)
+    ));
+}
+
 #[test]
 fn schemeless_input_is_preserved_without_filesystem_interpretation() -> Result<(), StorageError> {
     for input in [

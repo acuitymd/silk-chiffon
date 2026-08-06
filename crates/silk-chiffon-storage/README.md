@@ -118,7 +118,7 @@ Bare text preserves spaces, Unicode, and literal `%`, `?`, and `#` characters. F
 
 ## Accepted URL syntax
 
-`LocationInput::parse` classifies nonempty input without consulting the registry. Canonical explicit URLs become `LocationInput::Url(Location)`. Input without a colon before its first path separator becomes `LocationInput::Bare(String)`. A colon in that position starts URL-like syntax: a valid scheme prefix is parsed as an explicit URL, while an invalid prefix is rejected as ambiguous.
+`LocationInput::parse` classifies nonempty input without consulting the registry. Canonical explicit URLs become `LocationInput::Url(Location)`. Input without a colon before its first path separator becomes `LocationInput::Bare(String)`. A colon in that position starts URL-like syntax: a valid scheme prefix is parsed as an explicit URL, while an invalid prefix is rejected as ambiguous. On Windows, an absolute drive path such as `C:\data\input.parquet` is also bare input; the registered bare-location backend still decides what that text means.
 
 | Input                        | Meaning                                                                       |
 | ---------------------------- | ----------------------------------------------------------------------------- |

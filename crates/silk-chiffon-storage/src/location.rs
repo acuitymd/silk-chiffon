@@ -149,6 +149,10 @@ fn parse_storage_url(input: &str, scheme: &str) -> Result<Url, StorageError> {
 }
 
 fn scheme_like_prefix(input: &str) -> Result<Option<&str>, StorageError> {
+    if cfg!(windows) && has_windows_drive_root(input) {
+        return Ok(None);
+    }
+
     let Some(colon) = input.find(':') else {
         return Ok(None);
     };
@@ -170,6 +174,14 @@ fn scheme_like_prefix(input: &str) -> Result<Option<&str>, StorageError> {
         return Err(StorageError::AmbiguousLocation(input.to_owned()));
     }
     Ok(Some(scheme))
+}
+
+fn has_windows_drive_root(input: &str) -> bool {
+    let bytes = input.as_bytes();
+    bytes.first().is_some_and(u8::is_ascii_alphabetic)
+        && bytes.get(1) == Some(&b':')
+        && (bytes.get(2) == Some(&b'\\')
+            || (bytes.get(2) == Some(&b'/') && bytes.get(3) != Some(&b'/')))
 }
 
 fn parse_file_url(input: &str, raw_path: &str) -> Result<Url, StorageError> {

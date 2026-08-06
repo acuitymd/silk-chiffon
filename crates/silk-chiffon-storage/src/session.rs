@@ -4,13 +4,10 @@
 //! backend membership and routes; session creation adds each backend's parsed settings and a fresh
 //! object-store cache. Cloning a session shares that command-scoped state.
 
-use std::{
-    collections::HashMap,
-    fmt,
-    sync::{Arc, Mutex},
-};
+use std::{collections::HashMap, fmt, sync::Arc};
 
 use object_store::{ObjectStore, RetryConfig};
+use parking_lot::Mutex;
 use thiserror::Error;
 use url::Url;
 
@@ -39,12 +36,7 @@ impl fmt::Debug for StorageSession {
             .field("retry", &self.state.retry)
             .field(
                 "cached_object_stores",
-                &self
-                    .state
-                    .object_store_cache
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .len(),
+                &self.state.object_store_cache.lock().len(),
             )
             .finish()
     }
@@ -164,11 +156,7 @@ impl StorageSession {
         })?;
         let store_url = store_url(location.url());
 
-        let mut object_store_cache = self
-            .state
-            .object_store_cache
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut object_store_cache = self.state.object_store_cache.lock();
         let object_store = match object_store_cache.entry(store_url.clone()) {
             std::collections::hash_map::Entry::Occupied(entry) => Arc::clone(entry.get()),
             std::collections::hash_map::Entry::Vacant(entry) => {
