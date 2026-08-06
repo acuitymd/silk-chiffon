@@ -54,8 +54,9 @@ pub fn backend() -> Result<StorageBackend, StorageBackendBuildError> {
 #[cfg(feature = "local")]
 pub fn session() -> Result<StorageSession, StorageSessionCreationError> {
     let registry = StorageRegistry::builder().register(backend()?).build()?;
-    let command = registry.augment_args(Command::new("storage"));
-    let matches = command.try_get_matches_from(["storage"])?;
+    let command_name = "fake-convenience-command-that-is-never-used";
+    let command = registry.augment_args(Command::new(command_name));
+    let matches = command.try_get_matches_from([command_name])?;
     registry.create_session(&matches)
 }
 
