@@ -9,12 +9,13 @@ use std::{
 use clap::{Args, Command};
 use object_store::{ObjectStore, memory::InMemory, path::Path as ObjectPath};
 use silk_chiffon_storage::{
-    Location, ProviderResolution, RetryConfig, RetryConfigurationError, StorageAccess,
-    StorageDirection, StorageError, StorageProviderRegistration, StorageRegistry,
+    Location, LocationInput, ProviderResolution, RetryConfig, RetryConfigurationError,
+    StorageAccess, StorageDirection, StorageError, StorageProviderRegistration, StorageRegistry,
     StorageRegistryError,
 };
 
 static LAST_LABEL: Mutex<Option<String>> = Mutex::new(None);
+static LAST_BARE_LOCATION: Mutex<Option<String>> = Mutex::new(None);
 static LAST_RETRY_COUNT: Mutex<Option<usize>> = Mutex::new(None);
 static READ_ONLY_CALLS: AtomicUsize = AtomicUsize::new(0);
 static STORE_CONSTRUCTIONS: AtomicUsize = AtomicUsize::new(0);
@@ -23,6 +24,12 @@ static STORE_CONSTRUCTIONS: AtomicUsize = AtomicUsize::new(0);
 struct MemoryArgs {
     #[arg(long = "memory-label", default_value = "default")]
     label: String,
+}
+
+#[derive(Args, Clone)]
+struct RequiredCloudArgs {
+    #[arg(long = "cloud-account")]
+    account: String,
 }
 
 #[derive(Args, Clone)]
@@ -96,9 +103,37 @@ fn memory_resolution(
     Ok(provider_resolution(location))
 }
 
+fn memory_bare_location(input: &str, settings: &MemoryArgs) -> anyhow::Result<Location> {
+    *LAST_BARE_LOCATION.lock().unwrap() = Some(input.to_owned());
+    Ok(Location::parse_url(format!(
+        "mem://{}/mapped-object",
+        settings.label
+    ))?)
+}
+
+fn first_bare_location(_input: &str, _settings: &()) -> anyhow::Result<Location> {
+    Ok(Location::parse_url("first://bucket/object")?)
+}
+
+fn second_bare_location(_input: &str, _settings: &()) -> anyhow::Result<Location> {
+    Ok(Location::parse_url("second://bucket/object")?)
+}
+
+fn mismatched_bare_location(_input: &str, _settings: &()) -> anyhow::Result<Location> {
+    Ok(Location::parse_url("other://bucket/object")?)
+}
+
 fn unconfigured_resolution(
     location: &Location,
     _settings: &(),
+    _retry: Option<&RetryConfig>,
+) -> anyhow::Result<ProviderResolution> {
+    Ok(provider_resolution(location))
+}
+
+fn unused_resolution<T>(
+    location: &Location,
+    _settings: &T,
     _retry: Option<&RetryConfig>,
 ) -> anyhow::Result<ProviderResolution> {
     Ok(provider_resolution(location))
@@ -161,9 +196,13 @@ fn provider_resolution(location: &Location) -> ProviderResolution {
 }
 
 fn unit_registration(name: &'static str, scheme: &'static str) -> StorageProviderRegistration {
-    StorageProviderRegistration::without_args(name)
-        .schemes([scheme])
-        .enabled(StorageAccess::ReadWrite, unconfigured_resolution)
+    StorageProviderRegistration::without_args(
+        name,
+        scheme,
+        StorageAccess::ReadWrite,
+        unconfigured_resolution,
+    )
+    .build()
 }
 
 fn command_and_registry(
@@ -188,41 +227,58 @@ fn bind_defaults(registry: &StorageRegistry) -> silk_chiffon_storage::StorageRes
         .expect("default arguments should bind")
 }
 
+fn location_input(input: &str) -> LocationInput {
+    LocationInput::parse(input).unwrap()
+}
+
 #[test]
 fn registered_arguments_contribute_help_bind_typed_settings_and_resolve_declared_schemes() {
-    let registration = StorageProviderRegistration::with_args::<MemoryArgs>("memory")
-        .schemes(["mem"])
-        .enabled(StorageAccess::ReadWrite, memory_resolution);
+    let registration = StorageProviderRegistration::with_args::<MemoryArgs>(
+        "memory",
+        "mem",
+        StorageAccess::ReadWrite,
+        memory_resolution,
+    )
+    .additional_schemes(["memory"])
+    .bare_locations(memory_bare_location)
+    .build();
     let (mut command, registry) = command_and_registry([registration]);
 
     let help = command.render_long_help().to_string();
     assert!(help.contains("--memory-label"));
     assert_eq!(registry.by_scheme("MEM").unwrap().name(), "memory");
+    assert_eq!(registry.by_scheme("MEMORY").unwrap().name(), "memory");
 
     let matches = command
         .try_get_matches_from(["storage-test", "--memory-label", "bound"])
         .unwrap();
     let resolver = registry.bind_args(&matches).unwrap();
-    let location = Location::parse("mem://bucket/object", FilePath::new("/work")).unwrap();
+    let location = location_input("mem://bucket/object");
     let object = resolver.resolve_input(&location).unwrap();
 
     assert_eq!(object.url.as_str(), "mem://bucket/object");
     assert_eq!(object.path.as_ref(), "object");
     assert_eq!(LAST_LABEL.lock().unwrap().as_deref(), Some("bound"));
 
-    let encoded_location =
-        Location::parse("mem://bucket/data%20set", FilePath::new("/work")).unwrap();
+    let encoded_location = location_input("mem://bucket/data%20set");
     let encoded = resolver.resolve_input(&encoded_location).unwrap();
     assert_eq!(encoded.url.as_str(), "mem://bucket/data%20set");
     assert_eq!(encoded.path.as_ref(), "data set");
 
-    let unicode_location =
-        Location::parse("mem://bucket/r%C3%A9sum%C3%A9", FilePath::new("/work")).unwrap();
+    let unicode_location = location_input("mem://bucket/r%C3%A9sum%C3%A9");
     let unicode = resolver.resolve_input(&unicode_location).unwrap();
     assert_eq!(unicode.url.as_str(), "mem://bucket/r%C3%A9sum%C3%A9");
     assert_eq!(unicode.path.as_ref(), "résumé");
 
-    let unsupported = Location::parse("other://bucket/object", FilePath::new("/work")).unwrap();
+    let bare = location_input("literal ?#% résumé");
+    let mapped = resolver.resolve_input(&bare).unwrap();
+    assert_eq!(mapped.url.as_str(), "mem://bound/mapped-object");
+    assert_eq!(
+        LAST_BARE_LOCATION.lock().unwrap().as_deref(),
+        Some("literal ?#% résumé")
+    );
+
+    let unsupported = location_input("other://bucket/object");
     assert!(matches!(
         resolver.resolve_input(&unsupported),
         Err(StorageError::UnsupportedScheme(scheme)) if scheme == "other"
@@ -236,7 +292,7 @@ fn local_path_rejects_non_file_schemes_that_have_path_shaped_urls() {
         .build()
         .unwrap();
     let resolver = bind_defaults(&registry);
-    let location = Location::parse("mem:///tmp/object", FilePath::new("/work")).unwrap();
+    let location = location_input("mem:///tmp/object");
     let object = resolver.resolve_input(&location).unwrap();
 
     assert!(matches!(
@@ -270,14 +326,22 @@ fn registry_rejects_duplicate_provider_names_and_schemes() {
 fn registry_rejects_duplicate_cli_ids_long_options_and_short_options() {
     let duplicate_id = StorageRegistry::builder()
         .register(
-            StorageProviderRegistration::with_args::<SharedIdArgs>("first")
-                .schemes(["first"])
-                .disabled("unused"),
+            StorageProviderRegistration::with_args::<SharedIdArgs>(
+                "first",
+                "first",
+                StorageAccess::ReadOnly,
+                unused_resolution::<SharedIdArgs>,
+            )
+            .build(),
         )
         .register(
-            StorageProviderRegistration::with_args::<DuplicateIdArgs>("second")
-                .schemes(["second"])
-                .disabled("unused"),
+            StorageProviderRegistration::with_args::<DuplicateIdArgs>(
+                "second",
+                "second",
+                StorageAccess::ReadOnly,
+                unused_resolution::<DuplicateIdArgs>,
+            )
+            .build(),
         )
         .build();
     assert!(matches!(
@@ -287,14 +351,22 @@ fn registry_rejects_duplicate_cli_ids_long_options_and_short_options() {
 
     let duplicate_long = StorageRegistry::builder()
         .register(
-            StorageProviderRegistration::with_args::<SharedLongArgs>("first")
-                .schemes(["first"])
-                .disabled("unused"),
+            StorageProviderRegistration::with_args::<SharedLongArgs>(
+                "first",
+                "first",
+                StorageAccess::ReadOnly,
+                unused_resolution::<SharedLongArgs>,
+            )
+            .build(),
         )
         .register(
-            StorageProviderRegistration::with_args::<DuplicateLongArgs>("second")
-                .schemes(["second"])
-                .disabled("unused"),
+            StorageProviderRegistration::with_args::<DuplicateLongArgs>(
+                "second",
+                "second",
+                StorageAccess::ReadOnly,
+                unused_resolution::<DuplicateLongArgs>,
+            )
+            .build(),
         )
         .build();
     assert!(matches!(
@@ -304,14 +376,22 @@ fn registry_rejects_duplicate_cli_ids_long_options_and_short_options() {
 
     let duplicate_short = StorageRegistry::builder()
         .register(
-            StorageProviderRegistration::with_args::<SharedShortArgs>("first")
-                .schemes(["first"])
-                .disabled("unused"),
+            StorageProviderRegistration::with_args::<SharedShortArgs>(
+                "first",
+                "first",
+                StorageAccess::ReadOnly,
+                unused_resolution::<SharedShortArgs>,
+            )
+            .build(),
         )
         .register(
-            StorageProviderRegistration::with_args::<DuplicateShortArgs>("second")
-                .schemes(["second"])
-                .disabled("unused"),
+            StorageProviderRegistration::with_args::<DuplicateShortArgs>(
+                "second",
+                "second",
+                StorageAccess::ReadOnly,
+                unused_resolution::<DuplicateShortArgs>,
+            )
+            .build(),
         )
         .build();
     assert!(matches!(
@@ -321,10 +401,14 @@ fn registry_rejects_duplicate_cli_ids_long_options_and_short_options() {
 
     let shared_retry_collision = StorageRegistry::builder()
         .register(
-            StorageProviderRegistration::with_args::<SharedRetryCollisionArgs>("memory")
-                .schemes(["mem"])
-                .shared_retries()
-                .disabled("unused"),
+            StorageProviderRegistration::with_args::<SharedRetryCollisionArgs>(
+                "memory",
+                "mem",
+                StorageAccess::ReadOnly,
+                unused_resolution::<SharedRetryCollisionArgs>,
+            )
+            .shared_retries()
+            .build(),
         )
         .build();
     assert!(matches!(
@@ -338,14 +422,22 @@ fn registry_rejects_duplicate_cli_ids_long_options_and_short_options() {
 fn registry_rejects_duplicate_group_ids_and_argument_group_id_collisions() {
     let duplicate_group = StorageRegistry::builder()
         .register(
-            StorageProviderRegistration::with_args::<SharedGroupArgs>("first")
-                .schemes(["first"])
-                .disabled("unused"),
+            StorageProviderRegistration::with_args::<SharedGroupArgs>(
+                "first",
+                "first",
+                StorageAccess::ReadOnly,
+                unused_resolution::<SharedGroupArgs>,
+            )
+            .build(),
         )
         .register(
-            StorageProviderRegistration::with_args::<DuplicateGroupArgs>("second")
-                .schemes(["second"])
-                .disabled("unused"),
+            StorageProviderRegistration::with_args::<DuplicateGroupArgs>(
+                "second",
+                "second",
+                StorageAccess::ReadOnly,
+                unused_resolution::<DuplicateGroupArgs>,
+            )
+            .build(),
         )
         .build();
     assert!(matches!(
@@ -355,14 +447,22 @@ fn registry_rejects_duplicate_group_ids_and_argument_group_id_collisions() {
 
     let argument_group_collision = StorageRegistry::builder()
         .register(
-            StorageProviderRegistration::with_args::<SharedGroupArgs>("first")
-                .schemes(["first"])
-                .disabled("unused"),
+            StorageProviderRegistration::with_args::<SharedGroupArgs>(
+                "first",
+                "first",
+                StorageAccess::ReadOnly,
+                unused_resolution::<SharedGroupArgs>,
+            )
+            .build(),
         )
         .register(
-            StorageProviderRegistration::with_args::<GroupIdAsArgumentArgs>("second")
-                .schemes(["second"])
-                .disabled("unused"),
+            StorageProviderRegistration::with_args::<GroupIdAsArgumentArgs>(
+                "second",
+                "second",
+                StorageAccess::ReadOnly,
+                unused_resolution::<GroupIdAsArgumentArgs>,
+            )
+            .build(),
         )
         .build();
     assert!(matches!(
@@ -372,16 +472,89 @@ fn registry_rejects_duplicate_group_ids_and_argument_group_id_collisions() {
 }
 
 #[test]
+fn registry_rejects_multiple_bare_location_providers() {
+    let first = StorageProviderRegistration::without_args(
+        "first",
+        "first",
+        StorageAccess::ReadWrite,
+        unconfigured_resolution,
+    )
+    .bare_locations(first_bare_location)
+    .build();
+    let second = StorageProviderRegistration::without_args(
+        "second",
+        "second",
+        StorageAccess::ReadWrite,
+        unconfigured_resolution,
+    )
+    .bare_locations(second_bare_location)
+    .build();
+
+    let registry = StorageRegistry::builder()
+        .register(first)
+        .register(second)
+        .build();
+
+    assert!(matches!(
+        registry,
+        Err(StorageRegistryError::DuplicateBareLocationProvider {
+            first: "first",
+            second: "second",
+        })
+    ));
+}
+
+#[test]
+fn bare_location_mapper_must_return_a_scheme_owned_by_its_provider() {
+    let registration = StorageProviderRegistration::without_args(
+        "memory",
+        "mem",
+        StorageAccess::ReadWrite,
+        unconfigured_resolution,
+    )
+    .bare_locations(mismatched_bare_location)
+    .build();
+    let (_, registry) = command_and_registry([registration]);
+    let resolver = bind_defaults(&registry);
+    let location = location_input("raw-object");
+
+    assert!(matches!(
+        resolver.resolve_input(&location),
+        Err(StorageError::BareLocationSchemeMismatch {
+            provider: "memory",
+            scheme,
+        }) if scheme == "other"
+    ));
+}
+
+#[test]
+fn bare_locations_are_unsupported_without_a_claiming_provider() {
+    let (_, registry) = command_and_registry([unit_registration("memory", "mem")]);
+    assert!(registry.bare_location_provider().is_none());
+    let resolver = bind_defaults(&registry);
+    let location = location_input("raw-object");
+
+    assert!(matches!(
+        resolver.resolve_input(&location),
+        Err(StorageError::UnsupportedBareLocation(input)) if input == "raw-object"
+    ));
+}
+
+#[test]
 fn read_only_provider_rejects_output_before_invoking_its_callback() {
     READ_ONLY_CALLS.store(0, Ordering::SeqCst);
-    let registration = StorageProviderRegistration::without_args("read-only")
-        .schemes(["readonly"])
-        .enabled(StorageAccess::ReadOnly, read_only_resolution);
+    let registration = StorageProviderRegistration::without_args(
+        "read-only",
+        "readonly",
+        StorageAccess::ReadOnly,
+        read_only_resolution,
+    )
+    .build();
     assert!(registration.has_input());
     assert!(!registration.has_output());
     let (_, registry) = command_and_registry([registration]);
     let resolver = bind_defaults(&registry);
-    let location = Location::parse("readonly://source/table", FilePath::new("/work")).unwrap();
+    let location = location_input("readonly://source/table");
 
     resolver.resolve_input(&location).unwrap();
     assert_eq!(READ_ONLY_CALLS.load(Ordering::SeqCst), 1);
@@ -398,35 +571,54 @@ fn read_only_provider_rejects_output_before_invoking_its_callback() {
 }
 
 #[test]
-fn disabled_provider_reports_its_registration_diagnostic() {
-    let registration = StorageProviderRegistration::without_args("cloud")
-        .schemes(["cloud"])
-        .disabled("rebuild with the cloud feature");
-    assert!(!registration.has_input());
-    assert!(!registration.has_output());
-    let (_, registry) = command_and_registry([registration]);
+fn unregistered_providers_are_absent_with_no_required_arguments_or_schemes() {
+    let omitted = StorageProviderRegistration::with_args::<RequiredCloudArgs>(
+        "cloud",
+        "cloud",
+        StorageAccess::ReadWrite,
+        unused_resolution::<RequiredCloudArgs>,
+    )
+    .build();
+    let (command, registry) = command_and_registry([]);
+    command
+        .try_get_matches_from(["storage-test"])
+        .expect("an omitted provider must not enforce its required arguments");
+    assert_eq!(registry.registrations().count(), 0);
+    assert!(registry.by_scheme("cloud").is_none());
     let resolver = bind_defaults(&registry);
-    let location = Location::parse("cloud://bucket/object", FilePath::new("/work")).unwrap();
+    let location = location_input("cloud://bucket/object");
 
     assert!(matches!(
         resolver.resolve_input(&location),
-        Err(StorageError::ProviderDisabled {
-            provider: "cloud",
-            diagnostic: "rebuild with the cloud feature",
-        })
+        Err(StorageError::UnsupportedScheme(scheme)) if scheme == "cloud"
     ));
+
+    let (registered_command, _) = command_and_registry([omitted]);
+    assert!(
+        registered_command
+            .try_get_matches_from(["storage-test"])
+            .is_err()
+    );
 }
 
 #[test]
 fn retry_capable_providers_share_one_argument_group_and_receive_defaults() {
-    let first = StorageProviderRegistration::without_args("first")
-        .schemes(["first"])
-        .shared_retries()
-        .enabled(StorageAccess::ReadOnly, retry_resolution);
-    let second = StorageProviderRegistration::without_args("second")
-        .schemes(["second"])
-        .shared_retries()
-        .enabled(StorageAccess::ReadOnly, unconfigured_resolution);
+    let first = StorageProviderRegistration::without_args(
+        "first",
+        "first",
+        StorageAccess::ReadOnly,
+        retry_resolution,
+    )
+    .shared_retries()
+    .build();
+    let second = StorageProviderRegistration::without_args(
+        "second",
+        "second",
+        StorageAccess::ReadOnly,
+        unconfigured_resolution,
+    )
+    .shared_retries()
+    .build();
     let (command, registry) = command_and_registry([first, second]);
 
     assert_eq!(
@@ -459,12 +651,13 @@ fn retry_capable_providers_share_one_argument_group_and_receive_defaults() {
     assert_eq!(retry.backoff.base, 2.0);
 
     *LAST_RETRY_COUNT.lock().unwrap() = None;
-    let location = Location::parse("first://bucket/object", FilePath::new("/work")).unwrap();
+    let location = location_input("first://bucket/object");
     resolver.resolve_input(&location).unwrap();
     assert_eq!(*LAST_RETRY_COUNT.lock().unwrap(), Some(10));
 }
 
 #[test]
+#[cfg(feature = "local")]
 fn local_only_registry_omits_shared_retry_arguments() {
     let registry = StorageRegistry::builder()
         .register(silk_chiffon_storage::local::registration())
@@ -479,34 +672,46 @@ fn local_only_registry_omits_shared_retry_arguments() {
     );
     let resolver = bind_defaults(&registry);
     assert!(resolver.retry_configuration().is_none());
+    assert_eq!(
+        registry
+            .bare_location_provider()
+            .map(StorageProviderRegistration::name),
+        if cfg!(feature = "local-bare-paths") {
+            Some("local")
+        } else {
+            None
+        }
+    );
 
-    #[cfg(feature = "local")]
+    let explicit = location_input("file:///tmp/local-object");
+    let input = resolver.resolve_input(&explicit).unwrap();
+    let output = resolver.resolve_output(&explicit).unwrap();
+    assert!(Arc::ptr_eq(&input.store, &output.store));
+
+    let bare = location_input("/tmp/local-object");
+    #[cfg(feature = "local-bare-paths")]
     {
-        let location = Location::parse("local-object", FilePath::new("/work")).unwrap();
-        let input = resolver.resolve_input(&location).unwrap();
-        let output = resolver.resolve_output(&location).unwrap();
-        assert!(Arc::ptr_eq(&input.store, &output.store));
+        let mapped = resolver.resolve_input(&bare).unwrap();
+        assert_eq!(mapped.url.as_str(), "file:///tmp/local-object");
     }
-
-    #[cfg(not(feature = "local"))]
+    #[cfg(not(feature = "local-bare-paths"))]
     {
-        let location = Location::parse("local-object", FilePath::new("/work")).unwrap();
-        assert!(matches!(
-            resolver.resolve_input(&location),
-            Err(StorageError::ProviderDisabled {
-                provider: "local",
-                ..
-            })
-        ));
+        assert!(matches!(resolver.resolve_input(&bare), Err(
+            StorageError::UnsupportedBareLocation(input)
+        ) if input == "/tmp/local-object"));
     }
 }
 
 #[test]
 fn enabled_retries_validate_backoff_while_zero_retries_disable_validation() {
-    let registration = StorageProviderRegistration::without_args("memory")
-        .schemes(["mem"])
-        .shared_retries()
-        .enabled(StorageAccess::ReadOnly, unconfigured_resolution);
+    let registration = StorageProviderRegistration::without_args(
+        "memory",
+        "mem",
+        StorageAccess::ReadOnly,
+        unconfigured_resolution,
+    )
+    .shared_retries()
+    .build();
     let (command, registry) = command_and_registry([registration.clone()]);
     let invalid_matches = command
         .clone()
@@ -553,10 +758,14 @@ fn enabled_retries_validate_backoff_while_zero_retries_disable_validation() {
 
 #[test]
 fn enabled_retries_reject_each_invalid_retry_dimension() {
-    let registration = StorageProviderRegistration::without_args("memory")
-        .schemes(["mem"])
-        .shared_retries()
-        .enabled(StorageAccess::ReadOnly, unconfigured_resolution);
+    let registration = StorageProviderRegistration::without_args(
+        "memory",
+        "mem",
+        StorageAccess::ReadOnly,
+        unconfigured_resolution,
+    )
+    .shared_retries()
+    .build();
     let (_, registry) = command_and_registry([registration]);
 
     let cases = [
@@ -634,22 +843,24 @@ fn enabled_retries_reject_each_invalid_retry_dimension() {
 #[test]
 fn cache_reuses_one_store_per_origin_within_each_bound_command() {
     STORE_CONSTRUCTIONS.store(0, Ordering::SeqCst);
-    let registration = StorageProviderRegistration::without_args("memory")
-        .schemes(["mem"])
-        .shared_retries()
-        .enabled(StorageAccess::ReadOnly, counted_resolution);
+    let registration = StorageProviderRegistration::without_args(
+        "memory",
+        "mem",
+        StorageAccess::ReadOnly,
+        counted_resolution,
+    )
+    .shared_retries()
+    .build();
     let (command, registry) = command_and_registry([registration]);
     let matches = command
         .try_get_matches_from(["storage-test", "--storage-max-retries", "1"])
         .unwrap();
     let resolver = registry.bind_args(&matches).unwrap();
 
-    let first_location =
-        Location::parse("mem://one/blue/object-a", FilePath::new("/work")).unwrap();
-    let equivalent_location =
-        Location::parse("mem://one/blue/object-b?version=1", FilePath::new("/work")).unwrap();
-    let other_authority = Location::parse("mem://two/blue/object", FilePath::new("/work")).unwrap();
-    let other_path = Location::parse("mem://one/red/object", FilePath::new("/work")).unwrap();
+    let first_location = location_input("mem://one/blue/object-a");
+    let equivalent_location = location_input("mem://one/blue/object-b?version=1");
+    let other_authority = location_input("mem://two/blue/object");
+    let other_path = location_input("mem://one/red/object");
 
     let first = resolver.resolve_input(&first_location).unwrap();
     let equivalent = resolver.resolve_input(&equivalent_location).unwrap();
@@ -687,12 +898,16 @@ fn provider_errors_retain_provider_direction_and_source_context() {
             "provider-specific factory failure",
         ),
     ] {
-        let registration = StorageProviderRegistration::without_args("memory")
-            .schemes(["mem"])
-            .enabled(StorageAccess::ReadWrite, resolver);
+        let registration = StorageProviderRegistration::without_args(
+            "memory",
+            "mem",
+            StorageAccess::ReadWrite,
+            resolver,
+        )
+        .build();
         let (_, registry) = command_and_registry([registration]);
         let bound = bind_defaults(&registry);
-        let location = Location::parse("mem://bucket/object", FilePath::new("/work")).unwrap();
+        let location = location_input("mem://bucket/object");
         let error = bound.resolve_output(&location).unwrap_err();
 
         match error {

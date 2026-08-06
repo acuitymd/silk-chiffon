@@ -1,12 +1,12 @@
 //! Typed storage-provider registration and command-scoped resolution.
 //!
-//! Each enabled registration binds one concrete Clap argument type to its resolver. A disabled
-//! registration retains its argument type and a diagnostic. The registry can hold both without
-//! separating settings from the resolver that understands them.
+//! Each registration binds one concrete Clap argument type to its resolver and optional
+//! bare-location mapper. The registry can hold different settings types without separating them
+//! from the callbacks that understand them.
 //!
 //! Provider setup has two stages. [`StorageRegistry`] first collects registrations, validates their
 //! names, schemes, and CLI arguments, and augments a Clap command. [`StorageRegistry::bind_args`]
-//! then parses each enabled provider's settings once and produces a [`StorageResolver`] whose
+//! then parses each registered provider's settings once and produces a [`StorageResolver`] whose
 //! clones share those settings and a command-scoped client cache.
 
 mod binding;
@@ -14,7 +14,6 @@ mod binding;
 use std::{
     collections::{HashMap, HashSet},
     fmt,
-    marker::PhantomData,
     sync::{Arc, Mutex},
 };
 
@@ -23,7 +22,15 @@ use object_store::{ObjectStore, RetryConfig, path::Path as ObjectPath};
 use thiserror::Error;
 use url::Url;
 
-use crate::{Location, ResolvedLocation, RetryArgs, RetryConfigurationError, StorageError};
+use crate::{
+    Location, LocationInput, ResolvedLocation, RetryArgs, RetryConfigurationError, StorageError,
+};
+
+/// Converts schemeless input into a canonical location using settings registered as `T`.
+///
+/// A registration opts into the registry's exclusive bare-location route by supplying this
+/// callback. The returned location must use a scheme claimed by the same registration.
+pub type BareLocationMapper<T> = fn(input: &str, settings: &T) -> anyhow::Result<Location>;
 
 /// Resolves one provider location using settings registered as `T`.
 ///
@@ -113,66 +120,74 @@ impl StorageAccess {
     }
 }
 
-#[derive(Clone)]
-enum ProviderRegistration {
-    Enabled {
-        access: StorageAccess,
-        binder: Arc<dyn binding::BindProvider>,
-    },
-    Disabled {
-        diagnostic: &'static str,
-        arguments: Arc<dyn binding::RegisterProviderArguments>,
-    },
-}
-
-/// One provider's identity, argument contribution, and enabled or disabled behavior.
+/// One available provider's identity, argument contribution, and resolution behavior.
 ///
 /// Registrations are immutable descriptions that can be cloned into more than one registry. Use
-/// [`Self::with_args`] or [`Self::without_args`] to start a registration and finish it with
-/// [`StorageProviderRegistrationBuilder::enabled`] or
-/// [`StorageProviderRegistrationBuilder::disabled`].
+/// [`Self::with_args`] or [`Self::without_args`] to supply the required provider contract, add any
+/// optional behavior through the returned builder, and finish with
+/// [`StorageProviderRegistrationBuilder::build`].
 ///
 /// A provider registration follows this order:
 ///
-/// 1. Choose whether the provider has a settings type.
-/// 2. Add every URL scheme that selects it.
+/// 1. Supply its settings type, name, primary URL scheme, access, and resolver.
+/// 2. Add any additional URL schemes that select it.
 /// 3. Opt into shared retries if its client supports them.
-/// 4. Finish with an access declaration and resolver, or with a disabled diagnostic.
+/// 4. Optionally claim schemeless input with a typed mapper.
+/// 5. Build the complete registration.
 #[derive(Clone)]
 pub struct StorageProviderRegistration {
     name: &'static str,
     schemes: Vec<&'static str>,
-    provider: ProviderRegistration,
+    access: StorageAccess,
+    binder: Arc<dyn binding::BindProvider>,
+    handles_bare_locations: bool,
     uses_shared_retries: bool,
 }
 
 impl StorageProviderRegistration {
     /// Starts a registration whose settings are parsed from the command line as `T`.
     ///
-    /// The registry adds `T`'s provider-specific Clap arguments to its command. An enabled
-    /// registration parses `T` once during [`StorageRegistry::bind_args`]. A disabled registration
-    /// retains the arguments without constructing `T` during binding.
-    pub fn with_args<T>(name: &'static str) -> StorageProviderRegistrationBuilder<T>
+    /// `scheme` is the provider's required primary route. `access` is enforced before `resolver`
+    /// runs. The registry adds `T`'s provider-specific Clap arguments to its command and parses `T`
+    /// once during [`StorageRegistry::bind_args`].
+    pub fn with_args<T>(
+        name: &'static str,
+        scheme: &'static str,
+        access: StorageAccess,
+        resolver: ProviderResolver<T>,
+    ) -> StorageProviderRegistrationBuilder<T>
     where
         T: Args + FromArgMatches + Send + Sync + 'static,
     {
         StorageProviderRegistrationBuilder {
             name,
-            schemes: Vec::new(),
+            schemes: vec![scheme],
+            access,
+            resolver,
             args: binding::ArgsParser::for_args(),
+            bare_location_mapper: None,
             uses_shared_retries: false,
-            settings: PhantomData,
         }
     }
 
     /// Starts a registration that contributes no provider-specific CLI arguments.
-    pub fn without_args(name: &'static str) -> StorageProviderRegistrationBuilder<()> {
+    ///
+    /// `scheme` is the provider's required primary route. `access` is enforced before `resolver`
+    /// runs.
+    pub fn without_args(
+        name: &'static str,
+        scheme: &'static str,
+        access: StorageAccess,
+        resolver: ProviderResolver<()>,
+    ) -> StorageProviderRegistrationBuilder<()> {
         StorageProviderRegistrationBuilder {
             name,
-            schemes: Vec::new(),
+            schemes: vec![scheme],
+            access,
+            resolver,
             args: binding::ArgsParser::unit(),
+            bare_location_mapper: None,
             uses_shared_retries: false,
-            settings: PhantomData,
         }
     }
 
@@ -186,18 +201,19 @@ impl StorageProviderRegistration {
         &self.schemes
     }
 
-    /// Returns whether this enabled registration accepts input resolution.
-    ///
-    /// Disabled registrations return `false` regardless of their intended capability.
+    /// Returns whether this registration accepts input resolution.
     pub fn has_input(&self) -> bool {
-        matches!(&self.provider, ProviderRegistration::Enabled { access, .. } if access.supports(StorageDirection::Input))
+        self.access.supports(StorageDirection::Input)
     }
 
-    /// Returns whether this enabled registration accepts output resolution.
-    ///
-    /// Disabled registrations return `false` regardless of their intended capability.
+    /// Returns whether this registration accepts output resolution.
     pub fn has_output(&self) -> bool {
-        matches!(&self.provider, ProviderRegistration::Enabled { access, .. } if access.supports(StorageDirection::Output))
+        self.access.supports(StorageDirection::Output)
+    }
+
+    /// Returns whether this provider interprets schemeless input.
+    pub const fn handles_bare_locations(&self) -> bool {
+        self.handles_bare_locations
     }
 
     /// Returns whether this registration requests the registry's shared retry settings.
@@ -206,17 +222,11 @@ impl StorageProviderRegistration {
     }
 
     fn augment_args(&self, command: Command) -> Command {
-        match &self.provider {
-            ProviderRegistration::Enabled { binder, .. } => binder.augment(command),
-            ProviderRegistration::Disabled { arguments, .. } => arguments.augment(command),
-        }
+        self.binder.augment(command)
     }
 
     fn argument_keys(&self) -> Vec<(String, String)> {
-        match &self.provider {
-            ProviderRegistration::Enabled { binder, .. } => binder.argument_keys(),
-            ProviderRegistration::Disabled { arguments, .. } => arguments.argument_keys(),
-        }
+        self.binder.argument_keys()
     }
 }
 
@@ -228,22 +238,32 @@ impl StorageProviderRegistration {
 pub struct StorageProviderRegistrationBuilder<T> {
     name: &'static str,
     schemes: Vec<&'static str>,
+    access: StorageAccess,
+    resolver: ProviderResolver<T>,
     args: binding::ArgsParser<T>,
+    bare_location_mapper: Option<BareLocationMapper<T>>,
     uses_shared_retries: bool,
-    settings: PhantomData<fn() -> T>,
 }
 
 impl<T> StorageProviderRegistrationBuilder<T>
 where
     T: Send + Sync + 'static,
 {
-    /// Adds the URL schemes that select this provider.
+    /// Adds URL schemes beyond the primary scheme supplied at construction.
     ///
     /// Scheme lookup and duplicate detection are ASCII case-insensitive. Duplicate schemes are
-    /// reported when the containing registry is built. A registration without a scheme remains
-    /// visible through iteration but cannot be selected for resolution.
-    pub fn schemes(mut self, schemes: impl IntoIterator<Item = &'static str>) -> Self {
+    /// reported when the containing registry is built.
+    pub fn additional_schemes(mut self, schemes: impl IntoIterator<Item = &'static str>) -> Self {
         self.schemes.extend(schemes);
+        self
+    }
+
+    /// Claims schemeless input and maps it into one of this provider's registered schemes.
+    ///
+    /// Registry construction rejects more than one claimant. The mapper receives the raw input
+    /// unchanged after argument binding and may interpret it using the provider's typed settings.
+    pub fn bare_locations(mut self, mapper: BareLocationMapper<T>) -> Self {
+        self.bare_location_mapper = Some(mapper);
         self
     }
 
@@ -257,45 +277,27 @@ where
         self
     }
 
-    /// Finishes an enabled registration with its access declaration and typed resolver.
+    /// Finishes the registration and erases its settings type for registry storage.
     ///
-    /// The access declaration is enforced before `resolver` runs. The same callback serves every
+    /// The access declaration is enforced before the resolver runs. The same callback serves every
     /// allowed direction and does not receive the direction as an argument.
-    pub fn enabled(
-        self,
-        access: StorageAccess,
-        resolver: ProviderResolver<T>,
-    ) -> StorageProviderRegistration {
+    pub fn build(self) -> StorageProviderRegistration {
         StorageProviderRegistration {
             name: self.name,
             schemes: self.schemes,
-            provider: ProviderRegistration::Enabled {
-                access,
-                binder: Arc::new(binding::ProviderDefinition::new(self.args, resolver)),
-            },
-            uses_shared_retries: self.uses_shared_retries,
-        }
-    }
-
-    /// Finishes a disabled registration that reserves its name, schemes, and CLI arguments.
-    ///
-    /// Disabled registrations keep command help and scheme diagnostics stable across feature sets.
-    /// Resolution returns [`StorageError::ProviderDisabled`] with `diagnostic` without invoking a
-    /// provider callback.
-    pub fn disabled(self, diagnostic: &'static str) -> StorageProviderRegistration {
-        StorageProviderRegistration {
-            name: self.name,
-            schemes: self.schemes,
-            provider: ProviderRegistration::Disabled {
-                diagnostic,
-                arguments: Arc::new(binding::ProviderArguments::new(self.args)),
-            },
+            access: self.access,
+            handles_bare_locations: self.bare_location_mapper.is_some(),
+            binder: Arc::new(binding::ProviderDefinition::new(
+                self.args,
+                self.bare_location_mapper,
+                self.resolver,
+            )),
             uses_shared_retries: self.uses_shared_retries,
         }
     }
 }
 
-/// Errors that make a set of provider registrations ambiguous.
+/// Errors that make a set of provider registrations invalid or ambiguous.
 #[derive(Debug, Error)]
 pub enum StorageRegistryError {
     /// Two registrations use the same provider name, ignoring ASCII case.
@@ -307,6 +309,14 @@ pub enum StorageRegistryError {
     /// Provider or retry arguments reuse a Clap argument or group ID, or a primary option name.
     #[error("duplicate storage CLI argument: {0}")]
     DuplicateCliArgument(String),
+    /// More than one provider claims schemeless input.
+    #[error("storage providers {first} and {second} both claim bare locations")]
+    DuplicateBareLocationProvider {
+        /// The first provider claiming bare locations.
+        first: &'static str,
+        /// The later provider with the conflicting claim.
+        second: &'static str,
+    },
 }
 
 /// Collects provider registrations before validating and indexing them.
@@ -328,9 +338,10 @@ impl StorageRegistryBuilder {
     ///
     /// # Errors
     ///
-    /// Returns [`StorageRegistryError`] for duplicate provider names, schemes, or Clap identifiers.
-    /// Provider names and schemes are compared without ASCII case. Clap IDs and primary long and
-    /// short option spellings are compared exactly. Aliases are not indexed.
+    /// Returns [`StorageRegistryError`] for duplicate provider names, URL schemes, bare-location
+    /// claims, or Clap identifiers. Provider names and schemes are compared without ASCII case.
+    /// Clap IDs and primary long and short option spellings are compared exactly. Clap option
+    /// aliases are not indexed.
     pub fn build(self) -> Result<StorageRegistry, StorageRegistryError> {
         StorageRegistry::from_registrations(self.registrations)
     }
@@ -344,6 +355,7 @@ impl StorageRegistryBuilder {
 pub struct StorageRegistry {
     registrations: Vec<StorageProviderRegistration>,
     schemes: HashMap<String, usize>,
+    bare_location_provider: Option<usize>,
     uses_shared_retries: bool,
 }
 
@@ -361,6 +373,7 @@ impl StorageRegistry {
         let mut names = HashMap::new();
         let mut schemes = HashMap::new();
         let mut cli_arguments = HashSet::new();
+        let mut bare_location_provider = None;
         let uses_shared_retries = registrations
             .iter()
             .any(StorageProviderRegistration::uses_shared_retries);
@@ -384,6 +397,15 @@ impl StorageRegistry {
                 }
             }
 
+            if registration.handles_bare_locations
+                && let Some(first) = bare_location_provider.replace(index)
+            {
+                return Err(StorageRegistryError::DuplicateBareLocationProvider {
+                    first: registrations[first].name,
+                    second: registration.name,
+                });
+            }
+
             for (key, argument) in registration.argument_keys() {
                 if !cli_arguments.insert(key) {
                     return Err(StorageRegistryError::DuplicateCliArgument(argument));
@@ -394,28 +416,40 @@ impl StorageRegistry {
         Ok(Self {
             registrations,
             schemes,
+            bare_location_provider,
             uses_shared_retries,
         })
     }
 
-    /// Iterates registrations in the order they were added to the builder.
+    /// Iterates available providers in the order they were registered.
+    ///
+    /// Omitted feature-gated providers do not have placeholder registrations.
     pub fn registrations(&self) -> impl Iterator<Item = &StorageProviderRegistration> {
         self.registrations.iter()
     }
 
     /// Finds the registration for a URL scheme using ASCII case-insensitive lookup.
+    ///
+    /// `None` means no available provider owns the scheme.
     pub fn by_scheme(&self, scheme: &str) -> Option<&StorageProviderRegistration> {
         self.schemes
             .get(&scheme.to_ascii_lowercase())
             .map(|index| &self.registrations[*index])
     }
 
+    /// Returns the provider that interprets schemeless input, if one is registered.
+    ///
+    /// When this is `None`, bound resolvers reject [`LocationInput::Bare`].
+    pub fn bare_location_provider(&self) -> Option<&StorageProviderRegistration> {
+        self.bare_location_provider
+            .map(|index| &self.registrations[index])
+    }
+
     /// Adds shared retry arguments and every provider's Clap arguments.
     ///
     /// The returned command should be used to produce the `ArgMatches` later passed to
-    /// [`Self::bind_args`]. Disabled providers still contribute their arguments. Registry
-    /// validation does not inspect arguments already present on `command`, so those IDs and option
-    /// spellings must not collide with storage arguments.
+    /// [`Self::bind_args`]. Registry validation does not inspect arguments already present on
+    /// `command`, so those IDs and option spellings must not collide with storage arguments.
     pub fn augment_args(&self, mut command: Command) -> Command {
         if self.uses_shared_retries {
             command = RetryArgs::augment_args(command);
@@ -428,7 +462,7 @@ impl StorageRegistry {
 
     /// Binds one command's parsed arguments into a resolver and a fresh client cache.
     ///
-    /// Each enabled provider's concrete settings type is parsed once. Clones of the returned
+    /// Each registered provider's concrete settings type is parsed once. Clones of the returned
     /// resolver share those settings and its cache, while a later call to `bind_args` creates
     /// independent parsed settings, retry configuration, and cache.
     ///
@@ -448,40 +482,29 @@ impl StorageRegistry {
 
         let mut providers = Vec::with_capacity(self.registrations.len());
         for registration in &self.registrations {
-            providers.push(match &registration.provider {
-                ProviderRegistration::Enabled { access, binder } => BoundProvider::Enabled {
-                    name: registration.name,
-                    access: *access,
-                    resolver: binder.bind(matches)?,
-                    uses_shared_retries: registration.uses_shared_retries,
-                },
-                ProviderRegistration::Disabled { diagnostic, .. } => BoundProvider::Disabled {
-                    name: registration.name,
-                    diagnostic,
-                },
+            providers.push(BoundProvider {
+                name: registration.name,
+                access: registration.access,
+                resolver: registration.binder.bind(matches)?,
+                uses_shared_retries: registration.uses_shared_retries,
             });
         }
 
         Ok(StorageResolver {
             providers: Arc::new(providers),
             schemes: Arc::new(self.schemes.clone()),
+            bare_location_provider: self.bare_location_provider,
             retry,
             stores: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 }
 
-enum BoundProvider {
-    Enabled {
-        name: &'static str,
-        access: StorageAccess,
-        resolver: Arc<dyn binding::ResolveProvider>,
-        uses_shared_retries: bool,
-    },
-    Disabled {
-        name: &'static str,
-        diagnostic: &'static str,
-    },
+struct BoundProvider {
+    name: &'static str,
+    access: StorageAccess,
+    resolver: Arc<dyn binding::ResolveProvider>,
+    uses_shared_retries: bool,
 }
 
 /// Provider resolvers, retry settings, and cached clients bound to one command.
@@ -493,20 +516,19 @@ enum BoundProvider {
 pub struct StorageResolver {
     providers: Arc<Vec<BoundProvider>>,
     schemes: Arc<HashMap<String, usize>>,
+    bare_location_provider: Option<usize>,
     retry: Option<RetryConfig>,
     stores: Arc<Mutex<HashMap<Url, Arc<dyn ObjectStore>>>>,
 }
 
 impl StorageResolver {
-    /// Builds a resolver containing the default local provider registration.
-    ///
-    /// Without the `local` Cargo feature, construction still succeeds and local resolution returns
-    /// [`StorageError::ProviderDisabled`].
+    /// Builds a resolver containing the local provider registration.
     ///
     /// # Errors
     ///
     /// Returns [`StorageResolverBuildError`] if the built-in registration cannot be validated or
     /// its default command arguments cannot be bound.
+    #[cfg(feature = "local")]
     pub fn local() -> Result<Self, StorageResolverBuildError> {
         let registry = StorageRegistry::builder()
             .register(crate::local::registration())
@@ -525,79 +547,109 @@ impl StorageResolver {
 
     /// Resolves a location for reading.
     ///
-    /// Scheme selection and read access are checked before the provider callback runs. The resolver
-    /// layer issues no metadata request. The provider callback executes as part of resolution, and
-    /// its returned factory executes only on a cache miss. Use [`crate::validate_input`] when the
+    /// An explicit URL selects its provider by scheme. Schemless input selects the registry's one
+    /// bare-location provider, which maps the raw text into one of its URL schemes. Read access is
+    /// checked before either provider callback runs. The resolver layer issues no metadata request.
+    /// The returned factory executes only on a cache miss. Use [`crate::validate_input`] when the
     /// caller requires an explicit existence check after resolution.
     ///
     /// # Errors
     ///
-    /// Returns [`StorageError`] when the scheme is unavailable, the provider does not support
-    /// input, or provider resolution or client construction fails.
-    pub fn resolve_input(&self, location: &Location) -> Result<ResolvedLocation, StorageError> {
+    /// Returns [`StorageError`] when no provider owns the route, the selected provider does not
+    /// support input, bare-location mapping is invalid, or provider resolution or client
+    /// construction fails.
+    pub fn resolve_input(
+        &self,
+        location: &LocationInput,
+    ) -> Result<ResolvedLocation, StorageError> {
         self.resolve_direction(location, StorageDirection::Input)
     }
 
     /// Resolves a location for writing.
     ///
-    /// Scheme selection and write access are checked before the provider callback runs. The
-    /// resolver layer applies no overwrite policy. The provider callback executes as part of
-    /// resolution, and its returned factory executes only on a cache miss. Use
+    /// An explicit URL selects its provider by scheme. Schemless input selects the registry's one
+    /// bare-location provider, which maps the raw text into one of its URL schemes. Write access is
+    /// checked before either provider callback runs. The resolver layer applies no overwrite
+    /// policy, and the returned factory executes only on a cache miss. Use
     /// [`crate::preflight_output`] when the caller needs an explicit check after resolution.
     ///
     /// # Errors
     ///
-    /// Returns [`StorageError`] when the scheme is unavailable, the provider does not support
-    /// output, or provider resolution or client construction fails.
-    pub fn resolve_output(&self, location: &Location) -> Result<ResolvedLocation, StorageError> {
+    /// Returns [`StorageError`] when no provider owns the route, the selected provider does not
+    /// support output, bare-location mapping is invalid, or provider resolution or client
+    /// construction fails.
+    pub fn resolve_output(
+        &self,
+        location: &LocationInput,
+    ) -> Result<ResolvedLocation, StorageError> {
         self.resolve_direction(location, StorageDirection::Output)
     }
 
     fn resolve_direction(
         &self,
-        location: &Location,
+        input: &LocationInput,
         direction: StorageDirection,
     ) -> Result<ResolvedLocation, StorageError> {
-        let scheme = location.url().scheme();
-        let provider = self
-            .schemes
-            .get(scheme)
-            .map(|index| &self.providers[*index])
-            .ok_or_else(|| StorageError::UnsupportedScheme(scheme.to_owned()))?;
-
-        let (provider_name, access, resolver, uses_shared_retries) = match provider {
-            BoundProvider::Enabled {
-                name,
-                access,
-                resolver,
-                uses_shared_retries,
-            } => (*name, *access, resolver, *uses_shared_retries),
-            BoundProvider::Disabled { name, diagnostic } => {
-                return Err(StorageError::ProviderDisabled {
-                    provider: name,
-                    diagnostic,
-                });
+        let provider_index = match input {
+            LocationInput::Url(location) => {
+                let scheme = location.url().scheme();
+                *self
+                    .schemes
+                    .get(scheme)
+                    .ok_or_else(|| StorageError::UnsupportedScheme(scheme.to_owned()))?
             }
+            LocationInput::Bare(input) => self
+                .bare_location_provider
+                .ok_or_else(|| StorageError::UnsupportedBareLocation(input.clone()))?,
         };
-        if !access.supports(direction) {
+        let provider = &self.providers[provider_index];
+        if !provider.access.supports(direction) {
             return Err(StorageError::DirectionUnsupported {
-                provider: provider_name,
+                provider: provider.name,
                 direction,
             });
         }
 
-        let retry = if uses_shared_retries {
+        let mapped_location = match input {
+            LocationInput::Url(_) => None,
+            LocationInput::Bare(input) => Some(
+                provider
+                    .resolver
+                    .map_bare_location(input)
+                    .expect("the indexed bare-location provider must have a mapper")
+                    .map_err(|source| StorageError::ProviderResolution {
+                        provider: provider.name,
+                        direction,
+                        source,
+                    })?,
+            ),
+        };
+        let location = match (input, mapped_location.as_ref()) {
+            (LocationInput::Url(location), _) => location,
+            (LocationInput::Bare(_), Some(location)) => location,
+            (LocationInput::Bare(_), None) => unreachable!(),
+        };
+        let scheme = location.url().scheme();
+        if self.schemes.get(scheme) != Some(&provider_index) {
+            return Err(StorageError::BareLocationSchemeMismatch {
+                provider: provider.name,
+                scheme: scheme.to_owned(),
+            });
+        }
+
+        let retry = if provider.uses_shared_retries {
             self.retry.as_ref()
         } else {
             None
         };
-        let resolution = resolver.resolve(location, retry).map_err(|source| {
-            StorageError::ProviderResolution {
-                provider: provider_name,
+        let resolution = provider
+            .resolver
+            .resolve(location, retry)
+            .map_err(|source| StorageError::ProviderResolution {
+                provider: provider.name,
                 direction,
                 source,
-            }
-        })?;
+            })?;
 
         let store_url = store_url(location.url());
         let mut stores = self
@@ -610,7 +662,7 @@ impl StorageResolver {
             std::collections::hash_map::Entry::Vacant(entry) => {
                 let store = (resolution.store_factory)().map_err(|source| {
                     StorageError::ProviderResolution {
-                        provider: provider_name,
+                        provider: provider.name,
                         direction,
                         source,
                     }

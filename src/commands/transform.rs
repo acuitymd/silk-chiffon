@@ -28,7 +28,7 @@ use arrow::datatypes::SchemaRef;
 use camino::Utf8Path;
 use glob::glob;
 use owo_colors::OwoColorize;
-use silk_chiffon_storage::{Location, ResolvedLocation, StorageDirection, StorageResolver};
+use silk_chiffon_storage::{LocationInput, ResolvedLocation, StorageDirection, StorageResolver};
 use tabled::{builder::Builder, settings::Style};
 
 pub async fn run(args: TransformCommand) -> Result<()> {
@@ -183,8 +183,6 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         .transpose()?;
 
     let storage_resolver = StorageResolver::local()?;
-    let working_directory = std::env::current_dir()?;
-
     let mut pipeline = Pipeline::new()
         .with_query_dialect(dialect)
         .with_memory_limit(effective_memory_limit)
@@ -202,12 +200,8 @@ pub async fn run(args: TransformCommand) -> Result<()> {
 
     // resolve input paths (glob-expand if needed), build sources, and create InputStrategy
     let input_strategy = if !should_glob && input_paths.len() == 1 {
-        let (input_path, resolved) = resolve_local_path(
-            &input_paths[0],
-            &working_directory,
-            &storage_resolver,
-            StorageDirection::Input,
-        )?;
+        let (input_path, resolved) =
+            resolve_local_path(&input_paths[0], &storage_resolver, StorageDirection::Input)?;
         pipeline = pipeline.with_storage_location(resolved);
         let source = make_source(&input_path, input_format)?;
         InputStrategy::Single(source)
@@ -237,12 +231,8 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         let mut sources: Vec<Box<dyn DataSource>> = Vec::new();
         let mut schema: Option<SchemaRef> = None;
         for input_path in &expanded_paths {
-            let (local_path, resolved) = resolve_local_path(
-                input_path,
-                &working_directory,
-                &storage_resolver,
-                StorageDirection::Input,
-            )?;
+            let (local_path, resolved) =
+                resolve_local_path(input_path, &storage_resolver, StorageDirection::Input)?;
             pipeline = pipeline.with_storage_location(resolved);
             let source = make_source(&local_path, input_format)?;
             if let Some(ref schema) = schema {
@@ -403,12 +393,8 @@ pub async fn run(args: TransformCommand) -> Result<()> {
     )?;
 
     if let Some(output_path) = to {
-        let (output_path, resolved) = resolve_local_path(
-            &output_path,
-            &working_directory,
-            &storage_resolver,
-            StorageDirection::Output,
-        )?;
+        let (output_path, resolved) =
+            resolve_local_path(&output_path, &storage_resolver, StorageDirection::Output)?;
         pipeline = pipeline.with_storage_location(resolved);
         pipeline = pipeline.with_output_strategy_with_single_sink(
             output_path,
@@ -609,11 +595,10 @@ fn make_source(path: &str, input_format: Option<DataFormat>) -> Result<Box<dyn D
 
 fn resolve_local_path(
     input: &str,
-    working_directory: &std::path::Path,
     storage: &StorageResolver,
     direction: StorageDirection,
 ) -> Result<(String, ResolvedLocation)> {
-    let location = Location::parse(input, working_directory)?;
+    let location = LocationInput::parse(input)?;
     let resolved_location = match direction {
         StorageDirection::Input => storage.resolve_input(&location)?,
         StorageDirection::Output => storage.resolve_output(&location)?,

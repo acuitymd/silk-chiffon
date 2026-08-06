@@ -30,7 +30,7 @@ use silk_chiffon_core::{
     FormatRegistryError, FormatTransform, Identification, InputAccess, InspectionOutput,
     OutputSortColumn, RowCount, SinkFactoryContext, SinkResult, SortDirection, StreamBoundedness,
 };
-use silk_chiffon_storage::{Location, ResolvedLocation, StorageResolver};
+use silk_chiffon_storage::{LocationInput, ResolvedLocation, StorageResolver};
 
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
 struct TestFormatArgs {
@@ -296,7 +296,7 @@ fn parse_transform(registry: &FormatRegistry, arguments: &[&str]) -> usize {
 }
 
 fn resolved_location(path: &str) -> ResolvedLocation {
-    let location = Location::parse(path, std::env::current_dir().unwrap()).unwrap();
+    let location = LocationInput::parse(path).unwrap();
     StorageResolver::local()
         .unwrap()
         .resolve_input(&location)

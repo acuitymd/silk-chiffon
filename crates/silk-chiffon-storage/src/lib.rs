@@ -1,19 +1,17 @@
 //! Storage locations and registered `object_store` providers for Silk Chiffon.
 //!
-//! [`Location`] handles syntax: it turns a bare filesystem path or canonical storage URL into one
-//! canonical URL without contacting storage. A [`StorageRegistry`] composes providers and their
+//! [`LocationInput`] distinguishes an explicit canonical URL from schemeless text without
+//! assigning meaning to that text. A [`StorageRegistry`] composes providers and their
 //! provider-specific Clap arguments, then binds one command's parsed settings into a
-//! [`StorageResolver`].
+//! [`StorageResolver`]. One provider may claim schemeless input and map it to a [`Location`] using
+//! its bound settings.
 //!
 //! Resolution selects a provider, enforces its declared [`StorageAccess`], and translates the URL
 //! into an object path. It reuses one client per store root (scheme, host, and port) and does not
 //! impose existence or overwrite policy. Call [`validate_input`] and [`preflight_output`] when a
 //! command needs those checks.
 
-use std::{
-    path::{Path as FilePath, PathBuf},
-    sync::Arc,
-};
+use std::{path::PathBuf, sync::Arc};
 
 use object_store::{ObjectMeta, ObjectStore, ObjectStoreExt, path::Path as ObjectPath};
 use thiserror::Error;
@@ -25,7 +23,7 @@ mod retry;
 
 pub use object_store::RetryConfig;
 pub use provider::{
-    ProviderResolution, ProviderResolver, StorageAccess, StorageDirection,
+    BareLocationMapper, ProviderResolution, ProviderResolver, StorageAccess, StorageDirection,
     StorageProviderRegistration, StorageProviderRegistrationBuilder, StorageRegistry,
     StorageRegistryBuilder, StorageRegistryError, StorageResolver, StorageResolverBuildError,
 };
@@ -37,12 +35,14 @@ pub enum StorageError {
     /// The input location is empty.
     #[error("storage location cannot be empty")]
     EmptyLocation,
-    /// The supplied working directory is not absolute.
-    #[error("working directory must be absolute: {0}")]
-    RelativeWorkingDirectory(PathBuf),
     /// The colon comes before the first path separator, but the prefix is not a valid URL scheme.
     #[error("ambiguous storage location: {0}")]
     AmbiguousLocation(String),
+    /// No provider is registered to interpret schemeless input.
+    #[error("bare storage locations are unsupported: {0}")]
+    UnsupportedBareLocation(String),
+    #[error("storage URL requires an explicit scheme: {0}")]
+    UrlSchemeRequired(String),
     /// No provider is registered for the location's URL scheme.
     #[error("unsupported storage scheme: {0}")]
     UnsupportedScheme(String),
@@ -54,13 +54,15 @@ pub enum StorageError {
         /// The rejected URL source text.
         input: String,
     },
-    /// The scheme belongs to a provider that is unavailable in this build.
-    #[error("storage provider {provider} is disabled: {diagnostic}")]
-    ProviderDisabled {
-        /// The registered provider name.
+    /// A bare-location mapper returned a scheme owned by another provider or by no provider.
+    #[error(
+        "storage provider {provider} mapped a bare location to scheme it does not own: {scheme}"
+    )]
+    BareLocationSchemeMismatch {
+        /// The provider selected to interpret the bare location.
         provider: &'static str,
-        /// The provider's build or configuration guidance.
-        diagnostic: &'static str,
+        /// The scheme returned by that provider's mapper.
+        scheme: String,
     },
     /// The provider does not support the requested input or output direction.
     #[error("{direction} resolution is unsupported for storage provider: {provider}")]
@@ -124,31 +126,55 @@ pub struct Location {
     url: Url,
 }
 
-impl Location {
-    /// Parses a bare local path or canonical storage URL against an absolute working directory.
+/// Raw location syntax before schemeless input has been assigned to a provider.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LocationInput {
+    /// A canonical URL with an explicit scheme.
+    Url(Location),
+    /// Input without a URL scheme, preserved exactly for the provider that claims it.
+    Bare(String),
+}
+
+impl LocationInput {
+    /// Classifies raw input without assigning meaning to schemeless text.
     ///
-    /// Bare paths retain filesystem characters and become absolute `file:///` URLs. URL paths must
-    /// encode characters disallowed by URL syntax.
+    /// Explicit URLs are parsed and checked for canonical spelling. Input with no scheme-like
+    /// prefix is preserved exactly in [`Self::Bare`].
     ///
     /// # Errors
     ///
-    /// Returns [`StorageError`] when the input is empty or ambiguous, the working directory is
-    /// relative, or URL source text is malformed or violates the supported scheme and path
-    /// canonicality rules.
-    pub fn parse(
-        input: impl AsRef<str>,
-        working_directory: impl AsRef<FilePath>,
-    ) -> Result<Self, StorageError> {
+    /// Returns [`StorageError`] when the input is empty or explicit URL syntax is malformed,
+    /// ambiguous, or noncanonical.
+    pub fn parse(input: impl AsRef<str>) -> Result<Self, StorageError> {
         let input = input.as_ref();
         if input.is_empty() {
             return Err(StorageError::EmptyLocation);
         }
 
-        let working_directory = working_directory.as_ref();
-        if !working_directory.is_absolute() {
-            return Err(StorageError::RelativeWorkingDirectory(
-                working_directory.to_path_buf(),
-            ));
+        match scheme_like_prefix(input)? {
+            Some(_) => Location::parse_url(input).map(Self::Url),
+            None => Ok(Self::Bare(input.to_owned())),
+        }
+    }
+}
+
+impl From<Location> for LocationInput {
+    fn from(location: Location) -> Self {
+        Self::Url(location)
+    }
+}
+
+impl Location {
+    /// Parses a canonical storage URL with an explicit scheme.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] when the input is empty, lacks a scheme, or is malformed,
+    /// ambiguous, or noncanonical.
+    pub fn parse_url(input: impl AsRef<str>) -> Result<Self, StorageError> {
+        let input = input.as_ref();
+        if input.is_empty() {
+            return Err(StorageError::EmptyLocation);
         }
 
         let url = if let Some(raw_path) = input.strip_prefix("file:///") {
@@ -162,19 +188,18 @@ impl Location {
                     return Err(StorageError::NonCanonicalFileUrl(input.to_owned()));
                 }
                 Some(scheme) => parse_storage_url(input, scheme)?,
-                None => {
-                    let path = FilePath::new(input);
-                    let absolute = if path.is_absolute() {
-                        path.to_path_buf()
-                    } else {
-                        working_directory.join(path)
-                    };
-                    Url::from_file_path(&absolute)
-                        .map_err(|()| StorageError::InvalidFilePath(absolute))?
-                }
+                None => return Err(StorageError::UrlSchemeRequired(input.to_owned())),
             }
         };
 
+        Ok(Self { url })
+    }
+
+    #[cfg(feature = "local-bare-paths")]
+    pub(crate) fn from_file_path(path: impl AsRef<std::path::Path>) -> Result<Self, StorageError> {
+        let path = path.as_ref();
+        let url = Url::from_file_path(path)
+            .map_err(|()| StorageError::InvalidFilePath(path.to_path_buf()))?;
         Ok(Self { url })
     }
 
@@ -219,10 +244,6 @@ fn parse_storage_url(input: &str, scheme: &str) -> Result<Url, StorageError> {
 }
 
 fn scheme_like_prefix(input: &str) -> Result<Option<&str>, StorageError> {
-    if FilePath::new(input).is_absolute() {
-        return Ok(None);
-    }
-
     let Some(colon) = input.find(':') else {
         return Ok(None);
     };

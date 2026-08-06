@@ -2,16 +2,18 @@
 //!
 //! # The problem
 //!
-//! A storage provider registration can claim URL schemes. An enabled registration also supplies a
-//! resolver callback that turns a matching [`Location`] into a provider-specific object path and
-//! client factory. Provider code can live in another crate, so each provider must be free to define
-//! its own Clap arguments and receive the parsed values in its callback.
+//! A storage provider registration claims URL schemes and supplies a resolver callback that turns
+//! a matching [`Location`] into a provider-specific object path and client factory. It may also
+//! claim schemeless input and supply a callback that maps the raw text into a [`Location`]. Provider
+//! code can live in another crate, so each provider must be free to define its own Clap arguments
+//! and receive the parsed values in either callback.
 //!
 //! The public registration API represents that contract with a concrete settings type `T`.
-//! [`super::StorageProviderRegistration::with_args`] selects `T`, and
-//! [`super::StorageProviderRegistrationBuilder::enabled`] accepts only a
-//! [`super::ProviderResolver<T>`]. Rust therefore checks that the callback receives the same type
-//! produced by the provider's argument parser.
+//! [`super::StorageProviderRegistration::with_args`] selects `T` and accepts only a
+//! [`super::ProviderResolver<T>`], while
+//! [`super::StorageProviderRegistrationBuilder::bare_locations`] accepts only a
+//! [`super::BareLocationMapper<T>`]. Rust therefore checks that both callbacks receive the same
+//! type produced by the provider's argument parser.
 //!
 //! The registry cannot use one `T` for the whole collection. If [`super::StorageRegistry`] had a
 //! `T` parameter, choosing `ProviderAArgs` would prevent that registry from also storing a provider
@@ -37,22 +39,26 @@
 //! # The entities and their responsibilities
 //!
 //! **Provider** is a role, not a public Rust type. One provider consists of a name, the URL schemes
-//! it claims, optional command-line settings, and either resolver behavior or a diagnostic saying
-//! why that behavior is disabled. Several types represent that provider at different points in its
-//! lifecycle.
+//! it claims, optional command-line settings, resolution behavior, and optionally a claim on
+//! schemeless input. Several types represent that provider at different points in its lifecycle.
 //!
 //! The public entities divide ownership between provider code and the host executable:
 //!
 //! - **Provider code**, which may live in a separate crate, defines its settings type `T`, its
-//!   [`super::ProviderResolver<T>`] callback, and a function that returns a
-//!   [`super::StorageProviderRegistration`].
+//!   [`super::ProviderResolver<T>`], an optional [`super::BareLocationMapper<T>`], and a function
+//!   that returns a [`super::StorageProviderRegistration`].
 //! - The **host executable** chooses which registrations to include, constructs a
 //!   [`super::StorageRegistry`], lets that registry augment its Clap command, and passes the parsed
 //!   matches back to the registry.
 //! - [`ArgMatches`] is Clap's result from parsing the arguments contributed by the host and every
 //!   provider registration.
-//! - [`Location`] is the provider-neutral input to resolution. It contains a parsed URL, but no
-//!   provider settings, object-store client, or provider-specific object path.
+//! - [`crate::LocationInput`] is the provider-neutral syntax accepted by
+//!   [`super::StorageResolver`]. It is either an explicit [`Location`] or raw schemeless text.
+//! - [`Location`] is a canonical URL ready for provider resolution. It contains no provider
+//!   settings, object-store client, or provider-specific object path.
+//! - [`super::BareLocationMapper<T>`] is the optional callback contract for schemeless input. The
+//!   registry supplies the raw text and parsed `&T`; provider code assigns its own meaning and
+//!   returns a [`Location`] using one of that provider's schemes.
 //! - [`super::ProviderResolver<T>`] is the callback contract. `StorageResolver` supplies the
 //!   location, the parsed `&T`, and an optional retry configuration. Provider code returns a
 //!   [`super::ProviderResolution`].
@@ -62,15 +68,15 @@
 //!   receives it only if its registration opted into shared retries, and provider code decides how
 //!   to apply it to the object-store client.
 //! - [`super::StorageProviderRegistration`] is an unbound provider description. It records the
-//!   provider's identity, schemes, command-line behavior, and enabled or disabled behavior. It does
-//!   not contain settings parsed for a particular command.
+//!   provider's identity, schemes, command-line behavior, capabilities, and callbacks. It does not
+//!   contain settings parsed for a particular command.
 //! - [`super::StorageRegistry`] owns a set of those descriptions. During construction it checks
-//!   provider names, URL schemes, and indexed argument keys for collisions. It also builds the URL
-//!   scheme index and contributes every provider's arguments to the host's Clap command. It can be
-//!   reused to bind more than one set of command-line matches.
+//!   provider names, URL schemes, the unique schemeless-input claim, and indexed argument keys for
+//!   collisions. It also builds the routing indexes and contributes every provider's arguments to
+//!   the host's Clap command. It can be reused to bind more than one set of command-line matches.
 //! - [`super::StorageResolver`] is the runtime state bound to one set of command-line matches. It
-//!   owns every enabled provider's parsed settings, any shared retry configuration, and the client
-//!   cache. It selects a provider when asked to resolve a [`Location`].
+//!   owns every registered provider's parsed settings, any shared retry configuration, and the
+//!   client cache. It selects a provider when asked to resolve a [`crate::LocationInput`].
 //! - [`super::ProviderResolution`] is one callback's answer for one location. It contains the
 //!   provider-specific object path and a factory that can create the corresponding object-store
 //!   client after a cache miss.
@@ -79,31 +85,29 @@
 //!
 //! - [`ArgsParser<T>`] carries the Clap operations that add `T`'s arguments and reconstruct `T`
 //!   from matches.
-//! - [`ProviderDefinition<T>`] is an enabled provider before binding. It keeps `ArgsParser<T>` next
-//!   to the callback that accepts `&T`.
-//! - [`BoundProvider<T>`] is that enabled provider after binding. It keeps the parsed `T` next to
-//!   the same callback.
-//! - [`ProviderArguments<T>`] is the command-line portion of a disabled provider. It contributes
-//!   arguments but never constructs `T`.
+//! - [`ProviderDefinition<T>`] is a provider before binding. It keeps `ArgsParser<T>` next to the
+//!   callbacks that accept `&T`.
+//! - [`BoundProvider<T>`] is that provider after binding. It keeps the parsed `T` next to the same
+//!   mapper and resolver callbacks.
 //! - [`RegisterProviderArguments`], [`BindProvider`], and [`ResolveProvider`] are the dynamic
 //!   interfaces used during registry validation and command composition, binding, and resolution.
 //!
 //! ## What binding means
 //!
 //! **Binding** turns a reusable registry description into runtime state for one parsed command.
-//! [`super::StorageRegistry::bind_args`] reconstructs each enabled provider's `T` from the same
+//! [`super::StorageRegistry::bind_args`] reconstructs each registered provider's `T` from the same
 //! [`ArgMatches`], attaches each value to its matching callback, and returns a
-//! [`super::StorageResolver`]. Binding does not select a URL scheme, resolve a [`Location`], or
-//! construct an object-store client. Those actions happen later when the host calls the resolver.
+//! [`super::StorageResolver`]. Binding does not select a provider, map schemeless input, resolve a
+//! [`Location`], or construct an object-store client. Those actions happen later when the host
+//! calls the resolver.
 //!
 //! # From registration to resolution
 //!
 //! Provider code creates a registration while its settings type is still visible:
 //!
 //! ```text
-//! with_args::<ProviderArgs>("provider")
-//!     .schemes(["provider"])
-//!     .enabled(access, resolve)
+//! with_args::<ProviderArgs>("provider", "provider", access, resolve)
+//!     .build()
 //!
 //! resolve: fn(&Location, &ProviderArgs, Option<&RetryConfig>) -> ...
 //! ```
@@ -114,15 +118,19 @@
 //! 2. The host adds the registration to `StorageRegistry`, then uses `augment_args` to build the
 //!    command it will parse.
 //! 3. Clap produces `ArgMatches`, and the host passes those matches to `bind_args`.
-//! 4. `StorageRegistry` parses every enabled provider's settings and returns `StorageResolver`.
-//! 5. The host gives a `Location` to `StorageResolver`, which selects the registration by URL
-//!    scheme and invokes its callback with the `ProviderArgs` parsed in step 4.
+//! 4. `StorageRegistry` parses every registered provider's settings and returns `StorageResolver`.
+//! 5. The host gives a `LocationInput` to `StorageResolver`. An explicit URL selects its provider
+//!    by scheme. Schemless input selects the one provider that claimed the bare-location route,
+//!    whose mapper first turns the raw text into a `Location`.
+//! 6. `StorageResolver` invokes the selected provider's resolver with the `ProviderArgs` parsed in
+//!    step 4.
 //!
 //! All provider code is already linked into the host executable. The runtime behavior here is
 //! selection among explicit registrations, not loading crates or dynamic libraries after the
-//! process starts. All enabled and disabled provider arguments also share one flat Clap command.
-//! Clap therefore enforces required arguments from every registration when it creates
-//! [`ArgMatches`], even if the command later resolves a location for only one provider.
+//! process starts. All registered provider arguments share one flat Clap command. Clap therefore
+//! enforces required arguments from every registration when it creates [`ArgMatches`], even if the
+//! command later resolves a location for only one provider. A provider that is not available in a
+//! build must be omitted from the registry so its schemes and arguments are absent together.
 //!
 //! # The typed boundary
 //!
@@ -131,24 +139,24 @@
 //! converting its settings into an untyped value:
 //!
 //! ```text
-//! ArgsParser<T> + ProviderResolver<T>
-//!                  |
-//!                  v
-//!         ProviderDefinition<T>
-//!                  |
-//!            dyn BindProvider
-//!                  | bind(matches)
-//!                  v
-//!           BoundProvider<T>
-//!                  |
-//!          dyn ResolveProvider
-//!                  | resolve(location)
-//!                  v
-//!      ProviderResolver<T>(location, &T, retry)
+//! ArgsParser<T> + BareLocationMapper<T> + ProviderResolver<T>
+//!                              |
+//!                              v
+//!                     ProviderDefinition<T>
+//!                              |
+//!                       dyn BindProvider
+//!                              | bind(matches)
+//!                              v
+//!                       BoundProvider<T>
+//!                              |
+//!                      dyn ResolveProvider
+//!                              | map/resolve(location)
+//!                              v
+//!            callbacks receive the same parsed &T
 //! ```
 //!
 //! `dyn BindProvider` and `dyn ResolveProvider` are **trait objects**. Before binding, the registry
-//! sees an enabled provider as `dyn BindProvider`. After binding, the resolver sees it as
+//! sees a provider as `dyn BindProvider`. After binding, the resolver sees it as
 //! `dyn ResolveProvider`. In each state the caller knows which methods it can use, but the concrete
 //! implementing type is hidden. Hiding `T` this way is **type erasure**: the caller loses the name
 //! of the settings type without converting the settings into an untyped value. Calling a
@@ -156,29 +164,26 @@
 //! runtime.
 //!
 //! That concrete implementation still knows `T`. [`ProviderDefinition<T>`] parses `T` and
-//! constructs a [`BoundProvider<T>`]. The bound provider later passes `&T` to the matching resolver
-//! without a cast. This gives provider crates concrete types on their side of the API and lets the
-//! registry perform runtime selection without knowing those types.
+//! constructs a [`BoundProvider<T>`]. The bound provider later passes `&T` to the matching mapper
+//! or resolver without a cast. This gives provider crates concrete types on their side of the API,
+//! preserves the typed contract between the provider and host crates, and lets the registry perform
+//! runtime selection without knowing those types.
 //!
 //! The traits divide that process by lifecycle:
 //!
 //! 1. [`RegisterProviderArguments`] exposes CLI arguments for command augmentation and keys for
 //!    registry collision checks.
-//! 2. [`BindProvider`] parses an enabled provider's `T` once after Clap has produced matches.
-//! 3. [`ResolveProvider`] invokes the typed resolver after the settings type is hidden from the
-//!    registry.
+//! 2. [`BindProvider`] parses a provider's `T` once after Clap has produced matches.
+//! 3. [`ResolveProvider`] invokes the typed mapper or resolver after the settings type is hidden
+//!    from the registry.
 //!
-//! Disabled providers need only the first stage. [`ProviderArguments<T>`] retains the Clap
-//! operations specialized for `T`, but it never constructs a settings value or exposes resolution
-//! behavior.
-
 use std::sync::Arc;
 
 use clap::{ArgMatches, Args, Command, FromArgMatches};
 
 use object_store::RetryConfig;
 
-use super::{ProviderResolution, ProviderResolver};
+use super::{BareLocationMapper, ProviderResolution, ProviderResolver};
 use crate::Location;
 
 #[derive(Clone, Copy)]
@@ -258,10 +263,7 @@ impl ArgsParser<()> {
 
 /// The runtime interface shared by registry validation and command composition.
 ///
-/// Both enabled and disabled registrations participate in command composition and collision
-/// checks. Separating these operations from [`BindProvider`] lets disabled providers retain their
-/// arguments in command help and collision checks. They do not expose settings binding or
-/// resolution behavior.
+/// Registrations use this interface for command composition and collision checks before binding.
 pub(super) trait RegisterProviderArguments: Send + Sync {
     /// Adds this provider's arguments to the command being composed.
     fn augment(&self, command: Command) -> Command;
@@ -270,22 +272,25 @@ pub(super) trait RegisterProviderArguments: Send + Sync {
     fn argument_keys(&self) -> Vec<(String, String)>;
 }
 
-/// The runtime interface for turning command matches into an enabled provider.
+/// The runtime interface for turning command matches into a bound provider.
 ///
 /// The concrete implementation still knows `T`. It parses `T`, pairs the value with its matching
-/// [`ProviderResolver`], and erases the pair as a [`ResolveProvider`]. The registry can therefore
-/// bind providers with different settings types without recovering those types by downcasting.
+/// typed callbacks, and erases the group as a [`ResolveProvider`]. The registry can therefore bind
+/// providers with different settings types without recovering those types by downcasting.
 pub(super) trait BindProvider: RegisterProviderArguments {
     /// Parses this provider's settings once and returns a resolver that owns them.
     fn bind(&self, matches: &ArgMatches) -> Result<Arc<dyn ResolveProvider>, clap::Error>;
 }
 
-/// The runtime interface used after an enabled provider's settings have been bound.
+/// The runtime interface used after a provider's settings have been bound.
 ///
 /// A [`BoundProvider<T>`] implements this interface while retaining `T` internally. Dynamic
-/// dispatch hides the type from [`super::StorageResolver`], but the provider callback still
-/// receives `&T`.
+/// dispatch hides the type from [`super::StorageResolver`], but the provider callbacks still
+/// receive `&T`.
 pub(super) trait ResolveProvider: Send + Sync {
+    /// Maps schemeless input with this provider's bound settings when it claimed that route.
+    fn map_bare_location(&self, input: &str) -> Option<anyhow::Result<Location>>;
+
     /// Invokes the typed provider callback with its bound settings and retry configuration.
     fn resolve(
         &self,
@@ -294,19 +299,29 @@ pub(super) trait ResolveProvider: Send + Sync {
     ) -> anyhow::Result<ProviderResolution>;
 }
 
-/// An enabled provider before command arguments have been bound.
+/// A provider before command arguments have been bound.
 ///
-/// The parser and resolver share the same `T`, which makes a mismatched pair a compile-time error.
-/// This value is erased as [`BindProvider`] only after that relationship has been established.
+/// The parser, mapper, and resolver share the same `T`, which makes a mismatched group a
+/// compile-time error. This value is erased as [`BindProvider`] only after that relationship has
+/// been established.
 pub(super) struct ProviderDefinition<T> {
     args: ArgsParser<T>,
+    bare_location_mapper: Option<BareLocationMapper<T>>,
     resolver: ProviderResolver<T>,
 }
 
 impl<T> ProviderDefinition<T> {
-    /// Pairs a settings parser with the typed resolver that consumes its output.
-    pub(super) fn new(args: ArgsParser<T>, resolver: ProviderResolver<T>) -> Self {
-        Self { args, resolver }
+    /// Pairs a settings parser with the typed callbacks that consume its output.
+    pub(super) fn new(
+        args: ArgsParser<T>,
+        bare_location_mapper: Option<BareLocationMapper<T>>,
+        resolver: ProviderResolver<T>,
+    ) -> Self {
+        Self {
+            args,
+            bare_location_mapper,
+            resolver,
+        }
     }
 }
 
@@ -330,18 +345,20 @@ where
     fn bind(&self, matches: &ArgMatches) -> Result<Arc<dyn ResolveProvider>, clap::Error> {
         Ok(Arc::new(BoundProvider {
             settings: self.args.parse(matches)?,
+            bare_location_mapper: self.bare_location_mapper,
             resolver: self.resolver,
         }))
     }
 }
 
-/// An enabled provider after binding, with its concrete settings still intact.
+/// A provider after binding, with its concrete settings still intact.
 ///
 /// [`BindProvider::bind`] returns this value as an `Arc<dyn ResolveProvider>`. Dynamic dispatch
-/// enters this implementation, where `T` is known and can be passed to the matching resolver
-/// without a cast.
+/// enters this implementation, where `T` is known and can be passed to the matching mapper or
+/// resolver without a cast.
 struct BoundProvider<T> {
     settings: T,
+    bare_location_mapper: Option<BareLocationMapper<T>>,
     resolver: ProviderResolver<T>,
 }
 
@@ -349,40 +366,16 @@ impl<T> ResolveProvider for BoundProvider<T>
 where
     T: Send + Sync + 'static,
 {
+    fn map_bare_location(&self, input: &str) -> Option<anyhow::Result<Location>> {
+        self.bare_location_mapper
+            .map(|mapper| mapper(input, &self.settings))
+    }
+
     fn resolve(
         &self,
         location: &Location,
         retry: Option<&RetryConfig>,
     ) -> anyhow::Result<ProviderResolution> {
         (self.resolver)(location, &self.settings, retry)
-    }
-}
-
-/// The CLI portion of a disabled provider registration.
-///
-/// This type remains generic so it can call the Clap functions specialized for `T`. It never
-/// constructs or stores a `T`. The parent module handles attempts to resolve the disabled provider
-/// by returning the registration's diagnostic.
-pub(super) struct ProviderArguments<T> {
-    args: ArgsParser<T>,
-}
-
-impl<T> ProviderArguments<T> {
-    /// Retains a disabled provider's argument behavior for help and collision checks.
-    pub(super) fn new(args: ArgsParser<T>) -> Self {
-        Self { args }
-    }
-}
-
-impl<T> RegisterProviderArguments for ProviderArguments<T>
-where
-    T: Send + Sync + 'static,
-{
-    fn augment(&self, command: Command) -> Command {
-        self.args.augment(command)
-    }
-
-    fn argument_keys(&self) -> Vec<(String, String)> {
-        self.args.argument_keys()
     }
 }

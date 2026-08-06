@@ -1,66 +1,75 @@
+#[cfg(feature = "local")]
 use std::path::Path;
 
-#[cfg(feature = "local")]
+#[cfg(feature = "local-bare-paths")]
 use bytes::Bytes;
-#[cfg(feature = "local")]
+#[cfg(feature = "local-bare-paths")]
 use futures::TryStreamExt;
-#[cfg(feature = "local")]
+#[cfg(feature = "local-bare-paths")]
 use object_store::ObjectStoreExt;
-use silk_chiffon_storage::{Location, StorageError, StorageResolver};
 #[cfg(feature = "local")]
+use silk_chiffon_storage::StorageResolver;
+use silk_chiffon_storage::{Location, LocationInput, StorageError};
+#[cfg(feature = "local-bare-paths")]
 use silk_chiffon_storage::{preflight_output, validate_input};
-#[cfg(feature = "local")]
+#[cfg(feature = "local-bare-paths")]
 use std::sync::Arc;
+#[cfg(feature = "local-bare-paths")]
 use tempfile::TempDir;
 
-fn location(input: &str, working_directory: &Path) -> Result<Location, StorageError> {
-    Location::parse(input, working_directory)
+fn location(input: &str) -> Result<LocationInput, StorageError> {
+    LocationInput::parse(input)
 }
 
 #[test]
-fn relative_path_becomes_an_absolute_file_url() -> Result<(), StorageError> {
-    let working_directory = TempDir::new().unwrap();
-    let location = location("nested/data.parquet", working_directory.path())?;
-    let expected = working_directory.path().join("nested/data.parquet");
-
-    assert_eq!(location.url().scheme(), "file");
-    assert_eq!(location.url().to_file_path().unwrap(), expected);
-    Ok(())
-}
-
-#[test]
-fn absolute_path_becomes_a_file_url_without_requiring_the_path_to_exist() -> Result<(), StorageError>
-{
-    let working_directory = TempDir::new().unwrap();
-    let absent = working_directory.path().join("absent/data.parquet");
-    let location = location(absent.to_str().unwrap(), working_directory.path())?;
-
-    assert_eq!(location.url().to_file_path().unwrap(), absent);
-    Ok(())
-}
-
-#[test]
-fn bare_paths_accept_characters_that_require_encoding_in_urls() -> Result<(), StorageError> {
-    let working_directory = TempDir::new().unwrap();
+fn schemeless_input_is_preserved_without_filesystem_interpretation() -> Result<(), StorageError> {
     for input in [
+        "nested/data.parquet",
+        "/absolute/data.parquet",
+        "snapshot?#100%.parquet",
+        "résumé.parquet",
+    ] {
+        assert_eq!(location(input)?, LocationInput::Bare(input.to_owned()));
+    }
+    Ok(())
+}
+
+#[test]
+fn url_parser_requires_an_explicit_scheme() {
+    assert!(matches!(
+        Location::parse_url("data/input.parquet"),
+        Err(StorageError::UrlSchemeRequired(input)) if input == "data/input.parquet"
+    ));
+}
+
+#[test]
+#[cfg(feature = "local-bare-paths")]
+fn local_mapper_interprets_bare_locations_as_filesystem_paths() -> Result<(), StorageError> {
+    let working_directory = TempDir::new().unwrap();
+    for name in [
         "data set.parquet",
         "snapshot?#100%.parquet",
         "literal%20name.parquet",
         "résumé.parquet",
     ] {
-        let location = location(input, working_directory.path())?;
-        let expected = working_directory.path().join(input);
-        assert_eq!(location.url().to_file_path().unwrap(), expected);
-        #[cfg(feature = "local")]
-        {
-            let resolved = StorageResolver::local().unwrap().resolve_input(&location)?;
-            assert_eq!(resolved.local_path()?, expected);
-            assert_eq!(
-                resolved.path,
-                object_store::path::Path::from_absolute_path(&expected).unwrap()
-            );
-        }
+        let expected = working_directory.path().join(name);
+        let input = location(expected.to_str().unwrap())?;
+        let resolved = StorageResolver::local().unwrap().resolve_input(&input)?;
+        assert_eq!(resolved.local_path()?, expected);
+        assert_eq!(
+            resolved.path,
+            object_store::path::Path::from_absolute_path(&expected).unwrap()
+        );
     }
+
+    let relative = location("relative/data.parquet")?;
+    let resolved = StorageResolver::local().unwrap().resolve_input(&relative)?;
+    assert_eq!(
+        resolved.local_path()?,
+        std::env::current_dir()
+            .unwrap()
+            .join("relative/data.parquet")
+    );
 
     Ok(())
 }
@@ -86,8 +95,8 @@ fn canonical_file_urls_map_absolute_paths_to_store_keys() -> Result<(), Box<dyn 
             "tmp/résumé.parquet",
         ),
     ] {
-        let location = location(input, Path::new("/work"))?;
-        let resolved = StorageResolver::local()?.resolve_input(&location)?;
+        let location = Location::parse_url(input)?;
+        let resolved = StorageResolver::local()?.resolve_input(&location.clone().into())?;
 
         assert_eq!(location.url().as_str(), input);
         assert_eq!(
@@ -118,7 +127,7 @@ fn noncanonical_url_paths_report_their_source() {
         "s3://bucket/a/%2E%2E/object",
     ] {
         assert!(matches!(
-            Location::parse(input, Path::new("/work")),
+            LocationInput::parse(input),
             Err(StorageError::NonCanonicalUrlPath(rejected)) if rejected == input
         ));
     }
@@ -126,21 +135,24 @@ fn noncanonical_url_paths_report_their_source() {
 
 #[test]
 fn canonical_provider_urls_parse_before_scheme_resolution() {
-    let location = Location::parse("s3://bucket/object", Path::new("/work")).unwrap();
+    let input = LocationInput::parse("s3://bucket/object").unwrap();
+    let LocationInput::Url(location) = &input else {
+        panic!("an explicit URL should not parse as a bare location");
+    };
 
     assert_eq!(location.url().as_str(), "s3://bucket/object");
-    assert!(matches!(
-        StorageResolver::local()
-            .unwrap()
-            .resolve_input(&location),
-        Err(StorageError::UnsupportedScheme(scheme)) if scheme == "s3"
-    ));
+    #[cfg(feature = "local")]
+    assert!(
+        matches!(StorageResolver::local().unwrap().resolve_input(&input), Err(
+        StorageError::UnsupportedScheme(scheme)
+    ) if scheme == "s3")
+    );
 }
 
 #[test]
-#[cfg(feature = "local")]
+#[cfg(feature = "local-bare-paths")]
 fn object_store_path_validation_happens_during_resolution() {
-    let location = Location::parse("bad\0path", Path::new("/work")).unwrap();
+    let location = LocationInput::parse("bad\0path").unwrap();
 
     assert!(matches!(
         StorageResolver::local().unwrap().resolve_input(&location),
@@ -156,7 +168,7 @@ fn object_store_path_validation_happens_during_resolution() {
 fn noncanonical_storage_urls_are_rejected() {
     for input in ["s3:/bucket/object", "S3://bucket/object"] {
         assert!(matches!(
-            Location::parse(input, Path::new("/work")),
+            LocationInput::parse(input),
             Err(StorageError::NonCanonicalStorageUrl { scheme, input: rejected })
                 if scheme == "s3" && rejected == input
         ));
@@ -173,7 +185,7 @@ fn storage_urls_preserve_queries() {
         ),
         ("file:///tmp/object?version=1", "/tmp/object", "version=1"),
     ] {
-        let location = Location::parse(input, Path::new("/work")).unwrap();
+        let location = Location::parse_url(input).unwrap();
 
         assert_eq!(location.url().as_str(), input);
         assert_eq!(location.url().path(), path);
@@ -182,7 +194,7 @@ fn storage_urls_preserve_queries() {
 
     #[cfg(feature = "local")]
     {
-        let file = Location::parse("file:///tmp/object?version=1", Path::new("/work")).unwrap();
+        let file = LocationInput::parse("file:///tmp/object?version=1").unwrap();
         let resolved = StorageResolver::local()
             .unwrap()
             .resolve_input(&file)
@@ -202,7 +214,7 @@ fn storage_urls_reject_fragments_user_information_and_invalid_percent_encoding()
         "s3://bucket/%ZZ",
     ] {
         assert!(
-            Location::parse(input, Path::new("/work")).is_err(),
+            LocationInput::parse(input).is_err(),
             "{input:?} should be rejected"
         );
     }
@@ -210,8 +222,6 @@ fn storage_urls_reject_fragments_user_information_and_invalid_percent_encoding()
 
 #[test]
 fn noncanonical_local_file_urls_are_rejected() {
-    let working_directory = TempDir::new().unwrap();
-
     for invalid in [
         "file:relative",
         "file:/tmp/object",
@@ -223,7 +233,7 @@ fn noncanonical_local_file_urls_are_rejected() {
     ] {
         assert!(
             matches!(
-                Location::parse(invalid, working_directory.path()),
+                LocationInput::parse(invalid),
                 Err(StorageError::NonCanonicalFileUrl(_))
             ),
             "{invalid:?} should be rejected as a noncanonical local file URL"
@@ -233,8 +243,6 @@ fn noncanonical_local_file_urls_are_rejected() {
 
 #[test]
 fn strict_parser_rejects_malformed_or_ambiguous_locations() {
-    let working_directory = TempDir::new().unwrap();
-
     for invalid in [
         "",
         "relative:object",
@@ -242,31 +250,33 @@ fn strict_parser_rejects_malformed_or_ambiguous_locations() {
         "file:///tmp/%ZZ",
     ] {
         assert!(
-            Location::parse(invalid, working_directory.path()).is_err(),
+            LocationInput::parse(invalid).is_err(),
             "{invalid:?} should be rejected"
         );
     }
 }
 
 #[test]
-#[cfg(feature = "local")]
+#[cfg(feature = "local-bare-paths")]
 fn equivalent_locations_share_the_cached_store() {
     let working_directory = TempDir::new().unwrap();
-    let relative = location("data.parquet", working_directory.path()).unwrap();
-    let file_url = location(relative.url().as_str(), working_directory.path()).unwrap();
+    let path = working_directory.path().join("data.parquet");
+    let bare = location(path.to_str().unwrap()).unwrap();
     let resolver = StorageResolver::local().unwrap();
 
-    let first = resolver.resolve_input(&relative).unwrap();
+    let first = resolver.resolve_input(&bare).unwrap();
+    let file_url = location(first.url.as_str()).unwrap();
     let second = resolver.resolve_input(&file_url).unwrap();
 
     assert!(Arc::ptr_eq(&first.store, &second.store));
 }
 
 #[test]
-#[cfg(feature = "local")]
+#[cfg(feature = "local-bare-paths")]
 fn resolution_preserves_the_upstream_object_path() {
     let working_directory = TempDir::new().unwrap();
-    let location = location("nested/data%20set.parquet", working_directory.path()).unwrap();
+    let path = working_directory.path().join("nested/data%20set.parquet");
+    let location = location(path.to_str().unwrap()).unwrap();
     let resolved = StorageResolver::local()
         .unwrap()
         .resolve_input(&location)
@@ -282,10 +292,11 @@ fn resolution_preserves_the_upstream_object_path() {
 }
 
 #[tokio::test]
-#[cfg(feature = "local")]
+#[cfg(feature = "local-bare-paths")]
 async fn absent_object_resolution_is_separate_from_input_validation() {
     let working_directory = TempDir::new().unwrap();
-    let location = location("absent.parquet", working_directory.path()).unwrap();
+    let path = working_directory.path().join("absent.parquet");
+    let location = location(path.to_str().unwrap()).unwrap();
     let resolved = StorageResolver::local()
         .unwrap()
         .resolve_input(&location)
@@ -295,10 +306,11 @@ async fn absent_object_resolution_is_separate_from_input_validation() {
 }
 
 #[tokio::test]
-#[cfg(feature = "local")]
+#[cfg(feature = "local-bare-paths")]
 async fn absent_output_passes_preflight() {
     let working_directory = TempDir::new().unwrap();
-    let location = location("absent.parquet", working_directory.path()).unwrap();
+    let path = working_directory.path().join("absent.parquet");
+    let location = location(path.to_str().unwrap()).unwrap();
     let resolved = StorageResolver::local()
         .unwrap()
         .resolve_output(&location)
@@ -308,10 +320,11 @@ async fn absent_output_passes_preflight() {
 }
 
 #[tokio::test]
-#[cfg(feature = "local")]
+#[cfg(feature = "local-bare-paths")]
 async fn existing_output_requires_overwrite() {
     let working_directory = TempDir::new().unwrap();
-    let location = location("existing.parquet", working_directory.path()).unwrap();
+    let path = working_directory.path().join("existing.parquet");
+    let location = location(path.to_str().unwrap()).unwrap();
     let resolved = StorageResolver::local()
         .unwrap()
         .resolve_output(&location)
@@ -327,10 +340,11 @@ async fn existing_output_requires_overwrite() {
 }
 
 #[tokio::test]
-#[cfg(feature = "local")]
+#[cfg(feature = "local-bare-paths")]
 async fn local_store_supports_object_operations() {
     let working_directory = TempDir::new().unwrap();
-    let location = location("nested/data.bin", working_directory.path()).unwrap();
+    let path = working_directory.path().join("nested/data.bin");
+    let location = location(path.to_str().unwrap()).unwrap();
     let resolved = StorageResolver::local()
         .unwrap()
         .resolve_output(&location)
