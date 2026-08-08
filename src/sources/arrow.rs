@@ -13,9 +13,7 @@ use datafusion::{
 };
 use uuid::Uuid;
 
-use crate::sources::data_source::{
-    DataSource, DataSourceCapabilities, InputAccess, RowCount, StreamBoundedness,
-};
+use crate::sources::data_source::{DataSource, Replayability, RowCount};
 
 const CONTINUATION_MARKER: [u8; 4] = [0xff; 4];
 
@@ -36,8 +34,8 @@ impl DataSource for ArrowDataSource {
         "arrow"
     }
 
-    fn capabilities(&self) -> DataSourceCapabilities {
-        DataSourceCapabilities::new(StreamBoundedness::Finite, InputAccess::RandomAccess)
+    fn replayability(&self) -> Replayability {
+        Replayability::Replayable
     }
 
     async fn schema(&self) -> Result<SchemaRef> {

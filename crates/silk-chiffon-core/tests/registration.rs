@@ -25,10 +25,10 @@ use datafusion::{
 };
 use futures::StreamExt;
 use silk_chiffon_core::{
-    DataSink, DataSinkFactory, DataSource, DataSourceCapabilities, FormatCapability, FormatFuture,
-    FormatInspection, FormatInvocationError, FormatRegistration, FormatRegistry,
-    FormatRegistryError, FormatTransform, Identification, InputAccess, InspectionOutput,
-    OutputSortColumn, RowCount, SinkFactoryContext, SinkResult, SortDirection, StreamBoundedness,
+    DataSink, DataSinkFactory, DataSource, FormatCapability, FormatFuture, FormatInspection,
+    FormatInvocationError, FormatRegistration, FormatRegistry, FormatRegistryError,
+    FormatTransform, Identification, InspectionOutput, OutputSortColumn, Replayability, RowCount,
+    SinkFactoryContext, SinkResult, SortDirection,
 };
 use silk_chiffon_storage::{LocationInput, StorageHandle, local};
 
@@ -89,8 +89,8 @@ impl DataSource for TestSource {
         &self.name
     }
 
-    fn capabilities(&self) -> DataSourceCapabilities {
-        DataSourceCapabilities::new(StreamBoundedness::Finite, InputAccess::RandomAccess)
+    fn replayability(&self) -> Replayability {
+        Replayability::Replayable
     }
 
     async fn schema(&self) -> Result<SchemaRef> {
@@ -109,7 +109,7 @@ impl DataSource for TestSource {
 #[derive(Debug)]
 struct TestPartitionStream {
     schema: SchemaRef,
-    boundedness: StreamBoundedness,
+    infinite: bool,
 }
 
 impl PartitionStream for TestPartitionStream {
@@ -118,22 +118,24 @@ impl PartitionStream for TestPartitionStream {
     }
 
     fn execute(&self, _: Arc<TaskContext>) -> SendableRecordBatchStream {
-        match self.boundedness {
-            StreamBoundedness::Finite => Box::pin(RecordBatchStreamAdapter::new(
-                Arc::clone(&self.schema),
-                futures::stream::empty::<Result<RecordBatch, DataFusionError>>(),
-            )),
-            StreamBoundedness::Infinite => Box::pin(RecordBatchStreamAdapter::new(
+        if self.infinite {
+            Box::pin(RecordBatchStreamAdapter::new(
                 Arc::clone(&self.schema),
                 futures::stream::pending::<Result<RecordBatch, DataFusionError>>(),
-            )),
+            ))
+        } else {
+            Box::pin(RecordBatchStreamAdapter::new(
+                Arc::clone(&self.schema),
+                futures::stream::empty::<Result<RecordBatch, DataFusionError>>(),
+            ))
         }
     }
 }
 
 struct DirectStreamSource {
     schema: SchemaRef,
-    boundedness: StreamBoundedness,
+    infinite: bool,
+    replayability: Replayability,
 }
 
 #[async_trait]
@@ -142,8 +144,8 @@ impl DataSource for DirectStreamSource {
         "direct-stream"
     }
 
-    fn capabilities(&self) -> DataSourceCapabilities {
-        DataSourceCapabilities::new(self.boundedness, InputAccess::Sequential)
+    fn replayability(&self) -> Replayability {
+        self.replayability
     }
 
     async fn schema(&self) -> Result<SchemaRef> {
@@ -153,10 +155,10 @@ impl DataSource for DirectStreamSource {
     async fn as_table_provider(&self, _: &mut SessionContext) -> Result<Arc<dyn TableProvider>> {
         let partition = Arc::new(TestPartitionStream {
             schema: Arc::clone(&self.schema),
-            boundedness: self.boundedness,
+            infinite: self.infinite,
         });
         let table = StreamingTable::try_new(Arc::clone(&self.schema), vec![partition])?
-            .with_infinite_table(self.boundedness == StreamBoundedness::Infinite);
+            .with_infinite_table(self.infinite);
         Ok(Arc::new(table))
     }
 }
@@ -568,15 +570,14 @@ fn explicit_async_capability_outputs_preserve_typed_settings_and_context() {
 }
 
 #[test]
-fn direct_stream_sources_do_not_require_storage_handles() {
+fn direct_infinite_sources_use_datafusion_boundedness() {
     let source = DirectStreamSource {
         schema: Arc::new(arrow::datatypes::Schema::empty()),
-        boundedness: StreamBoundedness::Infinite,
+        infinite: true,
+        replayability: Replayability::Replayable,
     };
 
-    let capabilities = source.capabilities();
-    assert_eq!(capabilities.boundedness(), StreamBoundedness::Infinite);
-    assert_eq!(capabilities.input_access(), InputAccess::Sequential);
+    assert_eq!(source.replayability(), Replayability::Replayable);
     assert_eq!(
         futures::executor::block_on(source.row_count()).unwrap(),
         RowCount::Unknown
@@ -591,19 +592,18 @@ fn direct_stream_sources_do_not_require_storage_handles() {
 }
 
 #[test]
-fn finite_sequential_sources_can_sort_without_a_row_count() {
+fn finite_single_pass_sources_can_sort_without_a_row_count() {
     let source = DirectStreamSource {
         schema: Arc::new(Schema::new(vec![Field::new(
             "value",
             DataType::Int32,
             false,
         )])),
-        boundedness: StreamBoundedness::Finite,
+        infinite: false,
+        replayability: Replayability::SinglePass,
     };
 
-    let capabilities = source.capabilities();
-    assert_eq!(capabilities.boundedness(), StreamBoundedness::Finite);
-    assert_eq!(capabilities.input_access(), InputAccess::Sequential);
+    assert_eq!(source.replayability(), Replayability::SinglePass);
     assert_eq!(
         futures::executor::block_on(source.row_count()).unwrap(),
         RowCount::Unknown

@@ -12,9 +12,7 @@ use vortex::io::session::RuntimeSessionExt;
 use vortex::session::VortexSession;
 use vortex_datafusion::v2::VortexTable;
 
-use crate::sources::data_source::{
-    DataSource, DataSourceCapabilities, InputAccess, RowCount, StreamBoundedness,
-};
+use crate::sources::data_source::{DataSource, Replayability, RowCount};
 
 pub struct VortexDataSource {
     path: String,
@@ -32,8 +30,8 @@ impl DataSource for VortexDataSource {
         "vortex"
     }
 
-    fn capabilities(&self) -> DataSourceCapabilities {
-        DataSourceCapabilities::new(StreamBoundedness::Finite, InputAccess::RandomAccess)
+    fn replayability(&self) -> Replayability {
+        Replayability::Replayable
     }
 
     async fn schema(&self) -> Result<SchemaRef> {

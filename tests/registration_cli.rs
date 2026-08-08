@@ -6,10 +6,7 @@ use clap::CommandFactory;
 use silk_chiffon::utils::test_data::{TestBatch, TestFile};
 use silk_chiffon::{Cli, Commands, registration};
 #[cfg(feature = "local-bare-paths")]
-use silk_chiffon_core::{
-    DataSourceCapabilities, InputAccess, InspectionOutput, RowCount, SinkFactoryContext,
-    StreamBoundedness,
-};
+use silk_chiffon_core::{InspectionOutput, Replayability, RowCount, SinkFactoryContext};
 #[cfg(feature = "local-bare-paths")]
 use silk_chiffon_storage::LocationInput;
 
@@ -149,6 +146,27 @@ fn format_dispatch_stays_behind_registered_capabilities() {
     }
 }
 
+#[test]
+fn transform_validates_the_completed_plan_before_preflight_and_sinks() {
+    let transform = include_str!("../src/commands/transform.rs");
+    let query = transform.find("QueryOperation::new").unwrap();
+    let sort = transform.find("SortOperation::new").unwrap();
+    let validation = transform
+        .find("pipeline.validate_input_plan(&input_strategy)")
+        .unwrap();
+    let sampling = transform
+        .find("let avg_row_bytes = sample_avg_row_bytes")
+        .unwrap();
+    let sink = transform
+        .find("output_format.create_sink_factory(&sink_context)")
+        .unwrap();
+
+    assert!(query < validation);
+    assert!(sort < validation);
+    assert!(validation < sampling);
+    assert!(sampling < sink);
+}
+
 #[cfg(feature = "local-bare-paths")]
 #[tokio::test(flavor = "multi_thread")]
 async fn registered_capabilities_use_command_storage_and_explicit_outputs() {
@@ -179,10 +197,7 @@ async fn registered_capabilities_use_command_storage_and_explicit_outputs() {
         .unwrap();
     let parquet = command.formats().get("parquet").unwrap();
     let source = parquet.create_source(&input_handle).await.unwrap();
-    assert_eq!(
-        source.capabilities(),
-        DataSourceCapabilities::new(StreamBoundedness::Finite, InputAccess::RandomAccess)
-    );
+    assert_eq!(source.replayability(), Replayability::Replayable);
     assert_eq!(source.row_count().await.unwrap(), RowCount::Exact(3));
     let schema = source.schema().await.unwrap();
 

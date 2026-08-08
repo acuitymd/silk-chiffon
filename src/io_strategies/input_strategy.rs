@@ -12,9 +12,7 @@ use datafusion::{
 };
 use futures::stream::{SelectAll, Stream, select_all};
 
-use crate::sources::data_source::{
-    DataSource, DataSourceCapabilities, InputAccess, RowCount, StreamBoundedness,
-};
+use crate::sources::data_source::{DataSource, Replayability, RowCount};
 
 struct MergedSendableRecordBatchStreams {
     schema: SchemaRef,
@@ -70,25 +68,20 @@ impl InputStrategy {
         }
     }
 
-    pub fn capabilities(&self) -> DataSourceCapabilities {
-        let sources: Box<dyn Iterator<Item = &dyn DataSource> + '_> = match self {
-            InputStrategy::Single(source) => Box::new(std::iter::once(source.as_ref())),
+    pub fn replayability(&self) -> Replayability {
+        match self {
+            InputStrategy::Single(source) => source.replayability(),
             InputStrategy::Multiple(sources) => {
-                Box::new(sources.iter().map(|source| source.as_ref()))
-            }
-        };
-        let mut boundedness = StreamBoundedness::Finite;
-        let mut input_access = InputAccess::RandomAccess;
-        for source in sources {
-            let capabilities = source.capabilities();
-            if capabilities.boundedness() == StreamBoundedness::Infinite {
-                boundedness = StreamBoundedness::Infinite;
-            }
-            if capabilities.input_access() == InputAccess::Sequential {
-                input_access = InputAccess::Sequential;
+                if sources
+                    .iter()
+                    .all(|source| source.replayability() == Replayability::Replayable)
+                {
+                    Replayability::Replayable
+                } else {
+                    Replayability::SinglePass
+                }
             }
         }
-        DataSourceCapabilities::new(boundedness, input_access)
     }
 
     pub async fn row_count(&self) -> Result<RowCount> {
@@ -144,5 +137,51 @@ impl InputStrategy {
                 Ok(Box::pin(merged))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use datafusion::datasource::empty::EmptyTable;
+
+    use super::*;
+
+    struct TestSource(Replayability);
+
+    #[async_trait::async_trait]
+    impl DataSource for TestSource {
+        fn name(&self) -> &str {
+            "test"
+        }
+
+        fn replayability(&self) -> Replayability {
+            self.0
+        }
+
+        async fn schema(&self) -> Result<SchemaRef> {
+            Ok(Arc::new(arrow::datatypes::Schema::empty()))
+        }
+
+        async fn as_table_provider(
+            &self,
+            _: &mut SessionContext,
+        ) -> Result<Arc<dyn TableProvider>> {
+            Ok(Arc::new(EmptyTable::new(self.schema().await?)))
+        }
+    }
+
+    #[test]
+    fn multiple_inputs_aggregate_replayability() {
+        let mixed = InputStrategy::Multiple(vec![
+            Box::new(TestSource(Replayability::Replayable)),
+            Box::new(TestSource(Replayability::SinglePass)),
+        ]);
+        assert_eq!(mixed.replayability(), Replayability::SinglePass);
+
+        let replayable = InputStrategy::Multiple(vec![
+            Box::new(TestSource(Replayability::Replayable)),
+            Box::new(TestSource(Replayability::Replayable)),
+        ]);
+        assert_eq!(replayable.replayability(), Replayability::Replayable);
     }
 }

@@ -11,9 +11,7 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::file::reader::{FileReader as _, SerializedFileReader};
 use uuid::Uuid;
 
-use crate::sources::data_source::{
-    DataSource, DataSourceCapabilities, InputAccess, RowCount, StreamBoundedness,
-};
+use crate::sources::data_source::{DataSource, Replayability, RowCount};
 
 #[derive(Debug)]
 pub struct ParquetDataSource {
@@ -32,8 +30,8 @@ impl DataSource for ParquetDataSource {
         "parquet"
     }
 
-    fn capabilities(&self) -> DataSourceCapabilities {
-        DataSourceCapabilities::new(StreamBoundedness::Finite, InputAccess::RandomAccess)
+    fn replayability(&self) -> Replayability {
+        Replayability::Replayable
     }
 
     async fn schema(&self) -> Result<SchemaRef> {

@@ -7,44 +7,17 @@ use datafusion::{
     catalog::TableProvider, execution::SendableRecordBatchStream, prelude::SessionContext,
 };
 
-/// Controls whether operations that require end-of-input are valid.
+/// Whether preflight may consume rows before the source is executed.
+///
+/// Replayability concerns repeated consumption of the same logical input. It does not imply
+/// arbitrary byte seeking; a source may replay by reopening a pinned snapshot or restarting a
+/// read session.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum StreamBoundedness {
-    Finite,
-    Infinite,
-}
-
-/// Controls whether preflight work may revisit encoded input.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum InputAccess {
-    /// Input must be consumed from beginning to end without arbitrary seeking.
-    Sequential,
-    /// Input supports reads from arbitrary earlier or later positions.
-    RandomAccess,
-}
-
-/// Source properties needed before DataFusion builds an execution plan.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct DataSourceCapabilities {
-    boundedness: StreamBoundedness,
-    input_access: InputAccess,
-}
-
-impl DataSourceCapabilities {
-    pub const fn new(boundedness: StreamBoundedness, input_access: InputAccess) -> Self {
-        Self {
-            boundedness,
-            input_access,
-        }
-    }
-
-    pub const fn boundedness(self) -> StreamBoundedness {
-        self.boundedness
-    }
-
-    pub const fn input_access(self) -> InputAccess {
-        self.input_access
-    }
+pub enum Replayability {
+    /// Preflight must not consume rows before execution.
+    SinglePass,
+    /// Preflight may consume rows because execution can read the same logical input again.
+    Replayable,
 }
 
 /// A cardinality hint for sizing work without requiring every stream to know its length.
@@ -61,8 +34,8 @@ pub enum RowCount {
 pub trait DataSource: Send + Sync {
     fn name(&self) -> &str;
 
-    /// Reports behavior needed to validate planning and preflight work.
-    fn capabilities(&self) -> DataSourceCapabilities;
+    /// Reports whether preflight may consume rows without changing later execution.
+    fn replayability(&self) -> Replayability;
 
     /// Returns schema metadata, awaiting I/O when necessary.
     async fn schema(&self) -> Result<SchemaRef>;
