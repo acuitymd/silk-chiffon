@@ -593,3 +593,151 @@ fn local_utf8_path(handle: &StorageHandle) -> Result<Utf8PathBuf> {
 fn local_path_string(handle: &StorageHandle) -> Result<String> {
     Ok(local_utf8_path(handle)?.into_string())
 }
+
+#[cfg(all(test, feature = "local-bare-paths"))]
+mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use anyhow::Result;
+    use arrow::{array::RecordBatch, datatypes::SchemaRef};
+    use async_trait::async_trait;
+    use clap::CommandFactory;
+    use datafusion::{
+        catalog::{TableProvider, streaming::StreamingTable},
+        error::DataFusionError,
+        execution::TaskContext,
+        physical_plan::{
+            SendableRecordBatchStream, stream::RecordBatchStreamAdapter, streaming::PartitionStream,
+        },
+        prelude::SessionContext,
+    };
+    use silk_chiffon_core::{
+        DataSource, FormatFuture, FormatRegistration, FormatRegistry, FormatTransform,
+        Replayability,
+    };
+
+    use super::{ExecutableRegistries, arrow_registration, storage_registry};
+    use crate::{
+        CliSchema, Commands,
+        utils::test_data::{TestBatch, TestExtract, TestFile},
+    };
+    use silk_chiffon_storage::StorageHandle;
+
+    static STREAM_EXECUTIONS: AtomicUsize = AtomicUsize::new(0);
+
+    #[derive(Debug)]
+    struct SinglePassPartition {
+        batch: RecordBatch,
+    }
+
+    impl PartitionStream for SinglePassPartition {
+        fn schema(&self) -> &SchemaRef {
+            self.batch.schema_ref()
+        }
+
+        fn execute(&self, _: Arc<TaskContext>) -> SendableRecordBatchStream {
+            let stream = if STREAM_EXECUTIONS.fetch_add(1, Ordering::SeqCst) == 0 {
+                futures::stream::iter([Ok(self.batch.clone())])
+            } else {
+                futures::stream::iter([Err(DataFusionError::Execution(
+                    "single-pass source was consumed more than once".to_owned(),
+                ))])
+            };
+            Box::pin(RecordBatchStreamAdapter::new(self.batch.schema(), stream))
+        }
+    }
+
+    struct SinglePassSource;
+
+    #[async_trait]
+    impl DataSource for SinglePassSource {
+        fn name(&self) -> &str {
+            "single-pass-test"
+        }
+
+        fn replayability(&self) -> Replayability {
+            Replayability::SinglePass
+        }
+
+        async fn schema(&self) -> Result<SchemaRef> {
+            Ok(TestBatch::simple_schema())
+        }
+
+        async fn as_table_provider(
+            &self,
+            _: &mut SessionContext,
+        ) -> Result<Arc<dyn TableProvider>> {
+            let batch = TestBatch::simple_with(&[3, 1, 2], &["c", "a", "b"]);
+            let partition: Arc<dyn PartitionStream> = Arc::new(SinglePassPartition { batch });
+            let table = StreamingTable::try_new(TestBatch::simple_schema(), vec![partition])?;
+            Ok(Arc::new(table))
+        }
+    }
+
+    fn single_pass_source<'a>(
+        _: &'a StorageHandle,
+        _: &'a (),
+    ) -> FormatFuture<'a, Box<dyn DataSource>> {
+        Box::pin(async { Ok(Box::new(SinglePassSource) as Box<dyn DataSource>) })
+    }
+
+    fn single_pass_registration() -> FormatRegistration {
+        FormatRegistration::builder("single-pass-test")
+            .extensions(["single-pass-test"])
+            .transform(
+                FormatTransform::without_args()
+                    .source(single_pass_source)
+                    .build(),
+            )
+            .build()
+    }
+
+    #[tokio::test]
+    async fn sort_does_not_preflight_a_single_pass_source() {
+        STREAM_EXECUTIONS.store(0, Ordering::SeqCst);
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("input.single-pass-test");
+        let output = directory.path().join("output.arrow");
+        std::fs::write(&input, b"test source input").unwrap();
+
+        let formats = FormatRegistry::builder()
+            .register(single_pass_registration())
+            .register(arrow_registration())
+            .build()
+            .unwrap();
+        let registries = ExecutableRegistries {
+            formats,
+            storage: storage_registry(),
+        };
+        let matches = registries
+            .assembled_command(CliSchema::command())
+            .try_get_matches_from([
+                "silk-chiffon",
+                "transform",
+                "--from",
+                input.to_str().unwrap(),
+                "--input-format",
+                "single-pass-test",
+                "--to",
+                output.to_str().unwrap(),
+                "--output-format",
+                "arrow",
+                "--sort-by",
+                "id",
+            ])
+            .unwrap();
+        let cli = registries.runtime_cli(&matches).unwrap();
+        let Commands::Transform(command) = cli.command else {
+            panic!("expected transform command");
+        };
+
+        crate::commands::transform::run(command).await.unwrap();
+
+        let batches = TestFile::read_arrow(&output);
+        assert_eq!(TestExtract::i32_all(&batches, "id"), [1, 2, 3]);
+        assert_eq!(STREAM_EXECUTIONS.load(Ordering::SeqCst), 1);
+    }
+}
