@@ -168,13 +168,16 @@ fn parse_memory_stat_net_used(content: &str) -> Option<u64> {
     Some(total.saturating_sub(slab_reclaimable))
 }
 
-/// Sample actual rows from an `InputStrategy` to measure average in-memory Arrow row size.
+/// Reads source rows to measure their average in-memory Arrow size.
 ///
-/// Creates a throwaway `SessionContext` and streams batches until `target_rows` rows are
-/// read (or EOF). Returns the average bytes per row based on
-/// `RecordBatch::get_array_memory_size()`, which reflects the real in-memory footprint
-/// including variable-width columns like strings and lists.
-pub async fn sample_avg_row_bytes(
+/// Creates a throwaway `SessionContext` and streams complete batches until reaching
+/// `target_rows` at a batch boundary or reaching EOF. The result uses
+/// `RecordBatch::get_array_memory_size()`, which includes variable-width columns such as strings
+/// and lists.
+///
+/// This consumes one read of the source prefix. A caller that will read the input again must first
+/// require [`Replayability::Replayable`](silk_chiffon_core::Replayability::Replayable).
+pub async fn measure_avg_input_row_bytes(
     input_strategy: &InputStrategy,
     target_rows: usize,
 ) -> anyhow::Result<usize> {
@@ -200,7 +203,7 @@ pub async fn sample_avg_row_bytes(
 
 const MIN_SORT_SPILL_RESERVATION: usize = 10 * 1024 * 1024; // 10MB (DataFusion default)
 
-/// Estimate `sort_spill_reservation_bytes` from sampled row size and input characteristics.
+/// Estimate `sort_spill_reservation_bytes` from measured row size and input characteristics.
 ///
 /// The merge phase holds one batch per spill file in memory simultaneously.
 /// We estimate spill file count from total in-memory input size vs per-partition memory
@@ -523,7 +526,7 @@ kernel 500";
     }
 
     #[tokio::test]
-    async fn test_sample_avg_row_bytes_single_arrow() {
+    async fn test_measure_avg_input_row_bytes_single_arrow() {
         use crate::sources::arrow::ArrowDataSource;
         use crate::utils::test_data::{TestBatch, TestFile};
 
@@ -536,13 +539,13 @@ kernel 500";
             Box::new(ArrowDataSource::new(path.to_string_lossy().to_string()));
         let strategy = InputStrategy::Single(source);
 
-        let avg = sample_avg_row_bytes(&strategy, 100).await.unwrap();
+        let avg = measure_avg_input_row_bytes(&strategy, 100).await.unwrap();
         // i32 (4 bytes) + variable-length strings -- should be non-trivial
         assert!(avg > 0, "avg_row_bytes should be > 0, got {avg}");
     }
 
     #[tokio::test]
-    async fn test_sample_avg_row_bytes_multiple_files() {
+    async fn test_measure_avg_input_row_bytes_multiple_files() {
         use crate::sources::arrow::ArrowDataSource;
         use crate::utils::test_data::{TestBatch, TestFile};
 
@@ -560,12 +563,12 @@ kernel 500";
         ];
         let strategy = InputStrategy::Multiple(sources);
 
-        let avg = sample_avg_row_bytes(&strategy, 100).await.unwrap();
+        let avg = measure_avg_input_row_bytes(&strategy, 100).await.unwrap();
         assert!(avg > 0);
     }
 
     #[tokio::test]
-    async fn test_sample_avg_row_bytes_parquet() {
+    async fn test_measure_avg_input_row_bytes_parquet() {
         use crate::sources::parquet::ParquetDataSource;
         use crate::utils::test_data::{TestBatch, TestFile};
 
@@ -582,12 +585,12 @@ kernel 500";
             Box::new(ParquetDataSource::new(path.to_string_lossy().to_string()));
         let strategy = InputStrategy::Single(source);
 
-        let avg = sample_avg_row_bytes(&strategy, 100).await.unwrap();
+        let avg = measure_avg_input_row_bytes(&strategy, 100).await.unwrap();
         assert!(avg > 0);
     }
 
     #[tokio::test]
-    async fn test_sample_avg_row_bytes_respects_target_rows() {
+    async fn test_measure_avg_input_row_bytes_respects_target_rows() {
         use crate::sources::arrow::ArrowDataSource;
         use crate::utils::test_data::{TestBatch, TestFile};
 
@@ -609,12 +612,12 @@ kernel 500";
         let strategy = InputStrategy::Multiple(sources);
 
         // target only 50 rows -- should still produce a valid average
-        let avg = sample_avg_row_bytes(&strategy, 50).await.unwrap();
+        let avg = measure_avg_input_row_bytes(&strategy, 50).await.unwrap();
         assert!(avg > 0);
     }
 
     #[tokio::test]
-    async fn test_sample_avg_row_bytes_wide_vs_narrow() {
+    async fn test_measure_avg_input_row_bytes_wide_vs_narrow() {
         use crate::sources::arrow::ArrowDataSource;
         use crate::utils::test_data::{TestBatch, TestFile};
 
@@ -628,7 +631,9 @@ kernel 500";
         let narrow_strategy = InputStrategy::Single(Box::new(ArrowDataSource::new(
             narrow_path.to_string_lossy().to_string(),
         )));
-        let narrow_avg = sample_avg_row_bytes(&narrow_strategy, 100).await.unwrap();
+        let narrow_avg = measure_avg_input_row_bytes(&narrow_strategy, 100)
+            .await
+            .unwrap();
 
         // wide: many columns including strings
         let wide_path = dir.path().join("wide.arrow");
@@ -644,7 +649,9 @@ kernel 500";
         let wide_strategy = InputStrategy::Single(Box::new(ArrowDataSource::new(
             wide_path.to_string_lossy().to_string(),
         )));
-        let wide_avg = sample_avg_row_bytes(&wide_strategy, 100).await.unwrap();
+        let wide_avg = measure_avg_input_row_bytes(&wide_strategy, 100)
+            .await
+            .unwrap();
 
         assert!(
             wide_avg > narrow_avg,

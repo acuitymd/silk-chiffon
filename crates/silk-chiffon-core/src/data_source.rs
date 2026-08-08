@@ -7,16 +7,16 @@ use datafusion::{
     catalog::TableProvider, execution::SendableRecordBatchStream, prelude::SessionContext,
 };
 
-/// Whether preflight may consume rows before the source is executed.
+/// Whether the same logical input can be read from the beginning more than once.
 ///
 /// Replayability concerns repeated consumption of the same logical input. It does not imply
 /// arbitrary byte seeking; a source may replay by reopening a pinned snapshot or restarting a
 /// read session.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Replayability {
-    /// Preflight must not consume rows before execution.
+    /// Reading the input consumes its only available pass.
     SinglePass,
-    /// Preflight may consume rows because execution can read the same logical input again.
+    /// A later read can reproduce the same logical input from the beginning.
     Replayable,
 }
 
@@ -34,7 +34,7 @@ pub enum RowCount {
 pub trait DataSource: Send + Sync {
     fn name(&self) -> &str;
 
-    /// Reports whether preflight may consume rows without changing later execution.
+    /// Reports whether the input can be read from the beginning more than once.
     fn replayability(&self) -> Replayability;
 
     /// Returns schema metadata, awaiting I/O when necessary.

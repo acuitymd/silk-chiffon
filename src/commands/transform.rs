@@ -11,7 +11,7 @@ use crate::{
     operations::{query::QueryOperation, sort::SortOperation},
     pipeline::Pipeline,
     sources::data_source::{DataSource, Replayability, RowCount},
-    utils::memory::{estimate_sort_spill_reservation, sample_avg_row_bytes},
+    utils::memory::{estimate_sort_spill_reservation, measure_avg_input_row_bytes},
 };
 use anyhow::{Result, anyhow};
 use arrow::datatypes::SchemaRef;
@@ -235,7 +235,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
     pipeline.validate_input_plan(&input_strategy).await?;
 
     if has_sort && input_strategy.replayability() == Replayability::Replayable {
-        let avg_row_bytes = sample_avg_row_bytes(&input_strategy, 100_000).await?;
+        let avg_row_bytes = measure_avg_input_row_bytes(&input_strategy, 100_000).await?;
         if avg_row_bytes > 0 {
             let total_rows = match input_strategy
                 .row_count()

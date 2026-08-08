@@ -696,7 +696,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sort_does_not_preflight_a_single_pass_source() {
+    async fn sort_skips_row_size_measurement_for_single_pass_source() {
         STREAM_EXECUTIONS.store(0, Ordering::SeqCst);
         let directory = tempfile::tempdir().unwrap();
         let input = directory.path().join("input.single-pass-test");

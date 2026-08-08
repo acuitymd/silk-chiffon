@@ -147,15 +147,15 @@ fn format_dispatch_stays_behind_registered_capabilities() {
 }
 
 #[test]
-fn transform_validates_the_completed_plan_before_preflight_and_sinks() {
+fn completed_plan_is_validated_before_row_size_measurement_and_sink_creation() {
     let transform = include_str!("../src/commands/transform.rs");
     let query = transform.find("QueryOperation::new").unwrap();
     let sort = transform.find("SortOperation::new").unwrap();
     let validation = transform
         .find("pipeline.validate_input_plan(&input_strategy)")
         .unwrap();
-    let sampling = transform
-        .find("let avg_row_bytes = sample_avg_row_bytes")
+    let measurement = transform
+        .find("let avg_row_bytes = measure_avg_input_row_bytes")
         .unwrap();
     let sink = transform
         .find("output_format.create_sink_factory(&sink_context)")
@@ -163,8 +163,8 @@ fn transform_validates_the_completed_plan_before_preflight_and_sinks() {
 
     assert!(query < validation);
     assert!(sort < validation);
-    assert!(validation < sampling);
-    assert!(sampling < sink);
+    assert!(validation < measurement);
+    assert!(measurement < sink);
 }
 
 #[cfg(feature = "local-bare-paths")]
