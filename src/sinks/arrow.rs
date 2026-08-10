@@ -17,7 +17,7 @@ use crate::{
     ArrowCompression, ArrowIPCFormat,
     sinks::{
         completed_file_url,
-        data_sink::{DataSink, SinkResult},
+        data_sink::{DataSink, SinkCompletion},
     },
     utils::memory::estimate_row_bytes,
 };
@@ -203,7 +203,7 @@ impl DataSink for ArrowSink {
         Ok(())
     }
 
-    async fn finish(mut self: Box<Self>) -> Result<SinkResult> {
+    async fn finish(mut self: Box<Self>) -> Result<SinkCompletion> {
         // drop sender to signal EOF
         self.tx.take();
 
@@ -211,10 +211,7 @@ impl DataSink for ArrowSink {
         let result = handle.await.context("writer task panicked")??;
         let url = completed_file_url(&result.path).await?;
 
-        Ok(SinkResult {
-            files_written: vec![url],
-            rows_written: result.rows_written,
-        })
+        Ok(SinkCompletion::new(url, [], result.rows_written))
     }
 }
 
@@ -269,10 +266,10 @@ mod tests {
             sink.write_batch(batch).await.unwrap();
             let result = Box::new(sink).finish().await.unwrap();
 
-            assert_eq!(result.rows_written, 3);
-            assert_eq!(result.files_written.len(), 1);
+            assert_eq!(result.rows_written(), 3);
+            assert_eq!(result.durable_locations().len(), 1);
             assert_eq!(
-                result.files_written[0],
+                result.durable_locations()[0],
                 url::Url::from_file_path(&output_path).unwrap()
             );
 
@@ -297,7 +294,7 @@ mod tests {
             sink.write_batch(batch2).await.unwrap();
             let result = Box::new(sink).finish().await.unwrap();
 
-            assert_eq!(result.rows_written, 4);
+            assert_eq!(result.rows_written(), 4);
 
             let batches = verify::read_output_file(&output_path).unwrap();
             assert_eq!(batches.len(), 1);
@@ -326,7 +323,7 @@ mod tests {
             sink.write_batch(batch3).await.unwrap();
             let result = Box::new(sink).finish().await.unwrap();
 
-            assert_eq!(result.rows_written, 5);
+            assert_eq!(result.rows_written(), 5);
 
             let batches = verify::read_output_file(&output_path).unwrap();
             assert_eq!(batches.len(), 2);
@@ -353,7 +350,7 @@ mod tests {
             sink.write_batch(batch).await.unwrap();
             let result = Box::new(sink).finish().await.unwrap();
 
-            assert_eq!(result.rows_written, 3);
+            assert_eq!(result.rows_written(), 3);
 
             let batches = verify::read_output_stream(&output_path).unwrap();
             assert_eq!(batches.len(), 1);
@@ -411,8 +408,8 @@ mod tests {
                 let uncompressed_result = Box::new(uncompressed_sink).finish().await.unwrap();
                 let uncompressed_size = output_path.metadata().unwrap().len();
 
-                assert_eq!(compressed_result.rows_written, 100);
-                assert_eq!(uncompressed_result.rows_written, 100);
+                assert_eq!(compressed_result.rows_written(), 100);
+                assert_eq!(uncompressed_result.rows_written(), 100);
                 assert!(compressed_size < uncompressed_size);
 
                 let batches = verify::read_output_file(&output_path).unwrap();
@@ -483,7 +480,7 @@ mod tests {
 
             let result = Box::new(sink).finish().await.unwrap();
 
-            assert_eq!(result.rows_written, 0);
+            assert_eq!(result.rows_written(), 0);
             assert!(output_path.exists());
 
             let batches = verify::read_output_file(&output_path).unwrap();
@@ -521,7 +518,7 @@ mod tests {
 
             sink.write_stream(stream).await.unwrap();
             let result = Box::new(sink).finish().await.unwrap();
-            assert_eq!(result.rows_written, 5);
+            assert_eq!(result.rows_written(), 5);
 
             let batches = verify::read_output_file(&output_path).unwrap();
             assert_eq!(batches.len(), 1);

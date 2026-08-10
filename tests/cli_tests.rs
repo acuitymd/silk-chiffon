@@ -30,11 +30,13 @@ fn test_transform_help() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Transform data between formats"))
-        .stdout(predicate::str::contains("Single input file"))
-        .stdout(predicate::str::contains("Multiple input file"))
-        .stdout(predicate::str::contains("Single output file"))
+        .stdout(predicate::str::contains("Exact input reference"))
+        .stdout(predicate::str::contains("File location pattern"))
         .stdout(predicate::str::contains(
-            "Output path template for partitioning",
+            "Exact file or service output target",
+        ))
+        .stdout(predicate::str::contains(
+            "File output template for partitioning",
         ));
 }
 
@@ -57,9 +59,9 @@ fn test_transform_from_missing_to() {
 }
 
 #[test]
-fn test_transform_from_many_missing_to() {
+fn test_transform_repeatable_from_missing_to() {
     let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
-    cmd.args(["transform", "--from-many", "*.arrow"])
+    cmd.args(["transform", "--from-pattern", "*.arrow"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("required").or(predicate::str::contains("Usage:")));
@@ -162,7 +164,7 @@ fn test_transform_from_to_parquet_to_parquet() {
 }
 
 #[test]
-fn test_transform_from_many_to_arrow() {
+fn test_transform_repeatable_from_to_arrow() {
     let temp_dir = TempDir::new().unwrap();
     let input1 = temp_dir.path().join("input1.arrow");
     let input2 = temp_dir.path().join("input2.arrow");
@@ -176,9 +178,9 @@ fn test_transform_from_many_to_arrow() {
     let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
     cmd.args([
         "transform",
-        "--from-many",
+        "--from",
         input1.to_str().unwrap(),
-        "--from-many",
+        "--from",
         input2.to_str().unwrap(),
         "--to",
         output.to_str().unwrap(),
@@ -191,7 +193,7 @@ fn test_transform_from_many_to_arrow() {
 }
 
 #[test]
-fn test_transform_from_many_to_parquet() {
+fn test_transform_repeatable_from_to_parquet() {
     let temp_dir = TempDir::new().unwrap();
     let input1 = temp_dir.path().join("input1.arrow");
     let input2 = temp_dir.path().join("input2.arrow");
@@ -205,9 +207,9 @@ fn test_transform_from_many_to_parquet() {
     let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
     cmd.args([
         "transform",
-        "--from-many",
+        "--from",
         input1.to_str().unwrap(),
-        "--from-many",
+        "--from",
         input2.to_str().unwrap(),
         "--to",
         output.to_str().unwrap(),
@@ -220,7 +222,7 @@ fn test_transform_from_many_to_parquet() {
 }
 
 #[test]
-fn test_transform_from_many_glob_to_arrow() {
+fn test_transform_repeatable_from_glob_to_arrow() {
     let temp_dir = TempDir::new().unwrap();
     let input1 = temp_dir.path().join("input1.arrow");
     let input2 = temp_dir.path().join("input2.arrow");
@@ -236,7 +238,7 @@ fn test_transform_from_many_glob_to_arrow() {
     let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
     cmd.args([
         "transform",
-        "--from-many",
+        "--from-pattern",
         glob_pattern.to_str().unwrap(),
         "--to",
         output.to_str().unwrap(),
@@ -307,7 +309,7 @@ fn test_transform_from_to_many_parquet_partitioned() {
 }
 
 #[test]
-fn test_transform_from_many_to_many_partitioned() {
+fn test_transform_repeatable_from_to_many_partitioned() {
     let temp_dir = TempDir::new().unwrap();
     let input1 = temp_dir.path().join("input1.arrow");
     let input2 = temp_dir.path().join("input2.arrow");
@@ -321,9 +323,9 @@ fn test_transform_from_many_to_many_partitioned() {
     let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
     cmd.args([
         "transform",
-        "--from-many",
+        "--from",
         input1.to_str().unwrap(),
-        "--from-many",
+        "--from",
         input2.to_str().unwrap(),
         "--to-many",
         output_template.to_str().unwrap(),

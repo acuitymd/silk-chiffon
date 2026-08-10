@@ -1,9 +1,10 @@
 //! A memory pool that reserves capacity for non-spillable consumers.
 //!
-//! DataFusion's built-in `FairSpillPool` divides memory evenly among spillable consumers,
-//! but when spillable consumers have already consumed most of the pool, non-spillable
-//! consumers (like sort merge phases) can fail to allocate even small amounts. This pool
-//! solves that by maintaining a reserve that only non-spillable consumers can use.
+//! DataFusion's built-in `FairSpillPool` divides memory evenly among spillable
+//! consumers, but when spillable consumers have already consumed most of the
+//! pool, non-spillable consumers (like sort merge phases) can fail to allocate
+//! even small amounts. This pool solves that by maintaining a reserve that only
+//! non-spillable consumers can use.
 
 use datafusion::common::{Result, resources_datafusion_err};
 use datafusion::execution::memory_pool::{
@@ -50,8 +51,9 @@ struct PoolState {
 }
 
 impl ReservedSpillPool {
-    /// Create a new pool with `pool_size` total bytes and `reserve_for_non_spillable` bytes
-    /// reserved exclusively for non-spillable consumers.
+    /// Create a new pool with `pool_size` total bytes and
+    /// `reserve_for_non_spillable` bytes reserved exclusively for non-spillable
+    /// consumers.
     ///
     /// # Panics
     ///

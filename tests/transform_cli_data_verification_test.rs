@@ -99,9 +99,9 @@ fn test_merge_two_files() {
     cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
             "transform",
-            "--from-many",
+            "--from",
             input1.to_str().unwrap(),
-            "--from-many",
+            "--from",
             input2.to_str().unwrap(),
             "--to",
             output.to_str().unwrap(),
@@ -134,7 +134,7 @@ fn test_merge_with_glob() {
     cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
             "transform",
-            "--from-many",
+            "--from-pattern",
             glob_pattern.to_str().unwrap(),
             "--to",
             output.to_str().unwrap(),
@@ -145,6 +145,39 @@ fn test_merge_with_glob() {
     let batches = TestFile::read_parquet(&output);
     let mut ids = TestExtract::i32_all(&batches, "id");
     ids.sort();
+    assert_eq!(ids, vec![1, 2, 3]);
+}
+
+#[test]
+fn test_merge_with_repeatable_overlapping_patterns() {
+    let temp_dir = TempDir::new().unwrap();
+    let input1 = temp_dir.path().join("alpha.arrow");
+    let input2 = temp_dir.path().join("shared.arrow");
+    let input3 = temp_dir.path().join("zeta.arrow");
+    let output = temp_dir.path().join("merged.arrow");
+
+    TestFile::write_arrow_batch(&input1, &TestBatch::simple_with(&[1], &["a"]));
+    TestFile::write_arrow_batch(&input2, &TestBatch::simple_with(&[2], &["b"]));
+    TestFile::write_arrow_batch(&input3, &TestBatch::simple_with(&[3], &["c"]));
+
+    let first_pattern = temp_dir.path().join("a*.arrow");
+    let second_pattern = temp_dir.path().join("*.arrow");
+    cargo::cargo_bin_cmd!("silk-chiffon")
+        .args([
+            "transform",
+            "--from-pattern",
+            first_pattern.to_str().unwrap(),
+            "--from-pattern",
+            second_pattern.to_str().unwrap(),
+            "--to",
+            output.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let batches = TestFile::read_arrow(&output);
+    let mut ids = TestExtract::i32_all(&batches, "id");
+    ids.sort_unstable();
     assert_eq!(ids, vec![1, 2, 3]);
 }
 
@@ -231,9 +264,9 @@ fn test_merge_and_partition() {
     cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
             "transform",
-            "--from-many",
+            "--from",
             input1.to_str().unwrap(),
-            "--from-many",
+            "--from",
             input2.to_str().unwrap(),
             "--to-many",
             output_template.to_str().unwrap(),
@@ -486,9 +519,9 @@ fn test_merge_and_sort() {
     cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
             "transform",
-            "--from-many",
+            "--from",
             input1.to_str().unwrap(),
-            "--from-many",
+            "--from",
             input2.to_str().unwrap(),
             "--to",
             output.to_str().unwrap(),
@@ -568,15 +601,18 @@ fn test_list_outputs_json() {
     // should have 2 output files (one for "a", one for "b")
     assert_eq!(files.len(), 2);
 
-    // each file should have path, row_count, and partition_values
+    // Each completed output reports locations, rows, and partition fields.
     for file in &files {
-        assert!(file.get("path").is_some());
-        assert!(file.get("row_count").is_some());
-        assert!(file.get("partition_values").is_some());
+        assert!(file.get("durable_locations").is_some());
+        assert!(file.get("rows_written").is_some());
+        assert!(file.get("partition_fields").is_some());
+        assert!(file.get("path").is_none());
+        assert!(file.get("row_count").is_none());
+        assert!(file.get("partition_values").is_none());
 
-        let partition_values = file.get("partition_values").unwrap().as_array().unwrap();
+        let partition_values = file.get("partition_fields").unwrap().as_array().unwrap();
         assert_eq!(partition_values.len(), 1);
-        assert_eq!(partition_values[0].get("column").unwrap(), "name");
+        assert_eq!(partition_values[0].get("field").unwrap(), "name");
     }
 }
 

@@ -1,10 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use arrow::util::display::{ArrayFormatter, FormatOptions};
 use minijinja::{AutoEscape, Environment, Value};
 use percent_encoding::{AsciiSet, CONTROLS, percent_encode};
 
-use crate::io_strategies::partitioner::PartitionValues;
+use super::partitioner::PartitionValues;
 
 /// Default value for null or empty partition values, matching Hive's default.
 const HIVE_DEFAULT_PARTITION: &str = "__HIVE_DEFAULT_PARTITION__";
@@ -65,6 +65,15 @@ impl PathTemplate {
             env,
             template_str: pattern,
         }
+    }
+
+    pub fn referenced_fields(&self) -> Result<BTreeSet<String>, minijinja::Error> {
+        Ok(self
+            .env
+            .template_from_str(&self.template_str)?
+            .undeclared_variables(false)
+            .into_iter()
+            .collect())
     }
 
     /// Escape a path according to Hive partitioning conventions.

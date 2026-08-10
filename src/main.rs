@@ -1,6 +1,6 @@
 use anyhow::Result;
 use mimalloc::MiMalloc;
-use silk_chiffon::{Cli, Command, commands, default_thread_budget};
+use silk_chiffon::{Cli, Command, commands};
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
@@ -13,16 +13,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let thread_budget = match &cli.command {
-        Command::Transform(args) => args
-            .thread_budget
-            .as_ref()
-            .map(|spec| spec.resolve())
-            .unwrap_or_else(default_thread_budget),
-        _ => std::thread::available_parallelism()
-            .map(|p| p.get())
-            .unwrap_or(4),
-    };
+    let thread_budget = cli.command.runtime_worker_threads();
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.enable_all();

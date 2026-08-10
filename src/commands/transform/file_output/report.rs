@@ -1,37 +1,55 @@
-//! Output file information for partitioned writes.
+//! Storage-neutral reporting for completed file outputs.
 
 use arrow::array::ArrayRef;
 use arrow::util::display::ArrayFormatter;
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::io_strategies::partitioner::PartitionValues;
+use super::partitioner::PartitionValues;
 
-/// Information about a single output file from a partitioned write.
+/// One file sink completion with its partition identity.
 #[derive(Debug, Clone, Serialize)]
-pub struct OutputFileInfo {
-    pub path: String,
-    pub row_count: u64,
-    pub partition_values: Vec<PartitionColumnValue>,
+pub(in crate::commands::transform) struct CompletedFileOutput {
+    pub(in crate::commands::transform) durable_locations: Vec<String>,
+    pub(in crate::commands::transform) rows_written: u64,
+    pub(in crate::commands::transform) partition_fields: Vec<PartitionFieldValue>,
 }
 
-/// A single partition column and its value.
+/// One raw partition field value in `--by` order.
 #[derive(Debug, Clone, Serialize)]
-pub struct PartitionColumnValue {
-    pub column: String,
-    pub value: Value,
+pub(in crate::commands::transform) struct PartitionFieldValue {
+    pub(in crate::commands::transform) field: String,
+    pub(in crate::commands::transform) value: Value,
 }
 
-/// Convert partition values to a serializable format, preserving column order.
-pub fn partition_values_to_json(
+/// The deterministic report presented by `--list-outputs` after all writes finish.
+#[derive(Debug, Serialize)]
+#[serde(transparent)]
+pub(in crate::commands::transform) struct FileOutputReport(Vec<CompletedFileOutput>);
+
+impl FileOutputReport {
+    pub(in crate::commands::transform) fn new(mut outputs: Vec<CompletedFileOutput>) -> Self {
+        for output in &mut outputs {
+            output.durable_locations.sort();
+        }
+        outputs.sort_by(|left, right| left.durable_locations[0].cmp(&right.durable_locations[0]));
+        Self(outputs)
+    }
+
+    pub(in crate::commands::transform) fn outputs(&self) -> &[CompletedFileOutput] {
+        &self.0
+    }
+}
+
+pub(super) fn partition_field_values(
     values: &PartitionValues,
     column_order: &[String],
-) -> Vec<PartitionColumnValue> {
+) -> Vec<PartitionFieldValue> {
     column_order
         .iter()
         .filter_map(|col| {
-            values.get(col).map(|arr| PartitionColumnValue {
-                column: col.clone(),
+            values.get(col).map(|arr| PartitionFieldValue {
+                field: col.clone(),
                 value: array_to_json_value(arr),
             })
         })
@@ -41,7 +59,7 @@ pub fn partition_values_to_json(
 /// Format a single-row array as a string for use as a partition key component.
 /// This is not the greatest but ArrayRef can't be used as a key in a HashMap
 /// and we need that for the low cardinality partition strategy.
-pub fn format_scalar_value(arr: Option<&ArrayRef>) -> String {
+pub(super) fn format_scalar_value(arr: Option<&ArrayRef>) -> String {
     match arr {
         Some(arr) if !arr.is_empty() && !arr.is_null(0) => {
             let formatter = ArrayFormatter::try_new(arr.as_ref(), &Default::default());
@@ -154,7 +172,7 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
-    fn test_partition_values_to_json_preserves_order() {
+    fn partition_field_values_preserve_order() {
         let mut values: PartitionValues = HashMap::new();
         values.insert(
             "year".to_string(),
@@ -174,14 +192,14 @@ mod tests {
             "year".to_string(),
             "month".to_string(),
         ];
-        let result = partition_values_to_json(&values, &order);
+        let result = partition_field_values(&values, &order);
 
         assert_eq!(result.len(), 3);
-        assert_eq!(result[0].column, "region");
+        assert_eq!(result[0].field, "region");
         assert_eq!(result[0].value, Value::String("us-west".to_string()));
-        assert_eq!(result[1].column, "year");
+        assert_eq!(result[1].field, "year");
         assert_eq!(result[1].value, Value::Number(2023.into()));
-        assert_eq!(result[2].column, "month");
+        assert_eq!(result[2].field, "month");
         assert_eq!(result[2].value, Value::Number(12.into()));
     }
 

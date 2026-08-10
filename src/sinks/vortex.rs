@@ -19,7 +19,7 @@ use vortex::session::VortexSession;
 
 use crate::sinks::{
     completed_file_url,
-    data_sink::{DataSink, SinkResult},
+    data_sink::{DataSink, SinkCompletion},
 };
 
 #[derive(Clone, Copy)]
@@ -157,7 +157,7 @@ impl DataSink for VortexSink {
         Ok(())
     }
 
-    async fn finish(mut self: Box<Self>) -> Result<SinkResult> {
+    async fn finish(mut self: Box<Self>) -> Result<SinkCompletion> {
         let mut inner = self.inner.lock().await;
         inner.finish_buffered_batch()?;
         inner.flush_completed_batches().await?;
@@ -179,9 +179,6 @@ impl DataSink for VortexSink {
             .map_err(|e| anyhow!("writer task errored: {e}"))?;
         let url = completed_file_url(&self.path).await?;
 
-        Ok(SinkResult {
-            files_written: vec![url],
-            rows_written: inner.rows_written,
-        })
+        Ok(SinkCompletion::new(url, [], inner.rows_written))
     }
 }

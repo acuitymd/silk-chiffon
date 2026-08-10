@@ -12,7 +12,7 @@ use arrow::datatypes::{DataType, Schema};
 use datafusion::execution::SendableRecordBatchStream;
 use futures::stream::Stream;
 
-use crate::io_strategies::output_file_info::format_scalar_value;
+use super::report::format_scalar_value;
 
 /// A HashMap of column names to single-row arrays representing a partition value for a column
 pub type PartitionValues = HashMap<String, ArrayRef>;
@@ -38,7 +38,7 @@ pub fn partition_values_equal(a: &PartitionValues, b: &PartitionValues) -> bool 
 /// Examples:
 /// - ["us-west", "2024"] -> "7:us-west,4:2024"
 /// - ["a|b", "c"] -> "3:a|b,1:c" (no collision with ["a", "b|c"] -> "1:a,3:b|c")
-/// - ["us-west", NULL] -> "7:us-west,!" (no collision with ["us-west", "null"] -> "7:us-west,4:null")
+/// - `["us-west", NULL]` differs from `["us-west", "null"]`.
 /// - ["us-west", ""] -> "7:us-west,0:" (empty string is distinct from null)
 pub fn partition_key(values: &PartitionValues, column_order: &[String]) -> String {
     column_order
@@ -378,7 +378,7 @@ mod tests {
             results.push((values, batch));
         }
 
-        // should get 3 slices: first batch (category 1), second batch first part (category 1), second batch second part (category 2)
+        // The partition spans the batch boundary before the final value changes.
         assert_eq!(results.len(), 3);
     }
 
