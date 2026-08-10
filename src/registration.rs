@@ -1131,6 +1131,15 @@ mod tests {
     static SINK_BINDINGS: AtomicUsize = AtomicUsize::new(0);
     static SERVICE_INPUT_REFERENCES: Mutex<Vec<String>> = Mutex::new(Vec::new());
     static SERVICE_OUTPUT_RESULT: Mutex<Option<(String, usize)>> = Mutex::new(None);
+    static TYPED_SERVICE_OUTPUT_RESULT: Mutex<Option<TypedServiceOutputResult>> = Mutex::new(None);
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct TypedServiceOutputResult {
+        target: String,
+        marker: usize,
+        fields: Vec<String>,
+        ids: Vec<i32>,
+    }
 
     struct TestServiceSource {
         batch: RecordBatch,
@@ -1199,6 +1208,58 @@ mod tests {
             .schemes([scheme])
             .build()
             .unwrap()
+    }
+
+    #[derive(Args)]
+    struct TypedServiceInputArgs {
+        #[arg(long)]
+        test_service_input_start: i32,
+    }
+
+    #[derive(Args)]
+    struct TypedServiceOutputArgs {
+        #[arg(long)]
+        test_service_output_marker: usize,
+    }
+
+    fn create_typed_service_input<'a>(
+        reference: &'a str,
+        _: &'a SessionContext,
+        settings: &'a TypedServiceInputArgs,
+    ) -> BoxFuture<'a, Result<Box<dyn DataSource>>> {
+        Box::pin(async move {
+            anyhow::ensure!(reference == "typed-input://dataset");
+            let start = settings.test_service_input_start;
+            Ok(Box::new(TestServiceSource {
+                batch: TestBatch::simple_with(&[start, start + 1, start + 2], &["a", "b", "c"]),
+            }) as Box<dyn DataSource>)
+        })
+    }
+
+    fn write_typed_service_output<'a>(
+        target: &'a str,
+        mut stream: SendableRecordBatchStream,
+        settings: &'a TypedServiceOutputArgs,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let fields = stream
+                .schema()
+                .fields()
+                .iter()
+                .map(|field| field.name().clone())
+                .collect();
+            let mut batches = Vec::new();
+            while let Some(batch) = stream.next().await {
+                batches.push(batch?);
+            }
+            *TYPED_SERVICE_OUTPUT_RESULT.lock().unwrap() = Some(TypedServiceOutputResult {
+                target: target.to_owned(),
+                marker: settings.test_service_output_marker,
+                fields,
+                ids: TestExtract::i32_all(&batches, "id"),
+            });
+            Ok(())
+        })
     }
 
     #[derive(Args)]
@@ -1627,6 +1688,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn typed_service_only_transform_projects_and_drains_the_output() {
+        TYPED_SERVICE_OUTPUT_RESULT.lock().unwrap().take();
+        let input = ServiceInputDefinition::with_args(create_typed_service_input)
+            .name("typed-input")
+            .schemes(["typed-input"])
+            .build()
+            .unwrap();
+        let output = ServiceOutputDefinition::with_args(write_typed_service_output)
+            .name("typed-output")
+            .schemes(["typed-output"])
+            .build()
+            .unwrap();
+        let definition = application_definition_with_services(
+            FormatRegistry::builder().build().unwrap(),
+            vec![input],
+            vec![output],
+        );
+        let cli = test_cli(
+            definition,
+            &[
+                "silk-chiffon",
+                "transform",
+                "--from",
+                "typed-input://dataset",
+                "--to",
+                "typed-output://result",
+                "--test-service-input-start",
+                "40",
+                "--test-service-output-marker",
+                "23",
+                "--exclude-columns",
+                "name",
+            ],
+        );
+        let Command::Transform(command) = cli.command else {
+            panic!("expected transform command");
+        };
+
+        crate::commands::transform::run(command).await.unwrap();
+
+        assert_eq!(
+            TYPED_SERVICE_OUTPUT_RESULT.lock().unwrap().as_ref(),
+            Some(&TypedServiceOutputResult {
+                target: "typed-output://result".to_owned(),
+                marker: 23,
+                fields: vec!["id".to_owned()],
+                ids: vec![40, 41, 42],
+            })
+        );
+    }
+
+    #[tokio::test]
     async fn file_input_registers_the_handle_store_before_source_creation() {
         SERVICE_OUTPUT_RESULT.lock().unwrap().take();
         let directory = tempfile::tempdir().unwrap();
@@ -1733,6 +1846,103 @@ mod tests {
 
         let error = crate::commands::transform::run(command).await.unwrap_err();
         assert!(error.to_string().contains("does not support --to-many"));
+    }
+
+    #[tokio::test]
+    async fn service_routes_reject_file_only_options_and_unknown_schemes() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("input.arrow");
+        let output = directory.path().join("output.arrow");
+        TestFile::write_arrow_batch(
+            &input,
+            &TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]),
+        );
+        let input = input.to_str().unwrap();
+        let output = output.to_str().unwrap();
+        let cases = [
+            (
+                vec![
+                    "silk-chiffon",
+                    "transform",
+                    "--from",
+                    "test-input://source",
+                    "--to",
+                    output,
+                    "--input-format",
+                    "arrow",
+                ],
+                "--input-format applies only to file inputs",
+            ),
+            (
+                vec![
+                    "silk-chiffon",
+                    "transform",
+                    "--from",
+                    input,
+                    "--to",
+                    "test-output://target",
+                    "--output-format",
+                    "arrow",
+                ],
+                "--output-format applies only to file outputs",
+            ),
+            (
+                vec![
+                    "silk-chiffon",
+                    "transform",
+                    "--from",
+                    input,
+                    "--to",
+                    "test-output://target",
+                    "--list-outputs",
+                    "text",
+                ],
+                "--list-outputs applies only to file outputs",
+            ),
+            (
+                vec![
+                    "silk-chiffon",
+                    "transform",
+                    "--from",
+                    "unknown-input://source",
+                    "--to",
+                    output,
+                ],
+                "unsupported input scheme \"unknown-input\"",
+            ),
+            (
+                vec![
+                    "silk-chiffon",
+                    "transform",
+                    "--from",
+                    input,
+                    "--to",
+                    "unknown-output://target",
+                ],
+                "unsupported output scheme \"unknown-output\"",
+            ),
+        ];
+
+        for (arguments, expected) in cases {
+            let definition = application_definition_with_services(
+                FormatRegistry::builder()
+                    .register(arrow_format())
+                    .build()
+                    .unwrap(),
+                vec![test_service_input("test-input", "test-input")],
+                vec![test_service_output("test-output", "test-output")],
+            );
+            let cli = test_cli(definition, &arguments);
+            let Command::Transform(command) = cli.command else {
+                panic!("expected transform command");
+            };
+
+            let error = crate::commands::transform::run(command).await.unwrap_err();
+            assert!(
+                error.to_string().contains(expected),
+                "expected {expected:?}, got {error:#}"
+            );
+        }
     }
 
     fn directional_format_definition() -> ApplicationDefinition {
