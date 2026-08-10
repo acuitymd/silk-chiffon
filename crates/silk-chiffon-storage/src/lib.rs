@@ -47,11 +47,11 @@ pub mod retry;
 pub mod session;
 
 pub use backend::{
-    BareLocationMapper, ObjectPathMapper, ObjectStoreFactory, StorageAccess, StorageBackend,
+    BareLocationMapper, ObjectPathMapper, ObjectStoreCreatorFn, StorageAccess, StorageBackend,
     StorageBackendBuildError, StorageBackendBuilder, StorageDirection,
 };
 pub use error::StorageError;
-pub use handle::{StorageHandle, preflight_output, validate_input};
+pub use handle::{StorageHandle, ensure_output_absent, validate_input};
 pub use location::{Location, LocationInput};
 pub use object_store::RetryConfig;
 pub use registry::{StorageRegistry, StorageRegistryBuilder, StorageRegistryError};
