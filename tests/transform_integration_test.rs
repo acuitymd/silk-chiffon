@@ -28,7 +28,7 @@ where
     .map(OsString::from)
     .chain(format_args.into_iter().map(Into::into));
     let silk_chiffon::Cli {
-        command: silk_chiffon::Commands::Transform(mut command),
+        command: silk_chiffon::Command::Transform(mut command),
     } = silk_chiffon::Cli::try_parse_from(args).unwrap()
     else {
         unreachable!()
@@ -36,6 +36,10 @@ where
     command.from = None;
     command.to = None;
     command
+}
+
+fn transform_defaults() -> TransformCommand {
+    transform_defaults_with(std::iter::empty::<OsString>())
 }
 
 mod test_helpers {
@@ -146,7 +150,7 @@ async fn test_transform_arrow_to_arrow_basic() {
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -193,7 +197,7 @@ async fn test_transform_parquet_to_arrow() {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
         output_format: Some("arrow".to_owned()),
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -245,7 +249,7 @@ async fn test_transform_from_many_basic() {
             input2.to_string_lossy().to_string(),
         ],
         to: Some(output.to_string_lossy().to_string()),
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -276,7 +280,7 @@ async fn test_transform_from_many_with_glob() {
         from: None,
         from_many: vec![glob_pattern.to_string_lossy().to_string()],
         to: Some(output.to_string_lossy().to_string()),
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -302,7 +306,7 @@ async fn test_transform_to_many_partitioned() {
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("name".to_string()),
         create_dirs: false,
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -333,7 +337,7 @@ async fn test_transform_with_query() {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
         query: Some("SELECT * FROM data WHERE id > 1".to_string()),
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -361,7 +365,7 @@ async fn test_transform_with_sorting() {
                 direction: SortDirection::Ascending,
             }],
         }),
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -474,7 +478,7 @@ async fn test_transform_partition_with_create_dirs() {
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("name".to_string()),
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -502,7 +506,7 @@ async fn test_transform_partition_with_overwrite() {
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("name".to_string()),
         create_dirs: false,
-        ..Default::default()
+        ..transform_defaults()
     })
     .await;
 
@@ -516,7 +520,7 @@ async fn test_transform_partition_with_overwrite() {
         by: Some("name".to_string()),
         create_dirs: false,
         overwrite: true,
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -533,7 +537,7 @@ async fn test_transform_from_many_empty_glob() {
         from: None,
         from_many: vec![glob_pattern.to_string_lossy().to_string()],
         to: Some(output.to_string_lossy().to_string()),
-        ..Default::default()
+        ..transform_defaults()
     })
     .await;
 
@@ -563,7 +567,7 @@ async fn test_transform_partition_exclude_columns() {
         by: Some("name".to_string()),
         exclude_columns: vec!["name".to_string()],
         create_dirs: false,
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -589,7 +593,7 @@ async fn test_transform_with_projection_query() {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
         query: Some("SELECT id FROM data".to_string()),
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -613,7 +617,7 @@ async fn test_transform_with_aggregation_query() {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
         query: Some("SELECT COUNT(*) as count FROM data".to_string()),
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -648,7 +652,7 @@ async fn test_transform_query_and_sort_combined() {
                 direction: SortDirection::Ascending,
             }],
         }),
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -702,7 +706,7 @@ async fn test_transform_multi_column_sort() {
                 },
             ],
         }),
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -748,7 +752,7 @@ async fn test_transform_sort_descending() {
                 direction: SortDirection::Descending,
             }],
         }),
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -1098,7 +1102,7 @@ async fn test_transform_low_cardinality_partition() {
         partition_strategy: PartitionStrategy::NosortMulti,
         create_dirs: false,
         output_format: Some("parquet".to_owned()),
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -1166,7 +1170,7 @@ async fn test_transform_multi_column_partition() {
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("year,month".to_string()),
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -1204,7 +1208,7 @@ async fn test_transform_from_many_to_partitioned() {
         by: Some("name".to_string()),
         create_dirs: false,
         overwrite: true,
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -1254,7 +1258,7 @@ async fn test_transform_invalid_query() {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
         query: Some("SELECT nonexistent FROM data".to_string()),
-        ..Default::default()
+        ..transform_defaults()
     })
     .await;
 
@@ -1273,7 +1277,7 @@ async fn test_transform_empty_file() {
     silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -1378,7 +1382,7 @@ async fn test_transform_partition_list_outputs_text() {
         by: Some("name".to_string()),
         list_outputs: Some(ListOutputsFormat::Text),
         create_dirs: false,
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -1407,7 +1411,7 @@ async fn test_transform_partition_list_outputs_json() {
         by: Some("name".to_string()),
         list_outputs: Some(ListOutputsFormat::Json),
         create_dirs: false,
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -1433,7 +1437,7 @@ async fn test_transform_explicit_input_format_arrow_to_parquet() {
         to: Some(output.to_string_lossy().to_string()),
         input_format: Some("arrow".to_owned()),
         output_format: Some("parquet".to_owned()),
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -1457,7 +1461,7 @@ async fn test_transform_explicit_output_format_parquet() {
         to: Some(output.to_string_lossy().to_string()),
         input_format: Some("parquet".to_owned()),
         output_format: Some("arrow".to_owned()),
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -1521,7 +1525,7 @@ async fn test_transform_query_with_partition() {
         create_dirs: false,
         overwrite: true,
         query: Some("SELECT * FROM data WHERE value > 15".to_string()),
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap_or_else(|e| panic!("Command failed with error: {:?}", e));
@@ -1565,7 +1569,7 @@ async fn test_transform_query_with_different_dialect() {
         to: Some(output.to_string_lossy().to_string()),
         query: Some("SELECT * FROM data WHERE id >= 2".to_string()),
         dialect: QueryDialect::PostgreSQL,
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -1614,7 +1618,7 @@ async fn test_transform_partition_with_query_and_sort() {
                 direction: SortDirection::Ascending,
             }],
         }),
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -2142,7 +2146,7 @@ async fn test_multi_column_partition_verifies_data_arrow() {
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("year,month".to_string()),
         output_format: Some("arrow".to_owned()), // be explicit to ensure we are testing the correct format,
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -2221,7 +2225,7 @@ async fn test_multi_column_partition_verifies_data_parquet() {
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("year,month".to_string()),
         output_format: Some("parquet".to_owned()),
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -2287,7 +2291,7 @@ async fn test_multi_column_partition_three_columns_arrow() {
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("year,month,day".to_string()),
         output_format: Some("arrow".to_owned()),
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -2346,7 +2350,7 @@ async fn test_multi_column_partition_three_columns_parquet() {
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("year,month,day".to_string()),
         output_format: Some("parquet".to_owned()),
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -2405,7 +2409,7 @@ async fn test_multi_column_partition_mixed_types() {
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("region,year".to_string()),
         output_format: Some("arrow".to_owned()),
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -2473,7 +2477,7 @@ async fn test_multi_column_partition_parquet_with_exclude() {
         by: Some("year,month".to_string()),
         exclude_columns: vec!["year".to_string(), "month".to_string()],
         output_format: Some("parquet".to_owned()),
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -2525,7 +2529,7 @@ async fn test_multi_column_partition_arrow_with_exclude() {
         by: Some("year,month".to_string()),
         exclude_columns: vec!["year".to_string(), "month".to_string()],
         output_format: Some("arrow".to_owned()),
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -2581,7 +2585,7 @@ async fn test_multi_column_partition_verifies_output_paths_arrow() {
         list_outputs: Some(ListOutputsFormat::Json),
         list_outputs_file: Some(Utf8PathBuf::from_path_buf(list_output.clone()).unwrap()),
         output_format: Some("arrow".to_owned()),
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -2697,7 +2701,7 @@ async fn test_multi_column_partition_verifies_output_paths_parquet() {
         list_outputs: Some(ListOutputsFormat::Json),
         list_outputs_file: Some(Utf8PathBuf::from_path_buf(list_output.clone()).unwrap()),
         output_format: Some("parquet".to_owned()),
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -2869,7 +2873,7 @@ async fn test_partition_strategies_produce_same_output() {
         by: Some("category".to_string()),
         create_dirs: false,
         output_format: Some("parquet".to_owned()),
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -2888,7 +2892,7 @@ async fn test_partition_strategies_produce_same_output() {
         partition_strategy: PartitionStrategy::NosortMulti,
         create_dirs: false,
         output_format: Some("parquet".to_owned()),
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -3091,13 +3095,13 @@ async fn test_bloom_filter_prefix_with_exclusion() {
 }
 
 #[tokio::test]
-async fn test_transform_sort_with_spill_reservation_sampling() {
-    // verifies the sample-based sort_spill_reservation_bytes path runs without error
+async fn test_transform_sort_with_measured_spill_reservation() {
+    // A sort on replayable input measures row size to tune DataFusion's spill reservation.
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.parquet");
     let output = temp_dir.path().join("output.parquet");
 
-    // wider schema so sampling produces a meaningful row-byte estimate
+    // Several physical types make the measured row size exercise the sizing path.
     let batch = TestBatch::builder()
         .column_i32("id", &[5, 3, 1, 4, 2])
         .column_string("name", &["echo", "charlie", "alpha", "delta", "bravo"])
@@ -3115,7 +3119,7 @@ async fn test_transform_sort_with_spill_reservation_sampling() {
             }],
         }),
         output_format: Some("parquet".to_owned()),
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -3140,7 +3144,7 @@ async fn test_transform_sort_with_spill_reservation_sampling() {
 
 #[tokio::test]
 async fn test_transform_sort_multi_file_with_spill_reservation() {
-    // exercises sampling across multiple input files
+    // Row-size measurement covers the combined logical input, not only its first file.
     let temp_dir = TempDir::new().unwrap();
     let input1 = temp_dir.path().join("a.arrow");
     let input2 = temp_dir.path().join("b.arrow");
@@ -3161,7 +3165,7 @@ async fn test_transform_sort_multi_file_with_spill_reservation() {
                 direction: SortDirection::Ascending,
             }],
         }),
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -3196,7 +3200,7 @@ async fn test_reserved_spill_pool_simple_transform() {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
         non_spillable_reserve: Some(PoolReserveSpec::Percent(10)),
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -3225,7 +3229,7 @@ async fn test_reserved_spill_pool_with_sorting() {
                 direction: SortDirection::Ascending,
             }],
         }),
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -3262,7 +3266,7 @@ async fn test_reserved_spill_pool_with_fixed_reserve() {
                 direction: SortDirection::Ascending,
             }],
         }),
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -3296,7 +3300,7 @@ async fn test_reserved_spill_pool_with_top_consumers() {
         to: Some(output.to_string_lossy().to_string()),
         non_spillable_reserve: Some(PoolReserveSpec::Percent(25)),
         memory_pool_top_consumers: 0,
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -3335,7 +3339,7 @@ async fn test_nosort_evict_partitioned_write() {
         partition_strategy: PartitionStrategy::NosortEvict,
         max_open_partitions: Some(2),
         overwrite: true,
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();

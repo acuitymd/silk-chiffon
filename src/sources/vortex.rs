@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use datafusion::catalog::TableProvider;
 use datafusion::prelude::SessionContext;
@@ -12,15 +11,21 @@ use vortex::io::session::RuntimeSessionExt;
 use vortex::session::VortexSession;
 use vortex_datafusion::v2::VortexTable;
 
-use crate::sources::data_source::{DataSource, Replayability, RowCount};
+use crate::sources::data_source::{DataSource, Replayability, RowCount, RowCountCapability};
 
+/// A replayable Vortex input associated with a command's DataFusion session.
 pub struct VortexDataSource {
     path: String,
+    _session: SessionContext,
 }
 
 impl VortexDataSource {
-    pub fn new(path: String) -> Self {
-        Self { path }
+    /// Creates a source for one Vortex file.
+    pub fn new(path: String, session: SessionContext) -> Self {
+        Self {
+            path,
+            _session: session,
+        }
     }
 }
 
@@ -34,34 +39,11 @@ impl DataSource for VortexDataSource {
         Replayability::Replayable
     }
 
-    async fn schema(&self) -> Result<SchemaRef> {
-        let session = VortexSession::default();
-        let vortex_file = session
-            .open_options()
-            .open_path(self.path.as_str())
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to open Vortex file: {}", e))?;
-
-        let dtype = vortex_file.dtype();
-        let arrow_schema = dtype.to_arrow_schema().map_err(|e| {
-            anyhow::anyhow!("Failed to convert Vortex DType to Arrow Schema: {}", e)
-        })?;
-
-        Ok(Arc::new(arrow_schema))
+    fn row_count_capability(&self) -> Option<&dyn RowCountCapability> {
+        Some(self)
     }
 
-    async fn row_count(&self) -> Result<RowCount> {
-        let session = VortexSession::default();
-        let vortex_file = session
-            .open_options()
-            .open_path(self.path.as_str())
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to open Vortex file: {}", e))?;
-
-        Ok(RowCount::Exact(vortex_file.row_count()))
-    }
-
-    async fn as_table_provider(&self, _ctx: &mut SessionContext) -> Result<Arc<dyn TableProvider>> {
+    async fn table_provider(&self) -> Result<Arc<dyn TableProvider>> {
         let session = VortexSession::default().with_tokio();
         let vortex_file = session
             .open_options()
@@ -78,6 +60,20 @@ impl DataSource for VortexDataSource {
             session,
             Arc::new(arrow_schema),
         )))
+    }
+}
+
+#[async_trait]
+impl RowCountCapability for VortexDataSource {
+    async fn row_count(&self) -> Result<RowCount> {
+        let session = VortexSession::default();
+        let vortex_file = session
+            .open_options()
+            .open_path(self.path.as_str())
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to open Vortex file: {}", e))?;
+
+        Ok(RowCount::Exact(vortex_file.row_count()))
     }
 }
 
@@ -98,7 +94,7 @@ mod tests {
         let mut sink =
             VortexSink::create(path.to_path_buf(), schema, VortexSinkOptions::new()).unwrap();
         sink.write_batch(batch).await.unwrap();
-        sink.finish().await.unwrap();
+        Box::new(sink).finish().await.unwrap();
     }
 
     #[tokio::test]
@@ -119,7 +115,10 @@ mod tests {
         .unwrap();
         write_vortex_file(&path, &schema, batch).await;
 
-        let source = VortexDataSource::new(path.to_string_lossy().to_string());
+        let source = VortexDataSource::new(
+            path.to_string_lossy().to_string(),
+            datafusion::prelude::SessionContext::new(),
+        );
         let count = source.row_count().await.unwrap();
         assert_eq!(count, RowCount::Exact(5));
     }

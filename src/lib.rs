@@ -303,15 +303,18 @@ struct CliSchema {
     command: CommandSchema,
 }
 
+/// A parsed command whose format and storage settings have already been bound.
 pub struct Cli {
-    pub command: Commands,
+    pub command: Command,
 }
 
 impl Cli {
+    /// Parses the process arguments with the composed format and storage registries.
     pub fn parse() -> Self {
         Self::try_parse_from(std::env::args_os()).unwrap_or_else(|error| error.exit())
     }
 
+    /// Parses an explicit argument sequence with the composed registries.
     pub fn try_parse_from<I, T>(arguments: I) -> Result<Self, clap::Error>
     where
         I: IntoIterator<Item = T>,
@@ -357,14 +360,14 @@ enum CommandSchema {
     ///     # Merge and partition with glob
     ///     silk-chiffon transform --from-many '*.arrow' --to-many "{{year}}/{{month}}.parquet" --by year,month
     #[command(verbatim_doc_comment)]
-    Transform(TransformBaseArgs),
+    Transform(TransformArgs),
+
+    /// Detect the format of an input.
+    Detect(DetectArgs),
 
     /// Inspect file metadata and structure.
     ///
     /// Examples:
-    ///
-    ///     # Identify format
-    ///     silk-chiffon inspect identify data.parquet
     ///
     ///     # Inspect Parquet file
     ///     silk-chiffon inspect parquet data.parquet --pages
@@ -395,23 +398,30 @@ enum CommandSchema {
 }
 
 #[allow(clippy::large_enum_variant)]
-pub enum Commands {
+/// Runtime state for one parsed top-level command.
+///
+/// Unlike the private Clap schema, these variants contain command-scoped format bindings and a
+/// storage session. Command implementations therefore receive validated extension state instead
+/// of consulting global registries.
+pub enum Command {
     Transform(TransformCommand),
+    Detect(DetectCommand),
     Inspect(InspectCommand),
     Completions { shell: Shell },
 }
 
 impl clap::CommandFactory for Cli {
     fn command() -> clap::Command {
-        crate::registration::assembled_command(CliSchema::command())
+        crate::registration::CliDefinition::new().command(CliSchema::command())
     }
 
     fn command_for_update() -> clap::Command {
-        crate::registration::assembled_command(CliSchema::command_for_update())
+        crate::registration::CliDefinition::new().command(CliSchema::command_for_update())
     }
 }
 
-impl Commands {
+impl Command {
+    /// Writes shell completions for the fully composed CLI.
     pub fn generate_completions(shell: Shell) {
         clap_complete::generate(
             shell,
@@ -1321,7 +1331,7 @@ impl BloomFilterConfigBuilder {
 }
 
 #[derive(Args, Clone, Debug)]
-struct TransformBaseArgs {
+struct TransformArgs {
     /// Single input file path.
     #[arg(
         long,
@@ -1975,6 +1985,7 @@ pub struct VortexArgs {
     pub vortex_record_batch_size: Option<usize>,
 }
 
+/// Parsed transform arguments with command-scoped format bindings and storage state.
 pub struct TransformCommand {
     pub from: Option<String>,
     pub from_many: Vec<String>,
@@ -2001,17 +2012,17 @@ pub struct TransformCommand {
     pub list_outputs_file: Option<Utf8PathBuf>,
     pub create_dirs: bool,
     pub overwrite: bool,
-    pub formats: silk_chiffon_core::ConfiguredFormats,
+    pub formats: silk_chiffon_core::TransformBindings,
     pub storage: silk_chiffon_storage::StorageSession,
 }
 
 impl TransformCommand {
     fn from_parsed(
-        args: TransformBaseArgs,
-        formats: silk_chiffon_core::ConfiguredFormats,
+        args: TransformArgs,
+        formats: silk_chiffon_core::TransformBindings,
         storage: silk_chiffon_storage::StorageSession,
     ) -> Self {
-        let TransformBaseArgs {
+        let TransformArgs {
             from,
             from_many,
             input_format,
@@ -2070,92 +2081,79 @@ impl TransformCommand {
         }
     }
 
-    pub fn formats(&self) -> &silk_chiffon_core::ConfiguredFormats {
+    /// Returns the format functions bound to this command's parsed arguments.
+    pub fn formats(&self) -> &silk_chiffon_core::TransformBindings {
         &self.formats
     }
 
+    /// Returns the storage session created for this command invocation.
     pub fn storage(&self) -> &silk_chiffon_storage::StorageSession {
         &self.storage
-    }
-}
-
-impl Default for TransformCommand {
-    fn default() -> Self {
-        crate::registration::default_transform_command()
-            .expect("built-in transform arguments must have valid defaults")
     }
 }
 
 #[derive(Args)]
-struct InspectSchema {
-    #[command(subcommand)]
-    command: InspectSchemaSubcommand,
-}
+struct InspectSchema {}
 
-#[derive(Subcommand)]
-enum InspectSchemaSubcommand {
-    /// Detect file format
-    Identify(InspectIdentifyArgs),
-    /// Inspect a Parquet file
-    Parquet,
-    /// Inspect an Arrow IPC file
-    Arrow,
-    /// Inspect a Vortex file
-    Vortex,
-}
-
+/// One format-specific inspection with its bound arguments and storage session.
 pub struct InspectCommand {
-    pub command: InspectSubcommand,
-    inspection: Option<silk_chiffon_core::ConfiguredInspection>,
+    file: Utf8PathBuf,
+    mode: silk_chiffon_core::InspectionMode,
+    inspection: silk_chiffon_core::InspectionBinding,
     storage: silk_chiffon_storage::StorageSession,
-    formats: silk_chiffon_core::FormatRegistry,
-}
-
-pub enum InspectSubcommand {
-    Identify(InspectIdentifyArgs),
-    Parquet(InspectParquetArgs),
-    Arrow(InspectArrowArgs),
-    Vortex(InspectVortexArgs),
 }
 
 impl InspectCommand {
     fn from_parsed(
-        command: InspectSubcommand,
-        inspection: Option<silk_chiffon_core::ConfiguredInspection>,
+        file: Utf8PathBuf,
+        mode: silk_chiffon_core::InspectionMode,
+        inspection: silk_chiffon_core::InspectionBinding,
         storage: silk_chiffon_storage::StorageSession,
-        formats: silk_chiffon_core::FormatRegistry,
     ) -> Self {
         Self {
-            command,
+            file,
+            mode,
             inspection,
             storage,
-            formats,
         }
     }
 
+    /// Returns the storage session created for this command invocation.
     pub fn storage(&self) -> &silk_chiffon_storage::StorageSession {
         &self.storage
     }
 
-    pub fn inspection(&self) -> Option<&silk_chiffon_core::ConfiguredInspection> {
-        self.inspection.as_ref()
+    /// Returns the selected format's inspection function and parsed settings.
+    pub fn inspection(&self) -> &silk_chiffon_core::InspectionBinding {
+        &self.inspection
     }
 
     pub(crate) fn into_parts(
         self,
     ) -> (
-        InspectSubcommand,
-        Option<silk_chiffon_core::ConfiguredInspection>,
+        Utf8PathBuf,
+        silk_chiffon_core::InspectionMode,
+        silk_chiffon_core::InspectionBinding,
         silk_chiffon_storage::StorageSession,
-        silk_chiffon_core::FormatRegistry,
     ) {
-        (self.command, self.inspection, self.storage, self.formats)
+        (self.file, self.mode, self.inspection, self.storage)
     }
 }
 
 #[derive(Args, Clone, Debug)]
-pub struct InspectIdentifyArgs {
-    /// Path to the file to identify
+struct InspectionArgs {
+    /// Path to the file to inspect
+    #[arg(value_hint = ValueHint::FilePath)]
+    file: Utf8PathBuf,
+    /// Output format (auto-detects based on TTY if not specified)
+    #[arg(long, short = 'f', value_enum, default_value = "auto")]
+    format: OutputFormat,
+}
+
+#[derive(Args, Clone, Debug)]
+/// Arguments for content-based format detection.
+pub struct DetectArgs {
+    /// Path to the input whose format should be detected
     #[arg(value_hint = ValueHint::FilePath)]
     pub file: Utf8PathBuf,
     /// Output format (auto-detects based on TTY if not specified)
@@ -2163,14 +2161,39 @@ pub struct InspectIdentifyArgs {
     pub format: OutputFormat,
 }
 
+/// A detection request with the immutable format registry and command storage session.
+pub struct DetectCommand {
+    args: DetectArgs,
+    storage: silk_chiffon_storage::StorageSession,
+    formats: silk_chiffon_core::FormatRegistry,
+}
+
+impl DetectCommand {
+    fn from_parsed(
+        args: DetectArgs,
+        storage: silk_chiffon_storage::StorageSession,
+        formats: silk_chiffon_core::FormatRegistry,
+    ) -> Self {
+        Self {
+            args,
+            storage,
+            formats,
+        }
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        DetectArgs,
+        silk_chiffon_storage::StorageSession,
+        silk_chiffon_core::FormatRegistry,
+    ) {
+        (self.args, self.storage, self.formats)
+    }
+}
+
 #[derive(Args, Clone, Debug)]
 pub struct InspectParquetArgs {
-    /// Path to the Parquet file
-    #[arg(value_hint = ValueHint::FilePath)]
-    pub file: Utf8PathBuf,
-    /// Output format (auto-detects based on TTY if not specified)
-    #[arg(long, short = 'f', value_enum, default_value = "auto")]
-    pub format: OutputFormat,
     /// Row group to display details for (default: 0)
     #[arg(long, short = 'g', default_value = "0")]
     pub row_group: usize,
@@ -2181,15 +2204,9 @@ pub struct InspectParquetArgs {
 
 #[derive(Args, Clone, Debug)]
 pub struct InspectArrowArgs {
-    /// Path to the Arrow IPC file
-    #[arg(value_hint = ValueHint::FilePath)]
-    pub file: Utf8PathBuf,
     /// Show per-record-batch details
     #[arg(long)]
     pub batches: bool,
-    /// Output format (auto-detects based on TTY if not specified)
-    #[arg(long, short = 'f', value_enum, default_value = "auto")]
-    pub format: OutputFormat,
     /// Count total rows (requires reading entire file)
     #[arg(long)]
     pub row_count: bool,
@@ -2197,9 +2214,6 @@ pub struct InspectArrowArgs {
 
 #[derive(Args, Clone, Debug)]
 pub struct InspectVortexArgs {
-    /// Path to the Vortex file
-    #[arg(value_hint = ValueHint::FilePath)]
-    pub file: Utf8PathBuf,
     /// Show full schema details
     #[arg(long)]
     pub schema: bool,
@@ -2209,9 +2223,6 @@ pub struct InspectVortexArgs {
     /// Show layout structure
     #[arg(long)]
     pub layout: bool,
-    /// Output format (auto-detects based on TTY if not specified)
-    #[arg(long, short = 'f', value_enum, default_value = "auto")]
-    pub format: OutputFormat,
 }
 
 /// Output format for inspect commands

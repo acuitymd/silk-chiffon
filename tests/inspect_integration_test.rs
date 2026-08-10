@@ -261,7 +261,7 @@ mod vortex_tests {
             for batch in batches {
                 sink.write_batch(batch).await.unwrap();
             }
-            sink.finish().await.unwrap();
+            Box::new(sink).finish().await.unwrap();
         });
     }
 
@@ -347,7 +347,7 @@ mod vortex_tests {
 // =============================================================================
 
 #[test]
-fn test_inspect_identify_parquet() {
+fn test_detect_parquet() {
     let temp_dir = TempDir::new().unwrap();
     let file = temp_dir.path().join("test.parquet");
 
@@ -355,20 +355,14 @@ fn test_inspect_identify_parquet() {
     TestFile::write_parquet_batch(&file, &batch);
 
     let mut cmd = cargo_bin_cmd!("silk-chiffon");
-    cmd.args([
-        "inspect",
-        "identify",
-        file.to_str().unwrap(),
-        "--format",
-        "text",
-    ])
-    .assert()
-    .success()
-    .stdout(predicate::str::contains("Parquet"));
+    cmd.args(["detect", file.to_str().unwrap(), "--format", "text"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Parquet"));
 }
 
 #[test]
-fn test_inspect_identify_arrow_file() {
+fn test_detect_arrow_file() {
     let temp_dir = TempDir::new().unwrap();
     let file = temp_dir.path().join("test.arrow");
 
@@ -376,21 +370,15 @@ fn test_inspect_identify_arrow_file() {
     TestFile::write_arrow_batch(&file, &batch);
 
     let mut cmd = cargo_bin_cmd!("silk-chiffon");
-    cmd.args([
-        "inspect",
-        "identify",
-        file.to_str().unwrap(),
-        "--format",
-        "text",
-    ])
-    .assert()
-    .success()
-    .stdout(predicate::str::contains("Arrow IPC"))
-    .stdout(predicate::str::contains("file"));
+    cmd.args(["detect", file.to_str().unwrap(), "--format", "text"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Arrow IPC"))
+        .stdout(predicate::str::contains("file"));
 }
 
 #[test]
-fn test_inspect_identify_arrow_stream() {
+fn test_detect_arrow_stream() {
     let temp_dir = TempDir::new().unwrap();
     let file = temp_dir.path().join("test.stream.arrow");
 
@@ -398,21 +386,15 @@ fn test_inspect_identify_arrow_stream() {
     TestFile::write_arrow_stream(&file, &[batch]);
 
     let mut cmd = cargo_bin_cmd!("silk-chiffon");
-    cmd.args([
-        "inspect",
-        "identify",
-        file.to_str().unwrap(),
-        "--format",
-        "text",
-    ])
-    .assert()
-    .success()
-    .stdout(predicate::str::contains("Arrow IPC"))
-    .stdout(predicate::str::contains("stream"));
+    cmd.args(["detect", file.to_str().unwrap(), "--format", "text"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Arrow IPC"))
+        .stdout(predicate::str::contains("stream"));
 }
 
 #[test]
-fn test_inspect_identify_vortex_file() {
+fn test_detect_vortex_file() {
     let temp_dir = TempDir::new().unwrap();
     let file = temp_dir.path().join("test.vortex");
 
@@ -427,25 +409,19 @@ fn test_inspect_identify_vortex_file() {
         let mut sink =
             VortexSink::create(file.to_path_buf(), &schema, VortexSinkOptions::new()).unwrap();
         sink.write_batch(batch).await.unwrap();
-        sink.finish().await.unwrap();
+        Box::new(sink).finish().await.unwrap();
     });
 
     let mut cmd = cargo_bin_cmd!("silk-chiffon");
-    cmd.args([
-        "inspect",
-        "identify",
-        file.to_str().unwrap(),
-        "--format",
-        "text",
-    ])
-    .assert()
-    .success()
-    .stdout(predicate::str::contains("Vortex"))
-    .stdout(predicate::str::contains("file"));
+    cmd.args(["detect", file.to_str().unwrap(), "--format", "text"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Vortex"))
+        .stdout(predicate::str::contains("file"));
 }
 
 #[test]
-fn test_inspect_identify_json_output() {
+fn test_detect_json_output() {
     let temp_dir = TempDir::new().unwrap();
     let file = temp_dir.path().join("test.parquet");
 
@@ -453,35 +429,23 @@ fn test_inspect_identify_json_output() {
     TestFile::write_parquet_batch(&file, &batch);
 
     let mut cmd = cargo_bin_cmd!("silk-chiffon");
-    cmd.args([
-        "inspect",
-        "identify",
-        file.to_str().unwrap(),
-        "--format",
-        "json",
-    ])
-    .assert()
-    .success()
-    .stdout(predicate::str::contains("\"format\":"));
+    cmd.args(["detect", file.to_str().unwrap(), "--format", "json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"format\":"));
 }
 
 #[test]
-fn test_inspect_identify_unknown_file() {
+fn test_detect_unknown_file() {
     let temp_dir = TempDir::new().unwrap();
     let file = temp_dir.path().join("test.txt");
     std::fs::write(&file, "hello world").unwrap();
 
     let mut cmd = cargo_bin_cmd!("silk-chiffon");
-    cmd.args([
-        "inspect",
-        "identify",
-        file.to_str().unwrap(),
-        "--format",
-        "text",
-    ])
-    .assert()
-    .success()
-    .stdout(predicate::str::contains("Unknown"));
+    cmd.args(["detect", file.to_str().unwrap(), "--format", "text"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Unknown"));
 }
 
 // =============================================================================
@@ -700,7 +664,7 @@ mod parity_tests {
             let mut sink =
                 VortexSink::create(file.to_path_buf(), &schema, VortexSinkOptions::new()).unwrap();
             sink.write_batch(batch).await.unwrap();
-            sink.finish().await.unwrap();
+            Box::new(sink).finish().await.unwrap();
         });
 
         let json = get_json_output(&[
@@ -725,20 +689,14 @@ mod parity_tests {
     }
 
     #[test]
-    fn test_identify_parity() {
+    fn test_detect_parity() {
         let temp_dir = TempDir::new().unwrap();
         let file = temp_dir.path().join("test.parquet");
 
         let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
         TestFile::write_parquet_batch(&file, &batch);
 
-        let json = get_json_output(&[
-            "inspect",
-            "identify",
-            file.to_str().unwrap(),
-            "--format",
-            "json",
-        ]);
+        let json = get_json_output(&["detect", file.to_str().unwrap(), "--format", "json"]);
 
         assert_eq!(json["format"], "parquet");
     }
@@ -975,7 +933,7 @@ mod parity_tests {
             let mut sink =
                 VortexSink::create(file.to_path_buf(), &schema, VortexSinkOptions::new()).unwrap();
             sink.write_batch(batch).await.unwrap();
-            sink.finish().await.unwrap();
+            Box::new(sink).finish().await.unwrap();
         });
 
         let json = get_json_output(&[
@@ -1012,7 +970,7 @@ mod parity_tests {
             let mut sink =
                 VortexSink::create(file.to_path_buf(), &schema, VortexSinkOptions::new()).unwrap();
             sink.write_batch(batch).await.unwrap();
-            sink.finish().await.unwrap();
+            Box::new(sink).finish().await.unwrap();
         });
 
         let json = get_json_output(&[
@@ -1111,7 +1069,7 @@ mod parity_tests {
             let mut sink =
                 VortexSink::create(file.to_path_buf(), &schema, VortexSinkOptions::new()).unwrap();
             sink.write_batch(batch).await.unwrap();
-            sink.finish().await.unwrap();
+            Box::new(sink).finish().await.unwrap();
         });
 
         let json = get_json_output(&[

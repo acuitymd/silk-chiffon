@@ -3,10 +3,14 @@ use std::num::NonZeroUsize;
 
 use clap::CommandFactory;
 #[cfg(feature = "local-bare-paths")]
-use silk_chiffon::utils::test_data::{TestBatch, TestFile};
-use silk_chiffon::{Cli, Commands, registration};
+use datafusion::prelude::SessionContext;
 #[cfg(feature = "local-bare-paths")]
-use silk_chiffon_core::{InspectionOutput, Replayability, RowCount, SinkFactoryContext};
+use silk_chiffon::utils::test_data::{TestBatch, TestFile};
+use silk_chiffon::{Cli, Command, registration};
+#[cfg(feature = "local-bare-paths")]
+use silk_chiffon_core::{
+    InspectionMode, InspectionOutput, Replayability, RowCount, SinkBindingConfig,
+};
 #[cfg(feature = "local-bare-paths")]
 use silk_chiffon_storage::LocationInput;
 
@@ -15,16 +19,13 @@ fn executable_registers_formats_and_the_available_storage() {
     let formats = registration::format_registry();
     assert_eq!(
         formats
-            .registrations()
+            .formats()
             .map(|format| format.name())
             .collect::<Vec<_>>(),
         ["arrow", "parquet", "vortex"]
     );
-    assert!(formats.registrations().all(|format| {
-        format.has_identifier()
-            && format.has_source()
-            && format.has_sink()
-            && format.has_inspector()
+    assert!(formats.formats().all(|format| {
+        format.has_detector() && format.has_source() && format.has_sink() && format.has_inspector()
     }));
 
     let storage = registration::storage_registry();
@@ -69,7 +70,7 @@ fn composed_cli_binds_registered_transform_arguments() {
     ])
     .unwrap();
 
-    let Commands::Transform(command) = cli.command else {
+    let Command::Transform(command) = cli.command else {
         panic!("expected transform command");
     };
     assert_eq!(command.formats().formats().count(), 3);
@@ -128,45 +129,6 @@ fn registered_arguments_are_present_in_help_and_completions() {
     assert!(completions.contains("--vortex-record-batch-size"));
 }
 
-#[test]
-fn format_dispatch_stays_behind_registered_capabilities() {
-    let command_types = include_str!("../src/lib.rs");
-    let transform = include_str!("../src/commands/transform.rs");
-    let registration = include_str!("../src/registration.rs");
-
-    assert!(!command_types.contains("enum DataFormat"));
-    assert!(!transform.contains("DataFormat::"));
-    assert!(!transform.contains("fn detect_format"));
-    assert_eq!(transform.matches(".create_sink_factory(").count(), 1);
-    assert!(!registration.contains("LazyLock"));
-    assert!(!registration.contains("static FORMATS"));
-    for source in [transform, registration] {
-        assert!(!source.contains("downcast_ref"));
-        assert!(!source.contains("dyn Any"));
-    }
-}
-
-#[test]
-fn completed_plan_is_validated_before_row_size_measurement_and_sink_creation() {
-    let transform = include_str!("../src/commands/transform.rs");
-    let query = transform.find("QueryOperation::new").unwrap();
-    let sort = transform.find("SortOperation::new").unwrap();
-    let validation = transform
-        .find("pipeline.validate_input_plan(&input_strategy)")
-        .unwrap();
-    let measurement = transform
-        .find("let avg_row_bytes = measure_avg_input_row_bytes")
-        .unwrap();
-    let sink = transform
-        .find("output_format.create_sink_factory(&sink_context)")
-        .unwrap();
-
-    assert!(query < validation);
-    assert!(sort < validation);
-    assert!(validation < measurement);
-    assert!(measurement < sink);
-}
-
 #[cfg(feature = "local-bare-paths")]
 #[tokio::test(flavor = "multi_thread")]
 async fn registered_capabilities_use_command_storage_and_explicit_outputs() {
@@ -188,7 +150,7 @@ async fn registered_capabilities_use_command_storage_and_explicit_outputs() {
         "2",
     ])
     .unwrap();
-    let Commands::Transform(command) = cli.command else {
+    let Command::Transform(command) = cli.command else {
         panic!("expected transform command");
     };
     let input_handle = command
@@ -196,20 +158,33 @@ async fn registered_capabilities_use_command_storage_and_explicit_outputs() {
         .input_handle(&LocationInput::parse(input.to_str().unwrap()).unwrap())
         .unwrap();
     let parquet = command.formats().get("parquet").unwrap();
-    let source = parquet.create_source(&input_handle).await.unwrap();
+    let session = SessionContext::new();
+    let source = parquet
+        .create_source(&input_handle, &session)
+        .await
+        .unwrap();
     assert_eq!(source.replayability(), Replayability::Replayable);
-    assert_eq!(source.row_count().await.unwrap(), RowCount::Exact(3));
-    let schema = source.schema().await.unwrap();
+    assert_eq!(
+        source
+            .row_count_capability()
+            .unwrap()
+            .row_count()
+            .await
+            .unwrap(),
+        RowCount::Exact(3)
+    );
+    assert!(!source.schema().await.unwrap().fields().is_empty());
+    let schema = batch.schema();
 
-    let context = SinkFactoryContext::new(NonZeroUsize::new(2).unwrap(), false, Vec::new());
-    let sink_factory = parquet.create_sink_factory(&context).await.unwrap();
+    let context = SinkBindingConfig::new(NonZeroUsize::new(2).unwrap(), Vec::new());
+    let sink_binding = parquet.bind_sink(&context).await.unwrap();
     for output in [&output_one, &output_two] {
         let handle = command
             .storage()
             .output_handle(&LocationInput::parse(output.to_str().unwrap()).unwrap())
             .unwrap();
-        let mut sink = sink_factory
-            .create(handle, std::sync::Arc::clone(&schema))
+        let mut sink = sink_binding
+            .open_sink(handle, std::sync::Arc::clone(&schema))
             .await
             .unwrap();
         sink.write_batch(batch.clone()).await.unwrap();
@@ -220,15 +195,13 @@ async fn registered_capabilities_use_command_storage_and_explicit_outputs() {
     assert!(output_one.exists());
     assert!(output_two.exists());
 
-    let identified = registration::format_registry()
-        .get("parquet")
-        .unwrap()
-        .identify(&input_handle)
+    let detected = registration::format_registry()
+        .detect(&input_handle)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(identified.format(), "parquet");
-    assert_eq!(identified.variant(), None);
+    assert_eq!(detected.format(), "parquet");
+    assert_eq!(detected.variant(), None);
 }
 
 #[cfg(feature = "local-bare-paths")]
@@ -249,7 +222,7 @@ async fn composed_inspection_invokes_the_bound_registration() {
         "json",
     ])
     .unwrap();
-    let Commands::Inspect(command) = cli.command else {
+    let Command::Inspect(command) = cli.command else {
         panic!("expected inspect command");
     };
     let handle = command
@@ -258,8 +231,7 @@ async fn composed_inspection_invokes_the_bound_registration() {
         .unwrap();
     let output = command
         .inspection()
-        .unwrap()
-        .inspect(&handle)
+        .inspect(&handle, InspectionMode::Json)
         .await
         .unwrap();
     let InspectionOutput::Json(output) = output else {

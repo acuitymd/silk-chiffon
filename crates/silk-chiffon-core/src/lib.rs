@@ -1,15 +1,15 @@
 mod data_sink;
 mod data_source;
+mod format;
 mod inspection;
-mod registration;
 
-pub use data_sink::{DataSink, DataSinkFactory, SinkResult};
-pub use data_source::{DataSource, Replayability, RowCount};
-pub use inspection::InspectionOutput;
-pub use registration::{
-    ConfiguredFormat, ConfiguredFormats, ConfiguredInspection, FormatCapability, FormatFuture,
-    FormatInspection, FormatInvocationError, FormatRegistration, FormatRegistrationBuilder,
-    FormatRegistry, FormatRegistryBuilder, FormatRegistryError, FormatTransform,
-    FormatTransformBuilder, Identification, IdentifiedFormat, Identifier, Inspector,
-    OutputSortColumn, SinkFactory, SinkFactoryContext, SortDirection, SourceFactory,
+pub use data_sink::{DataSink, SinkBinding, SinkResult};
+pub use data_source::{DataSource, Replayability, RowCount, RowCountCapability};
+pub use format::{
+    DetectedFormat, FormatDefinition, FormatDefinitionBuilder, FormatDetectorFn, FormatFuture,
+    FormatMatch, FormatOperation, FormatOperationError, FormatRegistry, FormatRegistryBuilder,
+    FormatRegistryError, InspectionBinding, InspectionDefinition, InspectionMode, InspectorFn,
+    OutputOrderingColumn, SinkBinderFn, SinkBindingConfig, SortDirection, SourceCreatorFn,
+    TransformBinding, TransformBindings, TransformDefinition, TransformDefinitionBuilder,
 };
+pub use inspection::InspectionOutput;

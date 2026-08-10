@@ -12,7 +12,7 @@ use lru::LruCache;
 use anyhow::{Context, Result, anyhow};
 use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
-use datafusion::{execution::SendableRecordBatchStream, prelude::DataFrame};
+use datafusion::execution::SendableRecordBatchStream;
 use futures::StreamExt;
 
 use crate::{
@@ -29,10 +29,10 @@ use crate::{
     utils::{filesystem::ensure_parent_dir_exists, projected_stream::project_stream},
 };
 
-pub type TableName = String;
+pub type OutputPath = String;
 
-pub type SinkFactory = Box<
-    dyn Fn(TableName, SchemaRef) -> Pin<Box<dyn Future<Output = Result<Box<dyn DataSink>>> + Send>>
+pub type SinkOpenerFn = Box<
+    dyn Fn(OutputPath, SchemaRef) -> Pin<Box<dyn Future<Output = Result<Box<dyn DataSink>>> + Send>>
         + Send
         + Sync,
 >;
@@ -99,8 +99,8 @@ fn projection_indices_excluding(
 
 pub enum OutputStrategy {
     Single {
-        path: TableName,
-        sink_factory: SinkFactory,
+        path: OutputPath,
+        sink_opener: SinkOpenerFn,
         exclude_columns: Vec<String>,
         create_dirs: bool,
         overwrite: bool,
@@ -110,7 +110,7 @@ pub enum OutputStrategy {
     PartitionedSingleWriter {
         columns: Vec<String>,
         template: Box<PathTemplate>,
-        sink_factory: SinkFactory,
+        sink_opener: SinkOpenerFn,
         exclude_columns: Vec<String>,
         create_dirs: bool,
         overwrite: bool,
@@ -122,7 +122,7 @@ pub enum OutputStrategy {
     PartitionedMultiWriter {
         columns: Vec<String>,
         template: Box<PathTemplate>,
-        sink_factory: SinkFactory,
+        sink_opener: SinkOpenerFn,
         exclude_columns: Vec<String>,
         create_dirs: bool,
         overwrite: bool,
@@ -133,7 +133,7 @@ pub enum OutputStrategy {
     PartitionedEvictWriter {
         columns: Vec<String>,
         template: Box<PathTemplate>,
-        sink_factory: SinkFactory,
+        sink_opener: SinkOpenerFn,
         exclude_columns: Vec<String>,
         create_dirs: bool,
         overwrite: bool,
@@ -144,11 +144,6 @@ pub enum OutputStrategy {
 
 impl OutputStrategy {
     /// May only be called once. Each subsequent call will overwrite the previous output.
-    pub async fn write(&mut self, df: DataFrame) -> Result<Vec<OutputFileInfo>> {
-        self.write_stream(df.execute_stream().await?).await
-    }
-
-    /// May only be called once. Each subsequent call will overwrite the previous output.
     pub async fn write_stream(
         &mut self,
         stream: SendableRecordBatchStream,
@@ -156,7 +151,7 @@ impl OutputStrategy {
         match self {
             OutputStrategy::Single {
                 path,
-                sink_factory,
+                sink_opener,
                 exclude_columns,
                 create_dirs,
                 overwrite,
@@ -171,9 +166,10 @@ impl OutputStrategy {
                     None => stream,
                 };
 
-                let mut sink = sink_factory(path.clone(), Arc::clone(&stream.schema())).await?;
+                let mut sink = sink_opener(path.clone(), Arc::clone(&stream.schema())).await?;
 
-                let result = sink.write_stream(stream).await?;
+                sink.write_stream(stream).await?;
+                let result = sink.finish().await?;
 
                 Ok(vec![OutputFileInfo {
                     path: path.clone(),
@@ -182,7 +178,7 @@ impl OutputStrategy {
                 }])
             }
             OutputStrategy::PartitionedSingleWriter {
-                sink_factory,
+                sink_opener,
                 columns,
                 exclude_columns,
                 template,
@@ -215,7 +211,7 @@ impl OutputStrategy {
                         .unwrap_or(false);
 
                     if partition_changed {
-                        let mut prev = current.take().unwrap();
+                        let prev = current.take().unwrap();
                         let result = prev.sink.finish().await?;
                         created_files.push(OutputFileInfo {
                             path: prev.path,
@@ -230,14 +226,14 @@ impl OutputStrategy {
                     if current.is_none() {
                         let path = template.resolve(&partition_values);
                         prepare_output_path(&path, *overwrite, *create_dirs).await?;
-                        let sink = sink_factory(path.clone(), Arc::clone(&batch.schema())).await?;
+                        let sink = sink_opener(path.clone(), Arc::clone(&batch.schema())).await?;
                         current = Some(OpenSink::new(sink, path, partition_values.clone()));
                     }
 
                     current.as_mut().unwrap().sink.write_batch(batch).await?;
                 }
 
-                if let Some(mut prev) = current.take() {
+                if let Some(prev) = current.take() {
                     let result = prev.sink.finish().await?;
                     created_files.push(OutputFileInfo {
                         path: prev.path,
@@ -252,7 +248,7 @@ impl OutputStrategy {
                 Ok(created_files)
             }
             OutputStrategy::PartitionedMultiWriter {
-                sink_factory,
+                sink_opener,
                 columns,
                 exclude_columns,
                 template,
@@ -275,9 +271,8 @@ impl OutputStrategy {
                         Entry::Vacant(e) => {
                             let path = template.resolve(&partition_values);
                             prepare_output_path(&path, *overwrite, *create_dirs).await?;
-                            let sink =
-                                sink_factory(path.clone(), Arc::clone(&ctx.projected_schema))
-                                    .await?;
+                            let sink = sink_opener(path.clone(), Arc::clone(&ctx.projected_schema))
+                                .await?;
                             e.insert(OpenSink::new(sink, path, partition_values.clone()))
                         }
                     };
@@ -289,7 +284,7 @@ impl OutputStrategy {
                 drain_open_sinks(open_sinks, &ctx.column_order).await
             }
             OutputStrategy::PartitionedEvictWriter {
-                sink_factory,
+                sink_opener,
                 columns,
                 exclude_columns,
                 template,
@@ -321,10 +316,10 @@ impl OutputStrategy {
 
                         prepare_output_path(&path, *overwrite, *create_dirs).await?;
                         let sink =
-                            sink_factory(path.clone(), Arc::clone(&ctx.projected_schema)).await?;
+                            sink_opener(path.clone(), Arc::clone(&ctx.projected_schema)).await?;
                         let new_sink = OpenSink::new(sink, path, partition_values.clone());
 
-                        if let Some((_, mut evicted)) = cache.push(key.clone(), new_sink) {
+                        if let Some((_, evicted)) = cache.push(key.clone(), new_sink) {
                             let result = evicted.sink.finish().await?;
                             created_files.push(OutputFileInfo {
                                 path: evicted.path,
@@ -388,7 +383,7 @@ async fn drain_open_sinks(
     column_order: &[String],
 ) -> Result<Vec<OutputFileInfo>> {
     let mut created_files = Vec::new();
-    for (_, mut open_sink) in sinks {
+    for (_, open_sink) in sinks {
         let result = open_sink.sink.finish().await?;
         created_files.push(OutputFileInfo {
             path: open_sink.path,
@@ -417,13 +412,13 @@ mod tests {
 
     use super::*;
 
-    fn test_sink_factory<F>(factory: F) -> SinkFactory
+    fn test_sink_opener<F>(opener: F) -> SinkOpenerFn
     where
         F: Fn(String, SchemaRef) -> Result<Box<dyn DataSink>> + Send + Sync + 'static,
     {
-        let factory = Arc::new(factory);
+        let opener = Arc::new(opener);
         Box::new(move |name, schema| {
-            let result = factory(name, schema);
+            let result = opener(name, schema);
             Box::pin(async move { result })
         })
     }
@@ -445,7 +440,7 @@ mod tests {
             Ok(())
         }
 
-        async fn finish(&mut self) -> Result<SinkResult> {
+        async fn finish(mut self: Box<Self>) -> Result<SinkResult> {
             *self
                 .finished
                 .lock()
@@ -490,7 +485,7 @@ mod tests {
         let batches_clone = Arc::clone(&batches_written);
         let finished_clone = Arc::clone(&finished);
 
-        let sink_factory = test_sink_factory(move |name, _schema| {
+        let sink_opener = test_sink_opener(move |name, _schema| {
             Ok(Box::new(MockSink {
                 name,
                 batches: Arc::clone(&batches_clone),
@@ -501,7 +496,7 @@ mod tests {
         let mut strategy = OutputStrategy::PartitionedSingleWriter {
             columns: vec!["category".to_string()],
             template: Box::new(PathTemplate::new("output/{{category}}.parquet".to_string())),
-            sink_factory,
+            sink_opener,
             exclude_columns: vec![],
             create_dirs: false,
             overwrite: false,
@@ -536,7 +531,7 @@ mod tests {
         let batches_written = Arc::new(Mutex::new(Vec::new()));
         let batches_clone = Arc::clone(&batches_written);
 
-        let sink_factory = test_sink_factory(move |_name, _schema| {
+        let sink_opener = test_sink_opener(move |_name, _schema| {
             Ok(Box::new(MockSink {
                 name: _name,
                 batches: Arc::clone(&batches_clone),
@@ -547,7 +542,7 @@ mod tests {
         let mut strategy = OutputStrategy::PartitionedSingleWriter {
             columns: vec!["category".to_string()],
             template: Box::new(PathTemplate::new("output/{{category}}.parquet".to_string())),
-            sink_factory,
+            sink_opener,
             exclude_columns: vec![],
             create_dirs: false,
             overwrite: false,
@@ -584,7 +579,7 @@ mod tests {
         let batches_written = Arc::new(Mutex::new(Vec::new()));
         let batches_clone = Arc::clone(&batches_written);
 
-        let sink_factory = test_sink_factory(move |_name, _schema| {
+        let sink_opener = test_sink_opener(move |_name, _schema| {
             Ok(Box::new(MockSink {
                 name: _name,
                 batches: Arc::clone(&batches_clone),
@@ -595,7 +590,7 @@ mod tests {
         let mut strategy = OutputStrategy::PartitionedSingleWriter {
             columns: vec!["category".to_string()],
             template: Box::new(PathTemplate::new("output/{{category}}.parquet".to_string())),
-            sink_factory,
+            sink_opener,
             exclude_columns: vec!["category".to_string()],
             create_dirs: false,
             overwrite: false,
@@ -632,7 +627,7 @@ mod tests {
         let batches_written = Arc::new(Mutex::new(Vec::new()));
         let batches_clone = Arc::clone(&batches_written);
 
-        let sink_factory = test_sink_factory(move |_name, _schema| {
+        let sink_opener = test_sink_opener(move |_name, _schema| {
             Ok(Box::new(MockSink {
                 name: _name,
                 batches: Arc::clone(&batches_clone),
@@ -643,7 +638,7 @@ mod tests {
         let mut strategy = OutputStrategy::PartitionedSingleWriter {
             columns: vec!["region".to_string()],
             template: Box::new(PathTemplate::new("output/{{region}}.parquet".to_string())),
-            sink_factory,
+            sink_opener,
             exclude_columns: vec![],
             create_dirs: false,
             overwrite: false,
@@ -688,7 +683,7 @@ mod tests {
         let batches_written = Arc::new(Mutex::new(Vec::new()));
         let batches_clone = Arc::clone(&batches_written);
 
-        let sink_factory = test_sink_factory(move |_name, _schema| {
+        let sink_opener = test_sink_opener(move |_name, _schema| {
             Ok(Box::new(MockSink {
                 name: _name,
                 batches: Arc::clone(&batches_clone),
@@ -699,7 +694,7 @@ mod tests {
         let mut strategy = OutputStrategy::PartitionedSingleWriter {
             columns: vec!["category".to_string()],
             template: Box::new(PathTemplate::new("output/{{category}}.parquet".to_string())),
-            sink_factory,
+            sink_opener,
             exclude_columns: vec![],
             create_dirs: false,
             overwrite: false,
@@ -743,7 +738,7 @@ mod tests {
         let call_count = Arc::new(Mutex::new(0));
         let call_count_clone = Arc::clone(&call_count);
 
-        let sink_factory = test_sink_factory(move |name, _schema| {
+        let sink_opener = test_sink_opener(move |name, _schema| {
             let mut count = call_count_clone.lock().unwrap();
             *count += 1;
             let finished_flag = match *count {
@@ -763,7 +758,7 @@ mod tests {
         let mut strategy = OutputStrategy::PartitionedSingleWriter {
             columns: vec!["category".to_string()],
             template: Box::new(PathTemplate::new("output/{{category}}.parquet".to_string())),
-            sink_factory,
+            sink_opener,
             exclude_columns: vec![],
             create_dirs: false,
             overwrite: false,
@@ -819,7 +814,7 @@ mod tests {
         let batches_clone = Arc::clone(&batches);
         let finished_clone = Arc::clone(&finished);
 
-        let sink_factory = move |name: String, _schema: Arc<Schema>| {
+        let sink_opener = move |name: String, _schema: Arc<Schema>| {
             Ok(Box::new(MockSink {
                 name,
                 batches: Arc::clone(&batches_clone),
@@ -828,7 +823,7 @@ mod tests {
         };
 
         let mut strategy = OutputStrategy::PartitionedSingleWriter {
-            sink_factory: test_sink_factory(sink_factory),
+            sink_opener: test_sink_opener(sink_opener),
             columns: vec!["region".to_string()],
             template: Box::new(PathTemplate::new("output/{{region}}.parquet".to_string())),
             exclude_columns: vec![],
@@ -874,7 +869,7 @@ mod tests {
         let batches_clone = Arc::clone(&batches);
         let finished_clone = Arc::clone(&finished);
 
-        let sink_factory = move |name: String, _schema: Arc<Schema>| {
+        let sink_opener = move |name: String, _schema: Arc<Schema>| {
             Ok(Box::new(MockSink {
                 name,
                 batches: Arc::clone(&batches_clone),
@@ -883,7 +878,7 @@ mod tests {
         };
 
         let mut strategy = OutputStrategy::PartitionedSingleWriter {
-            sink_factory: test_sink_factory(sink_factory),
+            sink_opener: test_sink_opener(sink_opener),
             columns: vec!["nonexistent_column".to_string()],
             template: Box::new(PathTemplate::new(
                 "output/{{nonexistent_column}}.parquet".to_string(),
@@ -938,7 +933,7 @@ mod tests {
         let finished_clone = Arc::clone(&finished);
         let sink_create_count_clone = Arc::clone(&sink_create_count);
 
-        let sink_factory = move |name: String, _schema: Arc<Schema>| {
+        let sink_opener = move |name: String, _schema: Arc<Schema>| {
             *sink_create_count_clone.lock().unwrap() += 1;
             Ok(Box::new(MockSink {
                 name,
@@ -948,7 +943,7 @@ mod tests {
         };
 
         let mut strategy = OutputStrategy::PartitionedSingleWriter {
-            sink_factory: test_sink_factory(sink_factory),
+            sink_opener: test_sink_opener(sink_opener),
             columns: vec!["region".to_string()],
             template: Box::new(PathTemplate::new("output/{{region}}.parquet".to_string())),
             exclude_columns: vec![],
@@ -1003,7 +998,7 @@ mod tests {
         let batches_clone = Arc::clone(&batches_written);
         let finished_clone = Arc::clone(&finished);
 
-        let sink_factory = test_sink_factory(move |name, _schema| {
+        let sink_opener = test_sink_opener(move |name, _schema| {
             Ok(Box::new(MockSink {
                 name,
                 batches: Arc::clone(&batches_clone),
@@ -1014,7 +1009,7 @@ mod tests {
         let mut strategy = OutputStrategy::PartitionedMultiWriter {
             columns: vec!["category".to_string()],
             template: Box::new(PathTemplate::new("output/{{category}}.parquet".to_string())),
-            sink_factory,
+            sink_opener,
             exclude_columns: vec![],
             create_dirs: false,
             overwrite: false,
@@ -1053,7 +1048,7 @@ mod tests {
         let batches_clone = Arc::clone(&batches_written);
         let finished_count_clone = Arc::clone(&finished_count);
 
-        let sink_factory = test_sink_factory(move |name, _schema| {
+        let sink_opener = test_sink_opener(move |name, _schema| {
             let batches = Arc::clone(&batches_clone);
             let finished_count = Arc::clone(&finished_count_clone);
 
@@ -1069,7 +1064,7 @@ mod tests {
         let mut strategy = OutputStrategy::PartitionedMultiWriter {
             columns: vec!["category".to_string()],
             template: Box::new(PathTemplate::new("output/{{category}}.parquet".to_string())),
-            sink_factory,
+            sink_opener,
             exclude_columns: vec![],
             create_dirs: false,
             overwrite: false,
@@ -1114,7 +1109,7 @@ mod tests {
         let batches_written = Arc::new(Mutex::new(Vec::new()));
         let batches_clone = Arc::clone(&batches_written);
 
-        let sink_factory = test_sink_factory(move |name, _schema| {
+        let sink_opener = test_sink_opener(move |name, _schema| {
             Ok(Box::new(MockSink {
                 name,
                 batches: Arc::clone(&batches_clone),
@@ -1125,7 +1120,7 @@ mod tests {
         let mut strategy = OutputStrategy::PartitionedMultiWriter {
             columns: vec!["category".to_string()],
             template: Box::new(PathTemplate::new("output/{{category}}.parquet".to_string())),
-            sink_factory,
+            sink_opener,
             exclude_columns: vec!["category".to_string()],
             create_dirs: false,
             overwrite: false,
@@ -1174,7 +1169,7 @@ mod tests {
         let batches_written = Arc::new(Mutex::new(Vec::new()));
         let batches_clone = Arc::clone(&batches_written);
 
-        let sink_factory = test_sink_factory(move |name, _schema| {
+        let sink_opener = test_sink_opener(move |name, _schema| {
             *sink_create_count_clone.lock().unwrap() += 1;
             Ok(Box::new(MockSink {
                 name,
@@ -1186,7 +1181,7 @@ mod tests {
         let mut strategy = OutputStrategy::PartitionedMultiWriter {
             columns: vec!["category".to_string()],
             template: Box::new(PathTemplate::new("output/{{category}}.parquet".to_string())),
-            sink_factory,
+            sink_opener,
             exclude_columns: vec![],
             create_dirs: false,
             overwrite: false,
@@ -1226,7 +1221,7 @@ mod tests {
             Ok(())
         }
 
-        async fn finish(&mut self) -> Result<SinkResult> {
+        async fn finish(mut self: Box<Self>) -> Result<SinkResult> {
             (self.on_finish)();
             Ok(SinkResult {
                 files_written: vec![
@@ -1257,7 +1252,7 @@ mod tests {
         let sink_create_count = Arc::new(Mutex::new(0usize));
         let sink_create_count_clone = Arc::clone(&sink_create_count);
 
-        let sink_factory = test_sink_factory(move |name, _schema| {
+        let sink_opener = test_sink_opener(move |name, _schema| {
             *sink_create_count_clone.lock().unwrap() += 1;
             Ok(Box::new(MockSink {
                 name,
@@ -1269,7 +1264,7 @@ mod tests {
         let mut strategy = OutputStrategy::PartitionedEvictWriter {
             columns: vec!["category".to_string()],
             template: Box::new(PathTemplate::new("output/{{category}}.parquet".to_string())),
-            sink_factory,
+            sink_opener,
             exclude_columns: vec![],
             create_dirs: false,
             overwrite: false,
@@ -1304,7 +1299,7 @@ mod tests {
         let created_paths = Arc::new(Mutex::new(Vec::new()));
         let created_paths_clone = Arc::clone(&created_paths);
 
-        let sink_factory = test_sink_factory(move |name, _schema| {
+        let sink_opener = test_sink_opener(move |name, _schema| {
             created_paths_clone.lock().unwrap().push(name.clone());
             Ok(Box::new(MockSink {
                 name,
@@ -1316,7 +1311,7 @@ mod tests {
         let mut strategy = OutputStrategy::PartitionedEvictWriter {
             columns: vec!["category".to_string()],
             template: Box::new(PathTemplate::new("output/{{category}}.parquet".to_string())),
-            sink_factory,
+            sink_opener,
             exclude_columns: vec![],
             create_dirs: false,
             overwrite: false,
@@ -1358,7 +1353,7 @@ mod tests {
         let created_paths = Arc::new(Mutex::new(Vec::new()));
         let created_paths_clone = Arc::clone(&created_paths);
 
-        let sink_factory = test_sink_factory(move |name, _schema| {
+        let sink_opener = test_sink_opener(move |name, _schema| {
             created_paths_clone.lock().unwrap().push(name.clone());
             Ok(Box::new(MockSink {
                 name,
@@ -1370,7 +1365,7 @@ mod tests {
         let mut strategy = OutputStrategy::PartitionedEvictWriter {
             columns: vec!["category".to_string()],
             template: Box::new(PathTemplate::new("output/{{category}}.parquet".to_string())),
-            sink_factory,
+            sink_opener,
             exclude_columns: vec![],
             create_dirs: false,
             overwrite: false,
@@ -1409,7 +1404,7 @@ mod tests {
         let finished_names = Arc::new(Mutex::new(Vec::new()));
         let finished_names_clone = Arc::clone(&finished_names);
 
-        let sink_factory = test_sink_factory(move |name, _schema| {
+        let sink_opener = test_sink_opener(move |name, _schema| {
             let finished_names = Arc::clone(&finished_names_clone);
             let name_for_finish = name.clone();
             Ok(Box::new(MockSinkWithCallback {
@@ -1424,7 +1419,7 @@ mod tests {
         let mut strategy = OutputStrategy::PartitionedEvictWriter {
             columns: vec!["category".to_string()],
             template: Box::new(PathTemplate::new("output/{{category}}.parquet".to_string())),
-            sink_factory,
+            sink_opener,
             exclude_columns: vec![],
             create_dirs: false,
             overwrite: false,

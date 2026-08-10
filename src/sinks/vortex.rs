@@ -154,7 +154,7 @@ impl DataSink for VortexSink {
         Ok(())
     }
 
-    async fn finish(&mut self) -> Result<SinkResult> {
+    async fn finish(mut self: Box<Self>) -> Result<SinkResult> {
         let mut inner = self.inner.lock().await;
         inner.finish_buffered_batch()?;
         inner.flush_completed_batches().await?;

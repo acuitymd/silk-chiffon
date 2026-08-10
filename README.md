@@ -100,17 +100,17 @@ A large sort spills to disk instead of holding everything in the memory budget, 
 The `inspect` command reads a file's structure without converting it:
 
 ```bash
-silk-chiffon inspect identify mystery.bin       # which of the three formats is this?
+silk-chiffon detect mystery.bin                 # which of the three formats is this?
 silk-chiffon inspect parquet data.parquet       # schema, row groups, and statistics
 silk-chiffon inspect arrow data.arrow --batches  # schema and record-batch layout
 silk-chiffon inspect vortex data.vortex --stats  # schema and column statistics
 ```
 
-Each inspector can emit JSON with `--format json` for piping into other tools.
+`detect` and each format-specific inspector can emit JSON with `--format json` for piping into other tools.
 
 ## Command reference
 
-`transform` and `inspect` carry many more options than these examples show: compression levels, writer versions, dictionary control, partition strategies, and thread and queue tuning among them. The complete reference is in **[docs/CLI.md](docs/CLI.md)**, generated from the code so it can't drift. At the terminal, `silk-chiffon <command> --help` prints the same content.
+`transform`, `detect`, and `inspect` carry more options than these examples show: compression levels, writer versions, dictionary control, partition strategies, and thread and queue tuning among them. The complete reference is in **[docs/CLI.md](docs/CLI.md)**, generated from the code. At the terminal, `silk-chiffon <command> --help` prints the same content.
 
 Shell completions are available for zsh, bash, and fish:
 

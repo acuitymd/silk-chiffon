@@ -8,10 +8,10 @@ This document contains the help content for the `silk-chiffon` command-line prog
 
 - [`silk-chiffon`↴](#silk-chiffon)
 - [`silk-chiffon transform`↴](#silk-chiffon-transform)
+- [`silk-chiffon detect`↴](#silk-chiffon-detect)
 - [`silk-chiffon inspect`↴](#silk-chiffon-inspect)
-- [`silk-chiffon inspect identify`↴](#silk-chiffon-inspect-identify)
-- [`silk-chiffon inspect parquet`↴](#silk-chiffon-inspect-parquet)
 - [`silk-chiffon inspect arrow`↴](#silk-chiffon-inspect-arrow)
+- [`silk-chiffon inspect parquet`↴](#silk-chiffon-inspect-parquet)
 - [`silk-chiffon inspect vortex`↴](#silk-chiffon-inspect-vortex)
 - [`silk-chiffon completions`↴](#silk-chiffon-completions)
 
@@ -24,6 +24,7 @@ Silky smooth conversion between columnar data formats 💝
 ###### **Subcommands:**
 
 - `transform` — Transform data between formats with optional filtering, sorting, merging, and partitioning.
+- `detect` — Detect the format of an input
 - `inspect` — Inspect file metadata and structure.
 - `completions` — Generate shell completions for your shell.
 
@@ -450,39 +451,15 @@ Examples:
   Stores the original Arrow schema in the Parquet file's key-value metadata. This enables exact schema round-tripping but adds overhead. Default: disabled (not needed for most use cases).
 - `--vortex-record-batch-size <VORTEX_RECORD_BATCH_SIZE>` — Vortex record batch size
 
-## `silk-chiffon inspect`
+## `silk-chiffon detect`
 
-Inspect file metadata and structure.
+Detect the format of an input
 
-Examples:
-
-    # Identify format
-    silk-chiffon inspect identify data.parquet
-
-    # Inspect Parquet file
-    silk-chiffon inspect parquet data.parquet --pages
-
-    # Inspect Arrow file
-    silk-chiffon inspect arrow data.arrow --batches
-
-**Usage:** `silk-chiffon inspect <COMMAND>`
-
-###### **Subcommands:**
-
-- `identify` — Detect file format
-- `parquet` — Inspect a Parquet file
-- `arrow` — Inspect an Arrow IPC file
-- `vortex` — Inspect a Vortex file
-
-## `silk-chiffon inspect identify`
-
-Detect file format
-
-**Usage:** `silk-chiffon inspect identify [OPTIONS] <FILE>`
+**Usage:** `silk-chiffon detect [OPTIONS] <FILE>`
 
 ###### **Arguments:**
 
-- `<FILE>` — Path to the file to identify
+- `<FILE>` — Path to the input whose format should be detected
 
 ###### **Options:**
 
@@ -498,15 +475,62 @@ Detect file format
   - `json`:
     JSON output
 
+## `silk-chiffon inspect`
+
+Inspect file metadata and structure.
+
+Examples:
+
+    # Inspect Parquet file
+    silk-chiffon inspect parquet data.parquet --pages
+
+    # Inspect Arrow file
+    silk-chiffon inspect arrow data.arrow --batches
+
+**Usage:** `silk-chiffon inspect [COMMAND]`
+
+###### **Subcommands:**
+
+- `arrow` — Inspect arrow file metadata and structure
+- `parquet` — Inspect parquet file metadata and structure
+- `vortex` — Inspect vortex file metadata and structure
+
+## `silk-chiffon inspect arrow`
+
+Inspect arrow file metadata and structure
+
+**Usage:** `silk-chiffon inspect arrow [OPTIONS] <FILE>`
+
+###### **Arguments:**
+
+- `<FILE>` — Path to the file to inspect
+
+###### **Options:**
+
+- `-f`, `--format <FORMAT>` — Output format (auto-detects based on TTY if not specified)
+
+  Default value: `auto`
+
+  Possible values:
+  - `auto`:
+    Auto-detect: JSON if stdout is not a TTY, otherwise text
+  - `text`:
+    Human-readable text output
+  - `json`:
+    JSON output
+
+- `--batches` — Show per-record-batch details
+- `--row-count` — Count total rows (requires reading entire file)
+
 ## `silk-chiffon inspect parquet`
 
-Inspect a Parquet file
+Inspect parquet file metadata and structure
 
 **Usage:** `silk-chiffon inspect parquet [OPTIONS] <FILE>`
 
 ###### **Arguments:**
 
-- `<FILE>` — Path to the Parquet file
+- `<FILE>` — Path to the file to inspect
 
 ###### **Options:**
 
@@ -527,48 +551,18 @@ Inspect a Parquet file
   Default value: `0`
 - `-p`, `--pages <PAGES>` — Show page details for columns (comma-separated, or omit value for all columns)
 
-## `silk-chiffon inspect arrow`
-
-Inspect an Arrow IPC file
-
-**Usage:** `silk-chiffon inspect arrow [OPTIONS] <FILE>`
-
-###### **Arguments:**
-
-- `<FILE>` — Path to the Arrow IPC file
-
-###### **Options:**
-
-- `--batches` — Show per-record-batch details
-- `-f`, `--format <FORMAT>` — Output format (auto-detects based on TTY if not specified)
-
-  Default value: `auto`
-
-  Possible values:
-  - `auto`:
-    Auto-detect: JSON if stdout is not a TTY, otherwise text
-  - `text`:
-    Human-readable text output
-  - `json`:
-    JSON output
-
-- `--row-count` — Count total rows (requires reading entire file)
-
 ## `silk-chiffon inspect vortex`
 
-Inspect a Vortex file
+Inspect vortex file metadata and structure
 
 **Usage:** `silk-chiffon inspect vortex [OPTIONS] <FILE>`
 
 ###### **Arguments:**
 
-- `<FILE>` — Path to the Vortex file
+- `<FILE>` — Path to the file to inspect
 
 ###### **Options:**
 
-- `--schema` — Show full schema details
-- `--stats` — Show per-column statistics
-- `--layout` — Show layout structure
 - `-f`, `--format <FORMAT>` — Output format (auto-detects based on TTY if not specified)
 
   Default value: `auto`
@@ -580,6 +574,10 @@ Inspect a Vortex file
     Human-readable text output
   - `json`:
     JSON output
+
+- `--schema` — Show full schema details
+- `--stats` — Show per-column statistics
+- `--layout` — Show layout structure
 
 ## `silk-chiffon completions`
 

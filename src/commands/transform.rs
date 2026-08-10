@@ -5,7 +5,7 @@ use crate::{
     ListOutputsFormat, PartitionStrategy, SortDirection, SortSpec, TransformCommand,
     default_thread_budget,
     io_strategies::{
-        OutputFileInfo, input_strategy::InputStrategy, output_strategy::SinkFactory,
+        OutputFileInfo, input_sources::InputSources, output_strategy::SinkOpenerFn,
         path_template::PathTemplate,
     },
     operations::{query::QueryOperation, sort::SortOperation},
@@ -14,13 +14,12 @@ use crate::{
     utils::memory::{estimate_sort_spill_reservation, measure_avg_input_row_bytes},
 };
 use anyhow::{Result, anyhow};
-use arrow::datatypes::SchemaRef;
 use camino::Utf8Path;
 use glob::glob;
 use owo_colors::OwoColorize;
 use silk_chiffon_core::{
-    ConfiguredFormat, ConfiguredFormats, DataSinkFactory, OutputSortColumn, SinkFactoryContext,
-    SortDirection as CoreSortDirection,
+    OutputOrderingColumn, SinkBinding, SinkBindingConfig, SortDirection as CoreSortDirection,
+    TransformBinding, TransformBindings,
 };
 use silk_chiffon_storage::{LocationInput, StorageHandle, StorageSession};
 use tabled::{builder::Builder, settings::Style};
@@ -105,6 +104,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         .with_target_partitions(effective_target_partitions)
         .with_spill_path(spill_path)
         .with_spill_compression(spill_compression);
+    let session = pipeline.create_session_context()?;
 
     let (input_paths, should_glob) = if let Some(single_input) = from {
         (vec![single_input], false)
@@ -112,7 +112,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         (from_many, true)
     };
 
-    let input_strategy = if !should_glob && input_paths.len() == 1 {
+    let input_sources = if !should_glob && input_paths.len() == 1 {
         let handle = input_handle(&input_paths[0], &storage)?;
         let format = format_for_handle(
             &formats,
@@ -121,9 +121,9 @@ pub async fn run(args: TransformCommand) -> Result<()> {
             &input_paths[0],
             "input",
         )?;
-        let source = format.create_source(&handle).await?;
+        let source = format.create_source(&handle, &session).await?;
         pipeline = pipeline.with_storage_handle(handle);
-        InputStrategy::Single(source)
+        InputSources::new(source)
     } else {
         let mut expanded_paths = Vec::new();
 
@@ -148,7 +148,6 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         }
 
         let mut sources: Vec<Box<dyn DataSource>> = Vec::new();
-        let mut schema: Option<SchemaRef> = None;
         for input_path in &expanded_paths {
             let handle = input_handle(input_path, &storage)?;
             let format = format_for_handle(
@@ -158,22 +157,20 @@ pub async fn run(args: TransformCommand) -> Result<()> {
                 input_path,
                 "input",
             )?;
-            let source = format.create_source(&handle).await?;
-            if let Some(ref schema) = schema {
-                let source_schema = source.schema().await?;
-                if *schema != source_schema {
-                    anyhow::bail!(
-                        "Schema mismatch for input file {} (does not match other file(s))",
-                        input_path
-                    );
-                }
-            } else {
-                schema = Some(source.schema().await?);
-            }
+            let source = format.create_source(&handle, &session).await?;
             pipeline = pipeline.with_storage_handle(handle);
             sources.push(source);
         }
-        InputStrategy::Multiple(sources)
+        let mut sources = sources.into_iter();
+        let mut inputs = InputSources::new(
+            sources
+                .next()
+                .expect("empty path expansion is rejected above"),
+        );
+        for source in sources {
+            inputs.push(source);
+        }
+        inputs
     };
 
     let list_outputs_format = list_outputs;
@@ -232,16 +229,18 @@ pub async fn run(args: TransformCommand) -> Result<()> {
             pipeline.with_operation(Box::new(SortOperation::new(full_sort_spec.columns.clone())));
     }
 
-    pipeline.validate_input_plan(&input_strategy).await?;
+    pipeline = pipeline.with_inputs(input_sources);
+    let mut prepared = pipeline.prepare(session).await?;
 
-    if has_sort && input_strategy.replayability() == Replayability::Replayable {
-        let avg_row_bytes = measure_avg_input_row_bytes(&input_strategy, 100_000).await?;
+    if has_sort && prepared.inputs().replayability() == Replayability::Replayable {
+        let avg_row_bytes =
+            measure_avg_input_row_bytes(prepared.session(), prepared.inputs(), 100_000).await?;
         if avg_row_bytes > 0 {
-            let total_rows = match input_strategy
-                .row_count()
-                .await
-                .unwrap_or(RowCount::Unknown)
-            {
+            let row_count = match prepared.inputs().row_count_capability() {
+                Some(capability) => capability.row_count().await.unwrap_or(RowCount::Unknown),
+                None => RowCount::Unknown,
+            };
+            let total_rows = match row_count {
                 RowCount::Exact(rows) | RowCount::Estimated(rows) => {
                     usize::try_from(rows).unwrap_or(usize::MAX)
                 }
@@ -257,11 +256,9 @@ pub async fn run(args: TransformCommand) -> Result<()> {
                 memory_per_partition,
                 8192,
             );
-            pipeline = pipeline.with_sort_spill_reservation_bytes(reservation);
+            prepared = prepared.with_sort_spill_reservation_bytes(reservation);
         }
     }
-
-    pipeline = pipeline.with_input_strategy(input_strategy);
 
     let output_location = to
         .as_deref()
@@ -290,7 +287,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         .columns
         .iter()
         .map(|column| {
-            OutputSortColumn::new(
+            OutputOrderingColumn::new(
                 column.name.clone(),
                 match column.direction {
                     SortDirection::Ascending => CoreSortDirection::Ascending,
@@ -299,21 +296,25 @@ pub async fn run(args: TransformCommand) -> Result<()> {
             )
         })
         .collect();
-    let sink_context = SinkFactoryContext::new(
-        NonZeroUsize::new(usable_cpus).expect("the thread budget is always positive"),
-        has_sort,
+    let output_threads = if has_sort {
+        (usable_cpus / 4).max(1)
+    } else {
+        three_quarter_cpus
+    };
+    let sink_context = SinkBindingConfig::new(
+        NonZeroUsize::new(output_threads).expect("the thread budget is always positive"),
         output_ordering,
     );
-    let sink_factory = output_format.create_sink_factory(&sink_context).await?;
-    let sink_factory = registered_sink_factory(storage.clone(), sink_factory);
+    let sink_binding = output_format.bind_sink(&sink_context).await?;
+    let sink_opener = storage_sink_opener(storage.clone(), sink_binding);
 
     if let Some(output_path) = to {
         let handle = output_handle.expect("an exact output creates a handle");
         let output_path = local_output_path(&output_path, &handle)?;
-        pipeline = pipeline.with_storage_handle(handle);
-        pipeline = pipeline.with_output_strategy_with_single_sink(
+        prepared = prepared.with_storage_handle(&handle);
+        prepared = prepared.with_output_strategy_with_single_sink(
             output_path,
-            sink_factory,
+            sink_opener,
             exclude_columns.clone(),
             create_dirs,
             overwrite,
@@ -332,10 +333,10 @@ pub async fn run(args: TransformCommand) -> Result<()> {
 
         match partition_strategy {
             PartitionStrategy::NosortMulti => {
-                pipeline = pipeline.with_multi_writer_partitioned_sink(
+                prepared = prepared.with_multi_writer_partitioned_sink(
                     partition_columns,
                     path_template,
-                    sink_factory,
+                    sink_opener,
                     exclude_columns.clone(),
                     create_dirs,
                     overwrite,
@@ -343,10 +344,10 @@ pub async fn run(args: TransformCommand) -> Result<()> {
                 );
             }
             PartitionStrategy::NosortEvict => {
-                pipeline = pipeline.with_evict_writer_partitioned_sink(
+                prepared = prepared.with_evict_writer_partitioned_sink(
                     partition_columns,
                     path_template,
-                    sink_factory,
+                    sink_opener,
                     exclude_columns.clone(),
                     create_dirs,
                     overwrite,
@@ -355,10 +356,10 @@ pub async fn run(args: TransformCommand) -> Result<()> {
                 );
             }
             PartitionStrategy::SortSingle => {
-                pipeline = pipeline.with_single_writer_partitioned_sink(
+                prepared = prepared.with_single_writer_partitioned_sink(
                     partition_columns,
                     path_template,
-                    sink_factory,
+                    sink_opener,
                     exclude_columns.clone(),
                     create_dirs,
                     overwrite,
@@ -368,7 +369,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         }
     }
 
-    let files = pipeline.execute().await?;
+    let files = prepared.execute().await?;
 
     if let Some(format) = list_outputs_format {
         print_output_files(&files, format, list_outputs_file.as_deref())?;
@@ -489,12 +490,12 @@ fn output_handle(output: &str, storage: &StorageSession) -> Result<StorageHandle
 }
 
 fn format_for_handle<'a>(
-    formats: &'a ConfiguredFormats,
+    formats: &'a TransformBindings,
     explicit_format: Option<&str>,
     handle: &StorageHandle,
     display_path: &str,
     direction: &str,
-) -> Result<&'a ConfiguredFormat> {
+) -> Result<&'a TransformBinding> {
     if let Some(format) = explicit_format {
         return formats
             .get(format)
@@ -507,11 +508,11 @@ fn format_for_handle<'a>(
 }
 
 fn format_for_path<'a>(
-    formats: &'a ConfiguredFormats,
+    formats: &'a TransformBindings,
     explicit_format: Option<&str>,
     path: &str,
     direction: &str,
-) -> Result<&'a ConfiguredFormat> {
+) -> Result<&'a TransformBinding> {
     if let Some(format) = explicit_format {
         return formats
             .get(format)
@@ -524,11 +525,11 @@ fn format_for_path<'a>(
 }
 
 fn format_for_extension<'a>(
-    formats: &'a ConfiguredFormats,
+    formats: &'a TransformBindings,
     extension: Option<&str>,
     path: &str,
     direction: &str,
-) -> Result<&'a ConfiguredFormat> {
+) -> Result<&'a TransformBinding> {
     extension
         .and_then(|extension| formats.by_extension(extension))
         .ok_or_else(|| {
@@ -551,18 +552,18 @@ fn local_output_path(output: &str, handle: &StorageHandle) -> Result<String> {
         .map_err(|path| anyhow!("Local path is not valid UTF-8: {}", path.to_string_lossy()))
 }
 
-fn registered_sink_factory(
+fn storage_sink_opener(
     storage: StorageSession,
-    sink_factory: Box<dyn DataSinkFactory>,
-) -> SinkFactory {
-    let sink_factory: Arc<dyn DataSinkFactory> = sink_factory.into();
+    sink_binding: Box<dyn SinkBinding>,
+) -> SinkOpenerFn {
+    let sink_binding: Arc<dyn SinkBinding> = sink_binding.into();
     Box::new(move |path, schema| {
         let storage = storage.clone();
-        let sink_factory = Arc::clone(&sink_factory);
+        let sink_binding = Arc::clone(&sink_binding);
         Box::pin(async move {
             let location = LocationInput::parse(&path)?;
             let handle = storage.output_handle(&location)?;
-            sink_factory.create(handle, schema).await
+            sink_binding.open_sink(handle, schema).await
         })
     })
 }

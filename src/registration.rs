@@ -5,11 +5,14 @@ use apply_if::ApplyIf;
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use camino::Utf8PathBuf;
-use clap::{Command, CommandFactory, FromArgMatches, builder::PossibleValuesParser};
+use clap::{
+    Args, Command as ClapCommand, CommandFactory, FromArgMatches, builder::PossibleValuesParser,
+};
+use datafusion::prelude::SessionContext;
 use silk_chiffon_core::{
-    DataSink, DataSinkFactory, DataSource, FormatFuture, FormatInspection, FormatRegistration,
-    FormatRegistry, FormatTransform, Identification, InspectionOutput, OutputSortColumn,
-    SinkFactoryContext,
+    DataSink, DataSource, FormatDefinition, FormatFuture, FormatMatch, FormatRegistry,
+    InspectionDefinition, InspectionMode, InspectionOutput, OutputOrderingColumn, SinkBinding,
+    SinkBindingConfig, TransformDefinition,
 };
 use silk_chiffon_storage::{StorageHandle, StorageRegistry};
 
@@ -17,10 +20,10 @@ use silk_chiffon_storage::{StorageHandle, StorageRegistry};
 use silk_chiffon_storage::local;
 
 use crate::{
-    AllColumnsBloomFilterConfig, ArrowArgs, BloomFilterConfig, Cli, Commands,
-    DEFAULT_BLOOM_FILTER_FPP, InspectArrowArgs, InspectCommand, InspectIdentifyArgs,
-    InspectParquetArgs, InspectSubcommand, InspectVortexArgs, ParquetArgs, SortColumn, SortSpec,
-    TransformBaseArgs, TransformCommand, VortexArgs,
+    AllColumnsBloomFilterConfig, ArrowArgs, BloomFilterConfig, Cli, Command as RuntimeCommand,
+    DEFAULT_BLOOM_FILTER_FPP, DetectArgs, DetectCommand, InspectArrowArgs, InspectCommand,
+    InspectParquetArgs, InspectVortexArgs, InspectionArgs, OutputFormat, ParquetArgs, SortColumn,
+    SortSpec, TransformArgs, TransformCommand, VortexArgs,
     inspection::{
         arrow::ArrowInspector, inspectable::Inspectable, parquet::ParquetInspector,
         vortex::VortexInspector,
@@ -33,15 +36,17 @@ use crate::{
     sources::{arrow::ArrowDataSource, parquet::ParquetDataSource, vortex::VortexDataSource},
 };
 
+/// Builds the executable's set of available data formats.
 pub fn format_registry() -> FormatRegistry {
     FormatRegistry::builder()
-        .register(arrow_registration())
-        .register(parquet_registration())
-        .register(vortex_registration())
+        .register(arrow_format())
+        .register(parquet_format())
+        .register(vortex_format())
         .build()
         .expect("built-in format registrations must not conflict")
 }
 
+/// Builds the executable's feature-selected storage backends.
 pub fn storage_registry() -> StorageRegistry {
     let builder = StorageRegistry::builder();
     #[cfg(feature = "local")]
@@ -51,31 +56,32 @@ pub fn storage_registry() -> StorageRegistry {
         .expect("built-in storage backends must not conflict")
 }
 
-struct ExecutableRegistries {
+pub(crate) struct CliDefinition {
     formats: FormatRegistry,
     storage: StorageRegistry,
 }
 
-impl ExecutableRegistries {
-    fn new() -> Self {
+impl CliDefinition {
+    pub(crate) fn new() -> Self {
         Self {
             formats: format_registry(),
             storage: storage_registry(),
         }
     }
 
-    fn assembled_command(&self, command: Command) -> Command {
+    pub(crate) fn command(&self, command: ClapCommand) -> ClapCommand {
         command.mut_subcommands(|command| match command.get_name() {
-            "transform" => self.assemble_transform_command(command),
-            "inspect" => self.assemble_inspect_command(command),
+            "transform" => self.augment_transform_command(command),
+            "inspect" => self.augment_inspect_command(command),
+            "detect" => self.storage.augment_args(command),
             _ => command,
         })
     }
 
-    fn assemble_transform_command(&self, command: Command) -> Command {
+    fn augment_transform_command(&self, command: ClapCommand) -> ClapCommand {
         let possible_formats = self
             .formats
-            .registrations()
+            .formats()
             .map(|format| format.name())
             .collect::<Vec<_>>();
         let command = command.mut_args(|argument| match argument.get_id().as_str() {
@@ -88,16 +94,26 @@ impl ExecutableRegistries {
             .augment_transform_args(self.storage.augment_args(command))
     }
 
-    fn assemble_inspect_command(&self, command: Command) -> Command {
-        command.mut_subcommands(|command| {
-            let Some(format) = self.formats.get(command.get_name()) else {
-                return self.storage.augment_args(command);
-            };
-            format.augment_inspection_args(self.storage.augment_args(command))
-        })
+    fn augment_inspect_command(&self, mut command: ClapCommand) -> ClapCommand {
+        for format in self
+            .formats
+            .formats()
+            .filter(|format| format.has_inspector())
+        {
+            let format_command = ClapCommand::new(format.name())
+                .about(format!(
+                    "Inspect {} file metadata and structure",
+                    format.name()
+                ))
+                .visible_aliases(format.aliases().iter().copied());
+            let format_command = InspectionArgs::augment_args(format_command);
+            let format_command = format.augment_inspection_args(format_command);
+            command = command.subcommand(self.storage.augment_args(format_command));
+        }
+        command
     }
 
-    fn runtime_cli(self, matches: &clap::ArgMatches) -> Result<Cli, clap::Error> {
+    fn bind(self, matches: &clap::ArgMatches) -> Result<Cli, clap::Error> {
         let (name, matches) = matches.subcommand().ok_or_else(|| {
             clap::Error::raw(
                 clap::error::ErrorKind::MissingSubcommand,
@@ -106,13 +122,20 @@ impl ExecutableRegistries {
         })?;
         let command = match name {
             "transform" => {
-                let args = TransformBaseArgs::from_arg_matches(matches)?;
-                let formats = self.formats.bind_transform_args(matches)?;
+                let args = TransformArgs::from_arg_matches(matches)?;
+                let formats = self.formats.bind_transform(matches)?;
                 let storage = self.storage.create_session(matches).map_err(clap_error)?;
-                Commands::Transform(TransformCommand::from_parsed(args, formats, storage))
+                RuntimeCommand::Transform(TransformCommand::from_parsed(args, formats, storage))
             }
-            "inspect" => Commands::Inspect(parse_inspect(matches, self.formats, &self.storage)?),
-            "completions" => Commands::Completions {
+            "detect" => {
+                let args = DetectArgs::from_arg_matches(matches)?;
+                let storage = self.storage.create_session(matches).map_err(clap_error)?;
+                RuntimeCommand::Detect(DetectCommand::from_parsed(args, storage, self.formats))
+            }
+            "inspect" => {
+                RuntimeCommand::Inspect(parse_inspect(matches, &self.formats, &self.storage)?)
+            }
+            "completions" => RuntimeCommand::Completions {
                 shell: *matches
                     .get_one("shell")
                     .expect("Clap requires the completion shell"),
@@ -123,48 +146,21 @@ impl ExecutableRegistries {
     }
 }
 
-pub(crate) fn assembled_command(command: Command) -> Command {
-    ExecutableRegistries::new().assembled_command(command)
-}
-
 pub(crate) fn try_parse_from<I, T>(arguments: I) -> Result<Cli, clap::Error>
 where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
-    let registries = ExecutableRegistries::new();
-    let matches = registries
-        .assembled_command(crate::CliSchema::command())
+    let definition = CliDefinition::new();
+    let matches = definition
+        .command(crate::CliSchema::command())
         .try_get_matches_from(arguments)?;
-    registries.runtime_cli(&matches)
-}
-
-pub(crate) fn default_transform_command() -> Result<TransformCommand, clap::Error> {
-    let registries = ExecutableRegistries::new();
-    let matches = registries
-        .assembled_command(crate::CliSchema::command())
-        .try_get_matches_from([
-            "silk-chiffon",
-            "transform",
-            "--from",
-            "input.arrow",
-            "--to",
-            "output.arrow",
-        ])?;
-    let Cli {
-        command: Commands::Transform(mut command),
-    } = registries.runtime_cli(&matches)?
-    else {
-        unreachable!("the default command is a transform")
-    };
-    command.from = None;
-    command.to = None;
-    Ok(command)
+    definition.bind(&matches)
 }
 
 fn parse_inspect(
     matches: &clap::ArgMatches,
-    formats: FormatRegistry,
+    formats: &FormatRegistry,
     storage_registry: &StorageRegistry,
 ) -> Result<InspectCommand, clap::Error> {
     let (name, matches) = matches.subcommand().ok_or_else(|| {
@@ -176,191 +172,192 @@ fn parse_inspect(
     let storage = storage_registry
         .create_session(matches)
         .map_err(clap_error)?;
-    let (command, inspection) = match name {
-        "identify" => (
-            InspectSubcommand::Identify(InspectIdentifyArgs::from_arg_matches(matches)?),
-            None,
-        ),
-        "parquet" => (
-            InspectSubcommand::Parquet(InspectParquetArgs::from_arg_matches(matches)?),
-            Some(bind_inspection(&formats, "parquet", matches)?),
-        ),
-        "arrow" => (
-            InspectSubcommand::Arrow(InspectArrowArgs::from_arg_matches(matches)?),
-            Some(bind_inspection(&formats, "arrow", matches)?),
-        ),
-        "vortex" => (
-            InspectSubcommand::Vortex(InspectVortexArgs::from_arg_matches(matches)?),
-            Some(bind_inspection(&formats, "vortex", matches)?),
-        ),
-        _ => unreachable!("Clap accepted an unknown inspect command"),
-    };
+    let args = InspectionArgs::from_arg_matches(matches)?;
+    let inspection = bind_inspection(formats, name, matches)?;
     Ok(InspectCommand::from_parsed(
-        command, inspection, storage, formats,
+        args.file,
+        inspection_mode(args.format),
+        inspection,
+        storage,
     ))
+}
+
+fn inspection_mode(format: OutputFormat) -> InspectionMode {
+    if format.resolves_to_json() {
+        InspectionMode::Json
+    } else {
+        InspectionMode::Text
+    }
 }
 
 fn bind_inspection(
     formats: &FormatRegistry,
     format: &str,
     matches: &clap::ArgMatches,
-) -> Result<silk_chiffon_core::ConfiguredInspection, clap::Error> {
+) -> Result<silk_chiffon_core::InspectionBinding, clap::Error> {
     formats
         .get(format)
         .expect("the CLI contains only registered formats")
-        .bind_inspection_args(matches)
+        .bind_inspection(matches)
 }
 
 fn clap_error(error: impl std::fmt::Display) -> clap::Error {
     clap::Error::raw(clap::error::ErrorKind::ValueValidation, error.to_string())
 }
 
-fn arrow_registration() -> FormatRegistration {
-    FormatRegistration::builder("arrow")
+fn arrow_format() -> FormatDefinition {
+    FormatDefinition::builder("arrow")
         .extensions(["arrow", "arrows"])
-        .identifier(identify_arrow)
-        .identifier_priority(1)
+        .detector(detect_arrow)
+        .detection_priority(1)
         .transform(
-            FormatTransform::with_args::<ArrowArgs>()
-                .source(arrow_source)
-                .sink(arrow_sink_factory)
+            TransformDefinition::with_args::<ArrowArgs>()
+                .source(create_arrow_source)
+                .sink(bind_arrow_sink)
                 .build(),
         )
-        .inspection(FormatInspection::with_args::<InspectArrowArgs>(
+        .inspection(InspectionDefinition::with_args::<InspectArrowArgs>(
             inspect_arrow,
         ))
         .build()
 }
 
-fn parquet_registration() -> FormatRegistration {
-    FormatRegistration::builder("parquet")
+fn parquet_format() -> FormatDefinition {
+    FormatDefinition::builder("parquet")
         .extensions(["parquet"])
-        .identifier(identify_parquet)
-        .identifier_priority(0)
+        .detector(detect_parquet)
+        .detection_priority(0)
         .transform(
-            FormatTransform::with_args::<ParquetArgs>()
-                .source(parquet_source)
-                .sink(parquet_sink_factory)
+            TransformDefinition::with_args::<ParquetArgs>()
+                .source(create_parquet_source)
+                .sink(bind_parquet_sink)
                 .build(),
         )
-        .inspection(FormatInspection::with_args::<InspectParquetArgs>(
+        .inspection(InspectionDefinition::with_args::<InspectParquetArgs>(
             inspect_parquet,
         ))
         .build()
 }
 
-fn vortex_registration() -> FormatRegistration {
-    FormatRegistration::builder("vortex")
+fn vortex_format() -> FormatDefinition {
+    FormatDefinition::builder("vortex")
         .extensions(["vortex"])
-        .identifier(identify_vortex)
-        .identifier_priority(2)
+        .detector(detect_vortex)
+        .detection_priority(2)
         .transform(
-            FormatTransform::with_args::<VortexArgs>()
-                .source(vortex_source)
-                .sink(vortex_sink_factory)
+            TransformDefinition::with_args::<VortexArgs>()
+                .source(create_vortex_source)
+                .sink(bind_vortex_sink)
                 .build(),
         )
-        .inspection(FormatInspection::with_args::<InspectVortexArgs>(
+        .inspection(InspectionDefinition::with_args::<InspectVortexArgs>(
             inspect_vortex,
         ))
         .build()
 }
 
-fn identify_arrow(handle: &StorageHandle) -> FormatFuture<'_, Option<Identification>> {
+fn detect_arrow(handle: &StorageHandle) -> FormatFuture<'_, Option<FormatMatch>> {
     Box::pin(async move {
         let path = local_utf8_path(handle)?;
         Ok(ArrowInspector::detect_variant(&path)
             .ok()
-            .map(|variant| Identification::with_variant(variant.to_string())))
+            .map(|variant| FormatMatch::with_variant(variant.to_string())))
     })
 }
 
-fn identify_parquet(handle: &StorageHandle) -> FormatFuture<'_, Option<Identification>> {
+fn detect_parquet(handle: &StorageHandle) -> FormatFuture<'_, Option<FormatMatch>> {
     Box::pin(async move {
         let path = local_utf8_path(handle)?;
-        Ok(ParquetInspector::is_format(&path)?.then(Identification::new))
+        Ok(ParquetInspector::is_format(&path)?.then(FormatMatch::new))
     })
 }
 
-fn identify_vortex(handle: &StorageHandle) -> FormatFuture<'_, Option<Identification>> {
+fn detect_vortex(handle: &StorageHandle) -> FormatFuture<'_, Option<FormatMatch>> {
     Box::pin(async move {
         let path = local_utf8_path(handle)?;
-        Ok(VortexInspector::is_format(&path)?.then(|| Identification::with_variant("file")))
+        Ok(VortexInspector::is_format(&path)?.then(|| FormatMatch::with_variant("file")))
     })
 }
 
-fn arrow_source<'a>(
+fn create_arrow_source<'a>(
     handle: &'a StorageHandle,
+    session: &'a SessionContext,
     _args: &'a ArrowArgs,
 ) -> FormatFuture<'a, Box<dyn DataSource>> {
     Box::pin(async move {
-        Ok(Box::new(ArrowDataSource::new(local_path_string(handle)?)) as Box<dyn DataSource>)
+        Ok(Box::new(ArrowDataSource::new(
+            local_path_string(handle)?,
+            session.clone(),
+        )) as Box<dyn DataSource>)
     })
 }
 
-fn parquet_source<'a>(
+fn create_parquet_source<'a>(
     handle: &'a StorageHandle,
+    session: &'a SessionContext,
     _args: &'a ParquetArgs,
 ) -> FormatFuture<'a, Box<dyn DataSource>> {
     Box::pin(async move {
-        Ok(Box::new(ParquetDataSource::new(local_path_string(handle)?)) as Box<dyn DataSource>)
+        Ok(Box::new(ParquetDataSource::new(
+            local_path_string(handle)?,
+            session.clone(),
+        )) as Box<dyn DataSource>)
     })
 }
 
-fn vortex_source<'a>(
+fn create_vortex_source<'a>(
     handle: &'a StorageHandle,
+    session: &'a SessionContext,
     _args: &'a VortexArgs,
 ) -> FormatFuture<'a, Box<dyn DataSource>> {
     Box::pin(async move {
-        Ok(Box::new(VortexDataSource::new(local_path_string(handle)?)) as Box<dyn DataSource>)
+        Ok(Box::new(VortexDataSource::new(
+            local_path_string(handle)?,
+            session.clone(),
+        )) as Box<dyn DataSource>)
     })
 }
 
-fn arrow_sink_factory<'a>(
-    _context: &'a SinkFactoryContext,
+fn bind_arrow_sink<'a>(
+    _context: &'a SinkBindingConfig,
     args: &'a ArrowArgs,
-) -> FormatFuture<'a, Box<dyn DataSinkFactory>> {
+) -> FormatFuture<'a, Box<dyn SinkBinding>> {
     let options = ArrowSinkOptions::new()
         .with_compression(args.arrow_compression)
         .with_format(args.arrow_format)
         .with_record_batch_size(args.arrow_record_batch_size)
         .with_queue_depth(args.arrow_writing_queue_size);
-    Box::pin(async move { Ok(Box::new(ArrowFactory { options }) as Box<dyn DataSinkFactory>) })
+    Box::pin(async move { Ok(Box::new(ArrowSinkBinding { options }) as Box<dyn SinkBinding>) })
 }
 
-fn parquet_sink_factory<'a>(
-    context: &'a SinkFactoryContext,
+fn bind_parquet_sink<'a>(
+    context: &'a SinkBindingConfig,
     args: &'a ParquetArgs,
-) -> FormatFuture<'a, Box<dyn DataSinkFactory>> {
+) -> FormatFuture<'a, Box<dyn SinkBinding>> {
     Box::pin(async move {
         let options = parquet_options(context, args)?;
-        let thread_budget = context.thread_budget().get();
-        let default_encoding_threads = if context.pipeline_sorts() {
-            (thread_budget / 4).max(1)
-        } else {
-            (thread_budget * 3 / 4).max(1)
-        };
+        let default_encoding_threads = context.thread_budget().get();
         let runtimes = Arc::new(ParquetRuntimes::try_new(
             args.parquet_column_encoding_threads
                 .unwrap_or(default_encoding_threads),
             args.parquet_io_threads.unwrap_or(1),
         )?);
-        Ok(Box::new(ParquetFactory { options, runtimes }) as Box<dyn DataSinkFactory>)
+        Ok(Box::new(ParquetSinkBinding { options, runtimes }) as Box<dyn SinkBinding>)
     })
 }
 
-fn vortex_sink_factory<'a>(
-    _context: &'a SinkFactoryContext,
+fn bind_vortex_sink<'a>(
+    _context: &'a SinkBindingConfig,
     args: &'a VortexArgs,
-) -> FormatFuture<'a, Box<dyn DataSinkFactory>> {
+) -> FormatFuture<'a, Box<dyn SinkBinding>> {
     let options = VortexSinkOptions::new().apply_if_some(
         args.vortex_record_batch_size,
         VortexSinkOptions::with_record_batch_size,
     );
-    Box::pin(async move { Ok(Box::new(VortexFactory { options }) as Box<dyn DataSinkFactory>) })
+    Box::pin(async move { Ok(Box::new(VortexSinkBinding { options }) as Box<dyn SinkBinding>) })
 }
 
-fn parquet_options(context: &SinkFactoryContext, args: &ParquetArgs) -> Result<ParquetSinkOptions> {
+fn parquet_options(context: &SinkBindingConfig, args: &ParquetArgs) -> Result<ParquetSinkOptions> {
     for disabled in &args.parquet_bloom_column_off {
         if args
             .parquet_bloom_column
@@ -456,7 +453,7 @@ fn parquet_options(context: &SinkFactoryContext, args: &ParquetArgs) -> Result<P
     Ok(options)
 }
 
-fn output_sort_column(column: &OutputSortColumn) -> SortColumn {
+fn output_sort_column(column: &OutputOrderingColumn) -> SortColumn {
     SortColumn {
         name: column.name().to_owned(),
         direction: match column.direction() {
@@ -466,13 +463,17 @@ fn output_sort_column(column: &OutputSortColumn) -> SortColumn {
     }
 }
 
-struct ArrowFactory {
+struct ArrowSinkBinding {
     options: ArrowSinkOptions,
 }
 
 #[async_trait]
-impl DataSinkFactory for ArrowFactory {
-    async fn create(&self, handle: StorageHandle, schema: SchemaRef) -> Result<Box<dyn DataSink>> {
+impl SinkBinding for ArrowSinkBinding {
+    async fn open_sink(
+        &self,
+        handle: StorageHandle,
+        schema: SchemaRef,
+    ) -> Result<Box<dyn DataSink>> {
         Ok(Box::new(ArrowSink::create(
             handle.local_path()?,
             &schema,
@@ -481,14 +482,18 @@ impl DataSinkFactory for ArrowFactory {
     }
 }
 
-struct ParquetFactory {
+struct ParquetSinkBinding {
     options: ParquetSinkOptions,
     runtimes: Arc<ParquetRuntimes>,
 }
 
 #[async_trait]
-impl DataSinkFactory for ParquetFactory {
-    async fn create(&self, handle: StorageHandle, schema: SchemaRef) -> Result<Box<dyn DataSink>> {
+impl SinkBinding for ParquetSinkBinding {
+    async fn open_sink(
+        &self,
+        handle: StorageHandle,
+        schema: SchemaRef,
+    ) -> Result<Box<dyn DataSink>> {
         Ok(Box::new(ParquetSink::create(
             handle.local_path()?,
             &schema,
@@ -498,13 +503,17 @@ impl DataSinkFactory for ParquetFactory {
     }
 }
 
-struct VortexFactory {
+struct VortexSinkBinding {
     options: VortexSinkOptions,
 }
 
 #[async_trait]
-impl DataSinkFactory for VortexFactory {
-    async fn create(&self, handle: StorageHandle, schema: SchemaRef) -> Result<Box<dyn DataSink>> {
+impl SinkBinding for VortexSinkBinding {
+    async fn open_sink(
+        &self,
+        handle: StorageHandle,
+        schema: SchemaRef,
+    ) -> Result<Box<dyn DataSink>> {
         Ok(Box::new(VortexSink::create(
             handle.local_path()?,
             &schema,
@@ -515,13 +524,14 @@ impl DataSinkFactory for VortexFactory {
 
 fn inspect_arrow<'a>(
     handle: &'a StorageHandle,
+    mode: InspectionMode,
     args: &'a InspectArrowArgs,
 ) -> FormatFuture<'a, InspectionOutput> {
     Box::pin(async move {
         let path = local_utf8_path(handle)?;
         let inspector = ArrowInspector::open(&path, args.row_count || args.batches)
             .context("Failed to open Arrow file")?;
-        if args.format.resolves_to_json() {
+        if mode == InspectionMode::Json {
             return Ok(InspectionOutput::Json(inspector.to_json()));
         }
         let mut output = Vec::new();
@@ -535,6 +545,7 @@ fn inspect_arrow<'a>(
 
 fn inspect_parquet<'a>(
     handle: &'a StorageHandle,
+    mode: InspectionMode,
     args: &'a InspectParquetArgs,
 ) -> FormatFuture<'a, InspectionOutput> {
     Box::pin(async move {
@@ -543,7 +554,7 @@ fn inspect_parquet<'a>(
         let columns = args.pages.as_ref().and_then(|columns| {
             (!columns.is_empty()).then(|| columns.split(',').map(str::trim).collect::<Vec<_>>())
         });
-        if args.format.resolves_to_json() {
+        if mode == InspectionMode::Json {
             let value = if args.pages.is_some() {
                 inspector.to_json_with_pages(columns.as_deref())
             } else {
@@ -562,12 +573,13 @@ fn inspect_parquet<'a>(
 
 fn inspect_vortex<'a>(
     handle: &'a StorageHandle,
+    mode: InspectionMode,
     args: &'a InspectVortexArgs,
 ) -> FormatFuture<'a, InspectionOutput> {
     Box::pin(async move {
         let path = local_utf8_path(handle)?;
         let inspector = VortexInspector::open_file(&path).context("Failed to open Vortex file")?;
-        if args.format.resolves_to_json() {
+        if mode == InspectionMode::Json {
             return Ok(InspectionOutput::Json(inspector.to_json()));
         }
         let mut output = Vec::new();
@@ -614,19 +626,21 @@ mod tests {
         },
         prelude::SessionContext,
     };
+    use futures::StreamExt;
     use silk_chiffon_core::{
-        DataSource, FormatFuture, FormatRegistration, FormatRegistry, FormatTransform,
-        Replayability,
+        DataSource, FormatDefinition, FormatFuture, FormatRegistry, Replayability, SinkBinding,
+        TransformDefinition,
     };
 
-    use super::{ExecutableRegistries, arrow_registration, storage_registry};
+    use super::{CliDefinition, arrow_format, storage_registry};
     use crate::{
-        CliSchema, Commands,
+        CliSchema, Command,
         utils::test_data::{TestBatch, TestExtract, TestFile},
     };
     use silk_chiffon_storage::StorageHandle;
 
     static STREAM_EXECUTIONS: AtomicUsize = AtomicUsize::new(0);
+    static SINK_BINDINGS: AtomicUsize = AtomicUsize::new(0);
 
     #[derive(Debug)]
     struct SinglePassPartition {
@@ -666,10 +680,7 @@ mod tests {
             Ok(TestBatch::simple_schema())
         }
 
-        async fn as_table_provider(
-            &self,
-            _: &mut SessionContext,
-        ) -> Result<Arc<dyn TableProvider>> {
+        async fn table_provider(&self) -> Result<Arc<dyn TableProvider>> {
             let batch = TestBatch::simple_with(&[3, 1, 2], &["c", "a", "b"]);
             let partition: Arc<dyn PartitionStream> = Arc::new(SinglePassPartition { batch });
             let table = StreamingTable::try_new(TestBatch::simple_schema(), vec![partition])?;
@@ -679,20 +690,115 @@ mod tests {
 
     fn single_pass_source<'a>(
         _: &'a StorageHandle,
+        _: &'a SessionContext,
         _: &'a (),
     ) -> FormatFuture<'a, Box<dyn DataSource>> {
         Box::pin(async { Ok(Box::new(SinglePassSource) as Box<dyn DataSource>) })
     }
 
-    fn single_pass_registration() -> FormatRegistration {
-        FormatRegistration::builder("single-pass-test")
+    fn single_pass_format() -> FormatDefinition {
+        FormatDefinition::builder("single-pass-test")
             .extensions(["single-pass-test"])
             .transform(
-                FormatTransform::without_args()
+                TransformDefinition::without_args()
                     .source(single_pass_source)
                     .build(),
             )
             .build()
+    }
+
+    #[derive(Debug)]
+    struct InfinitePartition {
+        batch: RecordBatch,
+    }
+
+    impl PartitionStream for InfinitePartition {
+        fn schema(&self) -> &SchemaRef {
+            self.batch.schema_ref()
+        }
+
+        fn execute(&self, _: Arc<TaskContext>) -> SendableRecordBatchStream {
+            let stream =
+                futures::stream::iter([Ok(self.batch.clone())]).chain(futures::stream::pending::<
+                    Result<RecordBatch, DataFusionError>,
+                >());
+            Box::pin(RecordBatchStreamAdapter::new(self.batch.schema(), stream))
+        }
+    }
+
+    struct InfiniteSource;
+
+    #[async_trait]
+    impl DataSource for InfiniteSource {
+        fn name(&self) -> &str {
+            "infinite-test"
+        }
+
+        fn replayability(&self) -> Replayability {
+            Replayability::SinglePass
+        }
+
+        async fn schema(&self) -> Result<SchemaRef> {
+            Ok(TestBatch::simple_schema())
+        }
+
+        async fn table_provider(&self) -> Result<Arc<dyn TableProvider>> {
+            let batch = TestBatch::simple_with(&[3, 1, 2], &["c", "a", "b"]);
+            let partition: Arc<dyn PartitionStream> = Arc::new(InfinitePartition { batch });
+            let table = StreamingTable::try_new(TestBatch::simple_schema(), vec![partition])?
+                .with_infinite_table(true);
+            Ok(Arc::new(table))
+        }
+    }
+
+    fn infinite_source<'a>(
+        _: &'a StorageHandle,
+        _: &'a SessionContext,
+        _: &'a (),
+    ) -> FormatFuture<'a, Box<dyn DataSource>> {
+        Box::pin(async { Ok(Box::new(InfiniteSource) as Box<dyn DataSource>) })
+    }
+
+    fn infinite_format() -> FormatDefinition {
+        FormatDefinition::builder("infinite-test")
+            .extensions(["infinite-test"])
+            .transform(
+                TransformDefinition::without_args()
+                    .source(infinite_source)
+                    .build(),
+            )
+            .build()
+    }
+
+    fn count_sink_binding<'a>(
+        _: &'a silk_chiffon_core::SinkBindingConfig,
+        _: &'a (),
+    ) -> FormatFuture<'a, Box<dyn SinkBinding>> {
+        SINK_BINDINGS.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async {
+            Ok(Box::new(super::ArrowSinkBinding {
+                options: crate::sinks::arrow::ArrowSinkOptions::new(),
+            }) as Box<dyn SinkBinding>)
+        })
+    }
+
+    fn counted_sink_format() -> FormatDefinition {
+        FormatDefinition::builder("counted-sink-test")
+            .extensions(["counted-sink-test"])
+            .transform(
+                TransformDefinition::without_args()
+                    .sink(count_sink_binding)
+                    .build(),
+            )
+            .build()
+    }
+
+    fn test_cli(definition: CliDefinition, arguments: &[&str]) -> crate::Cli {
+        let matches = definition
+            .command(CliSchema::command())
+            .try_get_matches_from(arguments)
+            .unwrap();
+        definition.bind(&matches).unwrap()
     }
 
     #[tokio::test]
@@ -704,16 +810,16 @@ mod tests {
         std::fs::write(&input, b"test source input").unwrap();
 
         let formats = FormatRegistry::builder()
-            .register(single_pass_registration())
-            .register(arrow_registration())
+            .register(single_pass_format())
+            .register(arrow_format())
             .build()
             .unwrap();
-        let registries = ExecutableRegistries {
+        let definition = CliDefinition {
             formats,
             storage: storage_registry(),
         };
-        let matches = registries
-            .assembled_command(CliSchema::command())
+        let matches = definition
+            .command(CliSchema::command())
             .try_get_matches_from([
                 "silk-chiffon",
                 "transform",
@@ -729,8 +835,8 @@ mod tests {
                 "id",
             ])
             .unwrap();
-        let cli = registries.runtime_cli(&matches).unwrap();
-        let Commands::Transform(command) = cli.command else {
+        let cli = definition.bind(&matches).unwrap();
+        let Command::Transform(command) = cli.command else {
             panic!("expected transform command");
         };
 
@@ -739,5 +845,79 @@ mod tests {
         let batches = TestFile::read_arrow(&output);
         assert_eq!(TestExtract::i32_all(&batches, "id"), [1, 2, 3]);
         assert_eq!(STREAM_EXECUTIONS.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn unbounded_plan_is_rejected_before_sink_binding() {
+        SINK_BINDINGS.store(0, Ordering::SeqCst);
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("input.infinite-test");
+        let output = directory.path().join("output.counted-sink-test");
+        std::fs::write(&input, b"test source input").unwrap();
+
+        let definition = CliDefinition {
+            formats: FormatRegistry::builder()
+                .register(infinite_format())
+                .register(counted_sink_format())
+                .build()
+                .unwrap(),
+            storage: storage_registry(),
+        };
+        let cli = test_cli(
+            definition,
+            &[
+                "silk-chiffon",
+                "transform",
+                "--from",
+                input.to_str().unwrap(),
+                "--to",
+                output.to_str().unwrap(),
+            ],
+        );
+        let Command::Transform(command) = cli.command else {
+            panic!("expected transform command");
+        };
+
+        let error = crate::commands::transform::run(command).await.unwrap_err();
+        assert!(error.to_string().contains("require a bounded input plan"));
+        assert_eq!(SINK_BINDINGS.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn bounded_query_can_replace_an_unbounded_source_plan() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("input.infinite-test");
+        let output = directory.path().join("output.arrow");
+        std::fs::write(&input, b"test source input").unwrap();
+
+        let definition = CliDefinition {
+            formats: FormatRegistry::builder()
+                .register(infinite_format())
+                .register(arrow_format())
+                .build()
+                .unwrap(),
+            storage: storage_registry(),
+        };
+        let cli = test_cli(
+            definition,
+            &[
+                "silk-chiffon",
+                "transform",
+                "--from",
+                input.to_str().unwrap(),
+                "--to",
+                output.to_str().unwrap(),
+                "--query",
+                "SELECT CAST(1 AS INT) AS id, 'a' AS name",
+            ],
+        );
+        let Command::Transform(command) = cli.command else {
+            panic!("expected transform command");
+        };
+
+        crate::commands::transform::run(command).await.unwrap();
+
+        let batches = TestFile::read_arrow(&output);
+        assert_eq!(TestExtract::i32_all(&batches, "id"), [1]);
     }
 }
