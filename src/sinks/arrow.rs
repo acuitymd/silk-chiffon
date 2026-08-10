@@ -15,7 +15,10 @@ use tokio::{sync::mpsc, task::JoinHandle};
 
 use crate::{
     ArrowCompression, ArrowIPCFormat,
-    sinks::data_sink::{DataSink, SinkResult},
+    sinks::{
+        completed_file_url,
+        data_sink::{DataSink, SinkResult},
+    },
     utils::memory::estimate_row_bytes,
 };
 
@@ -206,9 +209,7 @@ impl DataSink for ArrowSink {
 
         let handle = self.handle.take().context("sink already finished")?;
         let result = handle.await.context("writer task panicked")??;
-        let url = url::Url::from_file_path(&result.path).map_err(|()| {
-            anyhow::anyhow!("output path is not absolute: {}", result.path.display())
-        })?;
+        let url = completed_file_url(&result.path).await?;
 
         Ok(SinkResult {
             files_written: vec![url],

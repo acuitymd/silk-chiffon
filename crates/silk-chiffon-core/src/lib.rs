@@ -9,7 +9,8 @@ pub use format::{
     DetectedFormat, FormatDefinition, FormatDefinitionBuilder, FormatDetectorFn, FormatFuture,
     FormatMatch, FormatOperation, FormatOperationError, FormatRegistry, FormatRegistryBuilder,
     FormatRegistryError, InspectionBinding, InspectionDefinition, InspectionMode, InspectorFn,
-    OutputOrderingColumn, SinkBinderFn, SinkBindingConfig, SortDirection, SourceCreatorFn,
-    TransformBinding, TransformBindings, TransformDefinition, TransformDefinitionBuilder,
+    OutputOrderingColumn, SinkBinderFn, SinkBindingConfig, SinkConcurrency, SortDirection,
+    SourceCreatorFn, TransformBinding, TransformBindings, TransformDefinition,
+    TransformDefinitionBuilder,
 };
 pub use inspection::InspectionOutput;

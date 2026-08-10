@@ -27,8 +27,8 @@ use silk_chiffon_core::{
     DataSink, DataSource, DetectedFormat, FormatDefinition, FormatFuture, FormatMatch,
     FormatOperation, FormatOperationError, FormatRegistry, FormatRegistryError,
     InspectionDefinition, InspectionMode, InspectionOutput, OutputOrderingColumn, Replayability,
-    RowCount, RowCountCapability, SinkBinding, SinkBindingConfig, SinkResult, SortDirection,
-    TransformDefinition,
+    RowCount, RowCountCapability, SinkBinding, SinkBindingConfig, SinkConcurrency, SinkResult,
+    SortDirection, TransformDefinition,
 };
 use silk_chiffon_storage::{LocationInput, StorageHandle, local};
 
@@ -404,6 +404,7 @@ fn one_sink_binding_shares_state_across_opened_sinks() {
     let transform = bindings.get("test").unwrap();
     let config = SinkBindingConfig::new(
         NonZeroUsize::new(3).unwrap(),
+        SinkConcurrency::Concurrent,
         vec![OutputOrderingColumn::new(
             "event_time",
             SortDirection::Descending,

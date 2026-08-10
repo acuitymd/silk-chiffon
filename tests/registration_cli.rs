@@ -9,7 +9,7 @@ use silk_chiffon::utils::test_data::{TestBatch, TestFile};
 use silk_chiffon::{Cli, Command, registration};
 #[cfg(feature = "local-bare-paths")]
 use silk_chiffon_core::{
-    InspectionMode, InspectionOutput, Replayability, RowCount, SinkBindingConfig,
+    InspectionMode, InspectionOutput, Replayability, RowCount, SinkBindingConfig, SinkConcurrency,
 };
 #[cfg(feature = "local-bare-paths")]
 use silk_chiffon_storage::LocationInput;
@@ -176,7 +176,11 @@ async fn registered_capabilities_use_command_storage_and_explicit_outputs() {
     assert!(!source.schema().await.unwrap().fields().is_empty());
     let schema = batch.schema();
 
-    let context = SinkBindingConfig::new(NonZeroUsize::new(2).unwrap(), Vec::new());
+    let context = SinkBindingConfig::new(
+        NonZeroUsize::new(2).unwrap(),
+        SinkConcurrency::Sequential,
+        Vec::new(),
+    );
     let sink_binding = parquet.bind_sink(&context).await.unwrap();
     for output in [&output_one, &output_two] {
         let handle = command

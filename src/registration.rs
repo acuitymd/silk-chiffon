@@ -6,13 +6,14 @@ use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use camino::Utf8PathBuf;
 use clap::{
-    Args, Command as ClapCommand, CommandFactory, FromArgMatches, builder::PossibleValuesParser,
+    Args, Command as ClapCommand, CommandFactory, FromArgMatches,
+    builder::{PossibleValue, PossibleValuesParser},
 };
 use datafusion::prelude::SessionContext;
 use silk_chiffon_core::{
     DataSink, DataSource, FormatDefinition, FormatFuture, FormatMatch, FormatRegistry,
     InspectionDefinition, InspectionMode, InspectionOutput, OutputOrderingColumn, SinkBinding,
-    SinkBindingConfig, TransformDefinition,
+    SinkBindingConfig, SinkConcurrency, TransformDefinition,
 };
 use silk_chiffon_storage::{StorageHandle, StorageRegistry};
 
@@ -79,14 +80,24 @@ impl CliDefinition {
     }
 
     fn augment_transform_command(&self, command: ClapCommand) -> ClapCommand {
-        let possible_formats = self
+        let input_formats = self
             .formats
             .formats()
-            .map(|format| format.name())
+            .filter(|format| format.has_source())
+            .map(|format| PossibleValue::new(format.name()).aliases(format.aliases()))
+            .collect::<Vec<_>>();
+        let output_formats = self
+            .formats
+            .formats()
+            .filter(|format| format.has_sink())
+            .map(|format| PossibleValue::new(format.name()).aliases(format.aliases()))
             .collect::<Vec<_>>();
         let command = command.mut_args(|argument| match argument.get_id().as_str() {
-            "input_format" | "output_format" => {
-                argument.value_parser(PossibleValuesParser::new(possible_formats.clone()))
+            "input_format" => {
+                argument.value_parser(PossibleValuesParser::new(input_formats.clone()))
+            }
+            "output_format" => {
+                argument.value_parser(PossibleValuesParser::new(output_formats.clone()))
             }
             _ => argument,
         });
@@ -405,7 +416,7 @@ fn parquet_options(context: &SinkBindingConfig, args: &ParquetArgs) -> Result<Pa
                 .collect(),
         });
 
-    let options = ParquetSinkOptions::new()
+    let mut options = ParquetSinkOptions::new()
         .with_parquet_compression(args.parquet_compression, args.parquet_compression_level)?
         .with_statistics(args.parquet_statistics)
         .with_writer_version(args.parquet_writer_version)
@@ -450,6 +461,17 @@ fn parquet_options(context: &SinkBindingConfig, args: &ParquetArgs) -> Result<Pa
             ParquetSinkOptions::with_write_batch_size,
         )
         .apply_if_some(sort_spec, ParquetSinkOptions::with_sort_spec);
+
+    if context.sink_concurrency() == SinkConcurrency::Concurrent {
+        // Several open Parquet pipelines multiply their buffered row groups, so keep each
+        // pipeline single-slot.
+        options = options
+            .with_ingestion_queue_size(1)
+            .with_encoding_queue_size(1)
+            .with_writing_queue_size(1)
+            .with_max_row_group_concurrency(1);
+    }
+
     Ok(options)
 }
 
@@ -608,15 +630,18 @@ fn local_path_string(handle: &StorageHandle) -> Result<String> {
 
 #[cfg(all(test, feature = "local-bare-paths"))]
 mod tests {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
+    use std::{
+        num::NonZeroUsize,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
     };
 
     use anyhow::Result;
     use arrow::{array::RecordBatch, datatypes::SchemaRef};
     use async_trait::async_trait;
-    use clap::CommandFactory;
+    use clap::{CommandFactory, FromArgMatches};
     use datafusion::{
         catalog::{TableProvider, streaming::StreamingTable},
         error::DataFusionError,
@@ -629,12 +654,12 @@ mod tests {
     use futures::StreamExt;
     use silk_chiffon_core::{
         DataSource, FormatDefinition, FormatFuture, FormatRegistry, Replayability, SinkBinding,
-        TransformDefinition,
+        SinkBindingConfig, SinkConcurrency, TransformDefinition,
     };
 
-    use super::{CliDefinition, arrow_format, storage_registry};
+    use super::{CliDefinition, arrow_format, parquet_options, storage_registry};
     use crate::{
-        CliSchema, Command,
+        CliSchema, Command, ParquetArgs,
         utils::test_data::{TestBatch, TestExtract, TestFile},
     };
     use silk_chiffon_storage::StorageHandle;
@@ -799,6 +824,94 @@ mod tests {
             .try_get_matches_from(arguments)
             .unwrap();
         definition.bind(&matches).unwrap()
+    }
+
+    fn directional_format_definition() -> CliDefinition {
+        CliDefinition {
+            formats: FormatRegistry::builder()
+                .register(single_pass_format())
+                .register(counted_sink_format())
+                .build()
+                .unwrap(),
+            storage: storage_registry(),
+        }
+    }
+
+    #[test]
+    fn transform_format_values_follow_source_and_sink_capabilities() {
+        directional_format_definition()
+            .command(CliSchema::command())
+            .try_get_matches_from([
+                "silk-chiffon",
+                "transform",
+                "--from",
+                "input.single-pass-test",
+                "--input-format",
+                "single-pass-test",
+                "--to",
+                "output.counted-sink-test",
+                "--output-format",
+                "counted-sink-test",
+            ])
+            .unwrap();
+
+        let input_error = directional_format_definition()
+            .command(CliSchema::command())
+            .try_get_matches_from([
+                "silk-chiffon",
+                "transform",
+                "--from",
+                "input.counted-sink-test",
+                "--input-format",
+                "counted-sink-test",
+                "--to",
+                "output.counted-sink-test",
+            ])
+            .unwrap_err();
+        assert_eq!(input_error.kind(), clap::error::ErrorKind::InvalidValue);
+
+        let output_error = directional_format_definition()
+            .command(CliSchema::command())
+            .try_get_matches_from([
+                "silk-chiffon",
+                "transform",
+                "--from",
+                "input.single-pass-test",
+                "--to",
+                "output.single-pass-test",
+                "--output-format",
+                "single-pass-test",
+            ])
+            .unwrap_err();
+        assert_eq!(output_error.kind(), clap::error::ErrorKind::InvalidValue);
+    }
+
+    #[test]
+    fn concurrent_sinks_use_single_slot_parquet_pipelines() {
+        let matches = CliDefinition::new()
+            .command(CliSchema::command())
+            .try_get_matches_from([
+                "silk-chiffon",
+                "transform",
+                "--from",
+                "input.arrow",
+                "--to",
+                "output.parquet",
+            ])
+            .unwrap();
+        let (_, matches) = matches.subcommand().unwrap();
+        let args = ParquetArgs::from_arg_matches(matches).unwrap();
+        let context = SinkBindingConfig::new(
+            NonZeroUsize::new(4).unwrap(),
+            SinkConcurrency::Concurrent,
+            Vec::new(),
+        );
+        let options = parquet_options(&context, &args).unwrap();
+
+        assert_eq!(options.ingestion_queue_size, Some(1));
+        assert_eq!(options.encoding_queue_size, Some(1));
+        assert_eq!(options.writing_queue_size, Some(1));
+        assert_eq!(options.max_row_group_concurrency, Some(1));
     }
 
     #[tokio::test]

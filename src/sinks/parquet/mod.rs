@@ -36,7 +36,10 @@ use crate::{
     BloomFilterConfig, ColumnDictionaryConfig, ColumnEncodingConfig, DictionaryMode,
     ParquetCompression, ParquetEncoding, ParquetStatistics, ParquetWriterVersion, SortDirection,
     SortSpec,
-    sinks::data_sink::{DataSink, SinkResult},
+    sinks::{
+        completed_file_url,
+        data_sink::{DataSink, SinkResult},
+    },
     utils::memory::estimate_row_bytes,
 };
 
@@ -646,8 +649,7 @@ impl DataSink for ParquetSink {
             .ok_or_else(|| anyhow!("Writer already closed"))?;
 
         let rows_written = writer.close().await?;
-        let url = url::Url::from_file_path(&inner.path)
-            .map_err(|()| anyhow!("output path is not absolute: {}", inner.path.display()))?;
+        let url = completed_file_url(&inner.path).await?;
 
         Ok(SinkResult {
             files_written: vec![url],

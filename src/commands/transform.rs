@@ -18,8 +18,8 @@ use camino::Utf8Path;
 use glob::glob;
 use owo_colors::OwoColorize;
 use silk_chiffon_core::{
-    OutputOrderingColumn, SinkBinding, SinkBindingConfig, SortDirection as CoreSortDirection,
-    TransformBinding, TransformBindings,
+    OutputOrderingColumn, SinkBinding, SinkBindingConfig, SinkConcurrency,
+    SortDirection as CoreSortDirection, TransformBinding, TransformBindings,
 };
 use silk_chiffon_storage::{LocationInput, StorageHandle, StorageSession};
 use tabled::{builder::Builder, settings::Style};
@@ -301,8 +301,18 @@ pub async fn run(args: TransformCommand) -> Result<()> {
     } else {
         three_quarter_cpus
     };
+    let sink_concurrency = if to_many.is_some()
+        && matches!(
+            partition_strategy,
+            PartitionStrategy::NosortMulti | PartitionStrategy::NosortEvict
+        ) {
+        SinkConcurrency::Concurrent
+    } else {
+        SinkConcurrency::Sequential
+    };
     let sink_context = SinkBindingConfig::new(
         NonZeroUsize::new(output_threads).expect("the thread budget is always positive"),
+        sink_concurrency,
         output_ordering,
     );
     let sink_binding = output_format.bind_sink(&sink_context).await?;

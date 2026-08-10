@@ -23,7 +23,7 @@ pub use definition::{
     DetectedFormat, FormatDefinition, FormatDefinitionBuilder, FormatDetectorFn, FormatFuture,
     FormatMatch, FormatOperation, FormatOperationError, InspectionBinding, InspectionDefinition,
     InspectionMode, InspectorFn, OutputOrderingColumn, SinkBinderFn, SinkBindingConfig,
-    SortDirection, SourceCreatorFn, TransformBinding, TransformBindings, TransformDefinition,
-    TransformDefinitionBuilder,
+    SinkConcurrency, SortDirection, SourceCreatorFn, TransformBinding, TransformBindings,
+    TransformDefinition, TransformDefinitionBuilder,
 };
 pub use registry::{FormatRegistry, FormatRegistryBuilder, FormatRegistryError};

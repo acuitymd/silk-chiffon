@@ -17,7 +17,10 @@ use vortex::dtype::DType;
 use vortex::file::WriteOptionsSessionExt;
 use vortex::session::VortexSession;
 
-use crate::sinks::data_sink::{DataSink, SinkResult};
+use crate::sinks::{
+    completed_file_url,
+    data_sink::{DataSink, SinkResult},
+};
 
 #[derive(Clone, Copy)]
 pub struct VortexSinkOptions {
@@ -174,8 +177,7 @@ impl DataSink for VortexSink {
             .await
             .map_err(|e| anyhow!("error joining writer task: {e}"))?
             .map_err(|e| anyhow!("writer task errored: {e}"))?;
-        let url = url::Url::from_file_path(&self.path)
-            .map_err(|()| anyhow!("output path is not absolute: {}", self.path.display()))?;
+        let url = completed_file_url(&self.path).await?;
 
         Ok(SinkResult {
             files_written: vec![url],
