@@ -27,7 +27,7 @@ use silk_chiffon_core::{
     DataSink, DataSource, DetectedFormat, FormatDefinition, FormatFuture, FormatMatch,
     FormatOperation, FormatOperationError, FormatRegistry, FormatRegistryError,
     InspectionDefinition, InspectionMode, InspectionOutput, OutputOrderingColumn, Replayability,
-    RowCount, RowCountCapability, SinkBinding, SinkBindingConfig, SinkConcurrency, SinkResult,
+    RowCount, RowCountCapability, SinkBinding, SinkBindingConfig, SinkCompletion, SinkConcurrency,
     SortDirection, TransformDefinition,
 };
 use silk_chiffon_storage::{LocationInput, StorageHandle, local};
@@ -117,7 +117,7 @@ impl DataSink for TestSink {
         Ok(())
     }
 
-    async fn finish(self: Box<Self>) -> Result<SinkResult> {
+    async fn finish(self: Box<Self>) -> Result<SinkCompletion> {
         let ordering_score = self
             .output_ordering
             .iter()
@@ -129,13 +129,14 @@ impl DataSink for TestSink {
                     }
             })
             .sum::<usize>();
-        Ok(SinkResult {
-            files_written: vec![self.output.clone()],
-            rows_written: (self.workers
+        Ok(SinkCompletion::new(
+            self.output.clone(),
+            [],
+            (self.workers
                 + self.thread_budget.get()
                 + self.opened.load(Ordering::SeqCst)
                 + ordering_score) as u64,
-        })
+        ))
     }
 }
 
@@ -421,14 +422,17 @@ fn one_sink_binding_shares_state_across_opened_sinks() {
         futures::executor::block_on(binding.open_sink(second_handle.clone(), schema)).unwrap();
     let first_result = futures::executor::block_on(first.finish()).unwrap();
     let second_result = futures::executor::block_on(second.finish()).unwrap();
-    assert_eq!(first_result.files_written, vec![first_handle.url().clone()]);
     assert_eq!(
-        second_result.files_written,
-        vec![second_handle.url().clone()]
+        first_result.durable_locations(),
+        [first_handle.url().clone()]
+    );
+    assert_eq!(
+        second_result.durable_locations(),
+        [second_handle.url().clone()]
     );
     let expected_rows = 6 + 3 + 2 + "event_time".len() + 2;
-    assert_eq!(first_result.rows_written, expected_rows as u64);
-    assert_eq!(second_result.rows_written, expected_rows as u64);
+    assert_eq!(first_result.rows_written(), expected_rows as u64);
+    assert_eq!(second_result.rows_written(), expected_rows as u64);
 }
 
 #[test]

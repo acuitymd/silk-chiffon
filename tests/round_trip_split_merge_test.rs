@@ -8,7 +8,6 @@
 //!
 //! Tests arrow, parquet, and vortex formats to ensure data survives a split + merge round trip.
 
-use std::ffi::OsString;
 use std::ops::Range;
 use std::path::Path;
 use std::sync::Arc;
@@ -211,28 +210,6 @@ async fn write_test_data(path: &Path, schema: &SchemaRef, ext: &str) {
     sink.finish().await.unwrap();
 }
 
-fn transform_defaults() -> silk_chiffon::TransformCommand {
-    let args = [
-        "silk-chiffon",
-        "transform",
-        "--from",
-        "input.arrow",
-        "--to",
-        "output.arrow",
-    ]
-    .into_iter()
-    .map(OsString::from);
-    let silk_chiffon::Cli {
-        command: silk_chiffon::Command::Transform(mut command),
-    } = silk_chiffon::Cli::try_parse_from(args).unwrap()
-    else {
-        unreachable!()
-    };
-    command.from = None;
-    command.to = None;
-    command
-}
-
 async fn round_trip_split_merge(ext: &str) {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join(format!("input.{ext}"));
@@ -244,35 +221,47 @@ async fn round_trip_split_merge(ext: &str) {
 
     // split by partition_key into target format
     let partition_template = format!("part_{{{{partition_key}}}}.{ext}");
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        from: Some(input.to_string_lossy().to_string()),
-        to_many: Some(
-            partition_dir
-                .join(&partition_template)
-                .to_string_lossy()
-                .to_string(),
-        ),
-        by: Some("partition_key".to_string()),
-        create_dirs: true,
-        ..transform_defaults()
-    })
-    .await
-    .unwrap();
+    let partition_target = partition_dir.join(&partition_template);
+    let silk_chiffon::Cli {
+        command: silk_chiffon::Command::Transform(command),
+    } = silk_chiffon::Cli::try_parse_from([
+        "silk-chiffon",
+        "transform",
+        "--from",
+        input.to_str().unwrap(),
+        "--to-many",
+        partition_target.to_str().unwrap(),
+        "--by",
+        "partition_key",
+    ])
+    .unwrap()
+    else {
+        unreachable!()
+    };
+    silk_chiffon::commands::transform::run(command)
+        .await
+        .unwrap();
 
     // merge partitions back
     let glob_pattern = format!("*.{ext}");
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        from_many: vec![
-            partition_dir
-                .join(&glob_pattern)
-                .to_string_lossy()
-                .to_string(),
-        ],
-        to: Some(output.to_string_lossy().to_string()),
-        ..transform_defaults()
-    })
-    .await
-    .unwrap();
+    let pattern = partition_dir.join(&glob_pattern);
+    let silk_chiffon::Cli {
+        command: silk_chiffon::Command::Transform(command),
+    } = silk_chiffon::Cli::try_parse_from([
+        "silk-chiffon",
+        "transform",
+        "--from-pattern",
+        pattern.to_str().unwrap(),
+        "--to",
+        output.to_str().unwrap(),
+    ])
+    .unwrap()
+    else {
+        unreachable!()
+    };
+    silk_chiffon::commands::transform::run(command)
+        .await
+        .unwrap();
 
     // register original and merged files as DataFusion tables
     let mut ctx = SessionContext::new();

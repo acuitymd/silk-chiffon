@@ -6,13 +6,13 @@ use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use datafusion::{catalog::TableProvider, prelude::SessionContext};
 
-use crate::sources::data_source::{DataSource, Replayability, RowCount, RowCountCapability};
+use crate::{DataSource, Replayability, RowCount, RowCountCapability};
 
 /// A command's nonempty collection of input sources.
 ///
-/// Keeping the first source separate makes the nonempty invariant part of the type. A single
-/// source exposes its provider directly. Multiple sources become a DataFusion union in the same
-/// session used to plan the command.
+/// Keeping the first source separate makes the nonempty invariant part of the
+/// type. A single source exposes its provider directly. Multiple sources become
+/// a DataFusion union in the same session used to plan the command.
 pub struct InputSources {
     first: Box<dyn DataSource>,
     rest: Vec<Box<dyn DataSource>>,
@@ -39,7 +39,8 @@ impl InputSources {
 
     /// Creates the provider for the complete logical input.
     ///
-    /// Multiple inputs use DataFusion's union semantics rather than a Silk Chiffon stream wrapper.
+    /// Multiple inputs use DataFusion's union semantics rather than a host stream
+    /// wrapper.
     pub async fn table_provider(&self, session: &SessionContext) -> Result<Arc<dyn TableProvider>> {
         let first = self.first.table_provider().await?;
         if self.rest.is_empty() {
@@ -67,8 +68,8 @@ impl InputSources {
 
     /// Returns combined row-count behavior only when every input provides it.
     ///
-    /// The combined operation returns an estimate if any component count is estimated and returns
-    /// unknown if any component count is unknown.
+    /// The combined operation returns an estimate if any component count is
+    /// estimated and returns unknown if any component count is unknown.
     pub fn row_count_capability(&self) -> Option<&dyn RowCountCapability> {
         self.iter()
             .all(|source| source.row_count_capability().is_some())
@@ -166,25 +167,27 @@ mod tests {
         assert_eq!(inputs.replayability(), Replayability::Replayable);
     }
 
-    #[tokio::test]
-    async fn row_count_requires_every_source_capability() {
-        let mut mixed =
-            InputSources::new(source(Replayability::Replayable, Some(RowCount::Exact(2))));
-        mixed.push(source(Replayability::Replayable, None));
-        assert!(mixed.row_count_capability().is_none());
+    #[test]
+    fn row_count_requires_every_source_capability() {
+        futures::executor::block_on(async {
+            let mut mixed =
+                InputSources::new(source(Replayability::Replayable, Some(RowCount::Exact(2))));
+            mixed.push(source(Replayability::Replayable, None));
+            assert!(mixed.row_count_capability().is_none());
 
-        let mut complete =
-            InputSources::new(source(Replayability::Replayable, Some(RowCount::Exact(2))));
-        complete.push(source(
-            Replayability::Replayable,
-            Some(RowCount::Estimated(3)),
-        ));
-        let count = complete
-            .row_count_capability()
-            .expect("all sources provide row counts")
-            .row_count()
-            .await
-            .unwrap();
-        assert_eq!(count, RowCount::Estimated(5));
+            let mut complete =
+                InputSources::new(source(Replayability::Replayable, Some(RowCount::Exact(2))));
+            complete.push(source(
+                Replayability::Replayable,
+                Some(RowCount::Estimated(3)),
+            ));
+            let count = complete
+                .row_count_capability()
+                .expect("all sources provide row counts")
+                .row_count()
+                .await
+                .unwrap();
+            assert_eq!(count, RowCount::Estimated(5));
+        });
     }
 }

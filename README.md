@@ -40,10 +40,13 @@ silk-chiffon inspect parquet data.parquet
 
 ### Merge many files into one
 
-`--from-many` takes repeated paths or a glob, as long as the inputs share a schema:
+Repeat `--from` for exact references, or repeat `--from-pattern` for file globs. Inputs must share a schema:
 
 ```bash
-silk-chiffon transform --from-many 'shards/*.arrow' --to combined.parquet
+silk-chiffon transform --from shard-1.arrow --from shard-2.arrow --to combined.parquet
+
+# or select file inputs with a pattern
+silk-chiffon transform --from-pattern 'shards/*.arrow' --to combined.parquet
 ```
 
 ### Partition one input into many files
@@ -85,7 +88,7 @@ Merge, filter, sort, partition, and encode together:
 
 ```bash
 silk-chiffon transform \
-  --from-many 'raw/*.arrow' \
+  --from-pattern 'raw/*.arrow' \
   --to-many 'out/{{region}}/data.parquet' --by region \
   --query "SELECT * FROM data WHERE amount > 0" \
   --sort-by date:desc \

@@ -38,30 +38,31 @@ Examples:
     silk-chiffon transform --from input.arrow --to output.parquet
 
     # Merge multiple files
-    silk-chiffon transform --from-many file1.arrow --from-many file2.arrow --to merged.parquet
+    silk-chiffon transform --from file1.arrow --from file2.arrow --to merged.parquet
 
     # Partition into multiple files
     silk-chiffon transform --from input.arrow --to-many "{{region}}.parquet" --by region
 
     # Merge and partition with glob
-    silk-chiffon transform --from-many '*.arrow' --to-many "{{year}}/{{month}}.parquet" --by year,month
+    silk-chiffon transform --from-pattern '*.arrow' \
+      --to-many "{{year}}/{{month}}.parquet" --by year,month
 
 **Usage:** `silk-chiffon transform [OPTIONS]`
 
 ###### **Options:**
 
-- `--from <FROM>` — Single input file path
-- `--from-many <FROM_MANY>` — Multiple input file paths (supports glob patterns). Can be specified multiple times
-- `--input-format <INPUT_FORMAT>` — Override input format detection
+- `--from <FROM>` — Exact input reference. May be specified multiple times
+- `--from-pattern <FROM_PATTERN>` — File location pattern. May be specified multiple times
+- `--input-format <INPUT_FORMAT>` — Override file input format detection
 
   Possible values: `arrow`, `parquet`, `vortex`
 
-- `--output-format <OUTPUT_FORMAT>` — Override output format detection
+- `--output-format <OUTPUT_FORMAT>` — Override file output format detection
 
   Possible values: `arrow`, `parquet`, `vortex`
 
-- `--to <TO>` — Single output file path
-- `--to-many <TO_MANY>` — Output path template for partitioning (e.g., "{{region}}.parquet"). Requires --by
+- `--to <TO>` — Exact file or service output target
+- `--to-many <TO_MANY>` — File output template for partitioning (e.g., "{{region}}.parquet"). Requires --by
 - `-d`, `--dialect <DIALECT>` — The query dialect to use
 
   Default value: `duckdb`
@@ -124,13 +125,7 @@ Examples:
 
   Default value: `lz4`
 
-  Possible values:
-  - `none`:
-    No compression (fastest, largest files)
-  - `lz4`:
-    LZ4 frame compression (fast, good compression)
-  - `zstd`:
-    Zstd compression (slower, best compression)
+  Possible values: `none`, `lz4`, `zstd`
 
 - `--preserve-input-order` — Preserve the row order from the input file in the output.
 
@@ -156,10 +151,10 @@ Examples:
   Possible values: `none`, `text`, `json`
 
 - `--list-outputs-file <LIST_OUTPUTS_FILE>` — Write output file listing to a file instead of stdout
-- `--create-dirs` — Create directories as needed
+- `--create-dirs` — Create file-output directories as needed
 
   Default value: `true`
-- `--overwrite` — Overwrite existing files
+- `--overwrite` — Overwrite existing file outputs
 - `--arrow-compression <ARROW_COMPRESSION>` — Arrow IPC compression codec
 
   Default value: `none`
@@ -205,7 +200,7 @@ Examples:
 
   Examples:
 
-      --parquet-bloom-all                                     # Bloom for low-cardinality columns
+      --parquet-bloom-all  # Bloom for low-cardinality columns
       --parquet-bloom-all "fpp=0.001"                         # Tighter false positive rate
       --parquet-bloom-all "ndv=10000"                         # Force bloom on ALL columns
       --parquet-bloom-all --parquet-bloom-column-off user_id  # Exclude user_id
@@ -261,7 +256,7 @@ Examples:
   Examples:
 
       --parquet-bloom-all --parquet-bloom-column-off user_id  # All except user_id
-      --parquet-bloom-column-off "user.address"               # Disable for all user.address leaves
+      --parquet-bloom-column-off "user.address"  # Disable all user.address leaves
       --parquet-bloom-column-off col1 --parquet-bloom-column-off col2  # Disable multiple
 - `--parquet-buffer-size <PARQUET_BUFFER_SIZE>` — I/O buffer size for Parquet writing (e.g., "32MB", "64MB", "1GB").
 
@@ -294,7 +289,8 @@ Examples:
   NON-ANALYZABLE TYPES:
   Cardinality analysis only works on certain types. Non-analyzable types (nested types
   like structs/lists/maps, and floats due to high cardinality) automatically use "always"
-  mode even if you specify "analyze". Use dot notation for nested paths (e.g., "user.address").
+  mode even if you specify "analyze". Use dot notation for nested paths
+  (e.g., "user.address").
   This enables dictionary for all leaf columns under that path.
 
   BLOOM FILTER INTERACTION:
