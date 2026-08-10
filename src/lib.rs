@@ -3,6 +3,7 @@ pub mod inspection;
 pub mod io_strategies;
 pub mod operations;
 pub mod pipeline;
+pub mod registration;
 pub mod sinks;
 pub mod sources;
 pub mod utils;
@@ -19,6 +20,7 @@ use parquet::{
     file::properties::{EnabledStatistics, WriterVersion},
 };
 use std::{
+    ffi::OsString,
     fmt::{self, Formatter},
     io::{self, IsTerminal},
     str::FromStr,
@@ -289,16 +291,43 @@ impl FromStr for PoolReserveSpec {
     }
 }
 
-#[derive(Parser, Debug)]
+#[derive(Parser)]
 #[command(
     name = "silk-chiffon",
     version = env!("SILK_CHIFFON_VERSION"),
     about,
     long_about = None
 )]
-pub struct Cli {
+struct CliSchema {
     #[command(subcommand)]
-    pub command: Commands,
+    command: CommandSchema,
+}
+
+/// A parsed command whose format and storage settings have already been bound.
+pub struct Cli {
+    pub command: Command,
+}
+
+impl Cli {
+    /// Parses the process arguments with the composed format and storage registries.
+    pub fn parse() -> Self {
+        Self::try_parse_from(std::env::args_os()).unwrap_or_else(|error| error.exit())
+    }
+
+    /// Parses an explicit argument sequence with the composed registries.
+    pub fn try_parse_from<I, T>(arguments: I) -> Result<Self, clap::Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<OsString> + Clone,
+    {
+        crate::registration::try_parse_from(arguments)
+    }
+}
+
+impl fmt::Debug for Cli {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("Cli").finish_non_exhaustive()
+    }
 }
 
 /// Render the full CLI reference as Markdown, used by `just docs` to regenerate
@@ -312,9 +341,9 @@ pub fn cli_markdown() -> String {
     )
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
-pub enum Commands {
+enum CommandSchema {
     /// Transform data between formats with optional filtering, sorting, merging, and partitioning.
     ///
     /// Examples:
@@ -331,14 +360,14 @@ pub enum Commands {
     ///     # Merge and partition with glob
     ///     silk-chiffon transform --from-many '*.arrow' --to-many "{{year}}/{{month}}.parquet" --by year,month
     #[command(verbatim_doc_comment)]
-    Transform(TransformCommand),
+    Transform(TransformArgs),
+
+    /// Detect the format of an input.
+    Detect(DetectArgs),
 
     /// Inspect file metadata and structure.
     ///
     /// Examples:
-    ///
-    ///     # Identify format
-    ///     silk-chiffon inspect identify data.parquet
     ///
     ///     # Inspect Parquet file
     ///     silk-chiffon inspect parquet data.parquet --pages
@@ -346,7 +375,7 @@ pub enum Commands {
     ///     # Inspect Arrow file
     ///     silk-chiffon inspect arrow data.arrow --batches
     #[command(verbatim_doc_comment)]
-    Inspect(InspectCommand),
+    Inspect(InspectSchema),
 
     /// Generate shell completions for your shell.
     ///
@@ -368,7 +397,31 @@ pub enum Commands {
     },
 }
 
-impl Commands {
+#[allow(clippy::large_enum_variant)]
+/// Runtime state for one parsed top-level command.
+///
+/// Unlike the private Clap schema, these variants contain command-scoped format bindings and a
+/// storage session. Command implementations therefore receive validated extension state instead
+/// of consulting global registries.
+pub enum Command {
+    Transform(TransformCommand),
+    Detect(DetectCommand),
+    Inspect(InspectCommand),
+    Completions { shell: Shell },
+}
+
+impl clap::CommandFactory for Cli {
+    fn command() -> clap::Command {
+        crate::registration::CliDefinition::new().command(CliSchema::command())
+    }
+
+    fn command_for_update() -> clap::Command {
+        crate::registration::CliDefinition::new().command(CliSchema::command_for_update())
+    }
+}
+
+impl Command {
+    /// Writes shell completions for the fully composed CLI.
     pub fn generate_completions(shell: Shell) {
         clap_complete::generate(
             shell,
@@ -1277,11 +1330,8 @@ impl BloomFilterConfigBuilder {
     }
 }
 
-#[derive(Args, Debug)]
-pub struct TransformCommand {
-    //
-    // ─── Input/Output ──────────────────────────────────────────────────────────────────
-    //
+#[derive(Args, Clone, Debug)]
+struct TransformArgs {
     /// Single input file path.
     #[arg(
         long,
@@ -1301,12 +1351,12 @@ pub struct TransformCommand {
     pub from_many: Vec<String>,
 
     /// Override input format detection.
-    #[arg(long, value_enum, help_heading = "Input/Output")]
-    pub input_format: Option<DataFormat>,
+    #[arg(long, help_heading = "Input/Output")]
+    pub input_format: Option<String>,
 
     /// Override output format detection.
-    #[arg(long, value_enum, help_heading = "Input/Output")]
-    pub output_format: Option<DataFormat>,
+    #[arg(long, help_heading = "Input/Output")]
+    pub output_format: Option<String>,
 
     /// Single output file path.
     #[arg(
@@ -1327,9 +1377,6 @@ pub struct TransformCommand {
     )]
     pub to_many: Option<String>,
 
-    //
-    // ─── Transformations ───────────────────────────────────────────────────────────────
-    //
     /// The query dialect to use.
     #[arg(
         short,
@@ -1361,9 +1408,6 @@ pub struct TransformCommand {
     #[arg(short, long, help_heading = "Transformations")]
     pub sort_by: Option<SortSpec>,
 
-    //
-    // ─── Execution ─────────────────────────────────────────────────────────────────────
-    //
     /// Target memory budget. Best-effort, not a hard limit.
     ///
     /// Accepts a byte size (e.g. "8GB"), "total[:pct]" for a percentage of total RAM,
@@ -1454,9 +1498,6 @@ pub struct TransformCommand {
     )]
     pub preserve_input_order: bool,
 
-    //
-    // ─── Partitioning ──────────────────────────────────────────────────────────────────
-    //
     /// Column(s) to partition by (comma-separated for multi-column partitioning).
     /// Partition output by column values. Only primitive types (integers, floats,
     /// strings, dates, etc.) are supported. Complex types (arrays, structs, maps)
@@ -1494,9 +1535,6 @@ pub struct TransformCommand {
     #[arg(long, requires = "list_outputs", help_heading = "Partitioning")]
     pub list_outputs_file: Option<Utf8PathBuf>,
 
-    //
-    // ─── Output Behavior ──────────────────────────────────────────────────────────────
-    //
     /// Create directories as needed.
     #[arg(long, default_value_t = true, help_heading = "Output Behavior")]
     pub create_dirs: bool,
@@ -1504,10 +1542,10 @@ pub struct TransformCommand {
     /// Overwrite existing files.
     #[arg(long, help_heading = "Output Behavior")]
     pub overwrite: bool,
+}
 
-    //
-    // ─── Arrow Options ─────────────────────────────────────────────────────────────────
-    //
+#[derive(Args, Clone, Debug)]
+pub struct ArrowArgs {
     /// Arrow IPC compression codec.
     #[arg(long, value_enum, default_value_t = ArrowCompression::default(), help_heading = "Arrow Options")]
     pub arrow_compression: ArrowCompression,
@@ -1523,10 +1561,10 @@ pub struct TransformCommand {
     /// Arrow writer queue size (number of batches buffered before backpressure).
     #[arg(long, default_value = "16", value_parser = parse_at_least_one, help_heading = "Arrow Options")]
     pub arrow_writing_queue_size: usize,
+}
 
-    //
-    // ─── Parquet Options ───────────────────────────────────────────────────────────────
-    //
+#[derive(Args, Clone, Debug)]
+pub struct ParquetArgs {
     /// Enable bloom filters for columns (default behavior).
     ///
     /// DICTIONARY/BLOOM INTERACTION:
@@ -1938,108 +1976,184 @@ pub struct TransformCommand {
     /// Default: disabled (not needed for most use cases).
     #[arg(long, help_heading = "Parquet Options")]
     pub parquet_arrow_metadata: bool,
+}
 
-    //
-    // ─── Vortex Options ────────────────────────────────────────────────────────────────
-    //
+#[derive(Args, Clone, Debug)]
+pub struct VortexArgs {
     /// Vortex record batch size.
     #[arg(long, help_heading = "Vortex Options")]
     pub vortex_record_batch_size: Option<usize>,
 }
 
+/// Parsed transform arguments with command-scoped format bindings and storage state.
+pub struct TransformCommand {
+    pub from: Option<String>,
+    pub from_many: Vec<String>,
+    pub input_format: Option<String>,
+    pub output_format: Option<String>,
+    pub to: Option<String>,
+    pub to_many: Option<String>,
+    pub dialect: QueryDialect,
+    pub exclude_columns: Vec<String>,
+    pub query: Option<String>,
+    pub sort_by: Option<SortSpec>,
+    pub memory_budget: MemoryBudgetSpec,
+    pub non_spillable_reserve: Option<PoolReserveSpec>,
+    pub memory_pool_top_consumers: usize,
+    pub thread_budget: Option<ThreadBudgetSpec>,
+    pub target_partitions: Option<usize>,
+    pub spill_path: Option<Utf8PathBuf>,
+    pub spill_compression: SpillCompression,
+    pub preserve_input_order: bool,
+    pub by: Option<String>,
+    pub partition_strategy: PartitionStrategy,
+    pub max_open_partitions: Option<usize>,
+    pub list_outputs: Option<ListOutputsFormat>,
+    pub list_outputs_file: Option<Utf8PathBuf>,
+    pub create_dirs: bool,
+    pub overwrite: bool,
+    pub formats: silk_chiffon_core::TransformBindings,
+    pub storage: silk_chiffon_storage::StorageSession,
+}
+
 impl TransformCommand {
-    pub fn new() -> Self {
+    fn from_parsed(
+        args: TransformArgs,
+        formats: silk_chiffon_core::TransformBindings,
+        storage: silk_chiffon_storage::StorageSession,
+    ) -> Self {
+        let TransformArgs {
+            from,
+            from_many,
+            input_format,
+            output_format,
+            to,
+            to_many,
+            dialect,
+            exclude_columns,
+            query,
+            sort_by,
+            memory_budget,
+            non_spillable_reserve,
+            memory_pool_top_consumers,
+            thread_budget,
+            target_partitions,
+            spill_path,
+            spill_compression,
+            preserve_input_order,
+            by,
+            partition_strategy,
+            max_open_partitions,
+            list_outputs,
+            list_outputs_file,
+            create_dirs,
+            overwrite,
+        } = args;
+
         Self {
-            from: None,
-            from_many: vec![],
-            to: None,
-            to_many: None,
-            input_format: None,
-            output_format: None,
-            dialect: QueryDialect::default(),
-            exclude_columns: vec![],
-            query: None,
-            sort_by: None,
-            memory_budget: MemoryBudgetSpec::Total { pct: 80, min: None },
-            non_spillable_reserve: None,
-            memory_pool_top_consumers: 10,
-            preserve_input_order: false,
-            target_partitions: None,
-            thread_budget: None,
-            by: None,
-            partition_strategy: PartitionStrategy::default(),
-            max_open_partitions: None,
-            list_outputs: None,
-            list_outputs_file: None,
-            create_dirs: true,
-            overwrite: false,
-            arrow_compression: ArrowCompression::default(),
-            arrow_format: ArrowIPCFormat::default(),
-            arrow_record_batch_size: 122_880,
-            arrow_writing_queue_size: 16,
-            parquet_bloom_all: None,
-            parquet_bloom_all_off: false,
-            parquet_bloom_column: vec![],
-            parquet_bloom_column_off: vec![],
-            parquet_buffer_size: None,
-            parquet_dictionary_column: vec![],
-            parquet_column_encoding: vec![],
-            parquet_column_encoding_threads: None,
-            parquet_ingestion_queue_size: 1,
-            parquet_encoding_queue_size: 4,
-            parquet_writing_queue_size: 4,
-            parquet_dictionary_column_off: vec![],
-            parquet_compression: ParquetCompression::default(),
-            parquet_compression_level: None,
-            parquet_encoding: None,
-            parquet_io_threads: None,
-            parquet_dictionary_all_off: false,
-            parquet_row_group_concurrency: None,
-            parquet_row_group_size: None,
-            parquet_sorted_metadata: false,
-            parquet_statistics: ParquetStatistics::default(),
-            parquet_writer_version: ParquetWriterVersion::default(),
-            parquet_data_page_size: None,
-            parquet_data_page_row_limit: None,
-            parquet_dictionary_page_size: None,
-            parquet_write_batch_size: None,
-            parquet_offset_index: false,
-            parquet_page_header_statistics: false,
-            parquet_arrow_metadata: false,
-            vortex_record_batch_size: None,
-            spill_path: None,
-            spill_compression: SpillCompression::default(),
+            from,
+            from_many,
+            input_format,
+            output_format,
+            to,
+            to_many,
+            dialect,
+            exclude_columns,
+            query,
+            sort_by,
+            memory_budget,
+            non_spillable_reserve,
+            memory_pool_top_consumers,
+            thread_budget,
+            target_partitions,
+            spill_path,
+            spill_compression,
+            preserve_input_order,
+            by,
+            partition_strategy,
+            max_open_partitions,
+            list_outputs,
+            list_outputs_file,
+            create_dirs,
+            overwrite,
+            formats,
+            storage,
         }
     }
-}
 
-impl Default for TransformCommand {
-    fn default() -> Self {
-        Self::new()
+    /// Returns the format functions bound to this command's parsed arguments.
+    pub fn formats(&self) -> &silk_chiffon_core::TransformBindings {
+        &self.formats
+    }
+
+    /// Returns the storage session created for this command invocation.
+    pub fn storage(&self) -> &silk_chiffon_storage::StorageSession {
+        &self.storage
     }
 }
 
-#[derive(Args, Debug)]
+#[derive(Args)]
+struct InspectSchema {}
+
+/// One format-specific inspection with its bound arguments and storage session.
 pub struct InspectCommand {
-    #[command(subcommand)]
-    pub command: InspectSubcommand,
+    file: Utf8PathBuf,
+    mode: silk_chiffon_core::InspectionMode,
+    inspection: silk_chiffon_core::InspectionBinding,
+    storage: silk_chiffon_storage::StorageSession,
 }
 
-#[derive(Subcommand, Debug)]
-pub enum InspectSubcommand {
-    /// Detect file format
-    Identify(InspectIdentifyArgs),
-    /// Inspect a Parquet file
-    Parquet(InspectParquetArgs),
-    /// Inspect an Arrow IPC file
-    Arrow(InspectArrowArgs),
-    /// Inspect a Vortex file
-    Vortex(InspectVortexArgs),
+impl InspectCommand {
+    fn from_parsed(
+        file: Utf8PathBuf,
+        mode: silk_chiffon_core::InspectionMode,
+        inspection: silk_chiffon_core::InspectionBinding,
+        storage: silk_chiffon_storage::StorageSession,
+    ) -> Self {
+        Self {
+            file,
+            mode,
+            inspection,
+            storage,
+        }
+    }
+
+    /// Returns the storage session created for this command invocation.
+    pub fn storage(&self) -> &silk_chiffon_storage::StorageSession {
+        &self.storage
+    }
+
+    /// Returns the selected format's inspection function and parsed settings.
+    pub fn inspection(&self) -> &silk_chiffon_core::InspectionBinding {
+        &self.inspection
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        Utf8PathBuf,
+        silk_chiffon_core::InspectionMode,
+        silk_chiffon_core::InspectionBinding,
+        silk_chiffon_storage::StorageSession,
+    ) {
+        (self.file, self.mode, self.inspection, self.storage)
+    }
 }
 
-#[derive(Args, Debug)]
-pub struct InspectIdentifyArgs {
-    /// Path to the file to identify
+#[derive(Args, Clone, Debug)]
+struct InspectionArgs {
+    /// Path to the file to inspect
+    #[arg(value_hint = ValueHint::FilePath)]
+    file: Utf8PathBuf,
+    /// Output format (auto-detects based on TTY if not specified)
+    #[arg(long, short = 'f', value_enum, default_value = "auto")]
+    format: OutputFormat,
+}
+
+#[derive(Args, Clone, Debug)]
+/// Arguments for content-based format detection.
+pub struct DetectArgs {
+    /// Path to the input whose format should be detected
     #[arg(value_hint = ValueHint::FilePath)]
     pub file: Utf8PathBuf,
     /// Output format (auto-detects based on TTY if not specified)
@@ -2047,14 +2161,39 @@ pub struct InspectIdentifyArgs {
     pub format: OutputFormat,
 }
 
-#[derive(Args, Debug)]
+/// A detection request with the immutable format registry and command storage session.
+pub struct DetectCommand {
+    args: DetectArgs,
+    storage: silk_chiffon_storage::StorageSession,
+    formats: silk_chiffon_core::FormatRegistry,
+}
+
+impl DetectCommand {
+    fn from_parsed(
+        args: DetectArgs,
+        storage: silk_chiffon_storage::StorageSession,
+        formats: silk_chiffon_core::FormatRegistry,
+    ) -> Self {
+        Self {
+            args,
+            storage,
+            formats,
+        }
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        DetectArgs,
+        silk_chiffon_storage::StorageSession,
+        silk_chiffon_core::FormatRegistry,
+    ) {
+        (self.args, self.storage, self.formats)
+    }
+}
+
+#[derive(Args, Clone, Debug)]
 pub struct InspectParquetArgs {
-    /// Path to the Parquet file
-    #[arg(value_hint = ValueHint::FilePath)]
-    pub file: Utf8PathBuf,
-    /// Output format (auto-detects based on TTY if not specified)
-    #[arg(long, short = 'f', value_enum, default_value = "auto")]
-    pub format: OutputFormat,
     /// Row group to display details for (default: 0)
     #[arg(long, short = 'g', default_value = "0")]
     pub row_group: usize,
@@ -2063,27 +2202,18 @@ pub struct InspectParquetArgs {
     pub pages: Option<String>,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Clone, Debug)]
 pub struct InspectArrowArgs {
-    /// Path to the Arrow IPC file
-    #[arg(value_hint = ValueHint::FilePath)]
-    pub file: Utf8PathBuf,
     /// Show per-record-batch details
     #[arg(long)]
     pub batches: bool,
-    /// Output format (auto-detects based on TTY if not specified)
-    #[arg(long, short = 'f', value_enum, default_value = "auto")]
-    pub format: OutputFormat,
     /// Count total rows (requires reading entire file)
     #[arg(long)]
     pub row_count: bool,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Clone, Debug)]
 pub struct InspectVortexArgs {
-    /// Path to the Vortex file
-    #[arg(value_hint = ValueHint::FilePath)]
-    pub file: Utf8PathBuf,
     /// Show full schema details
     #[arg(long)]
     pub schema: bool,
@@ -2093,9 +2223,6 @@ pub struct InspectVortexArgs {
     /// Show layout structure
     #[arg(long)]
     pub layout: bool,
-    /// Output format (auto-detects based on TTY if not specified)
-    #[arg(long, short = 'f', value_enum, default_value = "auto")]
-    pub format: OutputFormat,
 }
 
 /// Output format for inspect commands
@@ -2127,14 +2254,6 @@ impl OutputFormat {
             OutputFormat::Json => false,
         }
     }
-}
-
-#[derive(ValueEnum, Clone, Copy, Debug)]
-#[value(rename_all = "lowercase")]
-pub enum DataFormat {
-    Arrow,
-    Parquet,
-    Vortex,
 }
 
 #[derive(ValueEnum, PartialEq, Clone, Copy, Debug, Default)]
@@ -2771,7 +2890,6 @@ mod tests {
 
     mod cli_validation_tests {
         use super::*;
-        use clap::Parser;
 
         #[test]
         fn test_preserve_input_order_conflicts_with_query() {

@@ -15,7 +15,7 @@ use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use silk_chiffon::commands::transform;
-use silk_chiffon::{DataFormat, MemoryBudgetSpec, PartitionStrategy, TransformCommand};
+use silk_chiffon::{Cli, Command, PartitionStrategy, TransformCommand};
 use tempfile::TempDir;
 use tokio::runtime::Runtime;
 
@@ -181,29 +181,26 @@ fn write_arrow_file(path: &std::path::Path, schema: &SchemaRef, batches: Vec<Rec
     writer.finish().unwrap();
 }
 
-fn default_transform_command() -> TransformCommand {
-    TransformCommand {
-        from: None,
-        from_many: vec![],
-        to: None,
-        to_many: None,
-        by: None,
-        partition_strategy: PartitionStrategy::SortSingle,
-        exclude_columns: vec![],
-        list_outputs: None,
-        list_outputs_file: None,
-        create_dirs: true,
-        overwrite: true,
-        query: None,
-        dialect: Default::default(),
-        sort_by: None,
-        memory_budget: MemoryBudgetSpec::Total { pct: 80, min: None },
-        preserve_input_order: false,
-        target_partitions: None,
-        input_format: None,
-        output_format: Some(DataFormat::Parquet),
-        ..TransformCommand::default()
-    }
+fn benchmark_transform_command() -> TransformCommand {
+    let Cli {
+        command: Command::Transform(mut command),
+    } = Cli::try_parse_from([
+        "silk-chiffon",
+        "transform",
+        "--from",
+        "input.arrow",
+        "--to",
+        "output.parquet",
+        "--create-dirs",
+        "--overwrite",
+    ])
+    .unwrap()
+    else {
+        unreachable!()
+    };
+    command.from = None;
+    command.to = None;
+    command
 }
 
 type BatchCreator = fn(&SchemaRef, usize, usize) -> RecordBatch;
@@ -271,7 +268,7 @@ fn run_partition_benchmark(
                         to_many: Some(fixture.output_template.clone()),
                         by: Some("field1".to_string()),
                         partition_strategy,
-                        ..default_transform_command()
+                        ..benchmark_transform_command()
                     };
 
                     rt.block_on(async {

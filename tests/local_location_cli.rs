@@ -40,7 +40,7 @@ fn inspect_accepts_a_local_file_url() {
     TestFile::write_arrow_batch(&input, &batch);
 
     cargo::cargo_bin_cmd!("silk-chiffon")
-        .args(["inspect", "identify", &input_url, "--format", "text"])
+        .args(["detect", &input_url, "--format", "text"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Arrow IPC"));
@@ -62,7 +62,7 @@ fn inspect_rejects_noncanonical_file_urls() {
         canonical_url.replacen("file:///", "file:////", 1),
     ] {
         cargo::cargo_bin_cmd!("silk-chiffon")
-            .args(["inspect", "identify", &invalid, "--format", "text"])
+            .args(["detect", &invalid, "--format", "text"])
             .assert()
             .failure();
     }

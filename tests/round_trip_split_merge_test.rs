@@ -8,6 +8,7 @@
 //!
 //! Tests arrow, parquet, and vortex formats to ensure data survives a split + merge round trip.
 
+use std::ffi::OsString;
 use std::ops::Range;
 use std::path::Path;
 use std::sync::Arc;
@@ -167,12 +168,12 @@ async fn row_count(ctx: &SessionContext, table: &str) -> usize {
 async fn register_table(ctx: &mut SessionContext, name: &str, path: &Path, ext: &str) {
     let path_str = path.to_string_lossy().to_string();
     let source: Box<dyn DataSource> = match ext {
-        "arrow" => Box::new(ArrowDataSource::new(path_str)),
-        "parquet" => Box::new(ParquetDataSource::new(path_str)),
-        "vortex" => Box::new(VortexDataSource::new(path_str)),
+        "arrow" => Box::new(ArrowDataSource::new(path_str, ctx.clone())),
+        "parquet" => Box::new(ParquetDataSource::new(path_str, ctx.clone())),
+        "vortex" => Box::new(VortexDataSource::new(path_str, ctx.clone())),
         _ => panic!("unsupported format: {ext}"),
     };
-    let provider = source.as_table_provider(ctx).await.unwrap();
+    let provider = source.table_provider().await.unwrap();
     ctx.register_table(name, provider).unwrap();
 }
 
@@ -210,6 +211,28 @@ async fn write_test_data(path: &Path, schema: &SchemaRef, ext: &str) {
     sink.finish().await.unwrap();
 }
 
+fn transform_defaults() -> silk_chiffon::TransformCommand {
+    let args = [
+        "silk-chiffon",
+        "transform",
+        "--from",
+        "input.arrow",
+        "--to",
+        "output.arrow",
+    ]
+    .into_iter()
+    .map(OsString::from);
+    let silk_chiffon::Cli {
+        command: silk_chiffon::Command::Transform(mut command),
+    } = silk_chiffon::Cli::try_parse_from(args).unwrap()
+    else {
+        unreachable!()
+    };
+    command.from = None;
+    command.to = None;
+    command
+}
+
 async fn round_trip_split_merge(ext: &str) {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join(format!("input.{ext}"));
@@ -231,7 +254,7 @@ async fn round_trip_split_merge(ext: &str) {
         ),
         by: Some("partition_key".to_string()),
         create_dirs: true,
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -246,7 +269,7 @@ async fn round_trip_split_merge(ext: &str) {
                 .to_string(),
         ],
         to: Some(output.to_string_lossy().to_string()),
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();

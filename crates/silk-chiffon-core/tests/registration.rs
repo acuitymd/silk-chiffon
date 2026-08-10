@@ -23,59 +23,32 @@ use datafusion::{
     },
     prelude::SessionContext,
 };
-use futures::StreamExt;
 use silk_chiffon_core::{
-    DataSink, DataSinkFactory, DataSource, DataSourceCapabilities, FormatCapability, FormatFuture,
-    FormatInspection, FormatInvocationError, FormatRegistration, FormatRegistry,
-    FormatRegistryError, FormatTransform, Identification, InputAccess, InspectionOutput,
-    OutputSortColumn, RowCount, SinkFactoryContext, SinkResult, SortDirection, StreamBoundedness,
+    DataSink, DataSource, DetectedFormat, FormatDefinition, FormatFuture, FormatMatch,
+    FormatOperation, FormatOperationError, FormatRegistry, FormatRegistryError,
+    InspectionDefinition, InspectionMode, InspectionOutput, OutputOrderingColumn, Replayability,
+    RowCount, RowCountCapability, SinkBinding, SinkBindingConfig, SinkConcurrency, SinkResult,
+    SortDirection, TransformDefinition,
 };
 use silk_chiffon_storage::{LocationInput, StorageHandle, local};
 
-#[derive(Args, Clone, Debug, Eq, PartialEq)]
-struct TestFormatArgs {
-    /// Selects a test-format worker count.
-    ///
-    /// This value configures the registered source and sink factories.
+#[derive(Args)]
+struct TestArgs {
+    /// Number embedded in the test source and sink.
     #[arg(long, default_value_t = 4)]
-    test_format_workers: usize,
+    test_workers: usize,
 }
 
-#[derive(Args, Clone, Debug, Eq, PartialEq)]
-struct TestInspectionArgs {
-    /// Includes details in test-format inspection output.
+#[derive(Args)]
+struct InspectionArgs {
     #[arg(long)]
-    test_format_details: bool,
+    test_details: bool,
 }
 
-#[derive(Args, Clone, Debug)]
-struct ConflictingIdArgs {
-    #[arg(long)]
-    test_format_workers: Option<usize>,
-}
-
-#[derive(Args, Clone, Debug)]
-struct FirstLongArgs {
-    #[arg(long = "shared-long")]
-    first_long: bool,
-}
-
-#[derive(Args, Clone, Debug)]
-struct SecondLongArgs {
-    #[arg(long = "shared-long")]
-    second_long: bool,
-}
-
-#[derive(Args, Clone, Debug)]
-struct FirstShortArgs {
-    #[arg(long = "first-short", short = 'z')]
-    first_short: bool,
-}
-
-#[derive(Args, Clone, Debug)]
-struct SecondShortArgs {
-    #[arg(long = "second-short", short = 'z')]
-    second_short: bool,
+#[derive(Args)]
+struct SharedArgs {
+    #[arg(long = "shared")]
+    value: bool,
 }
 
 struct TestSource {
@@ -89,105 +62,50 @@ impl DataSource for TestSource {
         &self.name
     }
 
-    fn capabilities(&self) -> DataSourceCapabilities {
-        DataSourceCapabilities::new(StreamBoundedness::Finite, InputAccess::RandomAccess)
+    fn replayability(&self) -> Replayability {
+        Replayability::Replayable
     }
 
-    async fn schema(&self) -> Result<SchemaRef> {
-        Ok(Arc::clone(&self.schema))
+    fn row_count_capability(&self) -> Option<&dyn RowCountCapability> {
+        Some(self)
     }
 
-    async fn row_count(&self) -> Result<RowCount> {
-        Ok(RowCount::Exact(0))
-    }
-
-    async fn as_table_provider(&self, _: &mut SessionContext) -> Result<Arc<dyn TableProvider>> {
+    async fn table_provider(&self) -> Result<Arc<dyn TableProvider>> {
         Ok(Arc::new(EmptyTable::new(Arc::clone(&self.schema))))
     }
 }
 
-#[derive(Debug)]
-struct TestPartitionStream {
-    schema: SchemaRef,
-    boundedness: StreamBoundedness,
-}
-
-impl PartitionStream for TestPartitionStream {
-    fn schema(&self) -> &SchemaRef {
-        &self.schema
-    }
-
-    fn execute(&self, _: Arc<TaskContext>) -> SendableRecordBatchStream {
-        match self.boundedness {
-            StreamBoundedness::Finite => Box::pin(RecordBatchStreamAdapter::new(
-                Arc::clone(&self.schema),
-                futures::stream::empty::<Result<RecordBatch, DataFusionError>>(),
-            )),
-            StreamBoundedness::Infinite => Box::pin(RecordBatchStreamAdapter::new(
-                Arc::clone(&self.schema),
-                futures::stream::pending::<Result<RecordBatch, DataFusionError>>(),
-            )),
-        }
-    }
-}
-
-struct DirectStreamSource {
-    schema: SchemaRef,
-    boundedness: StreamBoundedness,
-}
-
 #[async_trait]
-impl DataSource for DirectStreamSource {
-    fn name(&self) -> &str {
-        "direct-stream"
+impl RowCountCapability for TestSource {
+    async fn row_count(&self) -> Result<RowCount> {
+        Ok(RowCount::Exact(0))
     }
+}
 
-    fn capabilities(&self) -> DataSourceCapabilities {
-        DataSourceCapabilities::new(self.boundedness, InputAccess::Sequential)
-    }
-
-    async fn schema(&self) -> Result<SchemaRef> {
-        Ok(Arc::clone(&self.schema))
-    }
-
-    async fn as_table_provider(&self, _: &mut SessionContext) -> Result<Arc<dyn TableProvider>> {
-        let partition = Arc::new(TestPartitionStream {
-            schema: Arc::clone(&self.schema),
-            boundedness: self.boundedness,
-        });
-        let table = StreamingTable::try_new(Arc::clone(&self.schema), vec![partition])?
-            .with_infinite_table(self.boundedness == StreamBoundedness::Infinite);
-        Ok(Arc::new(table))
-    }
+struct TestSinkBinding {
+    opened: Arc<AtomicUsize>,
+    workers: usize,
+    thread_budget: NonZeroUsize,
+    output_ordering: Arc<[OutputOrderingColumn]>,
 }
 
 struct TestSink {
     output: url::Url,
-    created: Arc<AtomicUsize>,
+    opened: Arc<AtomicUsize>,
     workers: usize,
     thread_budget: NonZeroUsize,
-    sorting: bool,
-    output_ordering: Arc<[OutputSortColumn]>,
-}
-
-struct TestSinkFactory {
-    created: Arc<AtomicUsize>,
-    workers: usize,
-    thread_budget: NonZeroUsize,
-    sorting: bool,
-    output_ordering: Arc<[OutputSortColumn]>,
+    output_ordering: Arc<[OutputOrderingColumn]>,
 }
 
 #[async_trait]
-impl DataSinkFactory for TestSinkFactory {
-    async fn create(&self, handle: StorageHandle, _: SchemaRef) -> Result<Box<dyn DataSink>> {
-        self.created.fetch_add(1, Ordering::SeqCst);
+impl SinkBinding for TestSinkBinding {
+    async fn open_sink(&self, handle: StorageHandle, _: SchemaRef) -> Result<Box<dyn DataSink>> {
+        self.opened.fetch_add(1, Ordering::SeqCst);
         Ok(Box::new(TestSink {
             output: handle.url().clone(),
-            created: Arc::clone(&self.created),
+            opened: Arc::clone(&self.opened),
             workers: self.workers,
             thread_budget: self.thread_budget,
-            sorting: self.sorting,
             output_ordering: Arc::clone(&self.output_ordering),
         }))
     }
@@ -199,7 +117,7 @@ impl DataSink for TestSink {
         Ok(())
     }
 
-    async fn finish(&mut self) -> Result<SinkResult> {
+    async fn finish(self: Box<Self>) -> Result<SinkResult> {
         let ordering_score = self
             .output_ordering
             .iter()
@@ -215,85 +133,80 @@ impl DataSink for TestSink {
             files_written: vec![self.output.clone()],
             rows_written: (self.workers
                 + self.thread_budget.get()
-                + usize::from(self.sorting)
-                + self.created.load(Ordering::SeqCst)
+                + self.opened.load(Ordering::SeqCst)
                 + ordering_score) as u64,
         })
     }
 }
 
-fn identifier(handle: &StorageHandle) -> FormatFuture<'_, Option<Identification>> {
+fn detect_test(handle: &StorageHandle) -> FormatFuture<'_, Option<FormatMatch>> {
     Box::pin(async move {
         Ok((handle.object_path().extension() == Some("test"))
-            .then(|| Identification::with_variant("test-stream")))
+            .then(|| FormatMatch::with_variant("test-stream")))
     })
 }
 
-fn source<'a>(
+fn create_source<'a>(
     handle: &'a StorageHandle,
-    settings: &'a TestFormatArgs,
+    session: &'a SessionContext,
+    settings: &'a TestArgs,
 ) -> FormatFuture<'a, Box<dyn DataSource>> {
     Box::pin(async move {
+        let partitions = session.state().config_options().execution.target_partitions;
         Ok(Box::new(TestSource {
-            name: format!("{}:{}", handle.url(), settings.test_format_workers),
-            schema: Arc::new(arrow::datatypes::Schema::empty()),
+            name: format!("{}:{}:{partitions}", handle.url(), settings.test_workers),
+            schema: Arc::new(Schema::empty()),
         }) as Box<dyn DataSource>)
     })
 }
 
-fn sink<'a>(
-    context: &'a SinkFactoryContext,
-    settings: &'a TestFormatArgs,
-) -> FormatFuture<'a, Box<dyn DataSinkFactory>> {
+fn bind_sink<'a>(
+    config: &'a SinkBindingConfig,
+    settings: &'a TestArgs,
+) -> FormatFuture<'a, Box<dyn SinkBinding>> {
     Box::pin(async move {
-        Ok(Box::new(TestSinkFactory {
-            created: Arc::new(AtomicUsize::new(0)),
-            workers: settings.test_format_workers,
-            thread_budget: context.thread_budget(),
-            sorting: context.pipeline_sorts(),
-            output_ordering: Arc::from(context.output_ordering()),
-        }) as Box<dyn DataSinkFactory>)
+        Ok(Box::new(TestSinkBinding {
+            opened: Arc::new(AtomicUsize::new(0)),
+            workers: settings.test_workers,
+            thread_budget: config.thread_budget(),
+            output_ordering: Arc::from(config.output_ordering()),
+        }) as Box<dyn SinkBinding>)
     })
 }
 
-fn inspector<'a>(
+fn inspect<'a>(
     handle: &'a StorageHandle,
-    settings: &'a TestInspectionArgs,
+    mode: InspectionMode,
+    settings: &'a InspectionArgs,
 ) -> FormatFuture<'a, InspectionOutput> {
     Box::pin(async move {
-        Ok(InspectionOutput::Text(format!(
-            "{} details={}",
-            handle.url(),
-            settings.test_format_details
-        )))
+        Ok(match mode {
+            InspectionMode::Text => InspectionOutput::Text(format!(
+                "{} details={}",
+                handle.url(),
+                settings.test_details
+            )),
+            InspectionMode::Json => InspectionOutput::Json(serde_json::json!({
+                "details": settings.test_details,
+            })),
+        })
     })
 }
 
-fn registration(name: &'static str) -> FormatRegistration {
-    let transform = FormatTransform::with_args::<TestFormatArgs>()
-        .source(source)
-        .sink(sink)
-        .build();
-    let inspection = FormatInspection::with_args::<TestInspectionArgs>(inspector);
-
-    FormatRegistration::builder(name)
+fn test_format(name: &'static str) -> FormatDefinition {
+    FormatDefinition::builder(name)
         .aliases(["t"])
         .extensions(["test"])
-        .identifier(identifier)
-        .identifier_priority(7)
-        .transform(transform)
-        .inspection(inspection)
+        .detector(detect_test)
+        .detection_priority(7)
+        .transform(
+            TransformDefinition::with_args::<TestArgs>()
+                .source(create_source)
+                .sink(bind_sink)
+                .build(),
+        )
+        .inspection(InspectionDefinition::with_args::<InspectionArgs>(inspect))
         .build()
-}
-
-fn parse_transform(registry: &FormatRegistry, arguments: &[&str]) -> usize {
-    let command = registry.augment_transform_args(Command::new("test"));
-    let matches = command.try_get_matches_from(arguments).unwrap();
-    let configured = registry.bind_transform_args(&matches).unwrap();
-    let transform = configured.get("test").unwrap();
-    let handle = local_handle("input.test");
-    let source = futures::executor::block_on(transform.create_source(&handle)).unwrap();
-    source.name().rsplit_once(':').unwrap().1.parse().unwrap()
 }
 
 fn local_handle(path: &str) -> StorageHandle {
@@ -301,364 +214,219 @@ fn local_handle(path: &str) -> StorageHandle {
     local::session().unwrap().input_handle(&location).unwrap()
 }
 
+fn bind_test_transform(
+    registry: &FormatRegistry,
+    arguments: &[&str],
+) -> silk_chiffon_core::TransformBindings {
+    let matches = registry
+        .augment_transform_args(Command::new("test"))
+        .try_get_matches_from(arguments)
+        .unwrap();
+    registry.bind_transform(&matches).unwrap()
+}
+
 #[test]
-fn registration_keeps_capabilities_independently_optional() {
-    let empty = FormatRegistration::builder("empty").build();
-    assert!(!empty.has_identifier());
+fn definitions_keep_capabilities_independently_optional() {
+    let empty = FormatDefinition::builder("empty").build();
+    assert!(!empty.has_detector());
     assert!(!empty.has_source());
     assert!(!empty.has_sink());
     assert!(!empty.has_inspector());
 
-    let source_only = FormatRegistration::builder("source-only")
+    let source_only = FormatDefinition::builder("source-only")
         .transform(
-            FormatTransform::with_args::<TestFormatArgs>()
-                .source(source)
+            TransformDefinition::with_args::<TestArgs>()
+                .source(create_source)
                 .build(),
         )
         .build();
-    assert!(!source_only.has_identifier());
     assert!(source_only.has_source());
     assert!(!source_only.has_sink());
-    assert!(!source_only.has_inspector());
 }
 
 #[test]
-fn registered_format_contributes_help_and_parses_ordinary_clap_args() {
+fn transform_arguments_remain_bound_to_typed_functions() {
     let registry = FormatRegistry::builder()
-        .register(registration("test"))
+        .register(test_format("test"))
         .build()
         .unwrap();
-
     let help = registry
         .augment_transform_args(Command::new("test"))
         .render_long_help()
         .to_string();
-    assert!(help.contains("--test-format-workers"));
-    assert!(help.contains("Selects a test-format worker count."));
-    assert!(help.contains("This value configures the registered source and sink factories."));
+    assert!(help.contains("--test-workers"));
 
-    assert_eq!(
-        parse_transform(&registry, &["test", "--test-format-workers", "9"]),
-        9
-    );
+    let bindings = bind_test_transform(&registry, &["test", "--test-workers", "9"]);
+    let session = SessionContext::new();
+    let source = futures::executor::block_on(
+        bindings
+            .get("test")
+            .unwrap()
+            .create_source(&local_handle("input.test"), &session),
+    )
+    .unwrap();
+    assert!(source.name().contains(":9:"));
+    assert!(source.row_count_capability().is_some());
 }
 
 #[test]
-fn inspection_args_are_scoped_to_the_typed_inspector_callback() {
-    let registration = registration("test");
-    let command = registration.augment_inspection_args(Command::new("inspect-test"));
-    let matches = command
-        .try_get_matches_from(["inspect-test", "--test-format-details"])
+fn inspection_arguments_and_mode_reach_the_inspector() {
+    let format = test_format("test");
+    let matches = format
+        .augment_inspection_args(Command::new("inspect"))
+        .try_get_matches_from(["inspect", "--test-details"])
         .unwrap();
-    let configured = registration.bind_inspection_args(&matches).unwrap();
-    let handle = local_handle("input.test");
-
-    assert_eq!(configured.format(), "test");
-    let output = futures::executor::block_on(configured.inspect(&handle)).unwrap();
-
+    let binding = format.bind_inspection(&matches).unwrap();
+    let output = futures::executor::block_on(
+        binding.inspect(&local_handle("input.test"), InspectionMode::Json),
+    )
+    .unwrap();
     assert_eq!(
         output,
-        InspectionOutput::Text(format!("{} details=true", handle.url()))
+        InspectionOutput::Json(serde_json::json!({ "details": true }))
     );
 }
 
 #[test]
 fn names_aliases_and_extensions_are_case_insensitive() {
     let registry = FormatRegistry::builder()
-        .register(registration("test"))
+        .register(test_format("test"))
         .build()
         .unwrap();
-
     assert_eq!(registry.get("TEST").unwrap().name(), "test");
     assert_eq!(registry.get("T").unwrap().name(), "test");
-    assert_eq!(registry.by_extension("TEST").unwrap().name(), "test");
-    assert_eq!(registry.by_extension(".test").unwrap().name(), "test");
+    assert_eq!(registry.by_extension(".TEST").unwrap().name(), "test");
 
-    let matches = registry
-        .augment_transform_args(Command::new("test"))
-        .try_get_matches_from(["test"])
-        .unwrap();
-    let configured = registry.bind_transform_args(&matches).unwrap();
-    assert_eq!(configured.get("TEST").unwrap().format(), "test");
-    assert_eq!(configured.get("T").unwrap().format(), "test");
-    assert_eq!(configured.by_extension(".TEST").unwrap().format(), "test");
-    assert_eq!(configured.formats().count(), 1);
+    let bindings = bind_test_transform(&registry, &["test"]);
+    assert_eq!(bindings.get("T").unwrap().format(), "test");
+    assert_eq!(bindings.by_extension("TEST").unwrap().format(), "test");
 }
 
 #[test]
-fn unregistered_format_is_unavailable() {
-    let registry = FormatRegistry::builder()
-        .register(registration("test"))
-        .build()
-        .unwrap();
-
-    assert!(registry.get("missing").is_none());
-    assert!(registry.by_extension("missing").is_none());
-}
-
-#[test]
-fn duplicate_names_aliases_and_extensions_are_rejected() {
-    let duplicate_name = FormatRegistry::builder()
-        .register(registration("test"))
-        .register(registration("TEST"))
+fn duplicate_claims_report_every_format() {
+    let names = FormatRegistry::builder()
+        .register(FormatDefinition::builder("dup").build())
+        .register(FormatDefinition::builder("two").aliases(["DUP"]).build())
+        .register(FormatDefinition::builder("three").aliases(["dup"]).build())
         .build();
     assert!(matches!(
-        duplicate_name,
-        Err(FormatRegistryError::DuplicateName(name)) if name == "test"
+        names,
+        Err(FormatRegistryError::DuplicateName { name, formats })
+            if name == "dup" && formats == ["dup", "two", "three"]
     ));
 
-    let duplicate_alias = FormatRegistry::builder()
-        .register(registration("test"))
-        .register(FormatRegistration::builder("other").aliases(["T"]).build())
+    let extensions = FormatRegistry::builder()
+        .register(
+            FormatDefinition::builder("one")
+                .extensions(["same"])
+                .build(),
+        )
+        .register(
+            FormatDefinition::builder("two")
+                .extensions([".SAME"])
+                .build(),
+        )
+        .register(
+            FormatDefinition::builder("three")
+                .extensions(["same"])
+                .build(),
+        )
         .build();
     assert!(matches!(
-        duplicate_alias,
-        Err(FormatRegistryError::DuplicateAlias(alias)) if alias == "t"
+        extensions,
+        Err(FormatRegistryError::DuplicateExtension { extension, formats })
+            if extension == "same" && formats == ["one", "two", "three"]
     ));
 
-    let duplicate_extension = FormatRegistry::builder()
-        .register(registration("test"))
+    let arguments = FormatRegistry::builder()
         .register(
-            FormatRegistration::builder("other")
-                .extensions([".TEST"])
+            FormatDefinition::builder("one")
+                .transform(TransformDefinition::with_args::<SharedArgs>().build())
+                .build(),
+        )
+        .register(
+            FormatDefinition::builder("two")
+                .transform(TransformDefinition::with_args::<SharedArgs>().build())
+                .build(),
+        )
+        .register(
+            FormatDefinition::builder("three")
+                .transform(TransformDefinition::with_args::<SharedArgs>().build())
                 .build(),
         )
         .build();
     assert!(matches!(
-        duplicate_extension,
-        Err(FormatRegistryError::DuplicateExtension(extension)) if extension == "test"
-    ));
-}
-
-#[test]
-fn duplicate_transform_argument_ids_long_names_and_short_names_are_rejected() {
-    let duplicate_id = FormatRegistry::builder()
-        .register(registration("test"))
-        .register(
-            FormatRegistration::builder("other")
-                .transform(FormatTransform::with_args::<ConflictingIdArgs>().build())
-                .build(),
-        )
-        .build();
-    assert!(matches!(
-        duplicate_id,
-        Err(FormatRegistryError::DuplicateCliArgument(argument))
-            if argument == "test_format_workers"
-    ));
-
-    let duplicate_long = FormatRegistry::builder()
-        .register(
-            FormatRegistration::builder("first")
-                .transform(FormatTransform::with_args::<FirstLongArgs>().build())
-                .build(),
-        )
-        .register(
-            FormatRegistration::builder("second")
-                .transform(FormatTransform::with_args::<SecondLongArgs>().build())
-                .build(),
-        )
-        .build();
-    assert!(matches!(
-        duplicate_long,
-        Err(FormatRegistryError::DuplicateCliArgument(argument)) if argument == "second_long"
-    ));
-
-    let duplicate_short = FormatRegistry::builder()
-        .register(
-            FormatRegistration::builder("first")
-                .transform(FormatTransform::with_args::<FirstShortArgs>().build())
-                .build(),
-        )
-        .register(
-            FormatRegistration::builder("second")
-                .transform(FormatTransform::with_args::<SecondShortArgs>().build())
-                .build(),
-        )
-        .build();
-    assert!(matches!(
-        duplicate_short,
-        Err(FormatRegistryError::DuplicateCliArgument(argument)) if argument == "second_short"
+        arguments,
+        Err(FormatRegistryError::DuplicateCliArgument { argument, formats })
+            if argument == "value" && formats == ["one", "two", "three"]
     ));
 }
 
+fn detected_name(detected: Option<DetectedFormat>) -> Option<&'static str> {
+    detected.map(|detected| detected.format())
+}
+
 #[test]
-fn identifier_iteration_uses_priority_then_registration_order() {
+fn detection_uses_priority_then_registration_order() {
     let registry = FormatRegistry::builder()
         .register(
-            FormatRegistration::builder("late")
-                .identifier(identifier)
-                .identifier_priority(10)
+            FormatDefinition::builder("late")
+                .detector(detect_test)
+                .detection_priority(10)
                 .build(),
         )
         .register(
-            FormatRegistration::builder("first")
-                .identifier(identifier)
-                .identifier_priority(1)
+            FormatDefinition::builder("first")
+                .detector(detect_test)
+                .detection_priority(1)
                 .build(),
         )
         .register(
-            FormatRegistration::builder("second")
-                .identifier(identifier)
-                .identifier_priority(1)
+            FormatDefinition::builder("second")
+                .detector(detect_test)
+                .detection_priority(1)
                 .build(),
         )
-        .register(FormatRegistration::builder("none").build())
         .build()
         .unwrap();
-
-    assert_eq!(
-        registry
-            .identifiers()
-            .map(FormatRegistration::name)
-            .collect::<Vec<_>>(),
-        ["first", "second", "late"]
-    );
+    let detected =
+        futures::executor::block_on(registry.detect(&local_handle("input.test"))).unwrap();
+    assert_eq!(detected_name(detected), Some("first"));
 }
 
 #[test]
-fn explicit_async_capability_outputs_preserve_typed_settings_and_context() {
+fn one_sink_binding_shares_state_across_opened_sinks() {
     let registry = FormatRegistry::builder()
-        .register(registration("test"))
+        .register(test_format("test"))
         .build()
         .unwrap();
-    let matches = registry
-        .augment_transform_args(Command::new("test"))
-        .try_get_matches_from(["test", "--test-format-workers", "6"])
-        .unwrap();
-    let configured = registry.bind_transform_args(&matches).unwrap();
-    let registration = registry.get("test").unwrap();
-    let transform = configured.get(registration.name()).unwrap();
-    let handle = local_handle("input.test");
-
-    let identified = futures::executor::block_on(registration.identify(&handle))
-        .unwrap()
-        .unwrap();
-    assert_eq!(identified.format(), "test");
-    assert_eq!(identified.variant(), Some("test-stream"));
-
-    let source = futures::executor::block_on(transform.create_source(&handle)).unwrap();
-    assert_eq!(source.name(), format!("{}:6", handle.url()));
-    assert!(
-        futures::executor::block_on(source.schema())
-            .unwrap()
-            .fields()
-            .is_empty()
-    );
-    assert_eq!(
-        futures::executor::block_on(source.row_count()).unwrap(),
-        RowCount::Exact(0)
-    );
-    let mut session = SessionContext::new();
-    let mut stream = futures::executor::block_on(source.as_stream(&mut session)).unwrap();
-    assert!(
-        futures::executor::block_on(stream.next()).is_none(),
-        "the default stream should execute the source's table provider"
-    );
-
-    let context = SinkFactoryContext::new(NonZeroUsize::new(2).unwrap(), false, vec![]);
-    let factory = futures::executor::block_on(transform.create_sink_factory(&context)).unwrap();
-    let schema = Arc::new(arrow::datatypes::Schema::empty());
-    let mut sink = futures::executor::block_on(factory.create(handle.clone(), schema)).unwrap();
-    let result = futures::executor::block_on(sink.finish()).unwrap();
-    assert_eq!(
-        result.files_written.as_slice(),
-        std::slice::from_ref(handle.url())
-    );
-    assert_eq!(result.rows_written, 9);
-}
-
-#[test]
-fn direct_stream_sources_do_not_require_storage_handles() {
-    let source = DirectStreamSource {
-        schema: Arc::new(arrow::datatypes::Schema::empty()),
-        boundedness: StreamBoundedness::Infinite,
-    };
-
-    let capabilities = source.capabilities();
-    assert_eq!(capabilities.boundedness(), StreamBoundedness::Infinite);
-    assert_eq!(capabilities.input_access(), InputAccess::Sequential);
-    assert_eq!(
-        futures::executor::block_on(source.row_count()).unwrap(),
-        RowCount::Unknown
-    );
-
-    let mut session = SessionContext::new();
-    let provider = futures::executor::block_on(source.as_table_provider(&mut session)).unwrap();
-    assert_eq!(provider.schema(), source.schema);
-    let state = session.state();
-    let plan = futures::executor::block_on(provider.scan(&state, None, &[], None)).unwrap();
-    assert!(plan.properties().boundedness.is_unbounded());
-}
-
-#[test]
-fn finite_sequential_sources_can_sort_without_a_row_count() {
-    let source = DirectStreamSource {
-        schema: Arc::new(Schema::new(vec![Field::new(
-            "value",
-            DataType::Int32,
-            false,
-        )])),
-        boundedness: StreamBoundedness::Finite,
-    };
-
-    let capabilities = source.capabilities();
-    assert_eq!(capabilities.boundedness(), StreamBoundedness::Finite);
-    assert_eq!(capabilities.input_access(), InputAccess::Sequential);
-    assert_eq!(
-        futures::executor::block_on(source.row_count()).unwrap(),
-        RowCount::Unknown
-    );
-
-    let mut session = SessionContext::new();
-    let provider = futures::executor::block_on(source.as_table_provider(&mut session)).unwrap();
-    let data_frame = session
-        .read_table(provider)
-        .unwrap()
-        .sort(vec![datafusion::prelude::col("value").sort(true, true)])
-        .unwrap();
-    let plan = futures::executor::block_on(data_frame.create_physical_plan()).unwrap();
-    assert!(!plan.properties().boundedness.is_unbounded());
-}
-
-#[test]
-fn one_typed_sink_factory_shares_state_across_output_sinks() {
-    let registry = FormatRegistry::builder()
-        .register(registration("test"))
-        .build()
-        .unwrap();
-    let matches = registry
-        .augment_transform_args(Command::new("test"))
-        .try_get_matches_from(["test", "--test-format-workers", "6"])
-        .unwrap();
-    let configured = registry.bind_transform_args(&matches).unwrap();
-    let transform = configured.get("test").unwrap();
-    let context = SinkFactoryContext::new(
+    let bindings = bind_test_transform(&registry, &["test", "--test-workers", "6"]);
+    let transform = bindings.get("test").unwrap();
+    let config = SinkBindingConfig::new(
         NonZeroUsize::new(3).unwrap(),
-        true,
-        vec![
-            OutputSortColumn::new("customer_id", SortDirection::Ascending),
-            OutputSortColumn::new("event_time", SortDirection::Descending),
-        ],
+        SinkConcurrency::Concurrent,
+        vec![OutputOrderingColumn::new(
+            "event_time",
+            SortDirection::Descending,
+        )],
     );
-    let factory = futures::executor::block_on(transform.create_sink_factory(&context)).unwrap();
-    let schema = Arc::new(arrow::datatypes::Schema::empty());
+    let binding = futures::executor::block_on(transform.bind_sink(&config)).unwrap();
+    let schema = Arc::new(Schema::empty());
     let first_handle = local_handle("first.test");
     let second_handle = local_handle("second.test");
-
-    let mut first =
-        futures::executor::block_on(factory.create(first_handle.clone(), Arc::clone(&schema)))
+    let first =
+        futures::executor::block_on(binding.open_sink(first_handle.clone(), Arc::clone(&schema)))
             .unwrap();
-    let mut second =
-        futures::executor::block_on(factory.create(second_handle.clone(), schema)).unwrap();
+    let second =
+        futures::executor::block_on(binding.open_sink(second_handle.clone(), schema)).unwrap();
     let first_result = futures::executor::block_on(first.finish()).unwrap();
     let second_result = futures::executor::block_on(second.finish()).unwrap();
-
     assert_eq!(first_result.files_written, vec![first_handle.url().clone()]);
     assert_eq!(
         second_result.files_written,
         vec![second_handle.url().clone()]
     );
-    let expected_rows = 6 + 3 + 1 + 2 + ("customer_id".len() + 1) + ("event_time".len() + 2);
+    let expected_rows = 6 + 3 + 2 + "event_time".len() + 2;
     assert_eq!(first_result.rows_written, expected_rows as u64);
     assert_eq!(second_result.rows_written, expected_rows as u64);
 }
@@ -666,70 +434,121 @@ fn one_typed_sink_factory_shares_state_across_output_sinks() {
 #[test]
 fn unavailable_capabilities_return_structured_errors() {
     let registry = FormatRegistry::builder()
-        .register(FormatRegistration::builder("empty").build())
+        .register(
+            FormatDefinition::builder("empty")
+                .transform(TransformDefinition::without_args().build())
+                .build(),
+        )
         .build()
         .unwrap();
-    let matches = registry
-        .augment_transform_args(Command::new("test"))
-        .try_get_matches_from(["test"])
-        .unwrap();
-    let configured = registry.bind_transform_args(&matches).unwrap();
-    let transform = configured.get("empty").unwrap();
-    let handle = local_handle("input.test");
-
-    let error = futures::executor::block_on(transform.create_source(&handle))
-        .err()
-        .unwrap();
+    let bindings = bind_test_transform(&registry, &["test"]);
+    let error = futures::executor::block_on(
+        bindings
+            .get("empty")
+            .unwrap()
+            .create_source(&local_handle("input.test"), &SessionContext::new()),
+    )
+    .err()
+    .unwrap();
     assert!(matches!(
         error,
-        FormatInvocationError::CapabilityUnavailable {
+        FormatOperationError::Unsupported {
             format: "empty",
-            capability: FormatCapability::Source,
+            operation: FormatOperation::SourceCreation,
         }
     ));
 }
 
-#[test]
-fn registration_binds_settings_without_any() {
-    let library = include_str!("../src/lib.rs");
-    let registration = include_str!("../src/registration.rs");
-    let source_contract = include_str!("../src/data_source.rs");
-    let sink_contract = include_str!("../src/data_sink.rs");
-    let inspection_contract = include_str!("../src/inspection.rs");
-    let public_sources = [
-        library,
-        registration,
-        source_contract,
-        sink_contract,
-        inspection_contract,
-    ]
-    .join("\n");
+#[derive(Debug)]
+struct TestPartitionStream {
+    schema: SchemaRef,
+    infinite: bool,
+}
 
-    for forbidden in [
-        "std::any::Any",
-        "dyn Any",
-        "get_any",
-        "CapabilityResult",
-        "Box<dyn Any",
-        "SettingsTypeMismatch",
-    ] {
-        assert!(
-            !public_sources.contains(forbidden),
-            "public contract contains {forbidden}"
-        );
+impl PartitionStream for TestPartitionStream {
+    fn schema(&self) -> &SchemaRef {
+        &self.schema
     }
 
-    let binding = include_str!("../src/registration/binding.rs");
-    assert!(!binding.contains("std::any::Any"));
-    assert!(!binding.contains("dyn Any"));
-    assert!(binding.contains("dyn InvokeTransform"));
-    assert!(binding.contains("dyn InvokeInspection"));
+    fn execute(&self, _: Arc<TaskContext>) -> SendableRecordBatchStream {
+        let stream: SendableRecordBatchStream = if self.infinite {
+            Box::pin(RecordBatchStreamAdapter::new(
+                Arc::clone(&self.schema),
+                futures::stream::pending::<Result<RecordBatch, DataFusionError>>(),
+            ))
+        } else {
+            Box::pin(RecordBatchStreamAdapter::new(
+                Arc::clone(&self.schema),
+                futures::stream::empty::<Result<RecordBatch, DataFusionError>>(),
+            ))
+        };
+        stream
+    }
+}
+
+struct DirectStreamSource {
+    schema: SchemaRef,
+    infinite: bool,
+    replayability: Replayability,
+}
+
+#[async_trait]
+impl DataSource for DirectStreamSource {
+    fn name(&self) -> &str {
+        "direct-stream"
+    }
+
+    fn replayability(&self) -> Replayability {
+        self.replayability
+    }
+
+    async fn table_provider(&self) -> Result<Arc<dyn TableProvider>> {
+        let partition = Arc::new(TestPartitionStream {
+            schema: Arc::clone(&self.schema),
+            infinite: self.infinite,
+        });
+        let table = StreamingTable::try_new(Arc::clone(&self.schema), vec![partition])?
+            .with_infinite_table(self.infinite);
+        Ok(Arc::new(table))
+    }
 }
 
 #[test]
-fn data_source_uses_one_context_aware_table_provider_contract() {
-    let source_contract = include_str!("../src/data_source.rs");
+fn datafusion_alone_reports_physical_boundedness() {
+    let source = DirectStreamSource {
+        schema: Arc::new(Schema::empty()),
+        infinite: true,
+        replayability: Replayability::Replayable,
+    };
+    assert!(source.row_count_capability().is_none());
+    let session = SessionContext::new();
+    let provider = futures::executor::block_on(source.table_provider()).unwrap();
+    let plan =
+        futures::executor::block_on(provider.scan(&session.state(), None, &[], None)).unwrap();
+    assert!(plan.properties().boundedness.is_unbounded());
+}
 
-    assert!(!source_contract.contains("supports_table_provider"));
-    assert!(!source_contract.contains("SessionContext::new"));
+#[test]
+fn finite_single_pass_sources_can_have_no_row_count() {
+    let source = DirectStreamSource {
+        schema: Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Int32,
+            false,
+        )])),
+        infinite: false,
+        replayability: Replayability::SinglePass,
+    };
+    assert_eq!(source.replayability(), Replayability::SinglePass);
+    assert!(source.row_count_capability().is_none());
+
+    let session = SessionContext::new();
+    let provider = futures::executor::block_on(source.table_provider()).unwrap();
+    let frame = session
+        .read_table(provider)
+        .unwrap()
+        .sort(vec![datafusion::prelude::col("value").sort(true, true)])
+        .unwrap();
+    let plan = futures::executor::block_on(frame.create_physical_plan()).unwrap();
+    assert!(!plan.properties().boundedness.is_unbounded());
 }

@@ -14,7 +14,7 @@ fn pipeline_registers_the_handle_store_with_datafusion() {
     let expected_url = handle.url().clone();
 
     let mut pipeline = Pipeline::new().with_storage_handle(handle);
-    let context = pipeline.build_session_context().unwrap();
+    let context = pipeline.create_session_context().unwrap();
     let registered_store = context
         .runtime_env()
         .object_store_registry

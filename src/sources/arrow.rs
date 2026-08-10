@@ -4,8 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Result, bail};
-use arrow::datatypes::SchemaRef;
-use arrow::ipc::reader::{FileReader, StreamReader, read_footer_length};
+use arrow::ipc::reader::read_footer_length;
 use arrow::ipc::{MessageHeader, root_as_footer, root_as_message};
 use async_trait::async_trait;
 use datafusion::{
@@ -13,18 +12,20 @@ use datafusion::{
 };
 use uuid::Uuid;
 
-use crate::sources::data_source::DataSource;
+use crate::sources::data_source::{DataSource, Replayability, RowCount, RowCountCapability};
 
 const CONTINUATION_MARKER: [u8; 4] = [0xff; 4];
 
-#[derive(Debug)]
+/// A replayable Arrow IPC input backed by a command-owned DataFusion session.
 pub struct ArrowDataSource {
     path: String,
+    session: SessionContext,
 }
 
 impl ArrowDataSource {
-    pub fn new(path: String) -> Self {
-        Self { path }
+    /// Creates a source for one Arrow IPC file or stream container.
+    pub fn new(path: String, session: SessionContext) -> Self {
+        Self { path, session }
     }
 }
 
@@ -34,35 +35,16 @@ impl DataSource for ArrowDataSource {
         "arrow"
     }
 
-    fn schema(&self) -> Result<SchemaRef> {
-        if let Ok(reader) = FileReader::try_new(File::open(&self.path)?, None) {
-            return Ok(reader.schema());
-        }
-
-        if let Ok(reader) = StreamReader::try_new(File::open(&self.path)?, None) {
-            return Ok(reader.schema());
-        }
-
-        anyhow::bail!("Could not read Arrow file: {}", self.path)
+    fn replayability(&self) -> Replayability {
+        Replayability::Replayable
     }
 
-    fn row_count(&self) -> Result<usize> {
-        let mut file = File::open(&self.path)?;
-
-        if let Some(count) = file_format_row_count(&mut file)? {
-            return Ok(count);
-        }
-
-        // rewind and try stream format
-        file.seek(SeekFrom::Start(0))?;
-        if let Some(count) = stream_format_row_count(&mut file)? {
-            return Ok(count);
-        }
-
-        bail!("Could not read Arrow file: {}", self.path)
+    fn row_count_capability(&self) -> Option<&dyn RowCountCapability> {
+        Some(self)
     }
 
-    async fn as_table_provider(&self, ctx: &mut SessionContext) -> Result<Arc<dyn TableProvider>> {
+    async fn table_provider(&self) -> Result<Arc<dyn TableProvider>> {
+        let ctx = &self.session;
         let table_name = format!("arrow_{}", Uuid::new_v4().as_simple());
         let file_extension = Path::new(&self.path)
             .extension()
@@ -77,14 +59,28 @@ impl DataSource for ArrowDataSource {
         let table = ctx.table(&table_name).await?;
         Ok(table.into_view())
     }
+}
 
-    fn supports_table_provider(&self) -> bool {
-        true
+#[async_trait]
+impl RowCountCapability for ArrowDataSource {
+    async fn row_count(&self) -> Result<RowCount> {
+        let mut file = File::open(&self.path)?;
+
+        if let Some(count) = file_format_row_count(&mut file)? {
+            return Ok(RowCount::Exact(count as u64));
+        }
+
+        // File and stream containers have different metadata layouts.
+        file.seek(SeekFrom::Start(0))?;
+        if let Some(count) = stream_format_row_count(&mut file)? {
+            return Ok(RowCount::Exact(count as u64));
+        }
+
+        bail!("Could not read Arrow file: {}", self.path)
     }
 }
 
-/// Get exact row count from an Arrow IPC file by parsing the footer and
-/// reading each block's message header without decoding any record batch data.
+/// Gets the exact row count from file metadata without decoding record batches.
 #[allow(
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
@@ -164,8 +160,7 @@ fn file_format_row_count(file: &mut File) -> Result<Option<usize>> {
     Ok(Some(total_rows))
 }
 
-/// Get exact row count from an Arrow IPC stream by parsing message headers
-/// and seeking past record batch bodies without decoding them.
+/// Gets the exact row count by reading stream headers and skipping record-batch bodies.
 #[allow(
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
@@ -251,49 +246,36 @@ fn stream_format_row_count(file: &mut File) -> Result<Option<usize>> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use arrow::array::{Int32Array, RecordBatch, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
     use datafusion::prelude::SessionContext;
-    use futures::StreamExt;
-
-    use super::*;
 
     const TEST_ARROW_FILE_PATH: &str = "tests/files/people.file.arrow";
     const TEST_ARROW_STREAM_PATH: &str = "tests/files/people.stream.arrow";
 
-    #[test]
-    fn test_new() {
-        let source = ArrowDataSource::new(TEST_ARROW_FILE_PATH.to_string());
-        assert_eq!(source.path, TEST_ARROW_FILE_PATH);
-    }
-
-    #[test]
-    fn test_name() {
-        let source = ArrowDataSource::new(TEST_ARROW_FILE_PATH.to_string());
-        assert_eq!(source.name(), "arrow");
+    fn test_source(path: impl Into<String>) -> ArrowDataSource {
+        ArrowDataSource::new(path.into(), SessionContext::new())
     }
 
     #[tokio::test]
-    async fn test_as_table_provider_file_format() {
-        let source = ArrowDataSource::new(TEST_ARROW_FILE_PATH.to_string());
-        let mut ctx = SessionContext::new();
-        let table_provider = source.as_table_provider(&mut ctx).await.unwrap();
+    async fn test_table_provider_file_format() {
+        let source = test_source(TEST_ARROW_FILE_PATH);
+        let table_provider = source.table_provider().await.unwrap();
         assert!(!table_provider.schema().fields().is_empty());
     }
 
     #[tokio::test]
-    async fn test_as_table_provider_stream_format() {
-        let source = ArrowDataSource::new(TEST_ARROW_STREAM_PATH.to_string());
-        let mut ctx = SessionContext::new();
-        let table_provider = source.as_table_provider(&mut ctx).await.unwrap();
+    async fn test_table_provider_stream_format() {
+        let source = test_source(TEST_ARROW_STREAM_PATH);
+        let table_provider = source.table_provider().await.unwrap();
         assert!(!table_provider.schema().fields().is_empty());
     }
 
     #[tokio::test]
-    async fn test_as_table_provider_can_be_queried() {
-        let source = ArrowDataSource::new(TEST_ARROW_FILE_PATH.to_string());
-        let mut ctx = SessionContext::new();
-        let table_provider = source.as_table_provider(&mut ctx).await.unwrap();
+    async fn test_table_provider_can_be_queried() {
+        let source = test_source(TEST_ARROW_FILE_PATH);
+        let table_provider = source.table_provider().await.unwrap();
 
         let ctx = SessionContext::new();
         ctx.register_table("test_table", table_provider).unwrap();
@@ -307,56 +289,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_as_stream_file_format() {
-        let source = ArrowDataSource::new(TEST_ARROW_FILE_PATH.to_string());
-        let mut stream = source.as_stream().await.unwrap();
-
-        assert!(!stream.schema().fields().is_empty());
-        let batch = stream.next().await.unwrap().unwrap();
-        assert!(stream.next().await.is_none());
-        assert!(batch.num_rows() > 0);
-    }
-
-    #[tokio::test]
-    async fn test_as_stream_stream_format() {
-        let source = ArrowDataSource::new(TEST_ARROW_STREAM_PATH.to_string());
-        let mut stream = source.as_stream().await.unwrap();
-
-        assert!(!stream.schema().fields().is_empty());
-        let batch = stream.next().await.unwrap().unwrap();
-        assert!(stream.next().await.is_none());
-        assert!(batch.num_rows() > 0);
-    }
-
-    #[tokio::test]
     async fn test_row_count_file_format() {
-        let source = ArrowDataSource::new(TEST_ARROW_FILE_PATH.to_string());
-        let count = source.row_count().unwrap();
+        let source = test_source(TEST_ARROW_FILE_PATH);
+        let count = source.row_count().await.unwrap();
 
         // verify against actually streaming all rows
-        let mut stream = source.as_stream().await.unwrap();
-        let mut streamed = 0;
-        while let Some(batch) = stream.next().await {
-            streamed += batch.unwrap().num_rows();
-        }
-        assert_eq!(count, streamed);
+        let provider = source.table_provider().await.unwrap();
+        let streamed = source
+            .session
+            .read_table(provider)
+            .unwrap()
+            .collect()
+            .await
+            .unwrap()
+            .iter()
+            .map(RecordBatch::num_rows)
+            .sum::<usize>();
+        assert_eq!(count, RowCount::Exact(streamed as u64));
     }
 
     #[tokio::test]
     async fn test_row_count_stream_format() {
-        let source = ArrowDataSource::new(TEST_ARROW_STREAM_PATH.to_string());
-        let count = source.row_count().unwrap();
+        let source = test_source(TEST_ARROW_STREAM_PATH);
+        let count = source.row_count().await.unwrap();
 
-        let mut stream = source.as_stream().await.unwrap();
-        let mut streamed = 0;
-        while let Some(batch) = stream.next().await {
-            streamed += batch.unwrap().num_rows();
-        }
-        assert_eq!(count, streamed);
+        let provider = source.table_provider().await.unwrap();
+        let streamed = source
+            .session
+            .read_table(provider)
+            .unwrap()
+            .collect()
+            .await
+            .unwrap()
+            .iter()
+            .map(RecordBatch::num_rows)
+            .sum::<usize>();
+        assert_eq!(count, RowCount::Exact(streamed as u64));
     }
 
-    #[test]
-    fn test_row_count_written_file_format() {
+    #[tokio::test]
+    async fn test_row_count_written_file_format() {
         use arrow::ipc::writer::FileWriter;
 
         let dir = tempfile::tempdir().unwrap();
@@ -388,12 +360,12 @@ mod tests {
         writer.write(&batch2).unwrap();
         writer.finish().unwrap();
 
-        let source = ArrowDataSource::new(path.to_string_lossy().to_string());
-        assert_eq!(source.row_count().unwrap(), 5);
+        let source = test_source(path.to_string_lossy());
+        assert_eq!(source.row_count().await.unwrap(), RowCount::Exact(5));
     }
 
-    #[test]
-    fn test_row_count_written_stream_format() {
+    #[tokio::test]
+    async fn test_row_count_written_stream_format() {
         use arrow::ipc::writer::StreamWriter;
 
         let dir = tempfile::tempdir().unwrap();
@@ -425,7 +397,7 @@ mod tests {
         writer.write(&batch2).unwrap();
         writer.finish().unwrap();
 
-        let source = ArrowDataSource::new(path.to_string_lossy().to_string());
-        assert_eq!(source.row_count().unwrap(), 7);
+        let source = test_source(path.to_string_lossy());
+        assert_eq!(source.row_count().await.unwrap(), RowCount::Exact(7));
     }
 }

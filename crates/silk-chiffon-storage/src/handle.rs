@@ -103,21 +103,16 @@ pub async fn validate_input(handle: &StorageHandle) -> Result<ObjectMeta, Storag
     Ok(handle.object_store.head(&handle.object_path).await?)
 }
 
-/// Checks whether writing to an output handle may proceed under the caller's overwrite policy.
+/// Requires an output handle's object to be absent.
 ///
-/// When `overwrite` is `true`, this returns without contacting storage. Otherwise it invokes
-/// `ObjectStoreExt::head` once, accepts a not-found response, and rejects an existing object. The
-/// check is advisory and does not reserve the destination against another writer.
+/// This invokes `ObjectStoreExt::head` once, accepts a not-found response, and rejects an existing
+/// object. The check is advisory and does not reserve the destination against another writer.
 ///
 /// # Errors
 ///
 /// Returns [`StorageError::OutputAlreadyExists`] for an existing object or
 /// [`StorageError::ObjectStore`] when the metadata request fails for another reason.
-pub async fn preflight_output(handle: &StorageHandle, overwrite: bool) -> Result<(), StorageError> {
-    if overwrite {
-        return Ok(());
-    }
-
+pub async fn ensure_output_absent(handle: &StorageHandle) -> Result<(), StorageError> {
     match handle.object_store.head(&handle.object_path).await {
         Ok(_) => Err(StorageError::OutputAlreadyExists(handle.url.clone())),
         Err(object_store::Error::NotFound { .. }) => Ok(()),

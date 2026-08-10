@@ -331,7 +331,7 @@ impl TestBatch {
         ]))
     }
 
-    /// id, tags (list<string>) - 3 rows
+    /// id, tags (`list<string>`) - 3 rows
     pub fn with_lists() -> RecordBatch {
         TestBatchBuilder::new()
             .column_i32("id", &[1, 2, 3])

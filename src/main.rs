@@ -1,7 +1,6 @@
 use anyhow::Result;
-use clap::Parser;
 use mimalloc::MiMalloc;
-use silk_chiffon::{Cli, Commands, commands, default_thread_budget};
+use silk_chiffon::{Cli, Command, commands, default_thread_budget};
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
@@ -9,13 +8,13 @@ static GLOBAL: MiMalloc = MiMalloc;
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    if let Commands::Completions { shell } = &cli.command {
-        Commands::generate_completions(*shell);
+    if let Command::Completions { shell } = &cli.command {
+        Command::generate_completions(*shell);
         return Ok(());
     }
 
     let thread_budget = match &cli.command {
-        Commands::Transform(args) => args
+        Command::Transform(args) => args
             .thread_budget
             .as_ref()
             .map(|spec| spec.resolve())
@@ -32,9 +31,10 @@ fn main() -> Result<()> {
 
     runtime.block_on(async {
         match cli.command {
-            Commands::Transform(args) => commands::transform::run(args).await?,
-            Commands::Inspect(args) => commands::inspect::run(args.command).await?,
-            Commands::Completions { .. } => unreachable!(),
+            Command::Transform(args) => commands::transform::run(args).await?,
+            Command::Detect(args) => commands::detect::run(args).await?,
+            Command::Inspect(args) => commands::inspect::run(args).await?,
+            Command::Completions { .. } => unreachable!(),
         };
         Ok(())
     })
