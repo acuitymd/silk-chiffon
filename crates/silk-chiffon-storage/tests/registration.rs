@@ -374,6 +374,15 @@ fn backend_build_validates_the_complete_definition() {
         Err(StorageBackendBuildError::MissingLocationValidator)
     ));
 
+    StorageBackend::without_args()
+        .name("memory")
+        .schemes(["mem"])
+        .access(StorageAccess::ReadWrite)
+        .allow_any_location()
+        .object_store_creator(in_memory_object_store)
+        .build()
+        .unwrap();
+
     let missing_store_creator = StorageBackend::without_args()
         .name("memory")
         .schemes(["mem"])

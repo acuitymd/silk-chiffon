@@ -13,11 +13,11 @@ use clap::Command;
 use object_store::{ObjectStore, local::LocalFileSystem};
 
 #[cfg(feature = "local-bare-paths")]
-use crate::LocationPattern;
+use crate::{Location, LocationPattern};
 #[cfg(feature = "local")]
 use crate::{
-    Location, StorageAccess, StorageBackend, StorageBackendBuildError, StorageRegistry,
-    StorageSession, StorageSessionCreationError,
+    StorageAccess, StorageBackend, StorageBackendBuildError, StorageRegistry, StorageSession,
+    StorageSessionCreationError,
 };
 
 /// Builds the built-in local backend definition for canonical `file:///` locations.
@@ -34,7 +34,7 @@ pub fn backend() -> Result<StorageBackend, StorageBackendBuildError> {
         .name("local")
         .schemes(["file"])
         .access(StorageAccess::ReadWrite)
-        .location_validator(validate_location)
+        .allow_any_location()
         .object_store_creator(create_object_store);
 
     #[cfg(feature = "local-bare-paths")]
@@ -62,11 +62,6 @@ pub fn session() -> Result<StorageSession, StorageSessionCreationError> {
     let command = registry.augment_args(Command::new(command_name));
     let matches = command.try_get_matches_from([command_name])?;
     registry.create_session(&matches)
-}
-
-#[cfg(feature = "local")]
-fn validate_location(_location: &Location, _settings: &()) -> anyhow::Result<()> {
-    Ok(())
 }
 
 #[cfg(feature = "local")]

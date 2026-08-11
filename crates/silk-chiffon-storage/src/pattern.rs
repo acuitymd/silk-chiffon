@@ -274,18 +274,18 @@ fn decoded_literal_prefix(raw_path: &str, input: &str) -> Result<String, Storage
 
 fn unescape_matcher_literals(input: &str) -> String {
     let mut literal = String::with_capacity(input.len());
-    let bytes = input.as_bytes();
+    let characters = input.chars().collect::<Vec<_>>();
     let mut index = 0;
-    while index < bytes.len() {
-        if index + 2 < bytes.len()
-            && bytes[index] == b'['
-            && bytes[index + 2] == b']'
-            && matches!(bytes[index + 1], b'*' | b'?' | b'[' | b']')
+    while index < characters.len() {
+        if index + 2 < characters.len()
+            && characters[index] == '['
+            && characters[index + 2] == ']'
+            && matches!(characters[index + 1], '*' | '?' | '[' | ']')
         {
-            literal.push(char::from(bytes[index + 1]));
+            literal.push(characters[index + 1]);
             index += 3;
         } else {
-            literal.push(char::from(bytes[index]));
+            literal.push(characters[index]);
             index += 1;
         }
     }

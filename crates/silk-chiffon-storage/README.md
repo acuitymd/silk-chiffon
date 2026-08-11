@@ -89,7 +89,7 @@ The callbacks divide handle creation and pattern routing into four backend-owned
 
 - `BareLocationMapper<T>` is an optional callback. When configured, it maps the original schemeless text to a canonical `Location` and claims the registry's single bare-location route.
 - `BarePatternMapper<T>` is an optional callback for schemeless patterns. It requires the same backend to claim exact bare locations and must return a `LocationPattern` under one of that backend's schemes.
-- `LocationValidator<T>` is required. It checks the backend's authority, query, and other URL rules after routing. Storage derives the `ObjectPath` generically from the decoded URL path.
+- Every backend must choose a location-validation policy. `LocationValidator<T>` checks authority, query, and other backend-specific URL rules after routing; `allow_any_location()` explicitly accepts every location that passed core syntax validation. Storage derives the `ObjectPath` generically from the decoded URL path.
 - `ObjectStoreCreatorFn<T>` creates a client for one store-root URL. It runs only on a session cache miss and receives shared retry configuration only when the backend opted in.
 
 `StorageAccess` declares read-only, write-only, or read-write support independently of those callbacks. A session rejects an unsupported direction before location validation or store creation.

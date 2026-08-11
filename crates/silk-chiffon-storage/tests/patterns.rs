@@ -263,6 +263,31 @@ async fn encoded_metacharacters_are_literal_and_matched_urls_are_pattern_safe() 
 }
 
 #[tokio::test]
+async fn encoded_unicode_and_percent_signs_preserve_object_path_identity() {
+    let storage = storage();
+    put(&storage, "mem://bucket/data/donn%C3%A9es/cent%25.arrow").await;
+    let exact = storage
+        .input_handle(
+            &LocationInput::parse("mem://bucket/data/donn%C3%A9es/cent%25.arrow").unwrap(),
+        )
+        .unwrap();
+    assert_eq!(exact.object_path().as_ref(), "data/données/cent%.arrow");
+
+    let pattern = LocationPattern::parse("mem://bucket/data/donn%C3%A9es/*.arrow").unwrap();
+    let matches = storage.expand_input_pattern(&pattern).await.unwrap();
+
+    assert_eq!(matches.len(), 1);
+    assert_eq!(
+        matches[0].url().as_str(),
+        "mem://bucket/data/donn%C3%A9es/cent%25.arrow"
+    );
+    assert_eq!(
+        matches[0].object_path().as_ref(),
+        "data/données/cent%.arrow"
+    );
+}
+
+#[tokio::test]
 async fn matched_urls_preserve_ipv6_authorities() {
     let storage = storage();
     put(&storage, "mem://[::1]/data/one.arrow").await;
@@ -332,6 +357,7 @@ async fn bare_exact_and_pattern_mapping_share_typed_backend_settings() {
 async fn matches_classes_recursive_segments_case_and_leading_dots() {
     let storage = storage();
     for url in [
+        "mem://bucket/data/root.arrow",
         "mem://bucket/data/a/one.arrow",
         "mem://bucket/data/b/.hidden.arrow",
         "mem://bucket/data/deep/nested/two.arrow",
@@ -346,9 +372,25 @@ async fn matches_classes_recursive_segments_case_and_leading_dots() {
 
     let recursive = LocationPattern::parse("mem://bucket/data/**/*.arrow").unwrap();
     let recursive_matches = storage.expand_input_pattern(&recursive).await.unwrap();
-    assert_eq!(recursive_matches.len(), 4);
+    assert_eq!(recursive_matches.len(), 5);
 
-    let lowercase = LocationPattern::parse("mem://bucket/data/a/upper.arrow").unwrap();
+    let negative_class = LocationPattern::parse("mem://bucket/data/[!a]/*.arrow").unwrap();
+    let negative_class_matches = storage.expand_input_pattern(&negative_class).await.unwrap();
+    assert_eq!(negative_class_matches.len(), 1);
+    assert_eq!(
+        negative_class_matches[0].object_path().as_ref(),
+        "data/b/.hidden.arrow"
+    );
+
+    let one_segment = LocationPattern::parse("mem://bucket/data/*.arrow").unwrap();
+    let one_segment_matches = storage.expand_input_pattern(&one_segment).await.unwrap();
+    assert_eq!(one_segment_matches.len(), 1);
+    assert_eq!(
+        one_segment_matches[0].object_path().as_ref(),
+        "data/root.arrow"
+    );
+
+    let lowercase = LocationPattern::parse("mem://bucket/data/a/u*.arrow").unwrap();
     assert!(
         storage
             .expand_input_pattern(&lowercase)
@@ -380,17 +422,44 @@ async fn exact_patterns_bypass_listing_and_globs_use_complete_literal_prefixes()
     let observations = OBSERVATIONS.lock().unwrap();
     assert_eq!(observations.heads, 1);
     assert_eq!(observations.listing_prefixes, [Some("data".to_owned())]);
+
+    drop(observations);
+    let no_literal_prefix = LocationPattern::parse("mem://bucket/*.arrow").unwrap();
+    assert!(
+        storage
+            .expand_input_pattern(&no_literal_prefix)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        OBSERVATIONS.lock().unwrap().listing_prefixes,
+        [Some("data".to_owned()), None]
+    );
 }
 
 #[test]
 fn rejects_glob_syntax_outside_the_url_path_and_malformed_patterns() {
-    for input in ["m*em://bucket/object", "mem://buck*et/object"] {
+    for input in [
+        "m*em://bucket/object",
+        "m?em://bucket/object",
+        "mem://buck*et/object",
+        "mem://buck?et/object",
+    ] {
         assert!(
             LocationPattern::parse(input).is_err(),
             "{input:?} should fail"
         );
     }
-    for input in ["mem://bucket/a/**b", "mem://bucket/a/[abc"] {
+    for input in [
+        "mem://bucket/a/**b",
+        "mem://bucket/a/b**",
+        "mem://bucket/a/***",
+        "mem://bucket/a/[abc",
+        "mem://bucket/a/%GG*.arrow",
+        "mem://user@bucket/a/*.arrow",
+        "mem://bucket/a/*.arrow#fragment",
+    ] {
         assert!(
             LocationPattern::parse(input).is_err(),
             "{input:?} should fail"

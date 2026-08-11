@@ -32,11 +32,16 @@ pub type BareLocationMapper<T> = fn(input: &str, settings: &T) -> anyhow::Result
 /// returned [`LocationPattern`] must use a scheme claimed by the backend.
 pub type BarePatternMapper<T> = fn(input: &str, settings: &T) -> anyhow::Result<LocationPattern>;
 
-/// Validates one routed canonical location using settings parsed as `T`.
+/// Applies backend-specific validation to one routed canonical location using settings parsed as
+/// `T`.
 ///
-/// Object paths are derived generically from decoded URL paths. A backend uses this required
-/// callback for its authority, query, and other location-specific rules.
+/// Object paths are derived generically from decoded URL paths. A backend may use this callback
+/// for its authority, query, and other location-specific rules.
 pub type LocationValidator<T> = fn(location: &Location, settings: &T) -> anyhow::Result<()>;
+
+fn accept_any_location<T>(_location: &Location, _settings: &T) -> anyhow::Result<()> {
+    Ok(())
+}
 
 /// Creates an object-store client for one session cache entry.
 ///
@@ -243,6 +248,14 @@ impl<T> StorageBackendBuilder<T> {
     /// Sets the callback that validates routed canonical locations.
     pub fn location_validator(mut self, validator: LocationValidator<T>) -> Self {
         self.location_validator = Some(validator);
+        self
+    }
+
+    /// Explicitly accepts every routed location that passed core syntax validation.
+    ///
+    /// Use this when a backend has no authority, query, or other location-specific rules.
+    pub fn allow_any_location(mut self) -> Self {
+        self.location_validator = Some(accept_any_location::<T>);
         self
     }
 

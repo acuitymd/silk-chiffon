@@ -149,6 +149,39 @@ fn test_merge_with_glob() {
 }
 
 #[test]
+fn test_merge_with_unicode_file_url_pattern() {
+    let temp_dir = TempDir::new().unwrap();
+    let input_dir = temp_dir.path().join("données");
+    std::fs::create_dir(&input_dir).unwrap();
+    let input1 = input_dir.join("entrée-1.arrow");
+    let input2 = input_dir.join("entrée-2.arrow");
+    let output = temp_dir.path().join("merged.arrow");
+
+    TestFile::write_arrow_batch(&input1, &TestBatch::simple_with(&[1], &["a"]));
+    TestFile::write_arrow_batch(&input2, &TestBatch::simple_with(&[2], &["b"]));
+
+    let pattern = url::Url::from_directory_path(&input_dir)
+        .unwrap()
+        .join("*.arrow")
+        .unwrap();
+    cargo::cargo_bin_cmd!("silk-chiffon")
+        .args([
+            "transform",
+            "--from-pattern",
+            pattern.as_str(),
+            "--to",
+            output.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let batches = TestFile::read_arrow(&output);
+    let mut ids = TestExtract::i32_all(&batches, "id");
+    ids.sort_unstable();
+    assert_eq!(ids, vec![1, 2]);
+}
+
+#[test]
 fn test_merge_with_repeatable_overlapping_patterns() {
     let temp_dir = TempDir::new().unwrap();
     let input1 = temp_dir.path().join("alpha.arrow");
