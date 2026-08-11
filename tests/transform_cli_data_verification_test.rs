@@ -182,6 +182,41 @@ fn test_merge_with_repeatable_overlapping_patterns() {
 }
 
 #[test]
+fn test_merge_combines_exact_and_pattern_inputs_without_cross_deduplication() {
+    let temp_dir = TempDir::new().unwrap();
+    let alpha = temp_dir.path().join("alpha.arrow");
+    let shared = temp_dir.path().join("shared.arrow");
+    let zeta = temp_dir.path().join("zeta.arrow");
+    let output = temp_dir.path().join("merged.arrow");
+
+    TestFile::write_arrow_batch(&alpha, &TestBatch::simple_with(&[1], &["a"]));
+    TestFile::write_arrow_batch(&shared, &TestBatch::simple_with(&[2], &["b"]));
+    TestFile::write_arrow_batch(&zeta, &TestBatch::simple_with(&[3], &["c"]));
+
+    let first_pattern = temp_dir.path().join("a*.arrow");
+    let second_pattern = temp_dir.path().join("*.arrow");
+    cargo::cargo_bin_cmd!("silk-chiffon")
+        .args([
+            "transform",
+            "--from",
+            shared.to_str().unwrap(),
+            "--from-pattern",
+            first_pattern.to_str().unwrap(),
+            "--from-pattern",
+            second_pattern.to_str().unwrap(),
+            "--to",
+            output.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let batches = TestFile::read_arrow(&output);
+    let mut ids = TestExtract::i32_all(&batches, "id");
+    ids.sort_unstable();
+    assert_eq!(ids, vec![1, 2, 2, 3]);
+}
+
+#[test]
 fn test_partition() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");

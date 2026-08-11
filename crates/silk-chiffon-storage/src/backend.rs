@@ -10,11 +10,11 @@ mod binding;
 use std::{collections::HashSet, fmt, sync::Arc};
 
 use clap::{ArgMatches, Args, Command, FromArgMatches};
-use object_store::{ObjectStore, RetryConfig, path::Path as ObjectPath};
+use object_store::{ObjectStore, RetryConfig};
 use thiserror::Error;
 use url::Url;
 
-use crate::Location;
+use crate::{Location, LocationPattern};
 
 pub(crate) use binding::BackendBinding;
 use binding::{BackendDefinition, TypedBackendDefinition};
@@ -25,13 +25,18 @@ use binding::{BackendDefinition, TypedBackendDefinition};
 /// returned [`Location`] must use a scheme claimed by the same backend.
 pub type BareLocationMapper<T> = fn(input: &str, settings: &T) -> anyhow::Result<Location>;
 
-/// Converts one canonical location into the path understood by a backend's object store.
+/// Converts schemeless pattern input into a canonical location pattern using settings parsed as
+/// `T`.
 ///
-/// A [`StorageSession`](crate::StorageSession) calls this mapper after routing, access checks, and
-/// successful bare-location mapping and scheme validation. It still runs on object-store cache
-/// hits. Backend-specific URL validation belongs here because only the backend knows its authority,
-/// query, and path rules.
-pub type ObjectPathMapper<T> = fn(location: &Location, settings: &T) -> anyhow::Result<ObjectPath>;
+/// This callback is optional and requires the same backend to claim bare exact locations. The
+/// returned [`LocationPattern`] must use a scheme claimed by the backend.
+pub type BarePatternMapper<T> = fn(input: &str, settings: &T) -> anyhow::Result<LocationPattern>;
+
+/// Validates one routed canonical location using settings parsed as `T`.
+///
+/// Object paths are derived generically from decoded URL paths. A backend uses this required
+/// callback for its authority, query, and other location-specific rules.
+pub type LocationValidator<T> = fn(location: &Location, settings: &T) -> anyhow::Result<()>;
 
 /// Creates an object-store client for one session cache entry.
 ///
@@ -174,7 +179,8 @@ pub struct StorageBackendBuilder<T> {
     schemes: Vec<&'static str>,
     access: Option<StorageAccess>,
     bare_location_mapper: Option<BareLocationMapper<T>>,
-    object_path_mapper: Option<ObjectPathMapper<T>>,
+    bare_pattern_mapper: Option<BarePatternMapper<T>>,
+    location_validator: Option<LocationValidator<T>>,
     object_store_creator: Option<ObjectStoreCreatorFn<T>>,
     uses_shared_retries: bool,
     augment_args: fn(Command) -> Command,
@@ -191,7 +197,8 @@ impl<T> StorageBackendBuilder<T> {
             schemes: Vec::new(),
             access: None,
             bare_location_mapper: None,
-            object_path_mapper: None,
+            bare_pattern_mapper: None,
+            location_validator: None,
             object_store_creator: None,
             uses_shared_retries: false,
             augment_args,
@@ -227,9 +234,15 @@ impl<T> StorageBackendBuilder<T> {
         self
     }
 
-    /// Sets the callback that maps canonical locations into the backend's object namespace.
-    pub fn object_path_mapper(mut self, mapper: ObjectPathMapper<T>) -> Self {
-        self.object_path_mapper = Some(mapper);
+    /// Maps schemeless patterns after this backend has claimed the bare-location route.
+    pub fn bare_pattern_mapper(mut self, mapper: BarePatternMapper<T>) -> Self {
+        self.bare_pattern_mapper = Some(mapper);
+        self
+    }
+
+    /// Sets the callback that validates routed canonical locations.
+    pub fn location_validator(mut self, validator: LocationValidator<T>) -> Self {
+        self.location_validator = Some(validator);
         self
     }
 
@@ -284,9 +297,12 @@ impl<T> StorageBackendBuilder<T> {
         }
 
         let access = self.access.ok_or(StorageBackendBuildError::MissingAccess)?;
-        let object_path_mapper = self
-            .object_path_mapper
-            .ok_or(StorageBackendBuildError::MissingObjectPathMapper)?;
+        if self.bare_pattern_mapper.is_some() && self.bare_location_mapper.is_none() {
+            return Err(StorageBackendBuildError::BarePatternMapperWithoutBareLocationMapper);
+        }
+        let location_validator = self
+            .location_validator
+            .ok_or(StorageBackendBuildError::MissingLocationValidator)?;
         let object_store_creator = self
             .object_store_creator
             .ok_or(StorageBackendBuildError::MissingObjectStoreCreator)?;
@@ -297,7 +313,8 @@ impl<T> StorageBackendBuilder<T> {
                 schemes: self.schemes.into_boxed_slice(),
                 access,
                 bare_location_mapper: self.bare_location_mapper,
-                object_path_mapper,
+                bare_pattern_mapper: self.bare_pattern_mapper,
+                location_validator,
                 object_store_creator,
                 uses_shared_retries: self.uses_shared_retries,
                 cli_argument_keys: cli_argument_keys.into_boxed_slice(),
@@ -325,8 +342,10 @@ pub enum StorageBackendBuildError {
     DuplicateCliArgument { argument: String },
     #[error("storage backend access is required")]
     MissingAccess,
-    #[error("storage backend object-path mapper is required")]
-    MissingObjectPathMapper,
+    #[error("storage backend location validator is required")]
+    MissingLocationValidator,
+    #[error("storage backend cannot map bare patterns without mapping bare locations")]
+    BarePatternMapperWithoutBareLocationMapper,
     #[error("storage backend object-store creator is required")]
     MissingObjectStoreCreator,
 }

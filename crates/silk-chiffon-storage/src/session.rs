@@ -6,15 +6,17 @@
 
 use std::{collections::HashMap, fmt, sync::Arc};
 
-use object_store::{ObjectStore, RetryConfig};
+use futures::TryStreamExt;
+use glob::MatchOptions;
+use object_store::{ObjectStore, ObjectStoreExt, RetryConfig, path::Path as ObjectPath};
 use parking_lot::Mutex;
 use thiserror::Error;
-use url::Url;
+use url::{Position, Url};
 
 use crate::{
-    LocationInput, RetryConfigurationError, StorageBackendBuildError, StorageDirection,
-    StorageError, StorageHandle, StorageRegistryError, backend::BackendBinding,
-    registry::RoutingIndex,
+    Location, LocationInput, LocationPattern, RetryConfigurationError, StorageBackendBuildError,
+    StorageDirection, StorageError, StorageHandle, StorageRegistryError, backend::BackendBinding,
+    pattern::PatternInput, registry::RoutingIndex,
 };
 
 /// Storage state bound to one command invocation.
@@ -92,6 +94,172 @@ impl StorageSession {
         self.create_handle(input, StorageDirection::Output)
     }
 
+    /// Expands one exact location or object-path glob into zero or more input handles.
+    ///
+    /// Exact patterns perform one metadata request without listing. Active globs list from their
+    /// longest complete literal-segment prefix and match complete canonical object paths. The
+    /// returned order is unspecified; callers own no-match policy, ordering, and deduplication.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] when routing, backend validation, metadata, or listing fails.
+    pub async fn expand_input_pattern(
+        &self,
+        pattern: &LocationPattern,
+    ) -> Result<Vec<StorageHandle>, StorageError> {
+        match &pattern.input {
+            PatternInput::Exact(input) => self.expand_exact_pattern(input).await,
+            PatternInput::Bare { source, .. } => {
+                let backend_index = self
+                    .state
+                    .routing
+                    .bare_location_backend_index
+                    .ok_or_else(|| StorageError::UnsupportedBarePattern(source.clone()))?;
+                let backend = &self.state.backends[backend_index];
+                if !backend.supports(StorageDirection::Input) {
+                    return Err(StorageError::DirectionUnsupported {
+                        backend: backend.name(),
+                        direction: StorageDirection::Input,
+                    });
+                }
+                let mapped = backend
+                    .map_bare_pattern(source)
+                    .ok_or_else(|| StorageError::UnsupportedBarePattern(source.clone()))?
+                    .map_err(|source_error| StorageError::BarePatternMapping {
+                        backend: backend.name(),
+                        bare_pattern: source.clone(),
+                        source: source_error,
+                    })?;
+                self.expand_mapped_pattern(&mapped, backend_index).await
+            }
+            PatternInput::Url { .. } => self.expand_url_pattern(pattern, None).await,
+        }
+    }
+
+    async fn expand_mapped_pattern(
+        &self,
+        pattern: &LocationPattern,
+        backend_index: usize,
+    ) -> Result<Vec<StorageHandle>, StorageError> {
+        match &pattern.input {
+            PatternInput::Exact(LocationInput::Url(location)) => {
+                self.require_pattern_backend(location, backend_index)?;
+                let handle = self.create_handle_for_location(
+                    location,
+                    backend_index,
+                    StorageDirection::Input,
+                )?;
+                self.head_pattern(handle, location.url().as_str()).await
+            }
+            PatternInput::Url { location, .. } => {
+                self.require_pattern_backend(location, backend_index)?;
+                self.expand_url_pattern(pattern, Some(backend_index)).await
+            }
+            PatternInput::Exact(LocationInput::Bare(_)) | PatternInput::Bare { .. } => {
+                Err(StorageError::BarePatternSchemeMismatch {
+                    backend: self.state.backends[backend_index].name(),
+                    scheme: "bare".to_owned(),
+                })
+            }
+        }
+    }
+
+    async fn expand_exact_pattern(
+        &self,
+        input: &LocationInput,
+    ) -> Result<Vec<StorageHandle>, StorageError> {
+        let source = match input {
+            LocationInput::Url(location) => location.url().as_str(),
+            LocationInput::Bare(source) => source,
+        };
+        let handle = self.input_handle(input)?;
+        self.head_pattern(handle, source).await
+    }
+
+    async fn head_pattern(
+        &self,
+        handle: StorageHandle,
+        pattern: &str,
+    ) -> Result<Vec<StorageHandle>, StorageError> {
+        match handle.object_store().head(handle.object_path()).await {
+            Ok(_) => Ok(vec![handle]),
+            Err(object_store::Error::NotFound { .. }) => Ok(Vec::new()),
+            Err(source) => Err(StorageError::PatternMetadata {
+                pattern: pattern.to_owned(),
+                source,
+            }),
+        }
+    }
+
+    async fn expand_url_pattern(
+        &self,
+        pattern: &LocationPattern,
+        expected_backend_index: Option<usize>,
+    ) -> Result<Vec<StorageHandle>, StorageError> {
+        let PatternInput::Url {
+            source,
+            location,
+            matcher,
+            literal_prefix,
+        } = &pattern.input
+        else {
+            unreachable!("caller passes an explicit active pattern");
+        };
+        let backend_index = match expected_backend_index {
+            Some(index) => index,
+            None => self.backend_index_for_location(location)?,
+        };
+        let pattern_handle =
+            self.create_handle_for_location(location, backend_index, StorageDirection::Input)?;
+        let listing_prefix = if literal_prefix.is_empty() {
+            None
+        } else {
+            Some(ObjectPath::parse(literal_prefix).map_err(|source| {
+                StorageError::InvalidObjectPath {
+                    location: location.url().clone(),
+                    source: Box::new(source),
+                }
+            })?)
+        };
+        let options = MatchOptions {
+            case_sensitive: true,
+            require_literal_separator: true,
+            require_literal_leading_dot: false,
+        };
+        let mut listed = pattern_handle.object_store().list(listing_prefix.as_ref());
+        let mut handles = Vec::new();
+        while let Some(metadata) =
+            listed
+                .try_next()
+                .await
+                .map_err(|source_error| StorageError::PatternListing {
+                    pattern: source.clone(),
+                    source: source_error,
+                })?
+        {
+            if !matcher.matches_with(metadata.location.as_ref(), options) {
+                continue;
+            }
+            let url = matched_url(location.url(), &metadata.location)?;
+            let matched_location = Location::parse_url(url.as_str())?;
+            let backend = &self.state.backends[backend_index];
+            backend
+                .validate_location(&matched_location)
+                .map_err(|source| StorageError::LocationValidation {
+                    backend: backend.name(),
+                    location: url.clone(),
+                    source,
+                })?;
+            handles.push(StorageHandle::new(
+                url,
+                pattern_handle.object_store(),
+                metadata.location,
+                pattern_handle.store_url().clone(),
+            ));
+        }
+        Ok(handles)
+    }
+
     fn create_handle(
         &self,
         input: &LocationInput,
@@ -120,7 +288,6 @@ impl StorageSession {
                 direction,
             });
         }
-
         let location = match input {
             LocationInput::Url(location) => location.clone(),
             LocationInput::Bare(bare_location) => backend
@@ -147,11 +314,63 @@ impl StorageSession {
             });
         }
 
-        let object_path = backend.map_object_path(&location).map_err(|source| {
-            StorageError::ObjectPathMapping {
+        self.create_handle_for_location(&location, backend_index, direction)
+    }
+
+    fn backend_index_for_location(&self, location: &Location) -> Result<usize, StorageError> {
+        self.state
+            .routing
+            .backend_index_by_scheme
+            .get(location.url().scheme())
+            .copied()
+            .ok_or_else(|| StorageError::UnsupportedScheme(location.url().scheme().to_owned()))
+    }
+
+    fn require_pattern_backend(
+        &self,
+        location: &Location,
+        backend_index: usize,
+    ) -> Result<(), StorageError> {
+        if self
+            .state
+            .routing
+            .backend_index_by_scheme
+            .get(location.url().scheme())
+            .copied()
+            != Some(backend_index)
+        {
+            return Err(StorageError::BarePatternSchemeMismatch {
+                backend: self.state.backends[backend_index].name(),
+                scheme: location.url().scheme().to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    fn create_handle_for_location(
+        &self,
+        location: &Location,
+        backend_index: usize,
+        direction: StorageDirection,
+    ) -> Result<StorageHandle, StorageError> {
+        let backend = &self.state.backends[backend_index];
+        if !backend.supports(direction) {
+            return Err(StorageError::DirectionUnsupported {
+                backend: backend.name(),
+                direction,
+            });
+        }
+        backend
+            .validate_location(location)
+            .map_err(|source| StorageError::LocationValidation {
                 backend: backend.name(),
                 location: location.url().clone(),
                 source,
+            })?;
+        let object_path = ObjectPath::from_url_path(location.url().path()).map_err(|source| {
+            StorageError::InvalidObjectPath {
+                location: location.url().clone(),
+                source: Box::new(source),
             }
         })?;
         let store_url = store_url(location.url());
@@ -207,4 +426,30 @@ fn store_url(url: &Url) -> Url {
     store_url.set_query(None);
     store_url.set_fragment(None);
     store_url
+}
+
+fn matched_url(base: &Url, object_path: &ObjectPath) -> Result<Url, StorageError> {
+    let mut exact = base.clone();
+    let query = exact.query().map(str::to_owned);
+    exact.set_query(None);
+    exact.set_path("/");
+    {
+        let mut segments = exact
+            .path_segments_mut()
+            .expect("routed storage URLs are hierarchical");
+        segments.clear();
+        segments.extend(object_path.parts().map(|part| part.as_ref().to_owned()));
+    }
+    let mut source = exact[..Position::BeforePath].to_owned();
+    source.push_str(
+        &exact[Position::BeforePath..Position::AfterPath]
+            .replace('*', "%2A")
+            .replace('[', "%5B")
+            .replace(']', "%5D"),
+    );
+    if let Some(query) = query {
+        source.push('?');
+        source.push_str(&query);
+    }
+    Location::parse_url(&source).map(|location| location.url().clone())
 }

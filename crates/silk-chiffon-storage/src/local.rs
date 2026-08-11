@@ -10,8 +10,10 @@ use std::sync::Arc;
 #[cfg(feature = "local")]
 use clap::Command;
 #[cfg(feature = "local")]
-use object_store::{ObjectStore, local::LocalFileSystem, path::Path as ObjectPath};
+use object_store::{ObjectStore, local::LocalFileSystem};
 
+#[cfg(feature = "local-bare-paths")]
+use crate::LocationPattern;
 #[cfg(feature = "local")]
 use crate::{
     Location, StorageAccess, StorageBackend, StorageBackendBuildError, StorageRegistry,
@@ -32,11 +34,13 @@ pub fn backend() -> Result<StorageBackend, StorageBackendBuildError> {
         .name("local")
         .schemes(["file"])
         .access(StorageAccess::ReadWrite)
-        .object_path_mapper(map_object_path)
+        .location_validator(validate_location)
         .object_store_creator(create_object_store);
 
     #[cfg(feature = "local-bare-paths")]
-    let builder = builder.bare_location_mapper(map_bare_location);
+    let builder = builder
+        .bare_location_mapper(map_bare_location)
+        .bare_pattern_mapper(map_bare_pattern);
 
     builder.build()
 }
@@ -61,8 +65,8 @@ pub fn session() -> Result<StorageSession, StorageSessionCreationError> {
 }
 
 #[cfg(feature = "local")]
-fn map_object_path(location: &Location, _settings: &()) -> anyhow::Result<ObjectPath> {
-    Ok(ObjectPath::from_url_path(location.url().path())?)
+fn validate_location(_location: &Location, _settings: &()) -> anyhow::Result<()> {
+    Ok(())
 }
 
 #[cfg(feature = "local")]
@@ -83,4 +87,15 @@ fn map_bare_location(input: &str, _settings: &()) -> anyhow::Result<Location> {
         std::env::current_dir()?.join(path)
     };
     Ok(Location::from_file_path(absolute)?)
+}
+
+#[cfg(feature = "local-bare-paths")]
+fn map_bare_pattern(input: &str, _settings: &()) -> anyhow::Result<LocationPattern> {
+    let path = std::path::Path::new(input);
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    Ok(LocationPattern::from_file_path_pattern(&absolute, input)?)
 }

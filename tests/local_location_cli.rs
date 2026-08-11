@@ -31,6 +31,31 @@ fn transform_accepts_local_file_urls_and_creates_parent_directories() {
 }
 
 #[test]
+fn transform_infers_input_format_from_the_decoded_object_path() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let output = temp_dir.path().join("output.parquet");
+    let input_url = Url::from_file_path(&input).unwrap().to_string();
+    let input_url = format!("{}%2Earrow", input_url.strip_suffix(".arrow").unwrap());
+
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_arrow_batch(&input, &batch);
+
+    cargo::cargo_bin_cmd!("silk-chiffon")
+        .args([
+            "transform",
+            "--from",
+            &input_url,
+            "--to",
+            output.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    assert!(output.exists());
+}
+
+#[test]
 fn inspect_accepts_a_local_file_url() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
