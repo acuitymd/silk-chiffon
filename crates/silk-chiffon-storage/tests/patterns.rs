@@ -14,7 +14,7 @@ use object_store::{
 };
 use silk_chiffon_storage::{
     Location, LocationInput, LocationPattern, ObjectStoreCreatorFn, StorageAccess, StorageBackend,
-    StorageRegistry, StorageSession,
+    StorageError, StorageRegistry, StorageSession,
 };
 use url::Url;
 
@@ -285,6 +285,48 @@ async fn encoded_unicode_and_percent_signs_preserve_object_path_identity() {
         matches[0].object_path().as_ref(),
         "data/données/cent%.arrow"
     );
+}
+
+#[tokio::test]
+async fn adversarial_object_names_round_trip_as_exact_locations() {
+    let storage = storage();
+    for url in [
+        "mem://bucket/data/%23%25%2A%3F%5B%5D%20donn%C3%A9es.arrow",
+        "mem://bucket/data/%E2%98%83.arrow",
+    ] {
+        put(&storage, url).await;
+    }
+
+    let pattern = LocationPattern::parse("mem://bucket/data/*.arrow??token=a?b").unwrap();
+    let matches = storage.expand_input_pattern(&pattern).await.unwrap();
+
+    assert_eq!(matches.len(), 2);
+    for handle in matches {
+        assert_eq!(handle.url().query(), Some("token=a?b"));
+        let exact = LocationInput::parse(handle.url().as_str()).unwrap();
+        assert_eq!(
+            storage.input_handle(&exact).unwrap().object_path(),
+            handle.object_path()
+        );
+    }
+}
+
+#[tokio::test]
+async fn encoded_separators_nul_and_empty_segments_never_reach_listing() {
+    let storage = storage();
+
+    for input in [
+        "mem://bucket/data/%2F*.arrow",
+        "mem://bucket/data/%00*.arrow",
+        "mem://bucket/data//*.arrow",
+    ] {
+        let pattern = LocationPattern::parse(input).unwrap();
+        let error = storage.expand_input_pattern(&pattern).await.unwrap_err();
+        assert!(
+            matches!(error, StorageError::InvalidObjectPath { .. }),
+            "{input:?} should fail"
+        );
+    }
 }
 
 #[tokio::test]

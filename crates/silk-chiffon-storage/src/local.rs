@@ -86,11 +86,52 @@ fn map_bare_location(input: &str, _settings: &()) -> anyhow::Result<Location> {
 
 #[cfg(feature = "local-bare-paths")]
 fn map_bare_pattern(input: &str, _settings: &()) -> anyhow::Result<LocationPattern> {
-    let path = std::path::Path::new(input);
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
+    map_bare_pattern_from(input, &std::env::current_dir()?)
+}
+
+#[cfg(feature = "local-bare-paths")]
+fn map_bare_pattern_from(
+    input: &str,
+    working_directory: &std::path::Path,
+) -> anyhow::Result<LocationPattern> {
+    let pattern = std::path::Path::new(input);
+    let (literal_base, relative_pattern) = if pattern.is_absolute() {
+        let root = std::path::Path::new("/");
+        (root, pattern.strip_prefix(root)?)
     } else {
-        std::env::current_dir()?.join(path)
+        (working_directory, pattern)
     };
-    Ok(LocationPattern::from_file_path_pattern(&absolute, input)?)
+    Ok(LocationPattern::from_file_path_pattern(
+        literal_base,
+        relative_pattern,
+        input,
+    )?)
+}
+
+#[cfg(all(test, feature = "local-bare-paths"))]
+mod tests {
+    #[tokio::test]
+    async fn bare_patterns_treat_the_working_directory_as_literal() {
+        let temporary = tempfile::tempdir().unwrap();
+        let decoy_directory = temporary.path().join("la");
+        std::fs::create_dir(&decoy_directory).unwrap();
+        std::fs::write(decoy_directory.join("decoy.arrow"), b"decoy").unwrap();
+
+        for directory_name in ["[literal]*?", "[unterminated", "**", "%2A"] {
+            let working_directory = temporary.path().join(directory_name);
+            std::fs::create_dir(&working_directory).unwrap();
+            let input = working_directory.join("one.arrow");
+            std::fs::write(&input, b"test").unwrap();
+
+            let pattern = super::map_bare_pattern_from("*.arrow", &working_directory).unwrap();
+            let matches = super::session()
+                .unwrap()
+                .expand_input_pattern(&pattern)
+                .await
+                .unwrap();
+
+            assert_eq!(matches.len(), 1, "working directory {directory_name:?}");
+            assert_eq!(matches[0].local_path().unwrap(), input);
+        }
+    }
 }

@@ -142,42 +142,52 @@ impl LocationPattern {
 
     #[cfg(feature = "local-bare-paths")]
     pub(crate) fn from_file_path_pattern(
-        path: &std::path::Path,
+        literal_base: &std::path::Path,
+        pattern: &std::path::Path,
         source: &str,
     ) -> Result<Self, StorageError> {
-        let path_source = path
+        let pattern_source = pattern
             .to_str()
-            .ok_or_else(|| StorageError::InvalidFilePath(path.to_path_buf()))?;
-        validate_recursive_globs(path_source, source)?;
-        let url = url::Url::from_file_path(path)
-            .map_err(|()| StorageError::InvalidFilePath(path.to_path_buf()))?;
+            .ok_or_else(|| StorageError::InvalidFilePath(pattern.to_path_buf()))?;
+        validate_recursive_globs(pattern_source, source)?;
+
+        let mut literal_path = literal_base.to_path_buf();
+        let mut pattern_segments = pattern_source.split('/').peekable();
+        while let Some(segment) = pattern_segments.next_if(|segment| !has_active_glob(segment)) {
+            literal_path.push(segment);
+        }
+        let active_pattern = pattern_segments.collect::<Vec<_>>().join("/");
+
+        let absolute_pattern = literal_base.join(pattern);
+        let url = url::Url::from_file_path(&absolute_pattern)
+            .map_err(|()| StorageError::InvalidFilePath(absolute_pattern.clone()))?;
         let location = Location::parse_url(url.as_str())?;
-        let matcher_source = object_store::path::Path::from_url_path(location.url().path())
+
+        let literal_url = url::Url::from_file_path(&literal_path)
+            .map_err(|()| StorageError::InvalidFilePath(literal_path.clone()))?;
+        let literal_location = Location::parse_url(literal_url.as_str())?;
+        let literal_prefix = object_store::path::Path::from_url_path(literal_location.url().path())
             .map_err(|object_path_source| StorageError::InvalidObjectPath {
-                location: location.url().clone(),
+                location: literal_location.url().clone(),
                 source: Box::new(object_path_source),
-            })?
-            .as_ref()
-            .to_owned();
+            })?;
+        let mut matcher_source = Pattern::escape(literal_prefix.as_ref());
+        if !matcher_source.is_empty() && !active_pattern.is_empty() {
+            matcher_source.push('/');
+        }
+        matcher_source.push_str(&active_pattern);
         let matcher = Pattern::new(&matcher_source).map_err(|pattern_source| {
             StorageError::InvalidLocationPattern {
                 input: source.to_owned(),
                 source: pattern_source,
             }
         })?;
-        let literal_prefix = path_source
-            .strip_prefix('/')
-            .unwrap_or(path_source)
-            .split('/')
-            .take_while(|segment| !has_active_glob(segment))
-            .collect::<Vec<_>>()
-            .join("/");
         Ok(Self {
             input: PatternInput::Url {
                 source: source.to_owned(),
                 location,
                 matcher,
-                literal_prefix,
+                literal_prefix: literal_prefix.to_string(),
             },
         })
     }
