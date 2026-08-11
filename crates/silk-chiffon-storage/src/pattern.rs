@@ -157,8 +157,9 @@ impl LocationPattern {
             literal_path.push(segment);
         }
         let active_pattern = pattern_segments.collect::<Vec<_>>().join("/");
+        let literal_path = lexically_normalize_absolute_path(&literal_path);
 
-        let absolute_pattern = literal_base.join(pattern);
+        let absolute_pattern = literal_path.join(&active_pattern);
         let url = url::Url::from_file_path(&absolute_pattern)
             .map_err(|()| StorageError::InvalidFilePath(absolute_pattern.clone()))?;
         let location = Location::parse_url(url.as_str())?;
@@ -191,6 +192,28 @@ impl LocationPattern {
             },
         })
     }
+}
+
+#[cfg(feature = "local-bare-paths")]
+fn lexically_normalize_absolute_path(path: &std::path::Path) -> std::path::PathBuf {
+    use std::path::{Component, PathBuf};
+
+    let mut normalized = PathBuf::from("/");
+    for component in path.components() {
+        match component {
+            Component::RootDir => {
+                normalized.clear();
+                normalized.push("/");
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Normal(segment) => normalized.push(segment),
+            Component::Prefix(_) => unreachable!("the storage crate supports only Unix paths"),
+        }
+    }
+    normalized
 }
 
 fn glob_before_url_separator(input: &str) -> bool {

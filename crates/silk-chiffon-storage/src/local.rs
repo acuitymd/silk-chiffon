@@ -134,4 +134,25 @@ mod tests {
             assert_eq!(matches[0].local_path().unwrap(), input);
         }
     }
+
+    #[tokio::test]
+    async fn bare_patterns_resolve_literal_parent_segments_before_globs() {
+        let temporary = tempfile::tempdir().unwrap();
+        let working_directory = temporary.path().join("work");
+        let input_directory = temporary.path().join("data");
+        std::fs::create_dir(&working_directory).unwrap();
+        std::fs::create_dir(&input_directory).unwrap();
+        let input = input_directory.join("one.arrow");
+        std::fs::write(&input, b"test").unwrap();
+
+        let pattern = super::map_bare_pattern_from("../data/*.arrow", &working_directory).unwrap();
+        let matches = super::session()
+            .unwrap()
+            .expand_input_pattern(&pattern)
+            .await
+            .unwrap();
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].local_path().unwrap(), input);
+    }
 }
