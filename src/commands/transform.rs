@@ -48,6 +48,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         preserve_input_order,
         target_partitions,
         input_format,
+        allow_unmatched_patterns,
         output_format,
         thread_budget,
         spill_path,
@@ -69,10 +70,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         sort_by.is_some() || (by.is_some() && partition_strategy == PartitionStrategy::SortSingle);
 
     if preserve_input_order
-        && !matches!(
-            &inputs,
-            crate::InputRequest::ExactReferences(references) if references.len() == 1
-        )
+        && (inputs.exact_references.len() != 1 || !inputs.file_patterns.is_empty())
     {
         anyhow::bail!("--preserve-input-order requires exactly one --from reference");
     }
@@ -119,59 +117,57 @@ pub async fn run(args: TransformCommand) -> Result<()> {
     let file_inputs = FileInputRoute::new(&storage, &formats, input_format.as_deref(), &session);
     let mut sources: Vec<Box<dyn DataSource>> = Vec::new();
     let mut used_file_input = false;
-    match &inputs {
-        crate::InputRequest::ExactReferences(references) => {
-            for reference in references.iter() {
-                let source = match explicit_scheme(reference) {
-                    Some(scheme) => match input_schemes.owner(scheme) {
-                        Some(crate::registration::InputSchemeOwner::FileInput) => {
-                            used_file_input = true;
-                            file_inputs.create_exact_source(reference).await?
-                        }
-                        Some(crate::registration::InputSchemeOwner::ServiceInput(index)) => {
-                            service_inputs
-                                .get(*index)
-                                .create_source(reference, &session)
-                                .await?
-                        }
-                        None => anyhow::bail!("unsupported input scheme {scheme:?}"),
-                    },
-                    None => {
-                        used_file_input = true;
-                        file_inputs.create_exact_source(reference).await?
-                    }
-                };
-                sources.push(source);
-            }
-        }
-        crate::InputRequest::Patterns(patterns) => {
-            for pattern in patterns.iter() {
-                if let Some(scheme) = explicit_scheme(pattern) {
-                    match input_schemes.owner(scheme) {
-                        Some(crate::registration::InputSchemeOwner::FileInput) => {}
-                        Some(crate::registration::InputSchemeOwner::ServiceInput(index)) => {
-                            anyhow::bail!(
-                                "service input {:?} does not support --from-pattern \
-                                 {pattern:?}; use --from",
-                                service_inputs.get(*index).name()
-                            );
-                        }
-                        None => anyhow::bail!("unsupported input scheme {scheme:?}"),
-                    }
+    for pattern in &inputs.file_patterns {
+        if let Some(scheme) = explicit_scheme(pattern) {
+            match input_schemes.owner(scheme) {
+                Some(crate::registration::InputSchemeOwner::FileInput) => {}
+                Some(crate::registration::InputSchemeOwner::ServiceInput(index)) => {
+                    anyhow::bail!(
+                        "service input {:?} does not support --from-pattern \
+                         {pattern:?}; use --from",
+                        service_inputs.get(*index).name()
+                    );
                 }
+                None => anyhow::bail!("unsupported input scheme {scheme:?}"),
             }
-            used_file_input = true;
-            sources.extend(file_inputs.create_pattern_sources(patterns.iter()).await?);
         }
     }
+    for reference in &inputs.exact_references {
+        let (source, is_file) = match explicit_scheme(reference) {
+            Some(scheme) => match input_schemes.owner(scheme) {
+                Some(crate::registration::InputSchemeOwner::FileInput) => {
+                    (file_inputs.create_exact_source(reference).await?, true)
+                }
+                Some(crate::registration::InputSchemeOwner::ServiceInput(index)) => (
+                    service_inputs
+                        .get(*index)
+                        .create_source(reference, &session)
+                        .await?,
+                    false,
+                ),
+                None => anyhow::bail!("unsupported input scheme {scheme:?}"),
+            },
+            None => (file_inputs.create_exact_source(reference).await?, true),
+        };
+        used_file_input |= is_file;
+        sources.push(source);
+    }
+    let pattern_sources = file_inputs
+        .create_pattern_sources(&inputs.file_patterns, allow_unmatched_patterns)
+        .await?;
+    used_file_input |= !pattern_sources.is_empty();
+    sources.extend(pattern_sources);
     if input_format.is_some() && !used_file_input {
         anyhow::bail!("--input-format applies only to file inputs");
+    }
+    if sources.is_empty() {
+        anyhow::bail!("no input sources were selected");
     }
     let mut sources = sources.into_iter();
     let mut input_sources = InputSources::new(
         sources
             .next()
-            .expect("InputRequest is nonempty and every reference creates one source"),
+            .expect("the final nonempty-input check succeeded"),
     );
     for source in sources {
         input_sources.push(source);

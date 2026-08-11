@@ -10,12 +10,14 @@ use std::sync::Arc;
 #[cfg(feature = "local")]
 use clap::Command;
 #[cfg(feature = "local")]
-use object_store::{ObjectStore, local::LocalFileSystem, path::Path as ObjectPath};
+use object_store::{ObjectStore, local::LocalFileSystem};
 
+#[cfg(feature = "local-bare-paths")]
+use crate::{Location, LocationPattern};
 #[cfg(feature = "local")]
 use crate::{
-    Location, StorageAccess, StorageBackend, StorageBackendBuildError, StorageRegistry,
-    StorageSession, StorageSessionCreationError,
+    StorageAccess, StorageBackend, StorageBackendBuildError, StorageRegistry, StorageSession,
+    StorageSessionCreationError,
 };
 
 /// Builds the built-in local backend definition for canonical `file:///` locations.
@@ -32,11 +34,13 @@ pub fn backend() -> Result<StorageBackend, StorageBackendBuildError> {
         .name("local")
         .schemes(["file"])
         .access(StorageAccess::ReadWrite)
-        .object_path_mapper(map_object_path)
+        .allow_any_location()
         .object_store_creator(create_object_store);
 
     #[cfg(feature = "local-bare-paths")]
-    let builder = builder.bare_location_mapper(map_bare_location);
+    let builder = builder
+        .bare_location_mapper(map_bare_location)
+        .bare_pattern_mapper(map_bare_pattern);
 
     builder.build()
 }
@@ -61,11 +65,6 @@ pub fn session() -> Result<StorageSession, StorageSessionCreationError> {
 }
 
 #[cfg(feature = "local")]
-fn map_object_path(location: &Location, _settings: &()) -> anyhow::Result<ObjectPath> {
-    Ok(ObjectPath::from_url_path(location.url().path())?)
-}
-
-#[cfg(feature = "local")]
 fn create_object_store(
     _store_url: &url::Url,
     _settings: &(),
@@ -83,4 +82,77 @@ fn map_bare_location(input: &str, _settings: &()) -> anyhow::Result<Location> {
         std::env::current_dir()?.join(path)
     };
     Ok(Location::from_file_path(absolute)?)
+}
+
+#[cfg(feature = "local-bare-paths")]
+fn map_bare_pattern(input: &str, _settings: &()) -> anyhow::Result<LocationPattern> {
+    map_bare_pattern_from(input, &std::env::current_dir()?)
+}
+
+#[cfg(feature = "local-bare-paths")]
+fn map_bare_pattern_from(
+    input: &str,
+    working_directory: &std::path::Path,
+) -> anyhow::Result<LocationPattern> {
+    let pattern = std::path::Path::new(input);
+    let (literal_base, relative_pattern) = if pattern.is_absolute() {
+        let root = std::path::Path::new("/");
+        (root, pattern.strip_prefix(root)?)
+    } else {
+        (working_directory, pattern)
+    };
+    Ok(LocationPattern::from_file_path_pattern(
+        literal_base,
+        relative_pattern,
+        input,
+    )?)
+}
+
+#[cfg(all(test, feature = "local-bare-paths"))]
+mod tests {
+    #[tokio::test]
+    async fn bare_patterns_treat_the_working_directory_as_literal() {
+        let temporary = tempfile::tempdir().unwrap();
+        let decoy_directory = temporary.path().join("la");
+        std::fs::create_dir(&decoy_directory).unwrap();
+        std::fs::write(decoy_directory.join("decoy.arrow"), b"decoy").unwrap();
+
+        for directory_name in ["[literal]*?", "[unterminated", "**", "%2A"] {
+            let working_directory = temporary.path().join(directory_name);
+            std::fs::create_dir(&working_directory).unwrap();
+            let input = working_directory.join("one.arrow");
+            std::fs::write(&input, b"test").unwrap();
+
+            let pattern = super::map_bare_pattern_from("*.arrow", &working_directory).unwrap();
+            let matches = super::session()
+                .unwrap()
+                .expand_input_pattern(&pattern)
+                .await
+                .unwrap();
+
+            assert_eq!(matches.len(), 1, "working directory {directory_name:?}");
+            assert_eq!(matches[0].local_path().unwrap(), input);
+        }
+    }
+
+    #[tokio::test]
+    async fn bare_patterns_resolve_literal_parent_segments_before_globs() {
+        let temporary = tempfile::tempdir().unwrap();
+        let working_directory = temporary.path().join("work");
+        let input_directory = temporary.path().join("data");
+        std::fs::create_dir(&working_directory).unwrap();
+        std::fs::create_dir(&input_directory).unwrap();
+        let input = input_directory.join("one.arrow");
+        std::fs::write(&input, b"test").unwrap();
+
+        let pattern = super::map_bare_pattern_from("../data/*.arrow", &working_directory).unwrap();
+        let matches = super::session()
+            .unwrap()
+            .expand_input_pattern(&pattern)
+            .await
+            .unwrap();
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].local_path().unwrap(), input);
+    }
 }

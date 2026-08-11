@@ -1286,7 +1286,6 @@ struct TransformArgs {
     /// Exact input reference. May be specified multiple times.
     #[arg(
         long,
-        conflicts_with = "from_pattern",
         required_unless_present = "from_pattern",
         help_heading = "Input/Output"
     )]
@@ -1295,11 +1294,14 @@ struct TransformArgs {
     /// File location pattern. May be specified multiple times.
     #[arg(
         long = "from-pattern",
-        conflicts_with = "from",
         required_unless_present = "from",
         help_heading = "Input/Output"
     )]
     pub from_pattern: Vec<String>,
+
+    /// Allow an individual file location pattern to match no files.
+    #[arg(long, requires = "from_pattern", help_heading = "Input/Output")]
+    pub allow_unmatched_patterns: bool,
 
     /// Override file input format detection.
     #[arg(long, help_heading = "Input/Output")]
@@ -1940,6 +1942,7 @@ pub struct VortexArgs {
 /// Parsed transform arguments with command-scoped format bindings and storage state.
 pub struct TransformCommand {
     inputs: InputRequest,
+    allow_unmatched_patterns: bool,
     input_format: Option<String>,
     output_format: Option<String>,
     to: Option<String>,
@@ -1971,34 +1974,9 @@ pub struct TransformCommand {
     output_schemes: crate::registration::OutputSchemeIndex,
 }
 
-pub(crate) struct NonEmpty<T> {
-    first: T,
-    rest: Vec<T>,
-}
-
-impl<T> NonEmpty<T> {
-    fn from_vec(values: Vec<T>) -> Self {
-        let mut values = values.into_iter();
-        Self {
-            first: values
-                .next()
-                .expect("Clap requires at least one transform input"),
-            rest: values.collect(),
-        }
-    }
-
-    pub(crate) fn iter(&self) -> impl Iterator<Item = &T> {
-        std::iter::once(&self.first).chain(&self.rest)
-    }
-
-    pub(crate) fn len(&self) -> usize {
-        1 + self.rest.len()
-    }
-}
-
-pub(crate) enum InputRequest {
-    ExactReferences(NonEmpty<String>),
-    Patterns(NonEmpty<String>),
+pub(crate) struct InputRequest {
+    pub(crate) exact_references: Vec<String>,
+    pub(crate) file_patterns: Vec<String>,
 }
 
 impl TransformCommand {
@@ -2014,6 +1992,7 @@ impl TransformCommand {
         let TransformArgs {
             from,
             from_pattern,
+            allow_unmatched_patterns,
             input_format,
             output_format,
             to,
@@ -2039,14 +2018,14 @@ impl TransformCommand {
             overwrite,
         } = args;
 
-        let inputs = if from.is_empty() {
-            InputRequest::Patterns(NonEmpty::from_vec(from_pattern))
-        } else {
-            InputRequest::ExactReferences(NonEmpty::from_vec(from))
+        let inputs = InputRequest {
+            exact_references: from,
+            file_patterns: from_pattern,
         };
 
         Self {
             inputs,
+            allow_unmatched_patterns,
             input_format,
             output_format,
             to,

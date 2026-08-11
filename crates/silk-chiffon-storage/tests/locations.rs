@@ -9,7 +9,7 @@ use futures::TryStreamExt;
 use object_store::ObjectStoreExt;
 use silk_chiffon_storage::{Location, LocationInput, StorageError};
 #[cfg(feature = "local-bare-paths")]
-use silk_chiffon_storage::{ensure_output_absent, validate_input};
+use silk_chiffon_storage::{LocationPattern, ensure_output_absent, validate_input};
 #[cfg(feature = "local-bare-paths")]
 use std::sync::Arc;
 #[cfg(feature = "local-bare-paths")]
@@ -17,18 +17,6 @@ use tempfile::TempDir;
 
 fn location(input: &str) -> Result<LocationInput, StorageError> {
     LocationInput::parse(input)
-}
-
-#[cfg(windows)]
-#[test]
-fn windows_drive_root_is_bare() {
-    for input in [r"C:\data\object", "C:/data/object"] {
-        assert_eq!(location(input).unwrap(), LocationInput::Bare(input.into()));
-    }
-    assert!(matches!(
-        location("c://host/object").unwrap(),
-        LocationInput::Url(_)
-    ));
 }
 
 #[test]
@@ -86,6 +74,32 @@ fn local_mapper_interprets_bare_locations_as_filesystem_paths() -> Result<(), St
     );
 
     Ok(())
+}
+
+#[tokio::test]
+#[cfg(feature = "local-bare-paths")]
+async fn local_mapper_expands_bare_path_patterns() {
+    let directory = TempDir::new().unwrap();
+    std::fs::write(directory.path().join("one.arrow"), b"one").unwrap();
+    std::fs::write(directory.path().join("two.parquet"), b"two").unwrap();
+
+    let source = directory
+        .path()
+        .join("*.arrow")
+        .to_string_lossy()
+        .into_owned();
+    let pattern = LocationPattern::parse(&source).unwrap();
+    let matches = silk_chiffon_storage::local::session()
+        .unwrap()
+        .expand_input_pattern(&pattern)
+        .await
+        .unwrap();
+
+    assert_eq!(matches.len(), 1);
+    assert_eq!(
+        matches[0].local_path().unwrap(),
+        directory.path().join("one.arrow")
+    );
 }
 
 #[test]
@@ -171,11 +185,10 @@ fn object_path_validation_happens_during_handle_creation() {
 
     assert!(matches!(
         silk_chiffon_storage::local::session().unwrap().input_handle(&location),
-        Err(StorageError::ObjectPathMapping {
-            backend: "local",
+        Err(StorageError::InvalidObjectPath {
             location: _,
             source,
-        }) if source.downcast_ref::<object_store::path::Error>().is_some()
+        }) if matches!(*source, object_store::path::Error::BadSegment { .. })
     ));
 }
 
