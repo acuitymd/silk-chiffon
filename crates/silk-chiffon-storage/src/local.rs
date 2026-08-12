@@ -131,7 +131,7 @@ mod tests {
                 .unwrap();
 
             assert_eq!(matches.len(), 1, "working directory {directory_name:?}");
-            assert_eq!(matches[0].local_path().unwrap(), input);
+            assert_eq!(matches[0].handle().local_path().unwrap(), input);
         }
     }
 
@@ -153,6 +153,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].local_path().unwrap(), input);
+        assert_eq!(matches[0].handle().local_path().unwrap(), input);
     }
 }

@@ -9,32 +9,23 @@ use std::{
 use anyhow::Result;
 use arrow::{
     array::RecordBatch,
-    datatypes::{DataType, Field, Schema, SchemaRef},
+    datatypes::{Field, Schema, SchemaRef},
 };
 use async_trait::async_trait;
 use clap::{Args, Command};
-use datafusion::{
-    catalog::{TableProvider, streaming::StreamingTable},
-    datasource::empty::EmptyTable,
-    error::DataFusionError,
-    execution::TaskContext,
-    physical_plan::{
-        SendableRecordBatchStream, stream::RecordBatchStreamAdapter, streaming::PartitionStream,
-    },
-    prelude::SessionContext,
-};
+use datafusion::{catalog::TableProvider, datasource::empty::EmptyTable, prelude::SessionContext};
 use silk_chiffon_core::{
-    DataSink, DataSource, DetectedFormat, FormatDefinition, FormatFuture, FormatMatch,
-    FormatOperation, FormatOperationError, FormatRegistry, FormatRegistryError,
-    InspectionDefinition, InspectionMode, InspectionOutput, OutputOrderingColumn, Replayability,
-    RowCount, RowCountCapability, SinkBinding, SinkBindingConfig, SinkCompletion, SinkConcurrency,
-    SortDirection, TransformDefinition,
+    DataSink, DetectedFormat, FormatDefinition, FormatFuture, FormatOperation,
+    FormatOperationError, FormatRegistry, FormatRegistryError, InputDetection, InputLeaf,
+    InputVariant, InspectionDefinition, InspectionMode, InspectionOutput, OutputOrderingColumn,
+    SinkBinding, SinkBindingConfig, SinkCompletion, SinkConcurrency, SortDirection,
+    TransformDefinition,
 };
-use silk_chiffon_storage::{LocationInput, StorageHandle, local};
+use silk_chiffon_storage::{InputObject, LocationInput, StorageHandle, local};
 
 #[derive(Args)]
 struct TestArgs {
-    /// Number embedded in the test source and sink.
+    /// Number embedded in the test input and output paths.
     #[arg(long, default_value_t = 4)]
     test_workers: usize,
 }
@@ -49,37 +40,6 @@ struct InspectionArgs {
 struct SharedArgs {
     #[arg(long = "shared")]
     value: bool,
-}
-
-struct TestSource {
-    name: String,
-    schema: SchemaRef,
-}
-
-#[async_trait]
-impl DataSource for TestSource {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn replayability(&self) -> Replayability {
-        Replayability::Replayable
-    }
-
-    fn row_count_capability(&self) -> Option<&dyn RowCountCapability> {
-        Some(self)
-    }
-
-    async fn table_provider(&self) -> Result<Arc<dyn TableProvider>> {
-        Ok(Arc::new(EmptyTable::new(Arc::clone(&self.schema))))
-    }
-}
-
-#[async_trait]
-impl RowCountCapability for TestSource {
-    async fn row_count(&self) -> Result<RowCount> {
-        Ok(RowCount::Exact(0))
-    }
 }
 
 struct TestSinkBinding {
@@ -140,24 +100,49 @@ impl DataSink for TestSink {
     }
 }
 
-fn detect_test(handle: &StorageHandle) -> FormatFuture<'_, Option<FormatMatch>> {
+fn detect_test(object: &InputObject) -> FormatFuture<'_, InputDetection> {
     Box::pin(async move {
-        Ok((handle.object_path().extension() == Some("test"))
-            .then(|| FormatMatch::with_variant("test-stream")))
+        Ok(
+            if object.handle().object_path().extension() == Some("test") {
+                InputDetection::Match(InputVariant::named("test-stream"))
+            } else {
+                InputDetection::Mismatch
+            },
+        )
     })
 }
 
-fn create_source<'a>(
-    handle: &'a StorageHandle,
+fn detect_any(_: &InputObject) -> FormatFuture<'_, InputDetection> {
+    Box::pin(async { Ok(InputDetection::Match(InputVariant::new())) })
+}
+
+fn create_unit_provider<'a>(
+    _: &'a InputLeaf,
+    _: &'a SessionContext,
+    _: &'a (),
+) -> FormatFuture<'a, Arc<dyn TableProvider>> {
+    Box::pin(async {
+        Ok(Arc::new(EmptyTable::new(Arc::new(Schema::empty()))) as Arc<dyn TableProvider>)
+    })
+}
+
+fn create_provider<'a>(
+    leaf: &'a InputLeaf,
     session: &'a SessionContext,
     settings: &'a TestArgs,
-) -> FormatFuture<'a, Box<dyn DataSource>> {
+) -> FormatFuture<'a, Arc<dyn TableProvider>> {
     Box::pin(async move {
         let partitions = session.state().config_options().execution.target_partitions;
-        Ok(Box::new(TestSource {
-            name: format!("{}:{}:{partitions}", handle.url(), settings.test_workers),
-            schema: Arc::new(Schema::empty()),
-        }) as Box<dyn DataSource>)
+        let variant = leaf.variant().name().unwrap_or("none");
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            format!(
+                "workers-{}-partitions-{partitions}-variant-{variant}",
+                settings.test_workers
+            ),
+            arrow::datatypes::DataType::Int32,
+            false,
+        )]));
+        Ok(Arc::new(EmptyTable::new(schema)) as Arc<dyn TableProvider>)
     })
 }
 
@@ -202,7 +187,7 @@ fn test_format(name: &'static str) -> FormatDefinition {
         .detection_priority(7)
         .transform(
             TransformDefinition::with_args::<TestArgs>()
-                .source(create_source)
+                .input_provider(create_provider)
                 .sink(bind_sink)
                 .build(),
         )
@@ -210,9 +195,22 @@ fn test_format(name: &'static str) -> FormatDefinition {
         .build()
 }
 
+fn local_object(extension: &str) -> InputObject {
+    let file = tempfile::Builder::new()
+        .suffix(extension)
+        .tempfile()
+        .unwrap();
+    let location = LocationInput::parse(file.path().to_str().unwrap()).unwrap();
+    futures::executor::block_on(local::session().unwrap().lookup_input(&location)).unwrap()
+}
+
 fn local_handle(path: &str) -> StorageHandle {
     let location = LocationInput::parse(path).unwrap();
     local::session().unwrap().input_handle(&location).unwrap()
+}
+
+fn local_leaf(session: &SessionContext, extension: &str, variant: InputVariant) -> InputLeaf {
+    InputLeaf::try_new(session, &[local_object(extension)], variant).unwrap()
 }
 
 fn bind_test_transform(
@@ -230,19 +228,19 @@ fn bind_test_transform(
 fn definitions_keep_capabilities_independently_optional() {
     let empty = FormatDefinition::builder("empty").build();
     assert!(!empty.has_detector());
-    assert!(!empty.has_source());
+    assert!(!empty.has_input_provider());
     assert!(!empty.has_sink());
     assert!(!empty.has_inspector());
 
-    let source_only = FormatDefinition::builder("source-only")
+    let input_only = FormatDefinition::builder("input-only")
         .transform(
             TransformDefinition::with_args::<TestArgs>()
-                .source(create_source)
+                .input_provider(create_provider)
                 .build(),
         )
         .build();
-    assert!(source_only.has_source());
-    assert!(!source_only.has_sink());
+    assert!(input_only.has_input_provider());
+    assert!(!input_only.has_sink());
 }
 
 #[test]
@@ -259,15 +257,28 @@ fn transform_arguments_remain_bound_to_typed_functions() {
 
     let bindings = bind_test_transform(&registry, &["test", "--test-workers", "9"]);
     let session = SessionContext::new();
-    let source = futures::executor::block_on(
+    let leaf = local_leaf(&session, ".test", InputVariant::named("test-stream"));
+    let provider = futures::executor::block_on(
         bindings
             .get("test")
             .unwrap()
-            .create_source(&local_handle("input.test"), &session),
+            .create_input_provider(&leaf, &session),
     )
     .unwrap();
-    assert!(source.name().contains(":9:"));
-    assert!(source.row_count_capability().is_some());
+    assert!(
+        provider
+            .schema()
+            .field(0)
+            .name()
+            .starts_with("workers-9-partitions-")
+    );
+    assert!(
+        provider
+            .schema()
+            .field(0)
+            .name()
+            .ends_with("variant-test-stream")
+    );
 }
 
 #[test]
@@ -279,7 +290,7 @@ fn inspection_arguments_and_mode_reach_the_inspector() {
         .unwrap();
     let binding = format.bind_inspection(&matches).unwrap();
     let output = futures::executor::block_on(
-        binding.inspect(&local_handle("input.test"), InspectionMode::Json),
+        binding.inspect(local_object(".test").handle(), InspectionMode::Json),
     )
     .unwrap();
     assert_eq!(
@@ -390,9 +401,81 @@ fn detection_uses_priority_then_registration_order() {
         )
         .build()
         .unwrap();
-    let detected =
-        futures::executor::block_on(registry.detect(&local_handle("input.test"))).unwrap();
+    let detected = futures::executor::block_on(registry.detect(&local_object(".test"))).unwrap();
     assert_eq!(detected_name(detected), Some("first"));
+}
+
+#[test]
+fn detection_tries_the_case_insensitive_extension_owner_first() {
+    let transform = || {
+        TransformDefinition::without_args()
+            .input_provider(create_unit_provider)
+            .build()
+    };
+    let registry = FormatRegistry::builder()
+        .register(
+            FormatDefinition::builder("priority")
+                .detector(detect_any)
+                .detection_priority(0)
+                .transform(transform())
+                .build(),
+        )
+        .register(
+            FormatDefinition::builder("preferred")
+                .extensions(["preferred"])
+                .detector(detect_any)
+                .detection_priority(10)
+                .transform(transform())
+                .build(),
+        )
+        .build()
+        .unwrap();
+    let object = local_object(".PREFERRED");
+
+    let detected = futures::executor::block_on(registry.detect(&object)).unwrap();
+    assert_eq!(detected_name(detected), Some("preferred"));
+
+    let bindings = bind_test_transform(&registry, &["test"]);
+    let detected = futures::executor::block_on(bindings.detect(&object)).unwrap();
+    assert_eq!(
+        detected.map(|(format, _)| format.format()),
+        Some("preferred")
+    );
+}
+
+#[test]
+fn transform_detection_skips_formats_without_input_providers() {
+    let registry = FormatRegistry::builder()
+        .register(
+            FormatDefinition::builder("sink-only")
+                .extensions(["test"])
+                .detector(detect_any)
+                .detection_priority(0)
+                .transform(
+                    TransformDefinition::with_args::<TestArgs>()
+                        .sink(bind_sink)
+                        .build(),
+                )
+                .build(),
+        )
+        .register(
+            FormatDefinition::builder("input")
+                .detector(detect_any)
+                .detection_priority(10)
+                .transform(
+                    TransformDefinition::without_args()
+                        .input_provider(create_unit_provider)
+                        .build(),
+                )
+                .build(),
+        )
+        .build()
+        .unwrap();
+    let bindings = bind_test_transform(&registry, &["test"]);
+
+    let detected = futures::executor::block_on(bindings.detect(&local_object(".test"))).unwrap();
+
+    assert_eq!(detected.map(|(format, _)| format.format()), Some("input"));
 }
 
 #[test]
@@ -446,11 +529,13 @@ fn unavailable_capabilities_return_structured_errors() {
         .build()
         .unwrap();
     let bindings = bind_test_transform(&registry, &["test"]);
+    let session = SessionContext::new();
+    let leaf = local_leaf(&session, ".empty", InputVariant::new());
     let error = futures::executor::block_on(
         bindings
             .get("empty")
             .unwrap()
-            .create_source(&local_handle("input.test"), &SessionContext::new()),
+            .create_input_provider(&leaf, &session),
     )
     .err()
     .unwrap();
@@ -458,101 +543,7 @@ fn unavailable_capabilities_return_structured_errors() {
         error,
         FormatOperationError::Unsupported {
             format: "empty",
-            operation: FormatOperation::SourceCreation,
+            operation: FormatOperation::InputProviderCreation,
         }
     ));
-}
-
-#[derive(Debug)]
-struct TestPartitionStream {
-    schema: SchemaRef,
-    infinite: bool,
-}
-
-impl PartitionStream for TestPartitionStream {
-    fn schema(&self) -> &SchemaRef {
-        &self.schema
-    }
-
-    fn execute(&self, _: Arc<TaskContext>) -> SendableRecordBatchStream {
-        let stream: SendableRecordBatchStream = if self.infinite {
-            Box::pin(RecordBatchStreamAdapter::new(
-                Arc::clone(&self.schema),
-                futures::stream::pending::<Result<RecordBatch, DataFusionError>>(),
-            ))
-        } else {
-            Box::pin(RecordBatchStreamAdapter::new(
-                Arc::clone(&self.schema),
-                futures::stream::empty::<Result<RecordBatch, DataFusionError>>(),
-            ))
-        };
-        stream
-    }
-}
-
-struct DirectStreamSource {
-    schema: SchemaRef,
-    infinite: bool,
-    replayability: Replayability,
-}
-
-#[async_trait]
-impl DataSource for DirectStreamSource {
-    fn name(&self) -> &str {
-        "direct-stream"
-    }
-
-    fn replayability(&self) -> Replayability {
-        self.replayability
-    }
-
-    async fn table_provider(&self) -> Result<Arc<dyn TableProvider>> {
-        let partition = Arc::new(TestPartitionStream {
-            schema: Arc::clone(&self.schema),
-            infinite: self.infinite,
-        });
-        let table = StreamingTable::try_new(Arc::clone(&self.schema), vec![partition])?
-            .with_infinite_table(self.infinite);
-        Ok(Arc::new(table))
-    }
-}
-
-#[test]
-fn datafusion_alone_reports_physical_boundedness() {
-    let source = DirectStreamSource {
-        schema: Arc::new(Schema::empty()),
-        infinite: true,
-        replayability: Replayability::Replayable,
-    };
-    assert!(source.row_count_capability().is_none());
-    let session = SessionContext::new();
-    let provider = futures::executor::block_on(source.table_provider()).unwrap();
-    let plan =
-        futures::executor::block_on(provider.scan(&session.state(), None, &[], None)).unwrap();
-    assert!(plan.properties().boundedness.is_unbounded());
-}
-
-#[test]
-fn finite_single_pass_sources_can_have_no_row_count() {
-    let source = DirectStreamSource {
-        schema: Arc::new(Schema::new(vec![Field::new(
-            "value",
-            DataType::Int32,
-            false,
-        )])),
-        infinite: false,
-        replayability: Replayability::SinglePass,
-    };
-    assert_eq!(source.replayability(), Replayability::SinglePass);
-    assert!(source.row_count_capability().is_none());
-
-    let session = SessionContext::new();
-    let provider = futures::executor::block_on(source.table_provider()).unwrap();
-    let frame = session
-        .read_table(provider)
-        .unwrap()
-        .sort(vec![datafusion::prelude::col("value").sort(true, true)])
-        .unwrap();
-    let plan = futures::executor::block_on(frame.create_physical_plan()).unwrap();
-    assert!(!plan.properties().boundedness.is_unbounded());
 }

@@ -1,20 +1,18 @@
-use std::num::NonZeroUsize;
+use std::{num::NonZeroUsize, sync::Arc};
 
 use crate::{
     ListOutputsFormat, PartitionStrategy, SortDirection, SortSpec, TransformCommand,
     default_thread_budget,
     operations::{query::QueryOperation, sort::SortOperation},
-    utils::{
-        memory::{estimate_sort_spill_reservation, measure_avg_input_row_bytes},
-        projected_stream::project_stream,
-    },
+    utils::projected_stream::project_stream,
 };
 use anyhow::{Result, anyhow};
 use camino::Utf8Path;
+use datafusion::catalog::TableProvider;
 use owo_colors::OwoColorize;
 use silk_chiffon_core::{
-    DataSource, InputSources, OutputOrderingColumn, Pipeline, Replayability, RowCount,
-    SinkBindingConfig, SinkConcurrency, SortDirection as CoreSortDirection,
+    InputSources, OutputOrderingColumn, Pipeline, SinkBindingConfig, SinkConcurrency,
+    SortDirection as CoreSortDirection,
 };
 use tabled::{builder::Builder, settings::Style};
 
@@ -115,7 +113,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
     let session = pipeline.create_session_context()?;
 
     let file_inputs = FileInputRoute::new(&storage, &formats, input_format.as_deref(), &session);
-    let mut sources: Vec<Box<dyn DataSource>> = Vec::new();
+    let mut providers: Vec<Arc<dyn TableProvider>> = Vec::new();
     let mut used_file_input = false;
     for pattern in &inputs.file_patterns {
         if let Some(scheme) = explicit_scheme(pattern) {
@@ -133,45 +131,37 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         }
     }
     for reference in &inputs.exact_references {
-        let (source, is_file) = match explicit_scheme(reference) {
+        let (provider, is_file) = match explicit_scheme(reference) {
             Some(scheme) => match input_schemes.owner(scheme) {
                 Some(crate::registration::InputSchemeOwner::FileInput) => {
-                    (file_inputs.create_exact_source(reference).await?, true)
+                    (file_inputs.create_exact_provider(reference).await?, true)
                 }
                 Some(crate::registration::InputSchemeOwner::ServiceInput(index)) => (
                     service_inputs
                         .get(*index)
-                        .create_source(reference, &session)
+                        .create_input_provider(reference, &session)
                         .await?,
                     false,
                 ),
                 None => anyhow::bail!("unsupported input scheme {scheme:?}"),
             },
-            None => (file_inputs.create_exact_source(reference).await?, true),
+            None => (file_inputs.create_exact_provider(reference).await?, true),
         };
         used_file_input |= is_file;
-        sources.push(source);
+        providers.push(provider);
     }
-    let pattern_sources = file_inputs
-        .create_pattern_sources(&inputs.file_patterns, allow_unmatched_patterns)
+    let pattern_providers = file_inputs
+        .create_pattern_providers(&inputs.file_patterns, allow_unmatched_patterns)
         .await?;
-    used_file_input |= !pattern_sources.is_empty();
-    sources.extend(pattern_sources);
+    used_file_input |= !pattern_providers.is_empty();
+    providers.extend(pattern_providers);
     if input_format.is_some() && !used_file_input {
         anyhow::bail!("--input-format applies only to file inputs");
     }
-    if sources.is_empty() {
-        anyhow::bail!("no input sources were selected");
+    if providers.is_empty() {
+        anyhow::bail!("no inputs were selected");
     }
-    let mut sources = sources.into_iter();
-    let mut input_sources = InputSources::new(
-        sources
-            .next()
-            .expect("the final nonempty-input check succeeded"),
-    );
-    for source in sources {
-        input_sources.push(source);
-    }
+    let input_sources = InputSources::try_new(&session, providers)?;
 
     let list_outputs_format = list_outputs;
 
@@ -232,32 +222,16 @@ pub async fn run(args: TransformCommand) -> Result<()> {
     pipeline = pipeline.with_inputs(input_sources);
     let mut prepared = pipeline.prepare(session).await?;
 
-    if has_sort && prepared.inputs().replayability() == Replayability::Replayable {
-        let avg_row_bytes =
-            measure_avg_input_row_bytes(prepared.session(), prepared.inputs(), 100_000).await?;
-        if avg_row_bytes > 0 {
-            let row_count = match prepared.inputs().row_count_capability() {
-                Some(capability) => capability.row_count().await.unwrap_or(RowCount::Unknown),
-                None => RowCount::Unknown,
-            };
-            let total_rows = match row_count {
-                RowCount::Exact(rows) | RowCount::Estimated(rows) => {
-                    usize::try_from(rows).unwrap_or(usize::MAX)
-                }
-                RowCount::Unknown => 100_000,
-            };
-            let total_in_memory_bytes = total_rows.saturating_mul(avg_row_bytes);
-            let memory_limit = effective_memory_limit.unwrap_or(total_budget * 60 / 100);
-            let partitions = effective_target_partitions.unwrap_or(three_quarter_cpus);
-            let memory_per_partition = memory_limit / partitions.max(1);
-            let reservation = estimate_sort_spill_reservation(
-                avg_row_bytes,
-                total_in_memory_bytes,
-                memory_per_partition,
-                8192,
-            );
-            prepared = prepared.with_sort_spill_reservation_bytes(reservation);
-        }
+    if has_sort {
+        let memory_limit = effective_memory_limit.unwrap_or(total_budget * 60 / 100);
+        let partitions = effective_target_partitions.unwrap_or(three_quarter_cpus);
+        let memory_per_partition = memory_limit / partitions.max(1);
+        let reservation = crate::utils::memory::sort_spill_reservation_from_plan(
+            prepared.execution_plan(),
+            memory_per_partition,
+            8192,
+        );
+        prepared = prepared.with_sort_spill_reservation_bytes(reservation);
     }
 
     if let Some(target) = to.as_deref()
@@ -354,14 +328,9 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         },
         _ => unreachable!("Clap requires exactly one output mode"),
     };
-    let output = FileOutputRoute::new(
-        &storage,
-        &formats,
-        output_format.as_deref(),
-        prepared.session(),
-    )
-    .bind(target, &sink_context, &prepared.output_schema())
-    .await?;
+    let output = FileOutputRoute::new(&storage, &formats, output_format.as_deref())
+        .bind(target, &sink_context, &prepared.output_schema())
+        .await?;
 
     let execution = prepared.begin_execution()?;
     let report = output.write(execution.into_sendable_stream()).await?;

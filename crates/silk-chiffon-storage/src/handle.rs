@@ -6,7 +6,7 @@
 
 use std::{path::PathBuf, sync::Arc};
 
-use object_store::{ObjectMeta, ObjectStore, ObjectStoreExt, path::Path as ObjectPath};
+use object_store::{ObjectStore, ObjectStoreExt, path::Path as ObjectPath};
 use url::Url;
 
 use crate::StorageError;
@@ -89,18 +89,6 @@ impl StorageHandle {
             .to_file_path()
             .map_err(|()| StorageError::InvalidFilePath(PathBuf::from(self.url.as_str())))
     }
-}
-
-/// Requires an input handle's object to exist and returns its metadata.
-///
-/// This invokes `ObjectStoreExt::head` once. Handle creation deliberately omits this policy so the
-/// same API can create handles for objects that do not exist yet.
-///
-/// # Errors
-///
-/// Returns [`StorageError::ObjectStore`] when the object is absent or the metadata request fails.
-pub async fn validate_input(handle: &StorageHandle) -> Result<ObjectMeta, StorageError> {
-    Ok(handle.object_store.head(&handle.object_path).await?)
 }
 
 /// Requires an output handle's object to be absent.
