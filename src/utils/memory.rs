@@ -179,12 +179,9 @@ pub fn sort_spill_reservation_from_plan(
     memory_per_partition: usize,
     batch_size: usize,
 ) -> Option<usize> {
-    fn visit(
-        plan: &std::sync::Arc<dyn ExecutionPlan>,
-        memory_per_partition: usize,
-        batch_size: usize,
-        reservations: &mut Vec<Option<usize>>,
-    ) {
+    let mut reservations = Vec::new();
+    let mut pending = vec![std::sync::Arc::clone(plan)];
+    while let Some(plan) = pending.pop() {
         if let Some(sort) = plan.downcast_ref::<SortExec>() {
             let input = sort.input();
             let partition_count = input.properties().partitioning.partition_count().max(1);
@@ -210,13 +207,9 @@ pub fn sort_spill_reservation_from_plan(
                 reservations.push(reservation);
             }
         }
-        for child in plan.children() {
-            visit(child, memory_per_partition, batch_size, reservations);
-        }
+        pending.extend(plan.children().into_iter().cloned());
     }
 
-    let mut reservations = Vec::new();
-    visit(plan, memory_per_partition, batch_size, &mut reservations);
     if reservations.is_empty() {
         return None;
     }
@@ -626,6 +619,33 @@ kernel 500";
         assert_eq!(
             sort_spill_reservation_from_plan(&plan, 500_000_000, 8192),
             Some(40 * 8192 * 200)
+        );
+    }
+
+    #[test]
+    fn sort_walk_handles_deep_physical_plans() {
+        use datafusion::{
+            common::{ColumnStatistics, Statistics, stats::Precision},
+            physical_expr::Partitioning,
+            physical_plan::repartition::RepartitionExec,
+        };
+
+        let mut plan = sort_with_statistics(
+            Statistics {
+                num_rows: Precision::Inexact(50_000_000),
+                total_byte_size: Precision::Inexact(10_000_000_000),
+                column_statistics: vec![ColumnStatistics::new_unknown()],
+            },
+            2,
+        );
+        for _ in 0..2_048 {
+            plan =
+                Arc::new(RepartitionExec::try_new(plan, Partitioning::RoundRobinBatch(1)).unwrap());
+        }
+
+        assert_eq!(
+            sort_spill_reservation_from_plan(&plan, 500_000_000, 8192),
+            Some(10 * 8192 * 200)
         );
     }
 }
