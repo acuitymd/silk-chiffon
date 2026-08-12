@@ -5,18 +5,24 @@ use async_trait::async_trait;
 use datafusion::{
     catalog::Session,
     common::{ColumnStatistics, Result, Statistics, stats::Precision},
+    config::ConfigOptions,
     datasource::{
         file_format::{FileFormat, FileMeta, file_compression_type::FileCompressionType},
         listing::PartitionedFile,
         physical_plan::{FileOpenFuture, FileOpener, FileScanConfig, FileSinkConfig, FileSource},
+        source::DataSourceExec,
         table_schema::TableSchema,
     },
     execution::object_store::ObjectStoreUrl,
-    logical_expr::{TableProviderFilterPushDown, col},
-    physical_expr::{LexOrdering, LexRequirement, PhysicalSortExpr, expressions::Column},
+    logical_expr::{TableProviderFilterPushDown, col, lit},
+    physical_expr::{
+        LexOrdering, LexRequirement, PhysicalExpr, PhysicalSortExpr, expressions::Column,
+    },
     physical_expr_adapter::DefaultPhysicalExprAdapterFactory,
     physical_plan::{
-        ExecutionPlan, empty::EmptyExec, metrics::ExecutionPlanMetricsSet,
+        ExecutionPlan,
+        filter_pushdown::{FilterPushdownPropagation, PushedDown},
+        metrics::ExecutionPlanMetricsSet,
         projection::ProjectionExprs,
     },
     prelude::{SessionConfig, SessionContext},
@@ -34,6 +40,7 @@ struct CapturedScan {
 
 struct CapturingFormat {
     captured: Arc<Mutex<Option<CapturedScan>>>,
+    filter_pushdown_calls: Arc<Mutex<Vec<Vec<String>>>>,
 }
 
 impl fmt::Debug for CapturingFormat {
@@ -93,17 +100,16 @@ impl FileFormat for CapturingFormat {
         state: &dyn Session,
         config: FileScanConfig,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let schema = config.projected_schema()?;
         let store_registered = state
             .runtime_env()
             .object_store(&config.object_store_url)
             .is_ok();
         *self.captured.lock() = Some(CapturedScan {
             target_partitions: state.config_options().execution.target_partitions,
-            config,
+            config: config.clone(),
             store_registered,
         });
-        Ok(Arc::new(EmptyExec::new(schema)))
+        Ok(DataSourceExec::from_data_source(config))
     }
 
     async fn create_writer_physical_plan(
@@ -117,7 +123,10 @@ impl FileFormat for CapturingFormat {
     }
 
     fn file_source(&self, table_schema: TableSchema) -> Arc<dyn FileSource> {
-        Arc::new(CapturingSource::new(table_schema))
+        Arc::new(CapturingSource::new(
+            table_schema,
+            Arc::clone(&self.filter_pushdown_calls),
+        ))
     }
 }
 
@@ -126,15 +135,17 @@ struct CapturingSource {
     table_schema: TableSchema,
     projection: SplitProjection,
     metrics: ExecutionPlanMetricsSet,
+    filter_pushdown_calls: Arc<Mutex<Vec<Vec<String>>>>,
 }
 
 impl CapturingSource {
-    fn new(table_schema: TableSchema) -> Self {
+    fn new(table_schema: TableSchema, filter_pushdown_calls: Arc<Mutex<Vec<Vec<String>>>>) -> Self {
         let projection = SplitProjection::unprojected(&table_schema);
         Self {
             table_schema,
             projection,
             metrics: ExecutionPlanMetricsSet::new(),
+            filter_pushdown_calls,
         }
     }
 }
@@ -186,6 +197,19 @@ impl FileSource for CapturingSource {
     fn file_type(&self) -> &str {
         "capture"
     }
+
+    fn try_pushdown_filters(
+        &self,
+        filters: Vec<Arc<dyn PhysicalExpr>>,
+        _config: &ConfigOptions,
+    ) -> Result<FilterPushdownPropagation<Arc<dyn FileSource>>> {
+        self.filter_pushdown_calls
+            .lock()
+            .push(filters.iter().map(ToString::to_string).collect());
+        Ok(FilterPushdownPropagation::with_parent_pushdown_result(
+            vec![PushedDown::No; filters.len()],
+        ))
+    }
 }
 
 #[test]
@@ -216,8 +240,10 @@ fn provider_passes_retained_file_primitives_to_the_format_unchanged() {
     )))]
     .into();
     let captured = Arc::new(Mutex::new(None));
+    let filter_pushdown_calls = Arc::new(Mutex::new(Vec::new()));
     let format = Arc::new(CapturingFormat {
         captured: Arc::clone(&captured),
+        filter_pushdown_calls: Arc::clone(&filter_pushdown_calls),
     });
     let store_url = ObjectStoreUrl::parse("memory://root").unwrap();
     let provider = file_table_provider(
@@ -246,8 +272,8 @@ fn provider_passes_retained_file_primitives_to_the_format_unchanged() {
         Some(5),
     ))
     .unwrap();
-    let captured = captured.lock();
-    let captured = captured.as_ref().unwrap();
+    let captured_guard = captured.lock();
+    let captured_scan = captured_guard.as_ref().unwrap();
 
     assert_eq!(
         provider.table_type(),
@@ -264,18 +290,35 @@ fn provider_passes_retained_file_primitives_to_the_format_unchanged() {
     assert_eq!(provider.schema(), schema);
     assert_eq!(provider.statistics(), Some(statistics));
     assert_eq!(plan.schema().fields().len(), 1);
-    assert_eq!(captured.target_partitions, 7);
-    assert!(captured.store_registered);
-    assert_eq!(captured.config.object_store_url, store_url);
-    assert_eq!(captured.config.limit, Some(5));
-    assert_eq!(captured.config.file_groups.len(), 1);
-    assert_eq!(captured.config.file_groups[0].len(), 1);
-    let retained = &captured.config.file_groups[0].files()[0];
+    assert_eq!(captured_scan.target_partitions, 7);
+    assert!(captured_scan.store_registered);
+    assert_eq!(captured_scan.config.object_store_url, store_url);
+    assert_eq!(captured_scan.config.limit, Some(5));
+    assert_eq!(captured_scan.config.file_groups.len(), 1);
+    assert_eq!(captured_scan.config.file_groups[0].len(), 1);
+    let retained = &captured_scan.config.file_groups[0].files()[0];
     assert_eq!(retained.object_meta, metadata);
     assert_eq!(retained.statistics.as_deref(), Some(&file_statistics));
-    assert_eq!(captured.config.statistics().num_rows, Precision::Exact(12));
-    assert!(captured.config.expr_adapter_factory.is_some());
-    assert_eq!(captured.config.output_ordering.len(), 1);
+    assert_eq!(
+        captured_scan.config.statistics().num_rows,
+        Precision::Exact(12)
+    );
+    assert!(captured_scan.config.expr_adapter_factory.is_some());
+    assert_eq!(captured_scan.config.output_ordering.len(), 1);
+    drop(captured_guard);
+
+    let frame = session
+        .read_table(provider)
+        .unwrap()
+        .filter(col("id").gt(lit(5_i64)))
+        .unwrap();
+    futures::executor::block_on(frame.create_physical_plan()).unwrap();
+    assert!(
+        filter_pushdown_calls
+            .lock()
+            .iter()
+            .any(|filters| filters.as_slice() == ["id@0 > 5"])
+    );
 }
 
 #[test]
@@ -283,6 +326,7 @@ fn provider_rejects_an_empty_exact_file_set() {
     let schema = Arc::new(Schema::empty());
     let format = Arc::new(CapturingFormat {
         captured: Arc::new(Mutex::new(None)),
+        filter_pushdown_calls: Arc::new(Mutex::new(Vec::new())),
     });
 
     let error = file_table_provider(

@@ -88,6 +88,9 @@ impl TableProvider for FileTableProvider {
         &self,
         state: &dyn Session,
         projection: Option<&Vec<usize>>,
+        // Inexact pushdown retains a FilterExec. DataFusion's physical
+        // optimizer converts that predicate and passes it through
+        // FileScanConfig to the format's FileSource.
         _filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
