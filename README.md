@@ -49,7 +49,9 @@ silk-chiffon transform --from shard-1.arrow --from shard-2.arrow --to combined.p
 silk-chiffon transform --from-pattern 'shards/*.arrow' --to combined.parquet
 ```
 
-Each pattern must match at least one file by default. Add `--allow-unmatched-patterns` when optional shards may be absent; the command still requires another exact or matched input. Exact inputs keep their order and duplicates. Matches are sorted by canonical URL and deduplicated within each pattern operand, then appended after exact inputs. Repeated or overlapping operands intentionally contribute rows again.
+Each pattern must match at least one file by default. Add `--allow-unmatched-patterns` when optional shards may be absent; the command still requires another exact or matched input. Exact inputs retain their CLI occurrence order and duplicates. Pattern operands are processed in CLI order after all exact inputs. Within one pattern, matches are sorted by canonical URL and deduplicated before they are collected into homogeneous groups by storage root, format, and container variant. Groups follow the first URL that belongs to each group, and URLs remain sorted within a group, but grouping can move a later URL ahead of an earlier URL from another group. Repeated or overlapping operands intentionally contribute rows again.
+
+This ordering makes input selection deterministic; it does not guarantee output row order. DataFusion may read providers, files, and partitions concurrently and interleave their rows. `--preserve-input-order` is available only for one exact `--from` file written to one output without a query or sort, and it cannot be combined with `--from-pattern`. Use `--sort-by` when the final row order must be defined by data columns.
 
 Files grouped from one pattern must have the same structural schema. Separate exact inputs and pattern groups are combined by column name, so columns missing from one group become null there.
 
