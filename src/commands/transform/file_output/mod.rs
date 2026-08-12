@@ -11,7 +11,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 use arrow::{array::RecordBatch, datatypes::SchemaRef};
-use datafusion::{physical_plan::SendableRecordBatchStream, prelude::SessionContext};
+use datafusion::physical_plan::SendableRecordBatchStream;
 use futures::StreamExt;
 use lru::LruCache;
 use silk_chiffon_core::{
@@ -55,7 +55,6 @@ pub(super) struct FileOutputRoute<'a> {
     storage: &'a StorageSession,
     formats: &'a TransformBindings,
     explicit_format: Option<&'a str>,
-    session: &'a SessionContext,
 }
 
 impl<'a> FileOutputRoute<'a> {
@@ -63,13 +62,11 @@ impl<'a> FileOutputRoute<'a> {
         storage: &'a StorageSession,
         formats: &'a TransformBindings,
         explicit_format: Option<&'a str>,
-        session: &'a SessionContext,
     ) -> Self {
         Self {
             storage,
             formats,
             explicit_format,
-            session,
         }
     }
 
@@ -94,7 +91,6 @@ impl<'a> FileOutputRoute<'a> {
                         format!("while binding format for exact file output {target:?}")
                     })?);
                 prepare_output(&target, &handle, overwrite, create_dirs).await?;
-                self.register_object_store(&handle);
                 Ok(FileOutput::Exact {
                     target,
                     handle,
@@ -139,7 +135,6 @@ impl<'a> FileOutputRoute<'a> {
                     })?);
                 Ok(FileOutput::Partitioned {
                     storage: self.storage.clone(),
-                    session: self.session.clone(),
                     sink_binding,
                     partition_fields,
                     template,
@@ -159,12 +154,6 @@ impl<'a> FileOutputRoute<'a> {
         self.storage
             .output_handle(&location)
             .with_context(|| format!("while resolving exact file output {target:?}"))
-    }
-
-    fn register_object_store(&self, handle: &StorageHandle) {
-        self.session
-            .runtime_env()
-            .register_object_store(handle.store_url(), handle.object_store());
     }
 
     fn format_for_handle<'b>(
@@ -222,7 +211,6 @@ pub(super) enum FileOutput {
     },
     Partitioned {
         storage: StorageSession,
-        session: SessionContext,
         sink_binding: Arc<dyn SinkBinding>,
         partition_fields: Vec<String>,
         template: PathTemplate,
@@ -245,7 +233,6 @@ impl FileOutput {
             } => write_exact(target, handle, sink_binding, stream, exclude_columns).await,
             Self::Partitioned {
                 storage,
-                session,
                 sink_binding,
                 partition_fields,
                 template,
@@ -257,7 +244,6 @@ impl FileOutput {
             } => {
                 let state = PartitionedWriteState {
                     storage,
-                    session,
                     sink_binding,
                     partition_fields,
                     template,
@@ -319,7 +305,6 @@ impl OpenSink {
 
 struct PartitionedWriteState {
     storage: StorageSession,
-    session: SessionContext,
     sink_binding: Arc<dyn SinkBinding>,
     partition_fields: Vec<String>,
     template: PathTemplate,
@@ -454,9 +439,6 @@ impl PartitionedWriteState {
             .output_handle(&location)
             .with_context(|| format!("while resolving partitioned file output {target:?}"))?;
         prepare_output(&target, &handle, self.overwrite, self.create_dirs).await?;
-        self.session
-            .runtime_env()
-            .register_object_store(handle.store_url(), handle.object_store());
         let sink = self
             .sink_binding
             .open_sink(handle, Arc::clone(schema))

@@ -14,9 +14,9 @@ use thiserror::Error;
 use url::{Position, Url};
 
 use crate::{
-    Location, LocationInput, LocationPattern, RetryConfigurationError, StorageBackendBuildError,
-    StorageDirection, StorageError, StorageHandle, StorageRegistryError, backend::BackendBinding,
-    pattern::PatternInput, registry::RoutingIndex,
+    InputObject, Location, LocationInput, LocationPattern, RetryConfigurationError,
+    StorageBackendBuildError, StorageDirection, StorageError, StorageHandle, StorageRegistryError,
+    backend::BackendBinding, pattern::PatternInput, registry::RoutingIndex,
 };
 
 /// Storage state bound to one command invocation.
@@ -84,6 +84,20 @@ impl StorageSession {
         self.create_handle(input, StorageDirection::Input)
     }
 
+    /// Resolves an exact input and records the object's current metadata.
+    ///
+    /// The returned metadata is an observation, not a snapshot or reservation. The object must
+    /// remain stable for the command's lifetime.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] when handle creation or the metadata request fails.
+    pub async fn lookup_input(&self, input: &LocationInput) -> Result<InputObject, StorageError> {
+        let handle = self.input_handle(input)?;
+        let metadata = handle.object_store().head(handle.object_path()).await?;
+        Ok(InputObject::new(handle, metadata))
+    }
+
     /// Creates a handle for writing without checking existence or overwrite policy.
     ///
     /// # Errors
@@ -94,7 +108,7 @@ impl StorageSession {
         self.create_handle(input, StorageDirection::Output)
     }
 
-    /// Expands one exact location or object-path glob into zero or more input handles.
+    /// Expands one exact location or object-path glob into zero or more input objects.
     ///
     /// Exact patterns perform one metadata request without listing. Active globs list from their
     /// longest complete literal-segment prefix and match complete canonical object paths. The
@@ -106,7 +120,7 @@ impl StorageSession {
     pub async fn expand_input_pattern(
         &self,
         pattern: &LocationPattern,
-    ) -> Result<Vec<StorageHandle>, StorageError> {
+    ) -> Result<Vec<InputObject>, StorageError> {
         match &pattern.input {
             PatternInput::Exact(input) => self.expand_exact_pattern(input).await,
             PatternInput::Bare { source, .. } => {
@@ -140,7 +154,7 @@ impl StorageSession {
         &self,
         pattern: &LocationPattern,
         backend_index: usize,
-    ) -> Result<Vec<StorageHandle>, StorageError> {
+    ) -> Result<Vec<InputObject>, StorageError> {
         match &pattern.input {
             PatternInput::Exact(LocationInput::Url(location)) => {
                 self.require_pattern_backend(location, backend_index)?;
@@ -167,7 +181,7 @@ impl StorageSession {
     async fn expand_exact_pattern(
         &self,
         input: &LocationInput,
-    ) -> Result<Vec<StorageHandle>, StorageError> {
+    ) -> Result<Vec<InputObject>, StorageError> {
         let source = match input {
             LocationInput::Url(location) => location.url().as_str(),
             LocationInput::Bare(source) => source,
@@ -180,9 +194,9 @@ impl StorageSession {
         &self,
         handle: StorageHandle,
         pattern: &str,
-    ) -> Result<Vec<StorageHandle>, StorageError> {
+    ) -> Result<Vec<InputObject>, StorageError> {
         match handle.object_store().head(handle.object_path()).await {
-            Ok(_) => Ok(vec![handle]),
+            Ok(metadata) => Ok(vec![InputObject::new(handle, metadata)]),
             Err(object_store::Error::NotFound { .. }) => Ok(Vec::new()),
             Err(source) => Err(StorageError::PatternMetadata {
                 pattern: pattern.to_owned(),
@@ -195,7 +209,7 @@ impl StorageSession {
         &self,
         pattern: &LocationPattern,
         expected_backend_index: Option<usize>,
-    ) -> Result<Vec<StorageHandle>, StorageError> {
+    ) -> Result<Vec<InputObject>, StorageError> {
         let PatternInput::Url {
             source,
             location,
@@ -250,12 +264,13 @@ impl StorageSession {
                     location: url.clone(),
                     source,
                 })?;
-            handles.push(StorageHandle::new(
+            let handle = StorageHandle::new(
                 url,
                 pattern_handle.object_store(),
-                metadata.location,
+                metadata.location.clone(),
                 pattern_handle.store_url().clone(),
-            ));
+            );
+            handles.push(InputObject::new(handle, metadata));
         }
         Ok(handles)
     }

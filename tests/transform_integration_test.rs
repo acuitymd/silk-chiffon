@@ -796,7 +796,7 @@ async fn test_transform_rejects_an_allowed_unmatched_pattern_without_another_sou
     })
     .await;
 
-    assert!(result.unwrap_err().to_string().contains("no input sources"));
+    assert!(result.unwrap_err().to_string().contains("no inputs"));
 }
 
 #[tokio::test]
@@ -1241,6 +1241,122 @@ async fn test_transform_arrow_format_stream() {
     assert!(output.exists());
     let file_size = std::fs::metadata(&output).unwrap().len();
     assert!(file_size > 0);
+}
+
+#[tokio::test]
+async fn test_transform_reads_arrow_stream_input_incrementally() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let output = temp_dir.path().join("output.parquet");
+
+    let batches = [
+        TestBatch::simple_with(&[1, 2], &["a", "b"]),
+        TestBatch::simple_with(&[3], &["c"]),
+    ];
+    TestFile::write_arrow_stream(&input, &batches);
+
+    run_transform(TestTransformCommand {
+        from: Some(input.to_string_lossy().to_string()),
+        to: Some(output.to_string_lossy().to_string()),
+        ..transform_defaults()
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(
+        TestFile::read_parquet(&output)
+            .iter()
+            .map(arrow::array::RecordBatch::num_rows)
+            .sum::<usize>(),
+        3
+    );
+}
+
+#[tokio::test]
+async fn arrow_stream_checks_each_file_schema_before_yielding_its_first_batch() {
+    let temp_dir = TempDir::new().unwrap();
+    let mismatched = temp_dir.path().join("a.arrow");
+    let representative = temp_dir.path().join("z.arrow");
+    let output = temp_dir.path().join("output.parquet");
+    let mismatched_batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new(
+            "other",
+            DataType::Int32,
+            false,
+        )])),
+        vec![Arc::new(Int32Array::from(vec![1]))],
+    )
+    .unwrap();
+    TestFile::write_arrow_stream(&mismatched, &[mismatched_batch]);
+    let ids = (0..1_000).collect::<Vec<_>>();
+    let names = (0..1_000)
+        .map(|index| format!("representative-{index:04}-with-padding"))
+        .collect::<Vec<_>>();
+    let names = names.iter().map(String::as_str).collect::<Vec<_>>();
+    let representative_batch = TestBatch::simple_with(&ids, &names);
+    TestFile::write_arrow_stream(&representative, &[representative_batch]);
+
+    let error = run_transform(TestTransformCommand {
+        patterns: vec![format!("{}/*.arrow", temp_dir.path().display())],
+        to: Some(output.to_string_lossy().to_string()),
+        query: Some("SELECT * FROM data LIMIT 1".to_owned()),
+        ..transform_defaults()
+    })
+    .await
+    .unwrap_err();
+
+    let message = format!("{error:#}");
+    assert!(message.contains("a.arrow"), "{message}");
+    assert!(message.contains("schema mismatch"), "{message}");
+    assert!(!message.contains("__silk_input"), "{message}");
+}
+
+#[tokio::test]
+async fn empty_vortex_files_still_participate_in_leaf_schema_validation() {
+    use silk_chiffon::sinks::{
+        data_sink::DataSink,
+        vortex::{VortexSink, VortexSinkOptions},
+    };
+
+    let temp_dir = TempDir::new().unwrap();
+    let mismatched = temp_dir.path().join("a.vortex");
+    let representative = temp_dir.path().join("z.vortex");
+    let output = temp_dir.path().join("output.arrow");
+    let mismatched_schema = Arc::new(Schema::new(vec![Field::new(
+        "other",
+        DataType::Int32,
+        false,
+    )]));
+    let sink = VortexSink::create(
+        mismatched.clone(),
+        &mismatched_schema,
+        VortexSinkOptions::new(),
+    )
+    .unwrap();
+    Box::new(sink).finish().await.unwrap();
+    let representative_batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    let mut sink = VortexSink::create(
+        representative.clone(),
+        &representative_batch.schema(),
+        VortexSinkOptions::new(),
+    )
+    .unwrap();
+    sink.write_batch(representative_batch).await.unwrap();
+    Box::new(sink).finish().await.unwrap();
+
+    let error = run_transform(TestTransformCommand {
+        patterns: vec![format!("{}/*.vortex", temp_dir.path().display())],
+        to: Some(output.to_string_lossy().to_string()),
+        ..transform_defaults()
+    })
+    .await
+    .unwrap_err();
+
+    let message = format!("{error:#}");
+    assert!(message.contains("a.vortex"), "{message}");
+    assert!(message.contains("schema does not match"), "{message}");
+    assert!(!message.contains("__silk_input"), "{message}");
+    assert!(!output.exists());
 }
 
 #[tokio::test]
@@ -1707,6 +1823,29 @@ async fn test_transform_explicit_input_format_arrow_to_parquet() {
     assert!(output.exists());
     let batches = TestFile::read_parquet(&output);
     assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 3);
+}
+
+#[tokio::test]
+async fn explicit_input_formats_use_the_selected_formats_detector() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let output = temp_dir.path().join("output.arrow");
+    TestFile::write_arrow_batch(
+        &input,
+        &TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]),
+    );
+
+    let error = run_transform(TestTransformCommand {
+        from: Some(input.to_string_lossy().to_string()),
+        to: Some(output.to_string_lossy().to_string()),
+        input_format: Some("parquet".to_owned()),
+        ..transform_defaults()
+    })
+    .await
+    .unwrap_err();
+
+    assert!(error.to_string().contains("is not recognized as parquet"));
+    assert!(!output.exists());
 }
 
 #[tokio::test]
@@ -3351,13 +3490,13 @@ async fn test_bloom_filter_prefix_with_exclusion() {
 }
 
 #[tokio::test]
-async fn test_transform_sort_with_measured_spill_reservation() {
-    // A sort on replayable input measures row size to tune DataFusion's spill reservation.
+async fn test_transform_sort_uses_final_plan_statistics_for_spill_reservation() {
+    // The final sort input statistics tune DataFusion's spill reservation.
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.parquet");
     let output = temp_dir.path().join("output.parquet");
 
-    // Several physical types make the measured row size exercise the sizing path.
+    // Several physical types exercise the statistics-based sizing path.
     let batch = TestBatch::builder()
         .column_i32("id", &[5, 3, 1, 4, 2])
         .column_string("name", &["echo", "charlie", "alpha", "delta", "bravo"])

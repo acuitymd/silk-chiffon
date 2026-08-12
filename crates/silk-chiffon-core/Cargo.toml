@@ -14,10 +14,12 @@ description = "Format-independent processing for Silk Chiffon"
 anyhow.workspace = true
 arrow.workspace = true
 async-trait.workspace = true
+bytes = "^1.12.1"
 camino = "^1.2.4"
 clap.workspace = true
 datafusion.workspace = true
 futures.workspace = true
+object_store.workspace = true
 parking_lot.workspace = true
 serde_json.workspace = true
 silk-chiffon-storage = { path = "../silk-chiffon-storage", default-features = false }
@@ -28,6 +30,7 @@ thiserror.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+datafusion-datasource = "=54.1.0"
 silk-chiffon-storage = { path = "../silk-chiffon-storage", features = ["local"] }
 
 [lints]

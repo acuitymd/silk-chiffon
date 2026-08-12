@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use anyhow::Result;
 use clap::{ArgMatches, Command};
-use silk_chiffon_storage::StorageHandle;
+use silk_chiffon_storage::InputObject;
 use thiserror::Error;
 
 use super::definition::{
@@ -168,16 +168,34 @@ impl FormatRegistry {
         self.formats.iter()
     }
 
-    /// Runs registered detectors in priority order and returns the first match.
+    /// Runs the input's extension owner first, then detectors in priority order.
     ///
     /// Detector errors stop detection so an I/O or parser failure is not reported as an unknown
     /// format.
     pub async fn detect(
         &self,
-        handle: &StorageHandle,
+        object: &InputObject,
     ) -> Result<Option<DetectedFormat>, FormatOperationError> {
+        let preferred = object
+            .handle()
+            .object_path()
+            .extension()
+            .and_then(|extension| {
+                self.extensions
+                    .get(&extension.to_ascii_lowercase())
+                    .copied()
+            });
+        if let Some(index) = preferred
+            && self.formats[index].detector.is_some()
+            && let Some(detected) = self.formats[index].detect(object).await?
+        {
+            return Ok(Some(detected));
+        }
         for index in &self.detection_order {
-            if let Some(detected) = self.formats[*index].detect(handle).await? {
+            if Some(*index) == preferred {
+                continue;
+            }
+            if let Some(detected) = self.formats[*index].detect(object).await? {
                 return Ok(Some(detected));
             }
         }
@@ -216,6 +234,7 @@ impl FormatRegistry {
         let mut bindings = Vec::new();
         let mut names = HashMap::new();
         let mut extensions = HashMap::new();
+        let mut detection_priorities = Vec::new();
         for format in &self.formats {
             let Some(transform) = &format.transform else {
                 continue;
@@ -223,8 +242,10 @@ impl FormatRegistry {
             let index = bindings.len();
             bindings.push(TransformBinding {
                 format: format.name,
+                detector: format.detector,
                 binding: transform.definition.bind(matches)?,
             });
+            detection_priorities.push((format.detection_priority, index));
             names.insert(format.name.to_ascii_lowercase(), index);
             for alias in &format.aliases {
                 names.insert(alias.to_ascii_lowercase(), index);
@@ -236,10 +257,19 @@ impl FormatRegistry {
                 );
             }
         }
+        detection_priorities.sort_by_key(|&(priority, index)| (priority, index));
+        let detection_order = detection_priorities
+            .into_iter()
+            .filter_map(|(_, index)| {
+                (bindings[index].detector.is_some() && bindings[index].has_input_provider())
+                    .then_some(index)
+            })
+            .collect();
         Ok(TransformBindings {
             bindings,
             names,
             extensions,
+            detection_order,
         })
     }
 }

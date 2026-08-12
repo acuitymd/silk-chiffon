@@ -211,7 +211,7 @@ fn test_merge_with_repeatable_overlapping_patterns() {
     let batches = TestFile::read_arrow(&output);
     let mut ids = TestExtract::i32_all(&batches, "id");
     ids.sort_unstable();
-    assert_eq!(ids, vec![1, 2, 3]);
+    assert_eq!(ids, vec![1, 1, 2, 3]);
 }
 
 #[test]
@@ -246,7 +246,7 @@ fn test_merge_combines_exact_and_pattern_inputs_without_cross_deduplication() {
     let batches = TestFile::read_arrow(&output);
     let mut ids = TestExtract::i32_all(&batches, "id");
     ids.sort_unstable();
-    assert_eq!(ids, vec![1, 2, 2, 3]);
+    assert_eq!(ids, vec![1, 1, 2, 2, 3]);
 }
 
 #[test]

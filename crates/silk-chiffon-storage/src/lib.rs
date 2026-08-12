@@ -43,6 +43,7 @@ compile_error!("silk-chiffon-storage supports Unix targets only");
 pub mod backend;
 pub mod error;
 pub mod handle;
+pub mod input;
 pub mod local;
 pub mod location;
 pub mod pattern;
@@ -55,7 +56,8 @@ pub use backend::{
     StorageBackend, StorageBackendBuildError, StorageBackendBuilder, StorageDirection,
 };
 pub use error::StorageError;
-pub use handle::{StorageHandle, ensure_output_absent, validate_input};
+pub use handle::{StorageHandle, ensure_output_absent};
+pub use input::InputObject;
 pub use location::{Location, LocationInput};
 pub use object_store::RetryConfig;
 pub use pattern::LocationPattern;

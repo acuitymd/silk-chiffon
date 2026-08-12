@@ -9,7 +9,7 @@ use futures::TryStreamExt;
 use object_store::ObjectStoreExt;
 use silk_chiffon_storage::{Location, LocationInput, StorageError};
 #[cfg(feature = "local-bare-paths")]
-use silk_chiffon_storage::{LocationPattern, ensure_output_absent, validate_input};
+use silk_chiffon_storage::{LocationPattern, ensure_output_absent};
 #[cfg(feature = "local-bare-paths")]
 use std::sync::Arc;
 #[cfg(feature = "local-bare-paths")]
@@ -97,7 +97,7 @@ async fn local_mapper_expands_bare_path_patterns() {
 
     assert_eq!(matches.len(), 1);
     assert_eq!(
-        matches[0].local_path().unwrap(),
+        matches[0].handle().local_path().unwrap(),
         directory.path().join("one.arrow")
     );
 }
@@ -336,16 +336,14 @@ fn storage_handle_preserves_the_upstream_object_path() {
 
 #[tokio::test]
 #[cfg(feature = "local-bare-paths")]
-async fn absent_object_handle_creation_is_separate_from_input_validation() {
+async fn absent_object_handle_creation_is_separate_from_input_lookup() {
     let working_directory = TempDir::new().unwrap();
     let path = working_directory.path().join("absent.parquet");
     let location = location(path.to_str().unwrap()).unwrap();
-    let handle = silk_chiffon_storage::local::session()
-        .unwrap()
-        .input_handle(&location)
-        .unwrap();
+    let storage = silk_chiffon_storage::local::session().unwrap();
+    let _handle = storage.input_handle(&location).unwrap();
 
-    assert!(validate_input(&handle).await.is_err());
+    assert!(storage.lookup_input(&location).await.is_err());
 }
 
 #[tokio::test]

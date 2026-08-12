@@ -5,23 +5,24 @@ use std::{
     sync::Arc,
 };
 
+use ::arrow::{buffer::Buffer, datatypes::SchemaRef, ipc::reader::StreamDecoder};
 use anyhow::{Context, Result, anyhow};
 use apply_if::ApplyIf;
-use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use camino::Utf8PathBuf;
 use clap::{
     Args, Command as ClapCommand, CommandFactory, FromArgMatches,
     builder::{PossibleValue, PossibleValuesParser},
 };
-use datafusion::prelude::SessionContext;
+use datafusion::{catalog::TableProvider, prelude::SessionContext};
+use object_store::ObjectStoreExt;
 use silk_chiffon_core::{
-    DataSink, DataSource, FormatDefinition, FormatFuture, FormatMatch, FormatRegistry,
+    DataSink, FormatDefinition, FormatFuture, FormatRegistry, InputDetection, InputVariant,
     InspectionDefinition, InspectionMode, InspectionOutput, OutputOrderingColumn,
     ServiceInputBinding, ServiceInputDefinition, ServiceOutputBinding, ServiceOutputDefinition,
     SinkBinding, SinkBindingConfig, SinkConcurrency, TransformDefinition,
 };
-use silk_chiffon_storage::{StorageDirection, StorageHandle, StorageRegistry};
+use silk_chiffon_storage::{InputObject, StorageDirection, StorageHandle, StorageRegistry};
 use thiserror::Error;
 
 #[cfg(feature = "local")]
@@ -41,7 +42,7 @@ use crate::{
         parquet::{ParquetRuntimes, ParquetSink, ParquetSinkOptions},
         vortex::{VortexSink, VortexSinkOptions},
     },
-    sources::{arrow::ArrowDataSource, parquet::ParquetDataSource, vortex::VortexDataSource},
+    sources::{arrow as arrow_source, parquet as parquet_source, vortex as vortex_source},
 };
 
 /// Builds the executable's set of available data formats.
@@ -511,7 +512,7 @@ impl ApplicationDefinition {
         let input_formats = self
             .formats
             .formats()
-            .filter(|format| format.has_source())
+            .filter(|format| format.has_input_provider())
             .map(|format| PossibleValue::new(format.name()).aliases(format.aliases()))
             .collect::<Vec<_>>();
         let output_formats = self
@@ -681,7 +682,7 @@ fn arrow_format() -> FormatDefinition {
         .detection_priority(1)
         .transform(
             TransformDefinition::with_args::<ArrowArgs>()
-                .source(create_arrow_source)
+                .input_provider(create_arrow_provider)
                 .sink(bind_arrow_sink)
                 .build(),
         )
@@ -698,7 +699,7 @@ fn parquet_format() -> FormatDefinition {
         .detection_priority(0)
         .transform(
             TransformDefinition::with_args::<ParquetArgs>()
-                .source(create_parquet_source)
+                .input_provider(create_parquet_provider)
                 .sink(bind_parquet_sink)
                 .build(),
         )
@@ -715,7 +716,7 @@ fn vortex_format() -> FormatDefinition {
         .detection_priority(2)
         .transform(
             TransformDefinition::with_args::<VortexArgs>()
-                .source(create_vortex_source)
+                .input_provider(create_vortex_provider)
                 .sink(bind_vortex_sink)
                 .build(),
         )
@@ -725,66 +726,156 @@ fn vortex_format() -> FormatDefinition {
         .build()
 }
 
-fn detect_arrow(handle: &StorageHandle) -> FormatFuture<'_, Option<FormatMatch>> {
+fn detect_arrow(object: &InputObject) -> FormatFuture<'_, InputDetection> {
     Box::pin(async move {
-        let path = local_utf8_path(handle)?;
-        Ok(ArrowInspector::detect_variant(&path)
-            .ok()
-            .map(|variant| FormatMatch::with_variant(variant.to_string())))
+        const ARROW_MAGIC: &[u8] = b"ARROW1";
+        const MAX_DETECTION_READ: u64 = 1024 * 1024;
+
+        let handle = object.handle();
+        let size = object.metadata().size;
+        if size >= 12 {
+            let ranges = [0..6, size - 6..size];
+            let magic = handle
+                .object_store()
+                .get_ranges(handle.object_path(), &ranges)
+                .await?;
+            let starts = magic[0].as_ref() == ARROW_MAGIC;
+            let ends = magic[1].as_ref() == ARROW_MAGIC;
+            if starts && ends {
+                return Ok(InputDetection::Match(InputVariant::named("file")));
+            }
+            if starts || ends {
+                return Ok(InputDetection::Malformed(anyhow!(
+                    "Arrow IPC file has only one of its two magic markers"
+                )));
+            }
+        }
+
+        let prefix_len = size.min(8);
+        if prefix_len < 4 {
+            return Ok(InputDetection::Mismatch);
+        }
+        let prefix = handle
+            .object_store()
+            .get_range(handle.object_path(), 0..prefix_len)
+            .await?;
+        let first = u32::from_le_bytes(prefix[..4].try_into().expect("four bytes were read"));
+        let (header_len, message_len, recognized) = if first == u32::MAX {
+            if prefix.len() < 8 {
+                return Ok(InputDetection::Malformed(anyhow!(
+                    "Arrow IPC continuation marker is missing its message length"
+                )));
+            }
+            (
+                8_u64,
+                u64::from(u32::from_le_bytes(prefix[4..8].try_into().unwrap())),
+                true,
+            )
+        } else {
+            (4_u64, u64::from(first), false)
+        };
+        if message_len == 0 || header_len + message_len > size {
+            return Ok(if recognized {
+                InputDetection::Malformed(anyhow!("Arrow IPC schema message is truncated"))
+            } else {
+                InputDetection::Mismatch
+            });
+        }
+        if message_len > MAX_DETECTION_READ && recognized {
+            return Ok(InputDetection::Match(InputVariant::named("stream")));
+        }
+        if message_len > MAX_DETECTION_READ {
+            return Ok(InputDetection::Mismatch);
+        }
+        let bytes = handle
+            .object_store()
+            .get_range(
+                handle.object_path(),
+                0..(header_len + message_len + 1).min(size),
+            )
+            .await?;
+        let mut decoder = StreamDecoder::new();
+        let mut buffer = Buffer::from(bytes);
+        match decoder.decode(&mut buffer) {
+            Ok(_) if decoder.schema().is_some() => {
+                Ok(InputDetection::Match(InputVariant::named("stream")))
+            }
+            Ok(_) if recognized => Ok(InputDetection::Malformed(anyhow!(
+                "Arrow IPC stream did not begin with a schema message"
+            ))),
+            Err(error) if recognized => Ok(InputDetection::Malformed(error.into())),
+            Ok(_) | Err(_) => Ok(InputDetection::Mismatch),
+        }
     })
 }
 
-fn detect_parquet(handle: &StorageHandle) -> FormatFuture<'_, Option<FormatMatch>> {
+fn detect_parquet(object: &InputObject) -> FormatFuture<'_, InputDetection> {
     Box::pin(async move {
-        let path = local_utf8_path(handle)?;
-        Ok(ParquetInspector::is_format(&path)?.then(FormatMatch::new))
+        const MAGIC: &[u8] = b"PAR1";
+        if object.metadata().size < 8 {
+            return Ok(InputDetection::Mismatch);
+        }
+        let handle = object.handle();
+        let size = object.metadata().size;
+        let magic = handle
+            .object_store()
+            .get_ranges(handle.object_path(), &[0..4, size - 4..size])
+            .await?;
+        let starts = magic[0].as_ref() == MAGIC;
+        let ends = magic[1].as_ref() == MAGIC;
+        Ok(match (starts, ends) {
+            (true, true) => InputDetection::Match(InputVariant::new()),
+            (true, false) | (false, true) => InputDetection::Malformed(anyhow!(
+                "Parquet input has only one of its two magic markers"
+            )),
+            (false, false) => InputDetection::Mismatch,
+        })
     })
 }
 
-fn detect_vortex(handle: &StorageHandle) -> FormatFuture<'_, Option<FormatMatch>> {
+fn detect_vortex(object: &InputObject) -> FormatFuture<'_, InputDetection> {
     Box::pin(async move {
-        let path = local_utf8_path(handle)?;
-        Ok(VortexInspector::is_format(&path)?.then(|| FormatMatch::with_variant("file")))
+        if object.metadata().size < 4 {
+            return Ok(InputDetection::Mismatch);
+        }
+        let handle = object.handle();
+        let magic = handle
+            .object_store()
+            .get_range(handle.object_path(), 0..4)
+            .await?;
+        Ok(if magic.as_ref() == b"VTXF" {
+            InputDetection::Match(InputVariant::named("file"))
+        } else {
+            InputDetection::Mismatch
+        })
     })
 }
 
-fn create_arrow_source<'a>(
-    handle: &'a StorageHandle,
+fn create_arrow_provider<'a>(
+    objects: &'a [InputObject],
+    variant: &'a InputVariant,
     session: &'a SessionContext,
     _args: &'a ArrowArgs,
-) -> FormatFuture<'a, Box<dyn DataSource>> {
-    Box::pin(async move {
-        Ok(Box::new(ArrowDataSource::new(
-            local_path_string(handle)?,
-            session.clone(),
-        )) as Box<dyn DataSource>)
-    })
+) -> FormatFuture<'a, Arc<dyn TableProvider>> {
+    Box::pin(arrow_source::create_provider(objects, variant, session))
 }
 
-fn create_parquet_source<'a>(
-    handle: &'a StorageHandle,
+fn create_parquet_provider<'a>(
+    objects: &'a [InputObject],
+    _variant: &'a InputVariant,
     session: &'a SessionContext,
     _args: &'a ParquetArgs,
-) -> FormatFuture<'a, Box<dyn DataSource>> {
-    Box::pin(async move {
-        Ok(Box::new(ParquetDataSource::new(
-            local_path_string(handle)?,
-            session.clone(),
-        )) as Box<dyn DataSource>)
-    })
+) -> FormatFuture<'a, Arc<dyn TableProvider>> {
+    Box::pin(parquet_source::create_provider(objects, session))
 }
 
-fn create_vortex_source<'a>(
-    handle: &'a StorageHandle,
+fn create_vortex_provider<'a>(
+    objects: &'a [InputObject],
+    _variant: &'a InputVariant,
     session: &'a SessionContext,
     _args: &'a VortexArgs,
-) -> FormatFuture<'a, Box<dyn DataSource>> {
-    Box::pin(async move {
-        Ok(Box::new(VortexDataSource::new(
-            local_path_string(handle)?,
-            session.clone(),
-        )) as Box<dyn DataSource>)
-    })
+) -> FormatFuture<'a, Arc<dyn TableProvider>> {
+    Box::pin(vortex_source::create_provider(objects, session))
 }
 
 fn bind_arrow_sink<'a>(
@@ -1082,10 +1173,6 @@ fn local_utf8_path(handle: &StorageHandle) -> Result<Utf8PathBuf> {
         .map_err(|path| anyhow!("Local path is not valid UTF-8: {}", path.display()))
 }
 
-fn local_path_string(handle: &StorageHandle) -> Result<String> {
-    Ok(local_utf8_path(handle)?.into_string())
-}
-
 #[cfg(all(test, feature = "local-bare-paths"))]
 mod tests {
     use std::{
@@ -1097,24 +1184,17 @@ mod tests {
     };
 
     use anyhow::Result;
-    use arrow::{array::RecordBatch, datatypes::SchemaRef};
-    use async_trait::async_trait;
+    use arrow::array::RecordBatch;
     use clap::{Args, CommandFactory, FromArgMatches};
     use datafusion::{
-        catalog::{TableProvider, streaming::StreamingTable},
-        datasource::MemTable,
-        error::DataFusionError,
-        execution::TaskContext,
-        physical_plan::{
-            SendableRecordBatchStream, stream::RecordBatchStreamAdapter, streaming::PartitionStream,
-        },
+        catalog::TableProvider, datasource::MemTable, physical_plan::SendableRecordBatchStream,
         prelude::SessionContext,
     };
     use futures::{StreamExt, future::BoxFuture};
     use silk_chiffon_core::{
-        DataSource, FormatDefinition, FormatFuture, FormatRegistry, Replayability,
-        ServiceInputDefinition, ServiceOutputDefinition, SinkBinding, SinkBindingConfig,
-        SinkConcurrency, TransformDefinition,
+        FormatDefinition, FormatFuture, FormatRegistry, InputVariant, ServiceInputDefinition,
+        ServiceOutputDefinition, SinkBinding, SinkBindingConfig, SinkConcurrency,
+        TransformDefinition,
     };
 
     use super::{
@@ -1125,9 +1205,7 @@ mod tests {
         CliSchema, Command, ParquetArgs,
         utils::test_data::{TestBatch, TestExtract, TestFile},
     };
-    use silk_chiffon_storage::StorageHandle;
-
-    static STREAM_EXECUTIONS: AtomicUsize = AtomicUsize::new(0);
+    use silk_chiffon_storage::InputObject;
     static SINK_BINDINGS: AtomicUsize = AtomicUsize::new(0);
     static SERVICE_INPUT_REFERENCES: Mutex<Vec<String>> = Mutex::new(Vec::new());
     static SERVICE_OUTPUT_RESULT: Mutex<Option<(String, usize)>> = Mutex::new(None);
@@ -1141,42 +1219,23 @@ mod tests {
         ids: Vec<i32>,
     }
 
-    struct TestServiceSource {
-        batch: RecordBatch,
-    }
-
-    #[async_trait]
-    impl DataSource for TestServiceSource {
-        fn name(&self) -> &str {
-            "test-service"
-        }
-
-        fn replayability(&self) -> Replayability {
-            Replayability::Replayable
-        }
-
-        async fn table_provider(&self) -> Result<Arc<dyn TableProvider>> {
-            Ok(Arc::new(MemTable::try_new(
-                self.batch.schema(),
-                vec![vec![self.batch.clone()]],
-            )?))
-        }
+    fn test_provider(batch: RecordBatch) -> Result<Arc<dyn TableProvider>> {
+        Ok(Arc::new(MemTable::try_new(
+            batch.schema(),
+            vec![vec![batch]],
+        )?))
     }
 
     fn create_test_service_input<'a>(
         reference: &'a str,
         _: &'a SessionContext,
         _: &'a (),
-    ) -> BoxFuture<'a, Result<Box<dyn DataSource>>> {
+    ) -> BoxFuture<'a, Result<Arc<dyn TableProvider>>> {
         SERVICE_INPUT_REFERENCES
             .lock()
             .unwrap()
             .push(reference.to_owned());
-        Box::pin(async {
-            Ok(Box::new(TestServiceSource {
-                batch: TestBatch::simple_with(&[4, 5, 6], &["d", "e", "f"]),
-            }) as Box<dyn DataSource>)
-        })
+        Box::pin(async { test_provider(TestBatch::simple_with(&[4, 5, 6], &["d", "e", "f"])) })
     }
 
     fn write_test_service_output<'a>(
@@ -1226,13 +1285,14 @@ mod tests {
         reference: &'a str,
         _: &'a SessionContext,
         settings: &'a TypedServiceInputArgs,
-    ) -> BoxFuture<'a, Result<Box<dyn DataSource>>> {
+    ) -> BoxFuture<'a, Result<Arc<dyn TableProvider>>> {
         Box::pin(async move {
             anyhow::ensure!(reference == "typed-input://dataset");
             let start = settings.test_service_input_start;
-            Ok(Box::new(TestServiceSource {
-                batch: TestBatch::simple_with(&[start, start + 1, start + 2], &["a", "b", "c"]),
-            }) as Box<dyn DataSource>)
+            test_provider(TestBatch::simple_with(
+                &[start, start + 1, start + 2],
+                &["a", "b", "c"],
+            ))
         })
     }
 
@@ -1278,16 +1338,12 @@ mod tests {
         reference: &'a str,
         _: &'a SessionContext,
         _: &'a ConflictingInputArgs,
-    ) -> BoxFuture<'a, Result<Box<dyn DataSource>>> {
+    ) -> BoxFuture<'a, Result<Arc<dyn TableProvider>>> {
         SERVICE_INPUT_REFERENCES
             .lock()
             .unwrap()
             .push(reference.to_owned());
-        Box::pin(async {
-            Ok(Box::new(TestServiceSource {
-                batch: TestBatch::simple_with(&[4, 5, 6], &["d", "e", "f"]),
-            }) as Box<dyn DataSource>)
-        })
+        Box::pin(async { test_provider(TestBatch::simple_with(&[4, 5, 6], &["d", "e", "f"])) })
     }
 
     fn write_conflicting_service_output<'a>(
@@ -1305,159 +1361,21 @@ mod tests {
         })
     }
 
-    #[derive(Debug)]
-    struct SinglePassPartition {
-        batch: RecordBatch,
-    }
-
-    impl PartitionStream for SinglePassPartition {
-        fn schema(&self) -> &SchemaRef {
-            self.batch.schema_ref()
-        }
-
-        fn execute(&self, _: Arc<TaskContext>) -> SendableRecordBatchStream {
-            let stream = if STREAM_EXECUTIONS.fetch_add(1, Ordering::SeqCst) == 0 {
-                futures::stream::iter([Ok(self.batch.clone())])
-            } else {
-                futures::stream::iter([Err(DataFusionError::Execution(
-                    "single-pass source was consumed more than once".to_owned(),
-                ))])
-            };
-            Box::pin(RecordBatchStreamAdapter::new(self.batch.schema(), stream))
-        }
-    }
-
-    struct SinglePassSource;
-
-    #[async_trait]
-    impl DataSource for SinglePassSource {
-        fn name(&self) -> &str {
-            "single-pass-test"
-        }
-
-        fn replayability(&self) -> Replayability {
-            Replayability::SinglePass
-        }
-
-        async fn schema(&self) -> Result<SchemaRef> {
-            Ok(TestBatch::simple_schema())
-        }
-
-        async fn table_provider(&self) -> Result<Arc<dyn TableProvider>> {
-            let batch = TestBatch::simple_with(&[3, 1, 2], &["c", "a", "b"]);
-            let partition: Arc<dyn PartitionStream> = Arc::new(SinglePassPartition { batch });
-            let table = StreamingTable::try_new(TestBatch::simple_schema(), vec![partition])?;
-            Ok(Arc::new(table))
-        }
-    }
-
-    fn single_pass_source<'a>(
-        _: &'a StorageHandle,
+    fn input_only_provider<'a>(
+        _: &'a [InputObject],
+        _: &'a InputVariant,
         _: &'a SessionContext,
         _: &'a (),
-    ) -> FormatFuture<'a, Box<dyn DataSource>> {
-        Box::pin(async { Ok(Box::new(SinglePassSource) as Box<dyn DataSource>) })
+    ) -> FormatFuture<'a, Arc<dyn TableProvider>> {
+        Box::pin(async { test_provider(TestBatch::simple_with(&[3, 1, 2], &["c", "a", "b"])) })
     }
 
-    fn single_pass_format() -> FormatDefinition {
-        FormatDefinition::builder("single-pass-test")
-            .extensions(["single-pass-test"])
+    fn input_only_format() -> FormatDefinition {
+        FormatDefinition::builder("input-only-test")
+            .extensions(["input-only-test"])
             .transform(
                 TransformDefinition::without_args()
-                    .source(single_pass_source)
-                    .build(),
-            )
-            .build()
-    }
-
-    fn registered_store_source<'a>(
-        handle: &'a StorageHandle,
-        session: &'a SessionContext,
-        _: &'a (),
-    ) -> FormatFuture<'a, Box<dyn DataSource>> {
-        Box::pin(async move {
-            let handle_store = handle.object_store();
-            let registered_store = session
-                .runtime_env()
-                .object_store_registry
-                .get_store(handle.store_url())?;
-            assert!(Arc::ptr_eq(&handle_store, &registered_store));
-
-            Ok(Box::new(TestServiceSource {
-                batch: TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]),
-            }) as Box<dyn DataSource>)
-        })
-    }
-
-    fn registered_store_format() -> FormatDefinition {
-        FormatDefinition::builder("registered-store-test")
-            .extensions(["registered-store-test"])
-            .transform(
-                TransformDefinition::without_args()
-                    .source(registered_store_source)
-                    .build(),
-            )
-            .build()
-    }
-
-    #[derive(Debug)]
-    struct InfinitePartition {
-        batch: RecordBatch,
-    }
-
-    impl PartitionStream for InfinitePartition {
-        fn schema(&self) -> &SchemaRef {
-            self.batch.schema_ref()
-        }
-
-        fn execute(&self, _: Arc<TaskContext>) -> SendableRecordBatchStream {
-            let stream =
-                futures::stream::iter([Ok(self.batch.clone())]).chain(futures::stream::pending::<
-                    Result<RecordBatch, DataFusionError>,
-                >());
-            Box::pin(RecordBatchStreamAdapter::new(self.batch.schema(), stream))
-        }
-    }
-
-    struct InfiniteSource;
-
-    #[async_trait]
-    impl DataSource for InfiniteSource {
-        fn name(&self) -> &str {
-            "infinite-test"
-        }
-
-        fn replayability(&self) -> Replayability {
-            Replayability::SinglePass
-        }
-
-        async fn schema(&self) -> Result<SchemaRef> {
-            Ok(TestBatch::simple_schema())
-        }
-
-        async fn table_provider(&self) -> Result<Arc<dyn TableProvider>> {
-            let batch = TestBatch::simple_with(&[3, 1, 2], &["c", "a", "b"]);
-            let partition: Arc<dyn PartitionStream> = Arc::new(InfinitePartition { batch });
-            let table = StreamingTable::try_new(TestBatch::simple_schema(), vec![partition])?
-                .with_infinite_table(true);
-            Ok(Arc::new(table))
-        }
-    }
-
-    fn infinite_source<'a>(
-        _: &'a StorageHandle,
-        _: &'a SessionContext,
-        _: &'a (),
-    ) -> FormatFuture<'a, Box<dyn DataSource>> {
-        Box::pin(async { Ok(Box::new(InfiniteSource) as Box<dyn DataSource>) })
-    }
-
-    fn infinite_format() -> FormatDefinition {
-        FormatDefinition::builder("infinite-test")
-            .extensions(["infinite-test"])
-            .transform(
-                TransformDefinition::without_args()
-                    .source(infinite_source)
+                    .input_provider(input_only_provider)
                     .build(),
             )
             .build()
@@ -1740,43 +1658,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn file_input_registers_the_handle_store_before_source_creation() {
-        SERVICE_OUTPUT_RESULT.lock().unwrap().take();
-        let directory = tempfile::tempdir().unwrap();
-        let input = directory.path().join("input.registered-store-test");
-        std::fs::write(&input, []).unwrap();
-        let definition = application_definition_with_services(
-            FormatRegistry::builder()
-                .register(registered_store_format())
-                .build()
-                .unwrap(),
-            Vec::new(),
-            vec![test_service_output("test-output", "test-output")],
-        );
-        let cli = test_cli(
-            definition,
-            &[
-                "silk-chiffon",
-                "transform",
-                "--from",
-                input.to_str().unwrap(),
-                "--to",
-                "test-output://result",
-            ],
-        );
-        let Command::Transform(command) = cli.command else {
-            panic!("expected transform command");
-        };
-
-        crate::commands::transform::run(command).await.unwrap();
-
-        assert_eq!(
-            SERVICE_OUTPUT_RESULT.lock().unwrap().as_ref(),
-            Some(&("test-output://result".to_owned(), 3))
-        );
-    }
-
-    #[tokio::test]
     async fn service_input_patterns_are_rejected_before_file_expansion() {
         let directory = tempfile::tempdir().unwrap();
         let output = directory.path().join("output.arrow");
@@ -1984,7 +1865,7 @@ mod tests {
     fn directional_format_definition() -> ApplicationDefinition {
         application_definition(
             FormatRegistry::builder()
-                .register(single_pass_format())
+                .register(input_only_format())
                 .register(counted_sink_format())
                 .build()
                 .unwrap(),
@@ -1992,16 +1873,16 @@ mod tests {
     }
 
     #[test]
-    fn transform_format_values_follow_source_and_sink_capabilities() {
+    fn transform_format_values_follow_input_and_output_capabilities() {
         directional_format_definition()
             .command(CliSchema::command())
             .try_get_matches_from([
                 "silk-chiffon",
                 "transform",
                 "--from",
-                "input.single-pass-test",
+                "input.input-only-test",
                 "--input-format",
-                "single-pass-test",
+                "input-only-test",
                 "--to",
                 "output.counted-sink-test",
                 "--output-format",
@@ -2030,11 +1911,11 @@ mod tests {
                 "silk-chiffon",
                 "transform",
                 "--from",
-                "input.single-pass-test",
+                "input.input-only-test",
                 "--to",
-                "output.single-pass-test",
+                "output.input-only-test",
                 "--output-format",
-                "single-pass-test",
+                "input-only-test",
             ])
             .unwrap_err();
         assert_eq!(output_error.kind(), clap::error::ErrorKind::InvalidValue);
@@ -2066,120 +1947,5 @@ mod tests {
         assert_eq!(options.encoding_queue_size, Some(1));
         assert_eq!(options.writing_queue_size, Some(1));
         assert_eq!(options.max_row_group_concurrency, Some(1));
-    }
-
-    #[tokio::test]
-    async fn sort_skips_row_size_measurement_for_single_pass_source() {
-        STREAM_EXECUTIONS.store(0, Ordering::SeqCst);
-        let directory = tempfile::tempdir().unwrap();
-        let input = directory.path().join("input.single-pass-test");
-        let output = directory.path().join("output.arrow");
-        std::fs::write(&input, b"test source input").unwrap();
-
-        let formats = FormatRegistry::builder()
-            .register(single_pass_format())
-            .register(arrow_format())
-            .build()
-            .unwrap();
-        let definition = application_definition(formats);
-        let matches = definition
-            .command(CliSchema::command())
-            .try_get_matches_from([
-                "silk-chiffon",
-                "transform",
-                "--from",
-                input.to_str().unwrap(),
-                "--input-format",
-                "single-pass-test",
-                "--to",
-                output.to_str().unwrap(),
-                "--output-format",
-                "arrow",
-                "--sort-by",
-                "id",
-            ])
-            .unwrap();
-        let cli = definition.bind(&matches).unwrap();
-        let Command::Transform(command) = cli.command else {
-            panic!("expected transform command");
-        };
-
-        crate::commands::transform::run(command).await.unwrap();
-
-        let batches = TestFile::read_arrow(&output);
-        assert_eq!(TestExtract::i32_all(&batches, "id"), [1, 2, 3]);
-        assert_eq!(STREAM_EXECUTIONS.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn unbounded_plan_is_rejected_before_sink_binding() {
-        SINK_BINDINGS.store(0, Ordering::SeqCst);
-        let directory = tempfile::tempdir().unwrap();
-        let input = directory.path().join("input.infinite-test");
-        let output = directory.path().join("output.counted-sink-test");
-        std::fs::write(&input, b"test source input").unwrap();
-
-        let definition = application_definition(
-            FormatRegistry::builder()
-                .register(infinite_format())
-                .register(counted_sink_format())
-                .build()
-                .unwrap(),
-        );
-        let cli = test_cli(
-            definition,
-            &[
-                "silk-chiffon",
-                "transform",
-                "--from",
-                input.to_str().unwrap(),
-                "--to",
-                output.to_str().unwrap(),
-            ],
-        );
-        let Command::Transform(command) = cli.command else {
-            panic!("expected transform command");
-        };
-
-        let error = crate::commands::transform::run(command).await.unwrap_err();
-        assert!(error.to_string().contains("require a bounded final plan"));
-        assert_eq!(SINK_BINDINGS.load(Ordering::SeqCst), 0);
-    }
-
-    #[tokio::test]
-    async fn bounded_query_can_replace_an_unbounded_source_plan() {
-        let directory = tempfile::tempdir().unwrap();
-        let input = directory.path().join("input.infinite-test");
-        let output = directory.path().join("output.arrow");
-        std::fs::write(&input, b"test source input").unwrap();
-
-        let definition = application_definition(
-            FormatRegistry::builder()
-                .register(infinite_format())
-                .register(arrow_format())
-                .build()
-                .unwrap(),
-        );
-        let cli = test_cli(
-            definition,
-            &[
-                "silk-chiffon",
-                "transform",
-                "--from",
-                input.to_str().unwrap(),
-                "--to",
-                output.to_str().unwrap(),
-                "--query",
-                "SELECT CAST(1 AS INT) AS id, 'a' AS name",
-            ],
-        );
-        let Command::Transform(command) = cli.command else {
-            panic!("expected transform command");
-        };
-
-        crate::commands::transform::run(command).await.unwrap();
-
-        let batches = TestFile::read_arrow(&output);
-        assert_eq!(TestExtract::i32_all(&batches, "id"), [1]);
     }
 }

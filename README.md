@@ -40,7 +40,7 @@ silk-chiffon inspect parquet data.parquet
 
 ### Merge many files into one
 
-Repeat `--from` for exact references and `--from-pattern` for file globs. The two flags may be combined, and all selected inputs must share a schema:
+Repeat `--from` for exact references and `--from-pattern` for file globs. The two flags may be combined:
 
 ```bash
 silk-chiffon transform --from shard-1.arrow --from shard-2.arrow --to combined.parquet
@@ -50,6 +50,8 @@ silk-chiffon transform --from-pattern 'shards/*.arrow' --to combined.parquet
 ```
 
 Each pattern must match at least one file by default. Add `--allow-unmatched-patterns` when optional shards may be absent; the command still requires another exact or matched input. Exact inputs keep their order and duplicates. Pattern matches are sorted by canonical URL, deduplicated against other pattern matches, and appended after exact inputs.
+
+Files grouped from one pattern must have the same structural schema. Separate exact inputs and pattern groups are combined by column name, so columns missing from one group become null there.
 
 Patterns use case-sensitive Unix glob rules. In an explicit URL path, `?` matches one character, `%3F` names a literal question mark, and `??` starts the query copied to each matched exact URL.
 

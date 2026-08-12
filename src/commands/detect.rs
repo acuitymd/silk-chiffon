@@ -12,8 +12,8 @@ use crate::{
 pub async fn run(command: DetectCommand) -> Result<()> {
     let (args, storage, formats) = command.into_parts();
     let location = LocationInput::parse(args.file.as_str())?;
-    let handle = storage.input_handle(&location)?;
-    let detected = formats.detect(&handle).await?;
+    let object = storage.lookup_input(&location).await?;
+    let detected = formats.detect(&object).await?;
 
     if args.format.resolves_to_json() {
         let output = match &detected {

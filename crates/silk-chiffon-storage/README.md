@@ -136,7 +136,7 @@ A query remains on the canonical URL and is syntactically separate from the URL 
 
 ## Location patterns
 
-`LocationPattern::parse` keeps pattern syntax separate from exact `LocationInput` parsing. An exact pattern still follows normal routing, performs one `head` request, and returns either one handle or no handles. An active glob lists through the selected `ObjectStore`, starting at the longest prefix made entirely of complete literal path segments, then matches the complete canonical object path.
+`LocationPattern::parse` keeps pattern syntax separate from exact `LocationInput` parsing. An exact pattern still follows normal routing, performs one `head` request, and returns either one input object or no objects. An active glob lists through the selected `ObjectStore`, starting at the longest prefix made entirely of complete literal path segments, then matches the complete canonical object path.
 
 Matching is case-sensitive. `*` and `?` do not cross `/`; `**` crosses path segments and must occupy a complete segment. Leading dots have no special treatment. Character classes use `glob::Pattern` syntax. Glob syntax is valid only in the object path, never in the scheme or authority.
 
@@ -146,7 +146,7 @@ Explicit pattern URLs use one raw `?` as the one-character wildcard. Percent-enc
 s3://bucket/part-?.parquet??versionId=one
 ```
 
-Each matched exact URL uses the ordinary single `?query` spelling. Matched object names percent-encode `*`, `?`, `[`, and `]`, so those characters remain literal when the URL is parsed through exact-only `LocationInput`. Pass a generated URL with a query as an exact input, or change its query delimiter back to `??` before using it as a new pattern operand. `StorageSession::expand_input_pattern` returns zero or more handles in unspecified order; the calling application owns no-match policy, ordering, and deduplication.
+Each matched exact URL uses the ordinary single `?query` spelling. Matched object names percent-encode `*`, `?`, `[`, and `]`, so those characters remain literal when the URL is parsed through exact-only `LocationInput`. Pass a generated URL with a query as an exact input, or change its query delimiter back to `??` before using it as a new pattern operand. `StorageSession::expand_input_pattern` returns zero or more `InputObject` values in unspecified order. Each value retains the metadata returned by the exact `head` or active-glob listing. The calling application owns no-match policy, ordering, and deduplication.
 
 ## Shared retries
 
@@ -168,16 +168,16 @@ Backends that do not opt in receive no retry configuration. Participating object
 
 A session caches one object-store client per store-root URL: scheme, host, and port, with the path reset to `/` and the query and fragment removed. Location validation and generic object-path derivation still run on cache hits. The object-store creator runs only on a cache miss while the cache lock is held, so concurrent requests cannot create duplicate clients for the same root.
 
-`StorageHandle::store_url` exposes the cache key, and `StorageHandle::object_store` returns a cheap clone of the shared client pointer. The pipeline registers that pair with DataFusion. This crate itself remains independent of DataFusion.
+`StorageHandle::store_url` exposes the cache key, and `StorageHandle::object_store` returns a cheap clone of the shared client pointer. A host may register the pair directly or place a root-scoped view in front of it for DataFusion-specific cache identity and diagnostics. This crate itself remains independent of DataFusion.
 
 ## Existence and output policy
 
-Ordinary handle creation performs neither an object-existence check nor an overwrite check. Those policies remain explicit:
+Ordinary handle creation performs neither an object-existence check nor an overwrite check. Input lookup and output policy remain explicit:
 
-- `validate_input` calls `head` and requires the input object to exist.
+- `StorageSession::lookup_input` calls `head` and returns an `InputObject` containing the observed metadata.
 - `ensure_output_absent` permits an absent object and rejects an existing object. Callers skip it when overwrite is enabled.
 
-Keeping these checks separate lets callers create an input handle without forcing an eager existence check and create an output handle before its object exists.
+The observed input metadata is neither a snapshot nor a reservation. Callers require selected inputs to remain stable for the command lifetime. Keeping lookup separate from handle creation lets callers create an input handle without forcing an eager existence check and create an output handle before its object exists.
 
 Pattern expansion is the exception: an exact `LocationPattern` calls `head` once so absence can contribute zero matches without listing.
 
