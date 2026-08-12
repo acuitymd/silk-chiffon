@@ -1,4 +1,4 @@
-use arrow::array::{Array, Int32Array, Int64Array, RecordBatch, StringArray};
+use arrow::array::{Array, Int32Array, Int64Array, NullArray, RecordBatch, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use camino::Utf8PathBuf;
 use silk_chiffon::{
@@ -28,6 +28,7 @@ struct TestTransformCommand {
     non_spillable_reserve: Option<PoolReserveSpec>,
     memory_pool_top_consumers: usize,
     preserve_input_order: bool,
+    target_partitions: Option<usize>,
     by: Option<String>,
     partition_strategy: PartitionStrategy,
     max_open_partitions: Option<usize>,
@@ -121,6 +122,9 @@ async fn run_transform(command: TestTransformCommand) -> anyhow::Result<()> {
     }
     if command.preserve_input_order {
         arguments.push(OsString::from("--preserve-input-order"));
+    }
+    if let Some(partitions) = command.target_partitions {
+        push_value!("--target-partitions", partitions.to_string());
     }
     if let Some(fields) = command.by {
         push_value!("--by", fields);
@@ -1273,6 +1277,162 @@ async fn test_transform_reads_arrow_stream_input_incrementally() {
 }
 
 #[tokio::test]
+async fn arrow_stream_projection_and_limit_execute_in_the_custom_opener() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let output = temp_dir.path().join("output.arrow");
+    TestFile::write_arrow_stream(
+        &input,
+        &[
+            TestBatch::simple_with(&[1, 2], &["a", "b"]),
+            TestBatch::simple_with(&[3, 4], &["c", "d"]),
+        ],
+    );
+
+    run_transform(TestTransformCommand {
+        from: Some(input.to_string_lossy().into_owned()),
+        to: Some(output.to_string_lossy().into_owned()),
+        query: Some("SELECT name FROM data ORDER BY id LIMIT 3".to_owned()),
+        ..transform_defaults()
+    })
+    .await
+    .unwrap();
+
+    let batches = TestFile::read_arrow(&output);
+    assert_eq!(batches[0].schema().fields().len(), 1);
+    assert_eq!(
+        silk_chiffon::utils::test_data::TestExtract::string_all(&batches, "name"),
+        ["a", "b", "c"]
+    );
+}
+
+#[tokio::test]
+async fn arrow_stream_exact_statistics_count_every_zero_body_batch() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let output = temp_dir.path().join("output.arrow");
+    let schema = Arc::new(Schema::new(vec![Field::new("empty", DataType::Null, true)]));
+    let batches = [
+        RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(NullArray::new(2))]).unwrap(),
+        RecordBatch::try_new(schema, vec![Arc::new(NullArray::new(3))]).unwrap(),
+    ];
+    TestFile::write_arrow_stream(&input, &batches);
+
+    run_transform(TestTransformCommand {
+        from: Some(input.to_string_lossy().into_owned()),
+        to: Some(output.to_string_lossy().into_owned()),
+        query: Some("SELECT COUNT(*) AS row_count FROM data".to_owned()),
+        ..transform_defaults()
+    })
+    .await
+    .unwrap();
+
+    let batches = TestFile::read_arrow(&output);
+    assert_eq!(
+        silk_chiffon::utils::test_data::TestExtract::i64(&batches[0], "row_count"),
+        [5]
+    );
+}
+
+#[tokio::test]
+async fn multiple_arrow_streams_repartition_only_at_file_boundaries() {
+    let temp_dir = TempDir::new().unwrap();
+    let first = temp_dir.path().join("first.arrow");
+    let second = temp_dir.path().join("second.arrow");
+    let output = temp_dir.path().join("output.arrow");
+    TestFile::write_arrow_stream(
+        &first,
+        &[
+            TestBatch::simple_with(&[1, 2], &["a", "b"]),
+            TestBatch::simple_with(&[3], &["c"]),
+        ],
+    );
+    TestFile::write_arrow_stream(
+        &second,
+        &[
+            TestBatch::simple_with(&[10], &["j"]),
+            TestBatch::simple_with(&[11, 12], &["k", "l"]),
+        ],
+    );
+
+    run_transform(TestTransformCommand {
+        patterns: vec![format!("{}/*.arrow", temp_dir.path().display())],
+        to: Some(output.to_string_lossy().into_owned()),
+        target_partitions: Some(4),
+        ..transform_defaults()
+    })
+    .await
+    .unwrap();
+
+    let mut ids =
+        silk_chiffon::utils::test_data::TestExtract::i32_all(&TestFile::read_arrow(&output), "id");
+    ids.sort_unstable();
+    assert_eq!(ids, [1, 2, 3, 10, 11, 12]);
+}
+
+#[tokio::test]
+async fn one_pattern_groups_arrow_file_and_stream_variants_separately() {
+    let temp_dir = TempDir::new().unwrap();
+    let file = temp_dir.path().join("file.arrow");
+    let stream = temp_dir.path().join("stream.arrow");
+    let output = temp_dir.path().join("output.arrow");
+    TestFile::write_arrow_batch(&file, &TestBatch::simple_with(&[1, 2], &["a", "b"]));
+    TestFile::write_arrow_stream(&stream, &[TestBatch::simple_with(&[3, 4], &["c", "d"])]);
+
+    run_transform(TestTransformCommand {
+        patterns: vec![format!("{}/*.arrow", temp_dir.path().display())],
+        to: Some(output.to_string_lossy().into_owned()),
+        target_partitions: Some(3),
+        ..transform_defaults()
+    })
+    .await
+    .unwrap();
+
+    let mut ids =
+        silk_chiffon::utils::test_data::TestExtract::i32_all(&TestFile::read_arrow(&output), "id");
+    ids.sort_unstable();
+    assert_eq!(ids, [1, 2, 3, 4]);
+}
+
+#[tokio::test]
+async fn arrow_file_checks_each_nonrepresentative_schema_before_rows() {
+    let temp_dir = TempDir::new().unwrap();
+    let mismatched = temp_dir.path().join("a.arrow");
+    let representative = temp_dir.path().join("z.arrow");
+    let output = temp_dir.path().join("output.parquet");
+    let mismatched_batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new(
+            "other",
+            DataType::Int32,
+            false,
+        )])),
+        vec![Arc::new(Int32Array::from(vec![1]))],
+    )
+    .unwrap();
+    TestFile::write_arrow_batch(&mismatched, &mismatched_batch);
+    let ids = (0..1_000).collect::<Vec<_>>();
+    let names = (0..1_000)
+        .map(|index| format!("representative-{index:04}-with-padding"))
+        .collect::<Vec<_>>();
+    let names = names.iter().map(String::as_str).collect::<Vec<_>>();
+    TestFile::write_arrow_batch(&representative, &TestBatch::simple_with(&ids, &names));
+
+    let error = run_transform(TestTransformCommand {
+        patterns: vec![format!("{}/*.arrow", temp_dir.path().display())],
+        to: Some(output.to_string_lossy().into_owned()),
+        query: Some("SELECT * FROM data LIMIT 1".to_owned()),
+        ..transform_defaults()
+    })
+    .await
+    .unwrap_err();
+
+    let message = format!("{error:#}");
+    assert!(message.contains("a.arrow"), "{message}");
+    assert!(message.contains("schema mismatch"), "{message}");
+    assert!(!message.contains("__silk_input"), "{message}");
+}
+
+#[tokio::test]
 async fn arrow_stream_checks_each_file_schema_before_yielding_its_first_batch() {
     let temp_dir = TempDir::new().unwrap();
     let mismatched = temp_dir.path().join("a.arrow");
@@ -1728,6 +1888,117 @@ async fn test_transform_mixed_parquet_and_arrow_inputs() {
     assert!(output.exists());
     let batches = TestFile::read_parquet(&output);
     assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 4);
+}
+
+#[tokio::test]
+async fn different_input_leaves_union_reordered_and_missing_columns_by_name() {
+    let temp_dir = TempDir::new().unwrap();
+    let first = temp_dir.path().join("first.arrow");
+    let second = temp_dir.path().join("second.arrow");
+    let output = temp_dir.path().join("output.arrow");
+    let first_batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("left", DataType::Utf8, false),
+        ])),
+        vec![
+            Arc::new(Int32Array::from(vec![1, 2])),
+            Arc::new(StringArray::from(vec!["a", "b"])),
+        ],
+    )
+    .unwrap();
+    let second_batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("right", DataType::Utf8, false),
+            Field::new("id", DataType::Int32, false),
+        ])),
+        vec![
+            Arc::new(StringArray::from(vec!["z"])),
+            Arc::new(Int32Array::from(vec![3])),
+        ],
+    )
+    .unwrap();
+    TestFile::write_arrow_batch(&first, &first_batch);
+    TestFile::write_arrow_batch(&second, &second_batch);
+
+    run_transform(TestTransformCommand {
+        exact_references: vec![
+            first.to_string_lossy().into_owned(),
+            second.to_string_lossy().into_owned(),
+        ],
+        to: Some(output.to_string_lossy().into_owned()),
+        ..transform_defaults()
+    })
+    .await
+    .unwrap();
+
+    let batches = TestFile::read_arrow(&output);
+    let names = batches[0]
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().clone())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["id", "left", "right"]);
+    let mut rows = batches
+        .iter()
+        .flat_map(|batch| {
+            let ids = silk_chiffon::utils::test_data::TestExtract::i32(batch, "id");
+            let left = silk_chiffon::utils::test_data::TestExtract::string_nullable(batch, "left");
+            let right =
+                silk_chiffon::utils::test_data::TestExtract::string_nullable(batch, "right");
+            ids.into_iter()
+                .zip(left)
+                .zip(right)
+                .map(|((id, left), right)| (id, left, right))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by_key(|row| row.0);
+    assert_eq!(
+        rows,
+        [
+            (1, Some("a".to_owned()), None),
+            (2, Some("b".to_owned()), None),
+            (3, None, Some("z".to_owned())),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn parquet_pattern_rejects_a_nonrepresentative_schema_mismatch() {
+    let temp_dir = TempDir::new().unwrap();
+    let expected = temp_dir.path().join("a.parquet");
+    let mismatched = temp_dir.path().join("b.parquet");
+    let output = temp_dir.path().join("output.arrow");
+    TestFile::write_parquet_batch(
+        &expected,
+        &TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]),
+    );
+    let mismatched_batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new(
+            "different",
+            DataType::Int32,
+            false,
+        )])),
+        vec![Arc::new(Int32Array::from(vec![9]))],
+    )
+    .unwrap();
+    TestFile::write_parquet_batch(&mismatched, &mismatched_batch);
+
+    let error = run_transform(TestTransformCommand {
+        patterns: vec![format!("{}/*.parquet", temp_dir.path().display())],
+        to: Some(output.to_string_lossy().into_owned()),
+        ..transform_defaults()
+    })
+    .await
+    .unwrap_err();
+
+    let message = format!("{error:#}");
+    assert!(message.contains("schema does not match"), "{message}");
+    assert!(message.contains(".parquet"), "{message}");
+    assert!(!message.contains("__silk_input"), "{message}");
+    assert!(!output.exists());
 }
 
 #[tokio::test]

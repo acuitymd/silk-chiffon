@@ -122,7 +122,7 @@ fn register_input_store(
     }
 
     let namespace = encode(handle.store_url().as_str().as_bytes());
-    let store_url = ObjectStoreUrl::parse(format!("silk-input://{namespace}@root"))?;
+    let store_url = ObjectStoreUrl::parse(format!("silk-input://{namespace}"))?;
     let files = objects
         .iter()
         .map(|object| {
@@ -334,9 +334,60 @@ impl ObjectStore for InputStoreView {
 
 #[cfg(test)]
 mod tests {
+    use bytes::Bytes;
+    use clap::Command;
     use object_store::{ObjectStoreExt, memory::InMemory};
+    use silk_chiffon_storage::{
+        LocationInput, StorageAccess, StorageBackend, StorageRegistry, StorageSession,
+    };
 
     use super::*;
+
+    fn memory_storage() -> StorageSession {
+        fn create_store(
+            _store_url: &Url,
+            _settings: &(),
+            _retry: Option<&object_store::RetryConfig>,
+        ) -> anyhow::Result<Arc<dyn ObjectStore>> {
+            Ok(Arc::new(InMemory::new()))
+        }
+
+        let backend = StorageBackend::without_args()
+            .name("memory")
+            .schemes(["mem"])
+            .access(StorageAccess::ReadWrite)
+            .allow_any_location()
+            .object_store_creator(create_store)
+            .build()
+            .unwrap();
+        let registry = StorageRegistry::builder()
+            .register(backend)
+            .build()
+            .unwrap();
+        let matches = registry
+            .augment_args(Command::new("input-store-test"))
+            .try_get_matches_from(["input-store-test"])
+            .unwrap();
+        registry.create_session(&matches).unwrap()
+    }
+
+    async fn put_input(storage: &StorageSession, url: &str, bytes: &'static [u8]) -> InputObject {
+        let input = LocationInput::parse(url).unwrap();
+        let handle = storage.output_handle(&input).unwrap();
+        handle
+            .object_store()
+            .put(handle.object_path(), Bytes::from_static(bytes).into())
+            .await
+            .unwrap();
+        storage.lookup_input(&input).await.unwrap()
+    }
+
+    fn operation_error<T>(result: StoreResult<T>) -> String {
+        match result {
+            Ok(_) => panic!("a scoped input view operation unexpectedly succeeded"),
+            Err(error) => error.to_string(),
+        }
+    }
 
     fn view() -> InputStoreView {
         InputStoreView {
@@ -370,6 +421,51 @@ mod tests {
     }
 
     #[test]
+    fn scoped_reads_preserve_the_external_path_and_support_ranges() {
+        futures::executor::block_on(async {
+            let inner = Arc::new(InMemory::new());
+            let inner_path: ObjectPath = "data/one.arrow".into();
+            inner
+                .put(&inner_path, Bytes::from_static(b"abcdef").into())
+                .await
+                .unwrap();
+            let view = InputStoreView {
+                inner,
+                store_root: Url::parse("s3://bucket/").unwrap(),
+            };
+            let canonical = Url::parse("s3://bucket/data/one.arrow?versionId=one").unwrap();
+            let location = scoped_path(&canonical, &inner_path);
+
+            let result = view
+                .get_opts(&location, GetOptions::default())
+                .await
+                .unwrap();
+            assert_eq!(result.meta.location, location);
+            assert_eq!(result.bytes().await.unwrap(), Bytes::from_static(b"abcdef"));
+            assert_eq!(
+                view.get_ranges(&location, &[0..2, 4..6]).await.unwrap(),
+                [Bytes::from_static(b"ab"), Bytes::from_static(b"ef")]
+            );
+            assert_eq!(view.to_string(), "Silk input view for s3://bucket/");
+        });
+    }
+
+    #[test]
+    fn multi_range_errors_use_the_canonical_input_identity() {
+        futures::executor::block_on(async {
+            let canonical = Url::parse("s3://bucket/missing.arrow?versionId=one").unwrap();
+            let location = scoped_path(&canonical, &"missing.arrow".into());
+            let error = view()
+                .get_ranges(&location, &[0..1, 2..3])
+                .await
+                .unwrap_err();
+
+            assert!(error.to_string().contains(canonical.as_str()));
+            assert!(!error.to_string().contains(INTERNAL_PREFIX));
+        });
+    }
+
+    #[test]
     fn a_view_rejects_paths_from_another_root() {
         futures::executor::block_on(async {
             let canonical = Url::parse("s3://other/one.arrow").unwrap();
@@ -382,6 +478,65 @@ mod tests {
                     .unwrap_err()
                     .to_string()
                     .contains("another root")
+            );
+        });
+    }
+
+    #[test]
+    fn malformed_scoped_paths_never_reach_the_inner_store() {
+        for path in [
+            "outside/00/00",
+            "__silk_input/00",
+            "__silk_input/0/00",
+            "__silk_input/zz/00",
+        ] {
+            let error = match view().decode_path(&ObjectPath::from(path)) {
+                Ok(_) => panic!("a malformed scoped path unexpectedly decoded"),
+                Err(error) => error,
+            };
+            assert!(error.to_string().contains("invalid internal input path"));
+        }
+    }
+
+    #[test]
+    fn the_scoped_store_is_read_only_and_does_not_list() {
+        futures::executor::block_on(async {
+            let view = view();
+            let path = ObjectPath::from("object");
+
+            assert!(
+                operation_error(
+                    view.put_opts(&path, Bytes::new().into(), PutOptions::default())
+                        .await
+                )
+                .contains("put_opts")
+            );
+            assert!(
+                operation_error(
+                    view.put_multipart_opts(&path, PutMultipartOptions::default())
+                        .await
+                )
+                .contains("put_multipart_opts")
+            );
+            assert!(operation_error(view.list(None).try_next().await).contains("list"));
+            assert!(
+                operation_error(view.list_with_delimiter(None).await)
+                    .contains("list_with_delimiter")
+            );
+            assert!(
+                operation_error(
+                    view.copy_opts(&path, &ObjectPath::from("copy"), CopyOptions::default())
+                        .await
+                )
+                .contains("copy_opts")
+            );
+            assert!(
+                operation_error(
+                    view.delete_stream(futures::stream::iter([Ok(path)]).boxed())
+                        .try_next()
+                        .await
+                )
+                .contains("delete_stream")
             );
         });
     }
@@ -435,6 +590,43 @@ mod tests {
     }
 
     #[test]
+    fn registrations_keep_different_storage_roots_isolated() {
+        let first =
+            ObjectStoreUrl::parse(format!("silk-input://{}", encode(b"s3://first-bucket/")))
+                .unwrap();
+        let second =
+            ObjectStoreUrl::parse(format!("silk-input://{}", encode(b"s3://second-bucket/")))
+                .unwrap();
+
+        assert_ne!(first, second);
+        let first_url: &Url = first.as_ref();
+        let second_url: &Url = second.as_ref();
+        assert_ne!(first_url.host_str(), second_url.host_str());
+    }
+
+    #[test]
+    fn a_leaf_cannot_span_storage_roots() {
+        futures::executor::block_on(async {
+            let storage = memory_storage();
+            let first = put_input(&storage, "mem://first/object.arrow", b"first").await;
+            let second = put_input(&storage, "mem://second/object.arrow", b"second").await;
+
+            let error = InputLeaf::try_new(
+                &SessionContext::new(),
+                &[first, second],
+                InputVariant::new(),
+            )
+            .expect_err("one leaf must not span storage roots");
+
+            assert!(
+                error
+                    .to_string()
+                    .contains("spans multiple object-store roots")
+            );
+        });
+    }
+
+    #[test]
     fn a_leaf_requires_at_least_one_file() {
         let error = InputLeaf::try_new(&SessionContext::new(), &[], InputVariant::new())
             .expect_err("an empty leaf must be rejected");
@@ -479,6 +671,30 @@ mod tests {
                     .url()
                     .path()
                     .ends_with("larger.arrow")
+            );
+        });
+    }
+
+    #[test]
+    fn representative_size_ties_use_the_smallest_canonical_url() {
+        futures::executor::block_on(async {
+            let storage = memory_storage();
+            let later = put_input(&storage, "mem://bucket/z.arrow", b"same").await;
+            let earlier = put_input(&storage, "mem://bucket/a.arrow", b"same").await;
+            let leaf = InputLeaf::try_new(
+                &SessionContext::new(),
+                &[later, earlier],
+                InputVariant::new(),
+            )
+            .unwrap();
+
+            assert_eq!(
+                leaf.representative()
+                    .extension::<CanonicalInput>()
+                    .unwrap()
+                    .url()
+                    .as_str(),
+                "mem://bucket/a.arrow"
             );
         });
     }

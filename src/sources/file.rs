@@ -216,7 +216,7 @@ fn stripped_data_type(data_type: &DataType) -> DataType {
 mod tests {
     use std::collections::HashMap;
 
-    use arrow::datatypes::Schema;
+    use arrow::datatypes::{Schema, UnionFields, UnionMode};
     use datafusion::physical_expr::{PhysicalSortExpr, expressions::Column};
     use object_store::ObjectMeta;
 
@@ -272,6 +272,79 @@ mod tests {
     }
 
     #[test]
+    fn structural_comparison_strips_metadata_from_every_nested_container() {
+        let child = |value: &str| {
+            Arc::new(
+                Field::new("item", DataType::Utf8, true)
+                    .with_metadata(HashMap::from([("source".to_owned(), value.to_owned())])),
+            )
+        };
+        let run_ends = Arc::new(Field::new("run_ends", DataType::Int32, false));
+        let variants = [
+            (
+                DataType::ListView(child("left")),
+                DataType::ListView(child("right")),
+            ),
+            (
+                DataType::FixedSizeList(child("left"), 4),
+                DataType::FixedSizeList(child("right"), 4),
+            ),
+            (
+                DataType::LargeList(child("left")),
+                DataType::LargeList(child("right")),
+            ),
+            (
+                DataType::LargeListView(child("left")),
+                DataType::LargeListView(child("right")),
+            ),
+            (
+                DataType::Map(child("left"), false),
+                DataType::Map(child("right"), false),
+            ),
+            (
+                DataType::RunEndEncoded(Arc::clone(&run_ends), child("left")),
+                DataType::RunEndEncoded(Arc::clone(&run_ends), child("right")),
+            ),
+            (
+                DataType::Union(
+                    UnionFields::try_new(vec![0], vec![child("left").as_ref().clone()]).unwrap(),
+                    UnionMode::Sparse,
+                ),
+                DataType::Union(
+                    UnionFields::try_new(vec![0], vec![child("right").as_ref().clone()]).unwrap(),
+                    UnionMode::Sparse,
+                ),
+            ),
+        ];
+
+        for (left, right) in variants {
+            let left = Arc::new(Schema::new(vec![Field::new("outer", left, true)]));
+            let right = Arc::new(Schema::new(vec![Field::new("outer", right, true)]));
+            assert!(structurally_equal(&left, &right));
+        }
+    }
+
+    #[test]
+    fn strict_adapter_rejects_a_structurally_different_file_schema() {
+        let logical = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Int64,
+            false,
+        )]));
+        let physical = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Utf8,
+            false,
+        )]));
+
+        let error = StrictPhysicalExprAdapterFactory
+            .create(logical, physical)
+            .expect_err("a structurally different file schema must fail");
+
+        assert!(error.to_string().contains("does not match leaf schema"));
+    }
+
+    #[test]
     fn file_ordering_uses_the_longest_prefix_declared_by_every_file() {
         let ordered_file = |columns: &[(&str, usize)]| {
             let ordering = columns
@@ -299,5 +372,30 @@ mod tests {
         assert_eq!(ordering.len(), 1);
         assert_eq!(ordering[0].len(), 1);
         assert_eq!(ordering[0][0].expr.to_string(), "id@0");
+    }
+
+    #[test]
+    fn file_ordering_is_not_claimed_when_any_file_is_unordered() {
+        let ordering: LexOrdering = [PhysicalSortExpr::new_default(Arc::new(Column::new(
+            "id", 0,
+        )))]
+        .into();
+        let ordered = PartitionedFile::new("ordered", 1).with_ordering(Some(ordering));
+        let unordered = PartitionedFile::new("unordered", 1);
+
+        assert!(common_output_ordering(&[ordered, unordered]).is_empty());
+    }
+
+    #[test]
+    fn file_ordering_is_not_claimed_without_a_common_prefix() {
+        let ordered = |name: &str, index: usize| {
+            let ordering: LexOrdering = [PhysicalSortExpr::new_default(Arc::new(Column::new(
+                name, index,
+            )))]
+            .into();
+            PartitionedFile::new(name, 1).with_ordering(Some(ordering))
+        };
+
+        assert!(common_output_ordering(&[ordered("left", 0), ordered("right", 1)]).is_empty());
     }
 }

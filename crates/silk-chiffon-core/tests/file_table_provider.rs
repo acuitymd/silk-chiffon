@@ -12,6 +12,7 @@ use datafusion::{
         table_schema::TableSchema,
     },
     execution::object_store::ObjectStoreUrl,
+    logical_expr::{TableProviderFilterPushDown, col},
     physical_expr::{LexOrdering, LexRequirement, PhysicalSortExpr, expressions::Column},
     physical_expr_adapter::DefaultPhysicalExprAdapterFactory,
     physical_plan::{
@@ -248,6 +249,18 @@ fn provider_passes_retained_file_primitives_to_the_format_unchanged() {
     let captured = captured.lock();
     let captured = captured.as_ref().unwrap();
 
+    assert_eq!(
+        provider.table_type(),
+        datafusion::logical_expr::TableType::Base
+    );
+    assert_eq!(
+        provider.supports_filters_pushdown(&[&col("id")]).unwrap(),
+        [TableProviderFilterPushDown::Inexact]
+    );
+    let debug = format!("{provider:?}");
+    assert!(debug.contains("FileTableProvider"));
+    assert!(debug.contains("files: 1"));
+    assert!(debug.contains("has_expr_adapter_factory: true"));
     assert_eq!(provider.schema(), schema);
     assert_eq!(provider.statistics(), Some(statistics));
     assert_eq!(plan.schema().fields().len(), 1);
@@ -263,4 +276,25 @@ fn provider_passes_retained_file_primitives_to_the_format_unchanged() {
     assert_eq!(captured.config.statistics().num_rows, Precision::Exact(12));
     assert!(captured.config.expr_adapter_factory.is_some());
     assert_eq!(captured.config.output_ordering.len(), 1);
+}
+
+#[test]
+fn provider_rejects_an_empty_exact_file_set() {
+    let schema = Arc::new(Schema::empty());
+    let format = Arc::new(CapturingFormat {
+        captured: Arc::new(Mutex::new(None)),
+    });
+
+    let error = file_table_provider(
+        ObjectStoreUrl::local_filesystem(),
+        Arc::clone(&schema),
+        Vec::new(),
+        Statistics::new_unknown(&schema),
+        Vec::new(),
+        format,
+        None,
+    )
+    .expect_err("an empty exact-file provider must be rejected");
+
+    assert!(error.to_string().contains("requires at least one file"));
 }

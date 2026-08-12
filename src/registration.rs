@@ -1173,26 +1173,31 @@ fn local_utf8_path(handle: &StorageHandle) -> Result<Utf8PathBuf> {
 #[cfg(all(test, feature = "local-bare-paths"))]
 mod tests {
     use std::{
+        collections::HashMap,
         num::NonZeroUsize,
         sync::{
-            Arc, Mutex,
+            Arc, LazyLock, Mutex,
             atomic::{AtomicUsize, Ordering},
         },
     };
 
     use anyhow::Result;
     use arrow::array::RecordBatch;
+    use bytes::Bytes;
     use clap::{Args, CommandFactory, FromArgMatches};
     use datafusion::{
         catalog::TableProvider, datasource::MemTable, physical_plan::SendableRecordBatchStream,
         prelude::SessionContext,
     };
     use futures::{StreamExt, future::BoxFuture};
+    use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory, path::Path as ObjectPath};
     use silk_chiffon_core::{
-        FormatDefinition, FormatFuture, FormatRegistry, InputLeaf, ServiceInputDefinition,
-        ServiceOutputDefinition, SinkBinding, SinkBindingConfig, SinkConcurrency,
-        TransformDefinition,
+        DataSink, FormatDefinition, FormatFuture, FormatRegistry, InputLeaf,
+        ServiceInputDefinition, ServiceOutputDefinition, SinkBinding, SinkBindingConfig,
+        SinkConcurrency, TransformDefinition,
     };
+    use silk_chiffon_storage::{StorageAccess, StorageBackend, StorageRegistry};
+    use url::Url;
 
     use super::{
         ApplicationAssemblyError, ApplicationDefinition, arrow_format, parquet_options,
@@ -1206,6 +1211,9 @@ mod tests {
     static SERVICE_INPUT_REFERENCES: Mutex<Vec<String>> = Mutex::new(Vec::new());
     static SERVICE_OUTPUT_RESULT: Mutex<Option<(String, usize)>> = Mutex::new(None);
     static TYPED_SERVICE_OUTPUT_RESULT: Mutex<Option<TypedServiceOutputResult>> = Mutex::new(None);
+    static LARGE_LEAF_FILES: AtomicUsize = AtomicUsize::new(0);
+    static REMOTE_STORES: LazyLock<Mutex<HashMap<String, Arc<InMemory>>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
 
     #[derive(Debug, Eq, PartialEq)]
     struct TypedServiceOutputResult {
@@ -1213,6 +1221,82 @@ mod tests {
         marker: usize,
         fields: Vec<String>,
         ids: Vec<i32>,
+    }
+
+    fn remote_store(root: &str) -> Arc<InMemory> {
+        Arc::clone(
+            REMOTE_STORES
+                .lock()
+                .unwrap()
+                .entry(root.to_owned())
+                .or_insert_with(|| Arc::new(InMemory::new())),
+        )
+    }
+
+    fn create_remote_store(
+        store_url: &Url,
+        _: &(),
+        _: Option<&object_store::RetryConfig>,
+    ) -> Result<Arc<dyn ObjectStore>> {
+        Ok(remote_store(store_url.as_str()))
+    }
+
+    fn remote_backend() -> StorageBackend {
+        StorageBackend::without_args()
+            .name("test-remote")
+            .schemes(["test-remote"])
+            .access(StorageAccess::ReadOnly)
+            .allow_any_location()
+            .object_store_creator(create_remote_store)
+            .build()
+            .unwrap()
+    }
+
+    fn remote_storage_registry() -> StorageRegistry {
+        StorageRegistry::builder()
+            .register(super::local::backend().unwrap())
+            .register(remote_backend())
+            .build()
+            .unwrap()
+    }
+
+    async fn put_remote_file(root: &str, path: &str, bytes: Vec<u8>) {
+        remote_store(root)
+            .put(&ObjectPath::from(path), Bytes::from(bytes).into())
+            .await
+            .unwrap();
+    }
+
+    fn file_bytes(extension: &str, batch: &RecordBatch) -> Vec<u8> {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(format!("input.{extension}"));
+        match extension {
+            "arrow" => TestFile::write_arrow_batch(&path, batch),
+            "parquet" => TestFile::write_parquet_batch(&path, batch),
+            _ => panic!("unsupported test format {extension}"),
+        }
+        std::fs::read(path).unwrap()
+    }
+
+    fn arrow_stream_bytes(batches: &[RecordBatch]) -> Vec<u8> {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("input.arrow");
+        TestFile::write_arrow_stream(&path, batches);
+        std::fs::read(path).unwrap()
+    }
+
+    async fn vortex_bytes(batch: RecordBatch) -> Vec<u8> {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("input.vortex");
+        let mut sink = crate::sinks::vortex::VortexSink::create(
+            path.clone(),
+            &batch.schema(),
+            crate::sinks::vortex::VortexSinkOptions::new(),
+        )
+        .unwrap();
+        sink.write_batch(batch).await.unwrap();
+        Box::new(sink).finish().await.unwrap();
+        std::fs::read(path).unwrap()
     }
 
     fn test_provider(batch: RecordBatch) -> Result<Arc<dyn TableProvider>> {
@@ -1365,12 +1449,32 @@ mod tests {
         Box::pin(async { test_provider(TestBatch::simple_with(&[3, 1, 2], &["c", "a", "b"])) })
     }
 
+    fn large_leaf_provider<'a>(
+        leaf: &'a InputLeaf,
+        _: &'a SessionContext,
+        _: &'a (),
+    ) -> FormatFuture<'a, Arc<dyn TableProvider>> {
+        LARGE_LEAF_FILES.store(leaf.files().len(), Ordering::SeqCst);
+        Box::pin(async { test_provider(TestBatch::simple_with(&[1], &["one"])) })
+    }
+
     fn input_only_format() -> FormatDefinition {
         FormatDefinition::builder("input-only-test")
             .extensions(["input-only-test"])
             .transform(
                 TransformDefinition::without_args()
                     .input_provider(input_only_provider)
+                    .build(),
+            )
+            .build()
+    }
+
+    fn large_leaf_format() -> FormatDefinition {
+        FormatDefinition::builder("large-leaf-test")
+            .extensions(["large-leaf-test"])
+            .transform(
+                TransformDefinition::without_args()
+                    .input_provider(large_leaf_provider)
                     .build(),
             )
             .build()
@@ -1422,6 +1526,21 @@ mod tests {
             storage_registry(),
             service_inputs,
             service_outputs,
+        )
+        .unwrap()
+    }
+
+    fn remote_application_definition() -> ApplicationDefinition {
+        ApplicationDefinition::from_parts(
+            FormatRegistry::builder()
+                .register(arrow_format())
+                .register(super::parquet_format())
+                .register(super::vortex_format())
+                .build()
+                .unwrap(),
+            remote_storage_registry(),
+            Vec::new(),
+            Vec::new(),
         )
         .unwrap()
     }
@@ -1597,6 +1716,342 @@ mod tests {
         assert_eq!(
             SERVICE_OUTPUT_RESULT.lock().unwrap().as_ref(),
             Some(&("test-output://result".to_owned(), 9))
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_exact_input_runs_through_query_projection_and_limit() {
+        let root = "test-remote://coverage-exact/";
+        let batch = TestBatch::simple_with(&[1, 2, 3, 4], &["a", "b", "c", "d"]);
+        put_remote_file(root, "nested/input.arrow", file_bytes("arrow", &batch)).await;
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("output.arrow");
+        let cli = test_cli(
+            remote_application_definition(),
+            &[
+                "silk-chiffon",
+                "transform",
+                "--from",
+                "test-remote://coverage-exact/nested/input.arrow",
+                "--to",
+                output.to_str().unwrap(),
+                "--query",
+                "SELECT name FROM data WHERE id >= 2 ORDER BY id LIMIT 2",
+            ],
+        );
+        let Command::Transform(command) = cli.command else {
+            panic!("expected transform command");
+        };
+
+        crate::commands::transform::run(command).await.unwrap();
+
+        let batches = TestFile::read_arrow(&output);
+        assert_eq!(batches[0].schema().fields().len(), 1);
+        assert_eq!(TestExtract::string_all(&batches, "name"), ["b", "c"]);
+    }
+
+    #[tokio::test]
+    async fn remote_arrow_stream_executes_through_the_scoped_store() {
+        let root = "test-remote://coverage-stream/";
+        put_remote_file(
+            root,
+            "input.arrow",
+            arrow_stream_bytes(&[
+                TestBatch::simple_with(&[1, 2], &["a", "b"]),
+                TestBatch::simple_with(&[3, 4], &["c", "d"]),
+            ]),
+        )
+        .await;
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("output.arrow");
+        let cli = test_cli(
+            remote_application_definition(),
+            &[
+                "silk-chiffon",
+                "transform",
+                "--from",
+                "test-remote://coverage-stream/input.arrow?versionId=pinned",
+                "--to",
+                output.to_str().unwrap(),
+                "--query",
+                "SELECT name FROM data WHERE id > 1 ORDER BY id DESC LIMIT 2",
+            ],
+        );
+        let Command::Transform(command) = cli.command else {
+            panic!("expected transform command");
+        };
+
+        crate::commands::transform::run(command).await.unwrap();
+
+        let batches = TestFile::read_arrow(&output);
+        assert_eq!(batches[0].schema().fields().len(), 1);
+        assert_eq!(TestExtract::string_all(&batches, "name"), ["d", "c"]);
+    }
+
+    #[tokio::test]
+    async fn missing_remote_exact_input_fails_before_output_construction() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("output.arrow");
+        let input = "test-remote://coverage-missing/missing.arrow?versionId=absent";
+        let cli = test_cli(
+            remote_application_definition(),
+            &[
+                "silk-chiffon",
+                "transform",
+                "--from",
+                input,
+                "--to",
+                output.to_str().unwrap(),
+            ],
+        );
+        let Command::Transform(command) = cli.command else {
+            panic!("expected transform command");
+        };
+
+        let error = crate::commands::transform::run(command).await.unwrap_err();
+
+        let message = format!("{error:#}");
+        assert!(message.contains(input), "{message}");
+        assert!(
+            message.to_ascii_lowercase().contains("not found"),
+            "{message}"
+        );
+        assert!(!message.contains("__silk_input"), "{message}");
+        assert!(!output.exists());
+    }
+
+    #[tokio::test]
+    async fn remote_vortex_input_uses_its_native_provider_end_to_end() {
+        let root = "test-remote://coverage-vortex/";
+        let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+        put_remote_file(root, "input.vortex", vortex_bytes(batch).await).await;
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("output.arrow");
+        let cli = test_cli(
+            remote_application_definition(),
+            &[
+                "silk-chiffon",
+                "transform",
+                "--from",
+                "test-remote://coverage-vortex/input.vortex",
+                "--to",
+                output.to_str().unwrap(),
+                "--query",
+                "SELECT id FROM data WHERE id >= 2",
+            ],
+        );
+        let Command::Transform(command) = cli.command else {
+            panic!("expected transform command");
+        };
+
+        crate::commands::transform::run(command).await.unwrap();
+
+        assert_eq!(
+            TestExtract::i32_all(&TestFile::read_arrow(&output), "id"),
+            [2, 3]
+        );
+    }
+
+    #[tokio::test]
+    async fn recognized_malformed_remote_input_stops_format_fallback() {
+        let root = "test-remote://coverage-malformed/";
+        let mut bytes = b"ARROW1".to_vec();
+        bytes.extend_from_slice(&[0; 16]);
+        put_remote_file(root, "input.arrow", bytes).await;
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("output.arrow");
+        let cli = test_cli(
+            remote_application_definition(),
+            &[
+                "silk-chiffon",
+                "transform",
+                "--from",
+                "test-remote://coverage-malformed/input.arrow",
+                "--to",
+                output.to_str().unwrap(),
+            ],
+        );
+        let Command::Transform(command) = cli.command else {
+            panic!("expected transform command");
+        };
+
+        let error = crate::commands::transform::run(command).await.unwrap_err();
+
+        let message = format!("{error:#}");
+        assert!(message.contains("malformed arrow input"), "{message}");
+        assert!(
+            message.contains("coverage-malformed/input.arrow"),
+            "{message}"
+        );
+        assert!(
+            message.contains("only one of its two magic markers"),
+            "{message}"
+        );
+        assert!(!output.exists());
+    }
+
+    #[tokio::test]
+    async fn unknown_remote_bytes_report_the_canonical_input() {
+        let root = "test-remote://coverage-unknown/";
+        put_remote_file(root, "input.unknown", b"not a known format".to_vec()).await;
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("output.arrow");
+        let cli = test_cli(
+            remote_application_definition(),
+            &[
+                "silk-chiffon",
+                "transform",
+                "--from",
+                "test-remote://coverage-unknown/input.unknown",
+                "--to",
+                output.to_str().unwrap(),
+            ],
+        );
+        let Command::Transform(command) = cli.command else {
+            panic!("expected transform command");
+        };
+
+        let error = crate::commands::transform::run(command).await.unwrap_err();
+
+        let message = format!("{error:#}");
+        assert!(message.contains("could not detect the format"), "{message}");
+        assert!(
+            message.contains("coverage-unknown/input.unknown"),
+            "{message}"
+        );
+        assert!(!output.exists());
+    }
+
+    #[tokio::test]
+    async fn identical_paths_in_different_remote_roots_cannot_cross_read() {
+        let first_root = "test-remote://coverage-root-a/";
+        let second_root = "test-remote://coverage-root-b/";
+        put_remote_file(
+            first_root,
+            "shared.arrow",
+            file_bytes("arrow", &TestBatch::simple_with(&[1, 2], &["a", "b"])),
+        )
+        .await;
+        put_remote_file(
+            second_root,
+            "shared.arrow",
+            file_bytes("arrow", &TestBatch::simple_with(&[90], &["z"])),
+        )
+        .await;
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("output.arrow");
+        let cli = test_cli(
+            remote_application_definition(),
+            &[
+                "silk-chiffon",
+                "transform",
+                "--from",
+                "test-remote://coverage-root-a/shared.arrow",
+                "--from",
+                "test-remote://coverage-root-b/shared.arrow",
+                "--to",
+                output.to_str().unwrap(),
+            ],
+        );
+        let Command::Transform(command) = cli.command else {
+            panic!("expected transform command");
+        };
+
+        crate::commands::transform::run(command).await.unwrap();
+
+        let mut ids = TestExtract::i32_all(&TestFile::read_arrow(&output), "id");
+        ids.sort_unstable();
+        assert_eq!(ids, [1, 2, 90]);
+    }
+
+    #[tokio::test]
+    async fn remote_pattern_groups_mixed_formats_without_losing_rows() {
+        let root = "test-remote://coverage-pattern/";
+        put_remote_file(
+            root,
+            "dataset/a.arrow",
+            file_bytes("arrow", &TestBatch::simple_with(&[1, 2], &["a", "b"])),
+        )
+        .await;
+        put_remote_file(
+            root,
+            "dataset/b.parquet",
+            file_bytes("parquet", &TestBatch::simple_with(&[3, 4], &["c", "d"])),
+        )
+        .await;
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("output.arrow");
+        let cli = test_cli(
+            remote_application_definition(),
+            &[
+                "silk-chiffon",
+                "transform",
+                "--from-pattern",
+                "test-remote://coverage-pattern/dataset/*",
+                "--to",
+                output.to_str().unwrap(),
+            ],
+        );
+        let Command::Transform(command) = cli.command else {
+            panic!("expected transform command");
+        };
+
+        crate::commands::transform::run(command).await.unwrap();
+
+        let mut ids = TestExtract::i32_all(&TestFile::read_arrow(&output), "id");
+        ids.sort_unstable();
+        assert_eq!(ids, [1, 2, 3, 4]);
+    }
+
+    #[tokio::test]
+    async fn six_figure_remote_pattern_builds_one_leaf_and_executes() {
+        const FILES: usize = 100_000;
+        LARGE_LEAF_FILES.store(0, Ordering::SeqCst);
+        SERVICE_OUTPUT_RESULT.lock().unwrap().take();
+        let root = "test-remote://coverage-large/";
+        let store = remote_store(root);
+        for index in 0..FILES {
+            store
+                .put(
+                    &ObjectPath::from(format!("dataset/{index:06}.large-leaf-test")),
+                    Bytes::new().into(),
+                )
+                .await
+                .unwrap();
+        }
+        let definition = ApplicationDefinition::from_parts(
+            FormatRegistry::builder()
+                .register(large_leaf_format())
+                .build()
+                .unwrap(),
+            remote_storage_registry(),
+            Vec::new(),
+            vec![test_service_output("test-output", "test-output")],
+        )
+        .unwrap();
+        let cli = test_cli(
+            definition,
+            &[
+                "silk-chiffon",
+                "transform",
+                "--from-pattern",
+                "test-remote://coverage-large/dataset/*.large-leaf-test",
+                "--input-format",
+                "large-leaf-test",
+                "--to",
+                "test-output://large",
+            ],
+        );
+        let Command::Transform(command) = cli.command else {
+            panic!("expected transform command");
+        };
+
+        crate::commands::transform::run(command).await.unwrap();
+
+        assert_eq!(LARGE_LEAF_FILES.load(Ordering::SeqCst), FILES);
+        assert_eq!(
+            SERVICE_OUTPUT_RESULT.lock().unwrap().as_ref(),
+            Some(&("test-output://large".to_owned(), 1))
         );
     }
 

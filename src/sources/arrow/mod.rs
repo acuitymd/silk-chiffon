@@ -863,14 +863,16 @@ async fn sample_statistics(
                     .checked_add(u64::try_from(message.bytes.len())?)
                     .context("Arrow sample byte count overflow")?;
                 let mut buffer = Buffer::from(message.bytes);
-                if let Some(batch) = decoder.decode(&mut buffer)? {
-                    reservation.try_resize(
-                        reservation
-                            .size()
-                            .checked_add(batch.get_array_memory_size())
-                            .context("Arrow sample reservation size overflow")?,
-                    )?;
-                    record_sample(&batch, &mut rows, &mut decoded_bytes, &mut column_bytes)?;
+                while !buffer.is_empty() {
+                    if let Some(batch) = decoder.decode(&mut buffer)? {
+                        reservation.try_resize(
+                            reservation
+                                .size()
+                                .checked_add(batch.get_array_memory_size())
+                                .context("Arrow sample reservation size overflow")?,
+                        )?;
+                        record_sample(&batch, &mut rows, &mut decoded_bytes, &mut column_bytes)?;
+                    }
                 }
                 reservation.free();
                 if rows >= SAMPLE_ROWS {
@@ -1114,14 +1116,17 @@ impl ActiveFiles {
 #[cfg(test)]
 mod tests {
     use arrow::{
-        array::NullArray,
-        datatypes::{DataType, Field, Schema},
+        array::{Array, NullArray, StringArray, StringDictionaryBuilder},
+        datatypes::{DataType, Field, Int32Type, Schema},
+        ipc::writer::FileWriter,
     };
     use datafusion::{
+        common::stats::Precision,
         execution::{memory_pool::GreedyMemoryPool, object_store::ObjectStoreUrl},
         physical_plan::metrics::ExecutionPlanMetricsSet,
     };
     use object_store::{ObjectStoreExt, memory::InMemory};
+    use tokio::sync::Notify;
 
     use super::*;
 
@@ -1145,6 +1150,38 @@ mod tests {
             e_tag: None,
             version: None,
         }
+    }
+
+    fn source(variant: ArrowIpcVariant) -> ArrowIpcSource {
+        let schema = Arc::new(Schema::new(vec![Field::new("value", DataType::Null, true)]));
+        let table_schema = TableSchema::new(schema, Vec::new());
+        ArrowIpcSource {
+            variant,
+            table_schema: table_schema.clone(),
+            projection: SplitProjection::unprojected(&table_schema),
+            metrics: ExecutionPlanMetricsSet::new(),
+            active_files: Arc::new(ActiveFiles::default()),
+            memory_pool: Arc::new(GreedyMemoryPool::new(usize::MAX)),
+        }
+    }
+
+    fn scan_config(source: &ArrowIpcSource, files: Vec<PartitionedFile>) -> FileScanConfig {
+        datafusion::datasource::physical_plan::FileScanConfigBuilder::new(
+            ObjectStoreUrl::local_filesystem(),
+            Arc::new(source.clone()),
+        )
+        .with_file_group(FileGroup::new(files))
+        .build()
+    }
+
+    async fn stored_bytes(location: &str, bytes: Vec<u8>) -> (Arc<dyn ObjectStore>, ObjectMeta) {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let meta = object(location, u64::try_from(bytes.len()).unwrap());
+        store
+            .put(&meta.location, Bytes::from(bytes).into())
+            .await
+            .unwrap();
+        (store, meta)
     }
 
     #[test]
@@ -1186,6 +1223,88 @@ mod tests {
     }
 
     #[test]
+    fn arrow_variants_reject_unknown_detector_output() {
+        let error = ArrowIpcVariant::parse(&InputVariant::named("unknown")).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("unknown Arrow IPC input variant")
+        );
+    }
+
+    #[tokio::test]
+    async fn arrow_file_format_declares_its_input_contract() {
+        let format = ArrowIpcFormat {
+            variant: ArrowIpcVariant::File,
+            active_files: Arc::new(ActiveFiles::default()),
+            memory_pool: Arc::new(GreedyMemoryPool::new(usize::MAX)),
+        };
+        let session = SessionContext::new();
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let schema = batch(1).schema();
+
+        assert_eq!(format.get_ext(), "arrow");
+        assert_eq!(
+            format
+                .get_ext_with_compression(&FileCompressionType::UNCOMPRESSED)
+                .unwrap(),
+            "arrow"
+        );
+        assert!(
+            format
+                .get_ext_with_compression(&FileCompressionType::GZIP)
+                .unwrap_err()
+                .to_string()
+                .contains("does not support file-level compression")
+        );
+        assert_eq!(format.compression_type(), None);
+        assert!(
+            format
+                .infer_schema(&session.state(), &store, &[])
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("requires one object")
+        );
+        let statistics = format
+            .infer_stats(
+                &session.state(),
+                &store,
+                Arc::clone(&schema),
+                &object("one.arrow", 1),
+            )
+            .await
+            .unwrap();
+        assert_eq!(statistics.num_rows, Precision::Absent);
+        let metadata = format
+            .infer_stats_and_ordering(&session.state(), &store, schema, &object("one.arrow", 1))
+            .await
+            .unwrap();
+        assert_eq!(metadata.statistics.num_rows, Precision::Absent);
+        assert!(metadata.ordering.is_none());
+    }
+
+    #[test]
+    fn arrow_sources_distinguish_seekable_files_from_whole_streams() {
+        let file = source(ArrowIpcVariant::File);
+        let stream = source(ArrowIpcVariant::Stream);
+
+        assert_eq!(file.file_type(), "arrow");
+        assert!(file.supports_repartitioning());
+        assert_eq!(stream.file_type(), "arrow_stream");
+        assert!(!stream.supports_repartitioning());
+    }
+
+    #[test]
+    fn active_file_debug_reports_only_live_layouts() {
+        let registry = ActiveFiles::default();
+        let _lease = registry.lease(&object("one.arrow", 1));
+
+        assert_eq!(format!("{registry:?}"), "ActiveFiles { entries: 1 }");
+    }
+
+    #[test]
     fn active_file_registry_prunes_dead_leases() {
         let registry = ActiveFiles::default();
         let meta = object("one.arrow", 1);
@@ -1208,25 +1327,11 @@ mod tests {
 
     #[test]
     fn stream_repartitioning_distributes_whole_files() {
-        let schema = Arc::new(Schema::new(vec![Field::new("value", DataType::Null, true)]));
-        let table_schema = TableSchema::new(schema, Vec::new());
-        let source = ArrowIpcSource {
-            variant: ArrowIpcVariant::Stream,
-            table_schema: table_schema.clone(),
-            projection: SplitProjection::unprojected(&table_schema),
-            metrics: ExecutionPlanMetricsSet::new(),
-            active_files: Arc::new(ActiveFiles::default()),
-            memory_pool: Arc::new(GreedyMemoryPool::new(usize::MAX)),
-        };
+        let source = source(ArrowIpcVariant::Stream);
         let files = (0..6)
             .map(|index| PartitionedFile::new(format!("{index}.arrow"), index + 1))
             .collect::<Vec<_>>();
-        let config = datafusion::datasource::physical_plan::FileScanConfigBuilder::new(
-            ObjectStoreUrl::local_filesystem(),
-            Arc::new(source.clone()),
-        )
-        .with_file_group(FileGroup::new(files))
-        .build();
+        let config = scan_config(&source, files);
 
         let repartitioned = source
             .repartitioned(3, usize::MAX, None, &config)
@@ -1248,6 +1353,57 @@ mod tests {
                 .iter()
                 .flat_map(FileGroup::iter)
                 .all(|file| file.range.is_none())
+        );
+    }
+
+    #[test]
+    fn stream_repartitioning_preserves_required_order_and_existing_groups() {
+        let source = source(ArrowIpcVariant::Stream);
+        let files = (0..3)
+            .map(|index| PartitionedFile::new(format!("{index}.arrow"), index + 1))
+            .collect::<Vec<_>>();
+        let config = scan_config(&source, files);
+        let ordering = [datafusion::physical_expr::PhysicalSortExpr::new_default(
+            Arc::new(datafusion::physical_expr::expressions::Column::new(
+                "value", 0,
+            )),
+        )]
+        .into();
+
+        assert!(
+            source
+                .repartitioned(1, usize::MAX, None, &config)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            source
+                .repartitioned(3, usize::MAX, Some(ordering), &config)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn file_repartitioning_splits_seekable_inputs_into_byte_ranges() {
+        let source = source(ArrowIpcVariant::File);
+        let config = scan_config(
+            &source,
+            vec![PartitionedFile::new("large.arrow", 1_000_000)],
+        );
+
+        let repartitioned = source
+            .repartitioned(4, 0, None, &config)
+            .unwrap()
+            .expect("a seekable file should be split");
+
+        assert_eq!(repartitioned.file_groups.len(), 4);
+        assert!(
+            repartitioned
+                .file_groups
+                .iter()
+                .flat_map(FileGroup::iter)
+                .all(|file| file.range.is_some())
         );
     }
 
@@ -1342,5 +1498,423 @@ mod tests {
             .await
             .is_ok()
         );
+    }
+
+    #[test]
+    fn invalid_file_block_ranges_fail_before_object_reads() {
+        let meta = object("invalid.arrow", 16);
+        let cases = [
+            (Block::new(-1, 0, 0), "offset is negative"),
+            (Block::new(0, -1, 0), "metadata length is negative"),
+            (Block::new(0, 0, -1), "body length is negative"),
+            (Block::new(15, 2, 0), "exceeds object size"),
+            (Block::new(i64::MAX, i32::MAX, i64::MAX), "range overflows"),
+        ];
+
+        for (block, expected) in cases {
+            let error = validate_blocks(&meta, "invalid.arrow", std::iter::once(&block))
+                .expect_err("invalid block must fail validation");
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn truncated_stream_frames_report_the_failing_boundary() {
+        let cases = [
+            (vec![1, 2, 3], "ends inside a message header"),
+            (
+                u32::MAX.to_le_bytes().to_vec(),
+                "ends after a continuation marker",
+            ),
+            (
+                [8_u32.to_le_bytes().as_slice(), &[0, 0, 0, 0]].concat(),
+                "ends inside message metadata",
+            ),
+        ];
+
+        for (index, (bytes, expected)) in cases.into_iter().enumerate() {
+            let location = format!("truncated-{index}.arrow");
+            let (store, meta) = stored_bytes(&location, bytes).await;
+            let error = match read_stream_message(&store, &meta, 0, &location, false).await {
+                Ok(_) => panic!("truncated message must fail"),
+                Err(error) => error,
+            };
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "value",
+                DataType::Int32,
+                false,
+            )])),
+            vec![Arc::new(arrow::array::Int32Array::from(vec![42]))],
+        )
+        .unwrap();
+        let mut bytes = Vec::new();
+        {
+            let mut writer =
+                arrow::ipc::writer::StreamWriter::try_new(&mut bytes, batch.schema().as_ref())
+                    .unwrap();
+            writer.write(&batch).unwrap();
+            writer.finish().unwrap();
+        }
+        let (store, meta) = stored_bytes("complete.arrow", bytes.clone()).await;
+        let StreamMessageRead::Message(schema) =
+            read_stream_message(&store, &meta, 0, "complete.arrow", false)
+                .await
+                .unwrap()
+        else {
+            panic!("the first stream message must contain the schema");
+        };
+        let StreamMessageRead::Message(record_batch) =
+            read_stream_message(&store, &meta, schema.end, "complete.arrow", false)
+                .await
+                .unwrap()
+        else {
+            panic!("the second stream message must contain the batch");
+        };
+        bytes.truncate(usize::try_from(record_batch.end - 1).unwrap());
+        let (store, meta) = stored_bytes("truncated-body.arrow", bytes).await;
+        let error =
+            match read_stream_message(&store, &meta, schema.end, "truncated-body.arrow", false)
+                .await
+            {
+                Ok(_) => panic!("a truncated body must fail"),
+                Err(error) => error,
+            };
+        assert!(
+            error.to_string().contains("ends inside a message body"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn impossible_file_footer_lengths_are_rejected() {
+        let batch = batch(1);
+        let mut bytes = Vec::new();
+        {
+            let mut writer = FileWriter::try_new(&mut bytes, batch.schema().as_ref()).unwrap();
+            writer.write(&batch).unwrap();
+            writer.finish().unwrap();
+        }
+        let length = bytes.len();
+        bytes[length - 10..length - 6]
+            .copy_from_slice(&u32::try_from(length).unwrap().to_le_bytes());
+        let (store, meta) = stored_bytes("bad-footer.arrow", bytes).await;
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(usize::MAX));
+
+        let error = match read_file_layout(&store, &meta, pool, "bad-footer.arrow").await {
+            Ok(_) => panic!("an impossible footer length must fail"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("footer length"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn completed_single_object_samples_are_exact_for_both_variants() {
+        let batches = [batch(2), batch(3)];
+        let schema = batches[0].schema();
+        let mut file_bytes = Vec::new();
+        {
+            let mut writer = FileWriter::try_new(&mut file_bytes, schema.as_ref()).unwrap();
+            for batch in &batches {
+                writer.write(batch).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        let mut stream_bytes = Vec::new();
+        {
+            let mut writer =
+                arrow::ipc::writer::StreamWriter::try_new(&mut stream_bytes, schema.as_ref())
+                    .unwrap();
+            for batch in &batches {
+                writer.write(batch).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+
+        for (variant, location, bytes) in [
+            (ArrowIpcVariant::File, "sample-file.arrow", file_bytes),
+            (ArrowIpcVariant::Stream, "sample-stream.arrow", stream_bytes),
+        ] {
+            let (store, meta) = stored_bytes(location, bytes).await;
+            let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(usize::MAX));
+            let statistics = sample_statistics(
+                variant,
+                &store,
+                &PartitionedFile::new_from_meta(meta.clone()),
+                &schema,
+                meta.size,
+                true,
+                pool,
+            )
+            .await
+            .unwrap();
+            let SampleStatistics::Available(statistics) = statistics else {
+                panic!("small complete inputs should produce statistics");
+            };
+
+            assert_eq!(
+                statistics.num_rows,
+                Precision::Exact(5),
+                "wrong row count for {variant:?}"
+            );
+            assert!(matches!(statistics.total_byte_size, Precision::Exact(_)));
+        }
+    }
+
+    #[tokio::test]
+    async fn representative_sampling_stops_after_the_batch_that_crosses_the_target() {
+        let batches = [batch(60_000), batch(60_000), batch(60_000)];
+        let schema = batches[0].schema();
+        let mut file_bytes = Vec::new();
+        {
+            let mut writer = FileWriter::try_new(&mut file_bytes, schema.as_ref()).unwrap();
+            for batch in &batches {
+                writer.write(batch).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        let mut stream_bytes = Vec::new();
+        {
+            let mut writer =
+                arrow::ipc::writer::StreamWriter::try_new(&mut stream_bytes, schema.as_ref())
+                    .unwrap();
+            for batch in &batches {
+                writer.write(batch).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+
+        for (variant, location, bytes) in [
+            (ArrowIpcVariant::File, "prefix-file.arrow", file_bytes),
+            (ArrowIpcVariant::Stream, "prefix-stream.arrow", stream_bytes),
+        ] {
+            let (store, meta) = stored_bytes(location, bytes).await;
+            let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(usize::MAX));
+            let statistics = sample_statistics(
+                variant,
+                &store,
+                &PartitionedFile::new_from_meta(meta.clone()),
+                &schema,
+                meta.size,
+                true,
+                pool,
+            )
+            .await
+            .unwrap();
+            let SampleStatistics::Available(statistics) = statistics else {
+                panic!("a complete sampled batch must produce statistics");
+            };
+
+            assert!(
+                matches!(statistics.num_rows, Precision::Inexact(rows) if rows >= 120_000),
+                "{statistics:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stream_without_a_schema_is_rejected() {
+        let (store, meta) = stored_bytes("schema-less.arrow", vec![0, 0, 0, 0]).await;
+
+        let error = infer_stream_schema(&store, &meta, "schema-less.arrow")
+            .await
+            .unwrap_err();
+
+        assert!(
+            error.to_string().contains("ended before its schema"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_opening_rejects_byte_range_partitions() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let schema = batch(1).schema();
+        let file = PartitionedFile::new("stream.arrow", 10).with_range(0, 5);
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(usize::MAX));
+
+        let error =
+            match open_stream(store, file, "stream.arrow".to_owned(), None, schema, pool).await {
+                Ok(_) => panic!("a stream range must not be opened"),
+                Err(error) => error,
+            };
+
+        assert!(error.to_string().contains("do not support byte-range"));
+    }
+
+    #[tokio::test]
+    async fn representative_statistics_are_inexact_for_multiple_objects() {
+        let batches = [batch(2), batch(3)];
+        let schema = batches[0].schema();
+        let mut bytes = Vec::new();
+        {
+            let mut writer = FileWriter::try_new(&mut bytes, schema.as_ref()).unwrap();
+            for batch in &batches {
+                writer.write(batch).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        let (store, meta) = stored_bytes("representative.arrow", bytes).await;
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(usize::MAX));
+
+        let statistics = sample_statistics(
+            ArrowIpcVariant::File,
+            &store,
+            &PartitionedFile::new_from_meta(meta.clone()),
+            &schema,
+            meta.size * 3,
+            false,
+            pool,
+        )
+        .await
+        .unwrap();
+        let SampleStatistics::Available(statistics) = statistics else {
+            panic!("the representative should produce an estimate");
+        };
+
+        assert!(matches!(statistics.num_rows, Precision::Inexact(rows) if rows >= 5));
+        assert!(matches!(statistics.total_byte_size, Precision::Inexact(_)));
+    }
+
+    #[tokio::test]
+    async fn dictionary_batches_decode_once_in_each_file_range() {
+        let mut dictionary = StringDictionaryBuilder::<Int32Type>::new();
+        for value in ["alpha", "beta", "gamma", "delta"] {
+            dictionary.append(value).unwrap();
+        }
+        let dictionary = Arc::new(dictionary.finish());
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            dictionary.data_type().clone(),
+            false,
+        )]));
+        let batches = [
+            RecordBatch::try_new(
+                Arc::clone(&schema),
+                vec![Arc::new(dictionary.slice(0, 2)) as Arc<dyn Array>],
+            )
+            .unwrap(),
+            RecordBatch::try_new(
+                Arc::clone(&schema),
+                vec![Arc::new(dictionary.slice(2, 2)) as Arc<dyn Array>],
+            )
+            .unwrap(),
+        ];
+        let mut bytes = Vec::new();
+        {
+            let mut writer = FileWriter::try_new(&mut bytes, schema.as_ref()).unwrap();
+            for batch in &batches {
+                writer.write(batch).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        let (store, meta) = stored_bytes("dictionary.arrow", bytes).await;
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(usize::MAX));
+        let layout = read_file_layout(&store, &meta, Arc::clone(&pool), "dictionary.arrow")
+            .await
+            .unwrap();
+        assert_eq!(layout.record_batches.len(), 2);
+        assert!(!layout.dictionaries.is_empty());
+        let split = layout.record_batches[1].offset();
+        let ranges = [(0, split), (split, i64::try_from(meta.size).unwrap())];
+        let active = Arc::new(ActiveFiles::default());
+        let mut values = Vec::new();
+
+        for (start, end) in ranges {
+            let file = PartitionedFile::new_from_meta(meta.clone()).with_range(start, end);
+            let stream = open_file(
+                Arc::clone(&store),
+                file,
+                "dictionary.arrow".to_owned(),
+                None,
+                Arc::clone(&schema),
+                Arc::clone(&active),
+                Arc::clone(&pool),
+            )
+            .await
+            .unwrap();
+            let decoded = stream.try_collect::<Vec<_>>().await.unwrap();
+            for batch in decoded {
+                let column = batch.column(0);
+                let dictionary = column
+                    .as_any()
+                    .downcast_ref::<arrow::array::DictionaryArray<Int32Type>>()
+                    .unwrap();
+                let strings = dictionary
+                    .values()
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap();
+                values.extend(
+                    dictionary
+                        .keys()
+                        .iter()
+                        .flatten()
+                        .map(|key| strings.value(usize::try_from(key).unwrap()).to_owned()),
+                );
+            }
+        }
+
+        assert_eq!(values, ["alpha", "beta", "gamma", "delta"]);
+
+        let statistics = sample_statistics(
+            ArrowIpcVariant::File,
+            &store,
+            &PartitionedFile::new_from_meta(meta.clone()),
+            &schema,
+            meta.size,
+            true,
+            pool,
+        )
+        .await
+        .unwrap();
+        let SampleStatistics::Available(statistics) = statistics else {
+            panic!("dictionary input must produce statistics");
+        };
+        assert_eq!(statistics.num_rows, Precision::Exact(4));
+    }
+
+    #[tokio::test]
+    async fn concurrent_layout_initialization_runs_once() {
+        let cell = Arc::new(LayoutCell::new());
+        let starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let make_task = |cell: Arc<LayoutCell>| {
+            let starts = Arc::clone(&starts);
+            let started = Arc::clone(&started);
+            let release = Arc::clone(&release);
+            tokio::spawn(async move {
+                cell.get_or_try_init(|| async move {
+                    starts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    started.notify_one();
+                    release.notified().await;
+                    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(usize::MAX));
+                    Ok::<_, datafusion::common::DataFusionError>(Arc::new(FileLayout {
+                        schema: Arc::new(Schema::empty()),
+                        version: MetadataVersion::V5,
+                        dictionaries: Vec::new(),
+                        record_batches: Vec::new(),
+                        _reservation: MemoryConsumer::new("test layout").register(&pool),
+                    }))
+                })
+                .await
+                .map(Arc::clone)
+            })
+        };
+        let first = make_task(Arc::clone(&cell));
+        started.notified().await;
+        let second = make_task(Arc::clone(&cell));
+        tokio::task::yield_now().await;
+        release.notify_waiters();
+
+        let first = first.await.unwrap().unwrap();
+        let second = second.await.unwrap().unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(starts.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }
