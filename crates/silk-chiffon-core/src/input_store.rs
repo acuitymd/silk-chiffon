@@ -16,6 +16,8 @@ use object_store::{
 use silk_chiffon_storage::InputObject;
 use url::Url;
 
+use crate::InputVariant;
+
 const INTERNAL_PREFIX: &str = "__silk_input";
 
 /// The canonical input URL attached to a DataFusion file descriptor.
@@ -31,12 +33,80 @@ impl CanonicalInput {
     }
 }
 
+/// Exact files prepared by the host as one homogeneous format leaf.
+///
+/// Construction enforces the format-independent leaf invariants: at least
+/// one object, one storage root, deterministic representative selection, and
+/// one scoped DataFusion store registration. Format implementations can then
+/// focus on schema, statistics, and decoding.
+#[derive(Debug)]
+pub struct InputLeaf {
+    object_store_url: ObjectStoreUrl,
+    files: Vec<PartitionedFile>,
+    representative_index: usize,
+    variant: InputVariant,
+}
+
+impl InputLeaf {
+    /// Prepares one leaf from objects already grouped by format and variant.
+    pub fn try_new(
+        session: &SessionContext,
+        objects: &[InputObject],
+        variant: InputVariant,
+    ) -> anyhow::Result<Self> {
+        let representative_index = objects
+            .iter()
+            .enumerate()
+            .max_by(|(_, left), (_, right)| {
+                left.metadata()
+                    .size
+                    .cmp(&right.metadata().size)
+                    .then_with(|| {
+                        right
+                            .handle()
+                            .url()
+                            .as_str()
+                            .cmp(left.handle().url().as_str())
+                    })
+            })
+            .map(|(index, _)| index)
+            .ok_or_else(|| anyhow::anyhow!("cannot build an empty file-input leaf"))?;
+        let (object_store_url, files) = register_input_store(session, objects)?;
+        Ok(Self {
+            object_store_url,
+            files,
+            representative_index,
+            variant,
+        })
+    }
+
+    /// Returns the scoped store registered for this leaf.
+    pub fn object_store_url(&self) -> &ObjectStoreUrl {
+        &self.object_store_url
+    }
+
+    /// Returns the exact DataFusion file descriptors in operand order.
+    pub fn files(&self) -> &[PartitionedFile] {
+        &self.files
+    }
+
+    /// Returns the largest file, choosing the smallest canonical URL on a size tie.
+    pub fn representative(&self) -> &PartitionedFile {
+        &self.files[self.representative_index]
+    }
+
+    /// Returns the format-specific container variant selected before grouping.
+    pub fn variant(&self) -> &InputVariant {
+        &self.variant
+    }
+}
+
 /// Registers one reversible DataFusion view for an input storage root.
 ///
 /// Scoped paths encode both the canonical URL and the backend object path.
 /// The view therefore needs no per-file lookup map, and registering another
 /// leaf from the same root safely reuses the same DataFusion store URL.
-pub fn register_input_store(
+fn register_input_store(
     session: &SessionContext,
     objects: &[InputObject],
 ) -> anyhow::Result<(ObjectStoreUrl, Vec<PartitionedFile>)> {
@@ -341,22 +411,74 @@ mod tests {
                 .unwrap();
             let session = SessionContext::new();
 
-            let (first_store_url, first_files) =
-                register_input_store(&session, std::slice::from_ref(&first)).unwrap();
-            let (second_store_url, _) =
-                register_input_store(&session, std::slice::from_ref(&second)).unwrap();
+            let first_leaf =
+                InputLeaf::try_new(&session, &[first], InputVariant::named("file")).unwrap();
+            let second_leaf =
+                InputLeaf::try_new(&session, &[second], InputVariant::named("file")).unwrap();
 
-            assert_eq!(first_store_url, second_store_url);
+            assert_eq!(
+                first_leaf.object_store_url(),
+                second_leaf.object_store_url()
+            );
             let store = session
                 .runtime_env()
-                .object_store(&first_store_url)
+                .object_store(first_leaf.object_store_url())
                 .unwrap();
             assert_eq!(
                 store
-                    .get_range(&first_files[0].object_meta.location, 0..5)
+                    .get_range(&first_leaf.files()[0].object_meta.location, 0..5)
                     .await
                     .unwrap(),
                 bytes::Bytes::from_static(b"first")
+            );
+        });
+    }
+
+    #[test]
+    fn a_leaf_requires_at_least_one_file() {
+        let error = InputLeaf::try_new(&SessionContext::new(), &[], InputVariant::new())
+            .expect_err("an empty leaf must be rejected");
+
+        assert!(error.to_string().contains("empty file-input leaf"));
+    }
+
+    #[test]
+    fn a_leaf_selects_the_largest_file_as_its_representative() {
+        futures::executor::block_on(async {
+            let directory = tempfile::tempdir().unwrap();
+            let smaller_path = directory.path().join("smaller.arrow");
+            let larger_path = directory.path().join("larger.arrow");
+            std::fs::write(&smaller_path, b"small").unwrap();
+            std::fs::write(&larger_path, b"larger").unwrap();
+            let storage = silk_chiffon_storage::local::session().unwrap();
+            let smaller = storage
+                .lookup_input(
+                    &silk_chiffon_storage::LocationInput::parse(smaller_path.to_str().unwrap())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let larger = storage
+                .lookup_input(
+                    &silk_chiffon_storage::LocationInput::parse(larger_path.to_str().unwrap())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let leaf = InputLeaf::try_new(
+                &SessionContext::new(),
+                &[smaller, larger],
+                InputVariant::named("stream"),
+            )
+            .unwrap();
+
+            assert!(
+                leaf.representative()
+                    .extension::<CanonicalInput>()
+                    .unwrap()
+                    .url()
+                    .path()
+                    .ends_with("larger.arrow")
             );
         });
     }

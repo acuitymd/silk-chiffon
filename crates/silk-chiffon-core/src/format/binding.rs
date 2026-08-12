@@ -18,13 +18,13 @@ use std::{future::Future, pin::Pin, sync::Arc};
 
 use clap::{ArgMatches, Args, Command, FromArgMatches};
 use datafusion::{catalog::TableProvider, prelude::SessionContext};
-use silk_chiffon_storage::{InputObject, StorageHandle};
+use silk_chiffon_storage::StorageHandle;
 
 use super::{
-    FormatOperation, FormatOperationError, InputProviderFn, InputVariant, InspectionMode,
-    InspectorFn, SinkBinderFn, SinkBindingConfig,
+    FormatOperation, FormatOperationError, InputProviderFn, InspectionMode, InspectorFn,
+    SinkBinderFn, SinkBindingConfig,
 };
-use crate::{InspectionOutput, SinkBinding};
+use crate::{InputLeaf, InspectionOutput, SinkBinding};
 
 /// The two Clap operations that must stay paired for one concrete settings type.
 #[derive(Clone, Copy)]
@@ -104,8 +104,7 @@ pub(super) trait ErasedTransformBinding: Send + Sync {
     fn create_input_provider<'a>(
         &'a self,
         format: &'static str,
-        objects: &'a [InputObject],
-        variant: &'a InputVariant,
+        leaf: &'a InputLeaf,
         session: &'a SessionContext,
     ) -> BindingFuture<'a, Arc<dyn TableProvider>>;
 
@@ -188,8 +187,7 @@ where
     fn create_input_provider<'a>(
         &'a self,
         format: &'static str,
-        objects: &'a [InputObject],
-        variant: &'a InputVariant,
+        leaf: &'a InputLeaf,
         session: &'a SessionContext,
     ) -> BindingFuture<'a, Arc<dyn TableProvider>> {
         let Some(input_provider) = self.input_provider else {
@@ -202,7 +200,7 @@ where
         };
 
         Box::pin(async move {
-            input_provider(objects, variant, session, &self.settings)
+            input_provider(leaf, session, &self.settings)
                 .await
                 .map_err(|source| FormatOperationError::Failed {
                     format,

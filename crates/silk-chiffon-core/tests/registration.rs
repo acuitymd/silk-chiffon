@@ -16,9 +16,10 @@ use clap::{Args, Command};
 use datafusion::{catalog::TableProvider, datasource::empty::EmptyTable, prelude::SessionContext};
 use silk_chiffon_core::{
     DataSink, DetectedFormat, FormatDefinition, FormatFuture, FormatOperation,
-    FormatOperationError, FormatRegistry, FormatRegistryError, InputDetection, InputVariant,
-    InspectionDefinition, InspectionMode, InspectionOutput, OutputOrderingColumn, SinkBinding,
-    SinkBindingConfig, SinkCompletion, SinkConcurrency, SortDirection, TransformDefinition,
+    FormatOperationError, FormatRegistry, FormatRegistryError, InputDetection, InputLeaf,
+    InputVariant, InspectionDefinition, InspectionMode, InspectionOutput, OutputOrderingColumn,
+    SinkBinding, SinkBindingConfig, SinkCompletion, SinkConcurrency, SortDirection,
+    TransformDefinition,
 };
 use silk_chiffon_storage::{InputObject, LocationInput, StorageHandle, local};
 
@@ -116,8 +117,7 @@ fn detect_any(_: &InputObject) -> FormatFuture<'_, InputDetection> {
 }
 
 fn create_unit_provider<'a>(
-    _: &'a [InputObject],
-    _: &'a InputVariant,
+    _: &'a InputLeaf,
     _: &'a SessionContext,
     _: &'a (),
 ) -> FormatFuture<'a, Arc<dyn TableProvider>> {
@@ -127,15 +127,18 @@ fn create_unit_provider<'a>(
 }
 
 fn create_provider<'a>(
-    _: &'a [InputObject],
-    _: &'a InputVariant,
+    leaf: &'a InputLeaf,
     session: &'a SessionContext,
     settings: &'a TestArgs,
 ) -> FormatFuture<'a, Arc<dyn TableProvider>> {
     Box::pin(async move {
         let partitions = session.state().config_options().execution.target_partitions;
+        let variant = leaf.variant().name().unwrap_or("none");
         let schema = Arc::new(Schema::new(vec![Field::new(
-            format!("workers-{}-partitions-{partitions}", settings.test_workers),
+            format!(
+                "workers-{}-partitions-{partitions}-variant-{variant}",
+                settings.test_workers
+            ),
             arrow::datatypes::DataType::Int32,
             false,
         )]));
@@ -206,6 +209,10 @@ fn local_handle(path: &str) -> StorageHandle {
     local::session().unwrap().input_handle(&location).unwrap()
 }
 
+fn local_leaf(session: &SessionContext, extension: &str, variant: InputVariant) -> InputLeaf {
+    InputLeaf::try_new(session, &[local_object(extension)], variant).unwrap()
+}
+
 fn bind_test_transform(
     registry: &FormatRegistry,
     arguments: &[&str],
@@ -250,20 +257,27 @@ fn transform_arguments_remain_bound_to_typed_functions() {
 
     let bindings = bind_test_transform(&registry, &["test", "--test-workers", "9"]);
     let session = SessionContext::new();
-    let object = local_object(".test");
-    let provider =
-        futures::executor::block_on(bindings.get("test").unwrap().create_input_provider(
-            std::slice::from_ref(&object),
-            &InputVariant::named("test-stream"),
-            &session,
-        ))
-        .unwrap();
+    let leaf = local_leaf(&session, ".test", InputVariant::named("test-stream"));
+    let provider = futures::executor::block_on(
+        bindings
+            .get("test")
+            .unwrap()
+            .create_input_provider(&leaf, &session),
+    )
+    .unwrap();
     assert!(
         provider
             .schema()
             .field(0)
             .name()
             .starts_with("workers-9-partitions-")
+    );
+    assert!(
+        provider
+            .schema()
+            .field(0)
+            .name()
+            .ends_with("variant-test-stream")
     );
 }
 
@@ -515,11 +529,14 @@ fn unavailable_capabilities_return_structured_errors() {
         .build()
         .unwrap();
     let bindings = bind_test_transform(&registry, &["test"]);
-    let error = futures::executor::block_on(bindings.get("empty").unwrap().create_input_provider(
-        &[],
-        &InputVariant::new(),
-        &SessionContext::new(),
-    ))
+    let session = SessionContext::new();
+    let leaf = local_leaf(&session, ".empty", InputVariant::new());
+    let error = futures::executor::block_on(
+        bindings
+            .get("empty")
+            .unwrap()
+            .create_input_provider(&leaf, &session),
+    )
     .err()
     .unwrap();
     assert!(matches!(

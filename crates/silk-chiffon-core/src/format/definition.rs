@@ -26,13 +26,13 @@ pub type FormatFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + '
 /// The registry supplies the canonical format name, so detector functions do not repeat it.
 pub type InputDetectorFn = for<'a> fn(&'a InputObject) -> FormatFuture<'a, InputDetection>;
 
-/// Creates one leaf provider from exact, homogeneous input objects and typed settings.
+/// Creates one provider from a host-validated input leaf and typed settings.
 ///
-/// The format variant was identified once before grouping and is not rediscovered during schema
-/// inference or scanning.
+/// The leaf already owns the exact file descriptors, scoped store, deterministic
+/// representative, and format variant. Formats do not rediscover those choices
+/// during schema inference or scanning.
 pub type InputProviderFn<T> = for<'a> fn(
-    &'a [InputObject],
-    &'a InputVariant,
+    &'a crate::InputLeaf,
     &'a SessionContext,
     &'a T,
 ) -> FormatFuture<'a, Arc<dyn TableProvider>>;
@@ -615,12 +615,11 @@ impl TransformBinding {
     /// Creates one homogeneous input provider using this binding's parsed settings.
     pub async fn create_input_provider(
         &self,
-        objects: &[InputObject],
-        variant: &InputVariant,
+        leaf: &crate::InputLeaf,
         session: &SessionContext,
     ) -> Result<Arc<dyn TableProvider>, FormatOperationError> {
         self.binding
-            .create_input_provider(self.format, objects, variant, session)
+            .create_input_provider(self.format, leaf, session)
             .await
     }
 

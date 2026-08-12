@@ -32,12 +32,14 @@ use datafusion::{
     physical_plan::{ExecutionPlan, metrics::ExecutionPlanMetricsSet, projection::ProjectionExprs},
     prelude::SessionContext,
 };
-use datafusion_datasource::projection::{ProjectionOpener, SplitProjection};
+use datafusion_datasource::{
+    file_groups::{FileGroup, FileGroupPartitioner},
+    projection::{ProjectionOpener, SplitProjection},
+};
 use futures::TryStreamExt;
 use object_store::{ObjectMeta, ObjectStore, ObjectStoreExt};
 use parking_lot::Mutex;
-use silk_chiffon_core::{CanonicalInput, InputVariant, file_table_provider, register_input_store};
-use silk_chiffon_storage::InputObject;
+use silk_chiffon_core::{CanonicalInput, InputLeaf, InputVariant, file_table_provider};
 use tokio::sync::OnceCell;
 
 use crate::sources::file::structurally_equal;
@@ -62,31 +64,12 @@ impl ArrowIpcVariant {
 }
 
 pub(crate) async fn create_provider(
-    objects: &[InputObject],
-    variant: &InputVariant,
+    leaf: &InputLeaf,
     session: &SessionContext,
 ) -> Result<Arc<dyn TableProvider>> {
-    let variant = ArrowIpcVariant::parse(variant)?;
-    let representative = objects
-        .iter()
-        .max_by(|left, right| {
-            left.metadata()
-                .size
-                .cmp(&right.metadata().size)
-                .then_with(|| {
-                    right
-                        .handle()
-                        .url()
-                        .as_str()
-                        .cmp(left.handle().url().as_str())
-                })
-        })
-        .context("cannot build an empty Arrow input leaf")?;
-    let representative_index = objects
-        .iter()
-        .position(|object| std::ptr::eq(object, representative))
-        .expect("the representative came from the object slice");
-    let (store_url, files) = register_input_store(session, objects)?;
+    let variant = ArrowIpcVariant::parse(leaf.variant())?;
+    let store_url = leaf.object_store_url().clone();
+    let files = leaf.files().to_vec();
     let store = session.runtime_env().object_store(&store_url)?;
     let active_files = Arc::new(ActiveFiles::default());
     let memory_pool = Arc::clone(&session.runtime_env().memory_pool);
@@ -95,8 +78,13 @@ pub(crate) async fn create_provider(
         active_files,
         memory_pool: Arc::clone(&memory_pool),
     });
-    let representative_meta = &files[representative_index].object_meta;
-    let representative_url = representative.handle().url().as_str();
+    let representative = leaf.representative();
+    let representative_meta = &representative.object_meta;
+    let representative_url = representative
+        .extension::<CanonicalInput>()
+        .expect("prepared input files retain their canonical URL")
+        .url()
+        .as_str();
     let schema = match variant {
         ArrowIpcVariant::File => {
             let lease = format.active_files.lease(representative_meta);
@@ -124,14 +112,14 @@ pub(crate) async fn create_provider(
     let statistics = match sample_statistics(
         variant,
         &store,
-        &files[representative_index],
+        representative,
         &schema,
         files.iter().try_fold(0_u64, |total, file| {
             total
                 .checked_add(file.object_meta.size)
                 .context("Arrow input size overflow")
         })?,
-        objects.len() == 1,
+        files.len() == 1,
         memory_pool,
     )
     .await
@@ -331,9 +319,76 @@ impl FileSource for ArrowIpcSource {
         }
     }
 
+    fn repartitioned(
+        &self,
+        target_partitions: usize,
+        repartition_file_min_size: usize,
+        output_ordering: Option<datafusion::physical_expr::LexOrdering>,
+        config: &FileScanConfig,
+    ) -> datafusion::common::Result<Option<FileScanConfig>> {
+        let file_groups = match self.variant {
+            ArrowIpcVariant::File => FileGroupPartitioner::new()
+                .with_target_partitions(target_partitions)
+                .with_repartition_file_min_size(repartition_file_min_size)
+                .with_preserve_order_within_groups(output_ordering.is_some())
+                .repartition_file_groups(&config.file_groups),
+            ArrowIpcVariant::Stream if output_ordering.is_none() => {
+                repartition_whole_files(&config.file_groups, target_partitions)
+            }
+            ArrowIpcVariant::Stream => None,
+        };
+        Ok(file_groups.map(|file_groups| {
+            let mut config = config.clone();
+            config.file_groups = file_groups;
+            config
+        }))
+    }
+
     fn supports_repartitioning(&self) -> bool {
         self.variant == ArrowIpcVariant::File
     }
+}
+
+fn repartition_whole_files(
+    file_groups: &[FileGroup],
+    target_partitions: usize,
+) -> Option<Vec<FileGroup>> {
+    let mut files = file_groups
+        .iter()
+        .flat_map(FileGroup::iter)
+        .cloned()
+        .collect::<Vec<_>>();
+    let group_count = target_partitions.min(files.len());
+    if group_count <= file_groups.len() {
+        return None;
+    }
+
+    files.sort_by(|left, right| {
+        right
+            .object_meta
+            .size
+            .cmp(&left.object_meta.size)
+            .then_with(|| left.path().cmp(right.path()))
+    });
+    let mut groups = (0..group_count)
+        .map(|_| (0_u64, Vec::new()))
+        .collect::<Vec<_>>();
+    for file in files {
+        let index = groups
+            .iter()
+            .enumerate()
+            .min_by_key(|(index, (size, files))| (*size, files.len(), *index))
+            .map(|(index, _)| index)
+            .expect("a positive group count creates at least one group");
+        groups[index].0 = groups[index].0.saturating_add(file.object_meta.size);
+        groups[index].1.push(file);
+    }
+    Some(
+        groups
+            .into_iter()
+            .map(|(_, files)| FileGroup::new(files))
+            .collect(),
+    )
 }
 
 struct ArrowIpcOpener {
@@ -1062,7 +1117,10 @@ mod tests {
         array::NullArray,
         datatypes::{DataType, Field, Schema},
     };
-    use datafusion::execution::memory_pool::GreedyMemoryPool;
+    use datafusion::{
+        execution::{memory_pool::GreedyMemoryPool, object_store::ObjectStoreUrl},
+        physical_plan::metrics::ExecutionPlanMetricsSet,
+    };
     use object_store::{ObjectStoreExt, memory::InMemory};
 
     use super::*;
@@ -1146,6 +1204,51 @@ mod tests {
         let _live = registry.lease(&object("live.arrow", 1));
 
         assert_eq!(registry.entries.lock().len(), 1);
+    }
+
+    #[test]
+    fn stream_repartitioning_distributes_whole_files() {
+        let schema = Arc::new(Schema::new(vec![Field::new("value", DataType::Null, true)]));
+        let table_schema = TableSchema::new(schema, Vec::new());
+        let source = ArrowIpcSource {
+            variant: ArrowIpcVariant::Stream,
+            table_schema: table_schema.clone(),
+            projection: SplitProjection::unprojected(&table_schema),
+            metrics: ExecutionPlanMetricsSet::new(),
+            active_files: Arc::new(ActiveFiles::default()),
+            memory_pool: Arc::new(GreedyMemoryPool::new(usize::MAX)),
+        };
+        let files = (0..6)
+            .map(|index| PartitionedFile::new(format!("{index}.arrow"), index + 1))
+            .collect::<Vec<_>>();
+        let config = datafusion::datasource::physical_plan::FileScanConfigBuilder::new(
+            ObjectStoreUrl::local_filesystem(),
+            Arc::new(source.clone()),
+        )
+        .with_file_group(FileGroup::new(files))
+        .build();
+
+        let repartitioned = source
+            .repartitioned(3, usize::MAX, None, &config)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(repartitioned.file_groups.len(), 3);
+        assert_eq!(
+            repartitioned
+                .file_groups
+                .iter()
+                .map(FileGroup::len)
+                .sum::<usize>(),
+            6
+        );
+        assert!(
+            repartitioned
+                .file_groups
+                .iter()
+                .flat_map(FileGroup::iter)
+                .all(|file| file.range.is_none())
+        );
     }
 
     #[tokio::test]

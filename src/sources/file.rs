@@ -12,46 +12,32 @@ use datafusion::{
     prelude::SessionContext,
 };
 use futures::{StreamExt, TryStreamExt};
-use silk_chiffon_core::{CanonicalInput, file_table_provider, register_input_store};
-use silk_chiffon_storage::InputObject;
+use silk_chiffon_core::{CanonicalInput, InputLeaf, file_table_provider};
 
 pub(crate) async fn native_file_provider(
-    objects: &[InputObject],
+    leaf: &InputLeaf,
     session: &SessionContext,
     format: Arc<dyn FileFormat>,
 ) -> Result<Arc<dyn datafusion::catalog::TableProvider>> {
-    let representative = objects
-        .iter()
-        .max_by(|left, right| {
-            left.metadata()
-                .size
-                .cmp(&right.metadata().size)
-                .then_with(|| {
-                    right
-                        .handle()
-                        .url()
-                        .as_str()
-                        .cmp(left.handle().url().as_str())
-                })
-        })
-        .context("cannot build an empty file-input leaf")?;
-    let representative_index = objects
-        .iter()
-        .position(|object| std::ptr::eq(object, representative))
-        .expect("the representative came from the object slice");
-    let (store_url, files) = register_input_store(session, objects)?;
+    let store_url = leaf.object_store_url().clone();
+    let files = leaf.files();
     let store = session.runtime_env().object_store(&store_url)?;
+    let representative = leaf.representative();
+    let representative_url = representative
+        .extension::<CanonicalInput>()
+        .expect("prepared input files retain their canonical URL")
+        .url();
     let schema = format
         .infer_schema(
             &session.state(),
             &store,
-            std::slice::from_ref(&files[representative_index].object_meta),
+            std::slice::from_ref(&representative.object_meta),
         )
         .await
         .with_context(|| {
             format!(
                 "while inferring schema from representative {}",
-                representative.handle().url()
+                representative_url
             )
         })?;
     let concurrency = session
@@ -59,7 +45,7 @@ pub(crate) async fn native_file_provider(
         .config_options()
         .execution
         .meta_fetch_concurrency;
-    let file_meta = futures::stream::iter(files.into_iter().enumerate())
+    let file_meta = futures::stream::iter(files.iter().cloned().enumerate())
         .map(|(index, file)| {
             let store = Arc::clone(&store);
             let format = Arc::clone(&format);

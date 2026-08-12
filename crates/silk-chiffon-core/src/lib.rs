@@ -19,7 +19,7 @@ pub use format::{
     SinkBindingConfig, SinkConcurrency, SortDirection, TransformBinding, TransformBindings,
     TransformDefinition, TransformDefinitionBuilder,
 };
-pub use input_store::{CanonicalInput, register_input_store};
+pub use input_store::{CanonicalInput, InputLeaf};
 pub use inspection::InspectionOutput;
 pub use pipeline::{
     InputSources, Pipeline, PipelineExecution, PipelineExecutionStartError,

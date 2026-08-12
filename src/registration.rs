@@ -17,8 +17,8 @@ use clap::{
 use datafusion::{catalog::TableProvider, prelude::SessionContext};
 use object_store::ObjectStoreExt;
 use silk_chiffon_core::{
-    DataSink, FormatDefinition, FormatFuture, FormatRegistry, InputDetection, InputVariant,
-    InspectionDefinition, InspectionMode, InspectionOutput, OutputOrderingColumn,
+    DataSink, FormatDefinition, FormatFuture, FormatRegistry, InputDetection, InputLeaf,
+    InputVariant, InspectionDefinition, InspectionMode, InspectionOutput, OutputOrderingColumn,
     ServiceInputBinding, ServiceInputDefinition, ServiceOutputBinding, ServiceOutputDefinition,
     SinkBinding, SinkBindingConfig, SinkConcurrency, TransformDefinition,
 };
@@ -852,30 +852,27 @@ fn detect_vortex(object: &InputObject) -> FormatFuture<'_, InputDetection> {
 }
 
 fn create_arrow_provider<'a>(
-    objects: &'a [InputObject],
-    variant: &'a InputVariant,
+    leaf: &'a InputLeaf,
     session: &'a SessionContext,
     _args: &'a ArrowArgs,
 ) -> FormatFuture<'a, Arc<dyn TableProvider>> {
-    Box::pin(arrow_source::create_provider(objects, variant, session))
+    Box::pin(arrow_source::create_provider(leaf, session))
 }
 
 fn create_parquet_provider<'a>(
-    objects: &'a [InputObject],
-    _variant: &'a InputVariant,
+    leaf: &'a InputLeaf,
     session: &'a SessionContext,
     _args: &'a ParquetArgs,
 ) -> FormatFuture<'a, Arc<dyn TableProvider>> {
-    Box::pin(parquet_source::create_provider(objects, session))
+    Box::pin(parquet_source::create_provider(leaf, session))
 }
 
 fn create_vortex_provider<'a>(
-    objects: &'a [InputObject],
-    _variant: &'a InputVariant,
+    leaf: &'a InputLeaf,
     session: &'a SessionContext,
     _args: &'a VortexArgs,
 ) -> FormatFuture<'a, Arc<dyn TableProvider>> {
-    Box::pin(vortex_source::create_provider(objects, session))
+    Box::pin(vortex_source::create_provider(leaf, session))
 }
 
 fn bind_arrow_sink<'a>(
@@ -1192,7 +1189,7 @@ mod tests {
     };
     use futures::{StreamExt, future::BoxFuture};
     use silk_chiffon_core::{
-        FormatDefinition, FormatFuture, FormatRegistry, InputVariant, ServiceInputDefinition,
+        FormatDefinition, FormatFuture, FormatRegistry, InputLeaf, ServiceInputDefinition,
         ServiceOutputDefinition, SinkBinding, SinkBindingConfig, SinkConcurrency,
         TransformDefinition,
     };
@@ -1205,7 +1202,6 @@ mod tests {
         CliSchema, Command, ParquetArgs,
         utils::test_data::{TestBatch, TestExtract, TestFile},
     };
-    use silk_chiffon_storage::InputObject;
     static SINK_BINDINGS: AtomicUsize = AtomicUsize::new(0);
     static SERVICE_INPUT_REFERENCES: Mutex<Vec<String>> = Mutex::new(Vec::new());
     static SERVICE_OUTPUT_RESULT: Mutex<Option<(String, usize)>> = Mutex::new(None);
@@ -1362,8 +1358,7 @@ mod tests {
     }
 
     fn input_only_provider<'a>(
-        _: &'a [InputObject],
-        _: &'a InputVariant,
+        _: &'a InputLeaf,
         _: &'a SessionContext,
         _: &'a (),
     ) -> FormatFuture<'a, Arc<dyn TableProvider>> {

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
 use datafusion::{catalog::TableProvider, prelude::SessionContext};
-use silk_chiffon_core::{InputVariant, TransformBinding, TransformBindings};
+use silk_chiffon_core::{InputLeaf, InputVariant, TransformBinding, TransformBindings};
 use silk_chiffon_storage::{InputObject, LocationInput, LocationPattern, StorageSession};
 
 /// Command-scoped file input behavior over bound storage and format settings.
@@ -40,8 +40,10 @@ impl<'a> FileInputRoute<'a> {
             .await
             .with_context(|| format!("while resolving exact file input {reference:?}"))?;
         let (format, variant) = self.identify(&object).await?;
+        let leaf = InputLeaf::try_new(self.session, std::slice::from_ref(&object), variant)
+            .with_context(|| format!("while preparing exact file input {reference:?}"))?;
         format
-            .create_input_provider(std::slice::from_ref(&object), &variant, self.session)
+            .create_input_provider(&leaf, self.session)
             .await
             .with_context(|| format!("while creating file input provider for {reference:?}"))
     }
@@ -91,10 +93,12 @@ impl<'a> FileInputRoute<'a> {
                 }
             }
             for group in groups {
+                let leaf = InputLeaf::try_new(self.session, &group.objects, group.variant)
+                    .with_context(|| format!("while preparing file input pattern {pattern:?}"))?;
                 providers.push(
                     group
                         .format
-                        .create_input_provider(&group.objects, &group.variant, self.session)
+                        .create_input_provider(&leaf, self.session)
                         .await
                         .with_context(|| {
                             format!("while creating file input provider for pattern {pattern:?}")

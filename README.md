@@ -49,7 +49,7 @@ silk-chiffon transform --from shard-1.arrow --from shard-2.arrow --to combined.p
 silk-chiffon transform --from-pattern 'shards/*.arrow' --to combined.parquet
 ```
 
-Each pattern must match at least one file by default. Add `--allow-unmatched-patterns` when optional shards may be absent; the command still requires another exact or matched input. Exact inputs keep their order and duplicates. Pattern matches are sorted by canonical URL, deduplicated against other pattern matches, and appended after exact inputs.
+Each pattern must match at least one file by default. Add `--allow-unmatched-patterns` when optional shards may be absent; the command still requires another exact or matched input. Exact inputs keep their order and duplicates. Matches are sorted by canonical URL and deduplicated within each pattern operand, then appended after exact inputs. Repeated or overlapping operands intentionally contribute rows again.
 
 Files grouped from one pattern must have the same structural schema. Separate exact inputs and pattern groups are combined by column name, so columns missing from one group become null there.
 

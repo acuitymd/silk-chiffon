@@ -171,8 +171,9 @@ const MIN_SORT_SPILL_RESERVATION: usize = 10 * 1024 * 1024; // 10MB (DataFusion 
 /// Tunes every physical sort from its immediate input statistics.
 ///
 /// DataFusion has already propagated or invalidated source estimates through the logical
-/// operators by this point. If any sort lacks useful statistics, the command falls back to ten
-/// percent of its per-partition memory budget.
+/// operators by this point. Each sort input partition is compared with the command's
+/// per-partition memory budget. A partition without useful statistics contributes a fallback of
+/// ten percent of that budget without discarding estimates from other partitions or sorts.
 pub fn sort_spill_reservation_from_plan(
     plan: &std::sync::Arc<dyn ExecutionPlan>,
     memory_per_partition: usize,
@@ -185,22 +186,29 @@ pub fn sort_spill_reservation_from_plan(
         reservations: &mut Vec<Option<usize>>,
     ) {
         if let Some(sort) = plan.downcast_ref::<SortExec>() {
-            let reservation = sort
-                .input()
-                .partition_statistics(None)
-                .ok()
-                .and_then(|statistics| {
-                    let rows = *statistics.num_rows.get_value()?;
-                    let bytes = *statistics.total_byte_size.get_value()?;
-                    let avg_row_bytes = bytes.checked_div(rows.max(1))?;
-                    estimate_sort_spill_reservation(
-                        avg_row_bytes,
-                        bytes,
-                        memory_per_partition,
-                        batch_size,
-                    )
-                });
-            reservations.push(reservation);
+            let input = sort.input();
+            let partition_count = input.properties().partitioning.partition_count().max(1);
+            let maximum = memory_per_partition / 2;
+            let fallback = (maximum >= MIN_SORT_SPILL_RESERVATION)
+                .then(|| (memory_per_partition / 10).clamp(MIN_SORT_SPILL_RESERVATION, maximum));
+            for partition in 0..partition_count {
+                let reservation = input
+                    .partition_statistics(Some(partition))
+                    .ok()
+                    .and_then(|statistics| {
+                        let rows = *statistics.num_rows.get_value()?;
+                        let bytes = *statistics.total_byte_size.get_value()?;
+                        let avg_row_bytes = bytes.checked_div(rows.max(1))?;
+                        estimate_sort_spill_reservation(
+                            avg_row_bytes,
+                            bytes,
+                            memory_per_partition,
+                            batch_size,
+                        )
+                    })
+                    .or(fallback);
+                reservations.push(reservation);
+            }
         }
         for child in plan.children() {
             visit(child, memory_per_partition, batch_size, reservations);
@@ -212,13 +220,7 @@ pub fn sort_spill_reservation_from_plan(
     if reservations.is_empty() {
         return None;
     }
-    let known = reservations.iter().flatten().copied().max();
-    if known.is_some() && reservations.iter().all(Option::is_some) {
-        return known;
-    }
-    let maximum = memory_per_partition / 2;
-    (maximum >= MIN_SORT_SPILL_RESERVATION)
-        .then(|| (memory_per_partition / 10).clamp(MIN_SORT_SPILL_RESERVATION, maximum))
+    reservations.into_iter().flatten().max()
 }
 
 /// Estimate `sort_spill_reservation_bytes` from measured row size and input characteristics.
@@ -545,15 +547,24 @@ kernel 500";
         assert_eq!(reservation, None);
     }
 
-    fn sort_with_statistics(statistics: datafusion::common::Statistics) -> Arc<dyn ExecutionPlan> {
+    fn sort_with_statistics(
+        statistics: datafusion::common::Statistics,
+        partitions: usize,
+    ) -> Arc<dyn ExecutionPlan> {
         use arrow::datatypes::Field;
         use datafusion::{
+            physical_expr::Partitioning,
             physical_expr::{PhysicalSortExpr, expressions::Column},
-            physical_plan::{sorts::sort::SortExec, test::exec::StatisticsExec},
+            physical_plan::{
+                repartition::RepartitionExec, sorts::sort::SortExec, test::exec::StatisticsExec,
+            },
         };
 
         let schema = Schema::new(vec![Field::new("value", DataType::Int64, false)]);
         let input = Arc::new(StatisticsExec::new(statistics, schema));
+        let input = Arc::new(
+            RepartitionExec::try_new(input, Partitioning::RoundRobinBatch(partitions)).unwrap(),
+        );
         Arc::new(SortExec::new(
             [PhysicalSortExpr::new_default(Arc::new(Column::new(
                 "value", 0,
@@ -567,14 +578,17 @@ kernel 500";
     fn final_sort_input_statistics_drive_the_existing_estimator() {
         use datafusion::common::{ColumnStatistics, Statistics, stats::Precision};
 
-        let plan = sort_with_statistics(Statistics {
-            num_rows: Precision::Inexact(50_000_000),
-            total_byte_size: Precision::Inexact(10_000_000_000),
-            column_statistics: vec![ColumnStatistics::new_unknown()],
-        });
+        let plan = sort_with_statistics(
+            Statistics {
+                num_rows: Precision::Inexact(50_000_000),
+                total_byte_size: Precision::Inexact(10_000_000_000),
+                column_statistics: vec![ColumnStatistics::new_unknown()],
+            },
+            2,
+        );
         let reservation = sort_spill_reservation_from_plan(&plan, 500_000_000, 8192);
 
-        assert_eq!(reservation, Some(20 * 8192 * 200));
+        assert_eq!(reservation, Some(10 * 8192 * 200));
     }
 
     #[test]
@@ -584,9 +598,34 @@ kernel 500";
             DataType::Int64,
             false,
         )]);
-        let plan = sort_with_statistics(datafusion::common::Statistics::new_unknown(&schema));
+        let plan = sort_with_statistics(datafusion::common::Statistics::new_unknown(&schema), 2);
         let reservation = sort_spill_reservation_from_plan(&plan, 200_000_000, 8192);
 
         assert_eq!(reservation, Some(20_000_000));
+    }
+
+    #[test]
+    fn an_unknown_sort_does_not_discard_a_larger_known_estimate() {
+        use datafusion::{
+            common::{ColumnStatistics, Statistics, stats::Precision},
+            physical_plan::union::UnionExec,
+        };
+
+        let known = sort_with_statistics(
+            Statistics {
+                num_rows: Precision::Inexact(200_000_000),
+                total_byte_size: Precision::Inexact(40_000_000_000),
+                column_statistics: vec![ColumnStatistics::new_unknown()],
+            },
+            2,
+        );
+        let schema = known.schema();
+        let unknown = sort_with_statistics(Statistics::new_unknown(&schema), 2);
+        let plan = UnionExec::try_new(vec![known, unknown]).unwrap();
+
+        assert_eq!(
+            sort_spill_reservation_from_plan(&plan, 500_000_000, 8192),
+            Some(40 * 8192 * 200)
+        );
     }
 }
