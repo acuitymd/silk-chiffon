@@ -1666,6 +1666,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dropping_an_open_file_stream_releases_its_layout_and_memory() {
+        let input = batch(3);
+        let schema = input.schema();
+        let mut bytes = Vec::new();
+        {
+            let mut writer = FileWriter::try_new(&mut bytes, schema.as_ref()).unwrap();
+            writer.write(&input).unwrap();
+            writer.finish().unwrap();
+        }
+        let (store, meta) = stored_bytes("cancel-file.arrow", bytes).await;
+        let pool = Arc::new(GreedyMemoryPool::new(usize::MAX));
+        let memory_pool: Arc<dyn MemoryPool> = Arc::<GreedyMemoryPool>::clone(&pool);
+        let active_files = Arc::new(ActiveFiles::default());
+        let stream = open_file(
+            store,
+            PartitionedFile::new_from_meta(meta.clone()),
+            "cancel-file.arrow".to_owned(),
+            None,
+            schema,
+            Arc::clone(&active_files),
+            memory_pool,
+        )
+        .await
+        .unwrap();
+
+        assert!(pool.reserved() > 0);
+        assert!(
+            active_files
+                .entries
+                .lock()
+                .get(&ObjectIdentity::from(&meta))
+                .and_then(Weak::upgrade)
+                .is_some()
+        );
+        drop(stream);
+
+        assert_eq!(pool.reserved(), 0);
+        assert!(
+            active_files
+                .entries
+                .lock()
+                .get(&ObjectIdentity::from(&meta))
+                .and_then(Weak::upgrade)
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_an_open_arrow_stream_releases_its_read_memory() {
+        let input = batch(3);
+        let schema = input.schema();
+        let mut bytes = Vec::new();
+        {
+            let mut writer =
+                arrow::ipc::writer::StreamWriter::try_new(&mut bytes, schema.as_ref()).unwrap();
+            writer.write(&input).unwrap();
+            writer.finish().unwrap();
+        }
+        let (store, meta) = stored_bytes("cancel-stream.arrow", bytes).await;
+        let pool = Arc::new(GreedyMemoryPool::new(usize::MAX));
+        let memory_pool: Arc<dyn MemoryPool> = Arc::<GreedyMemoryPool>::clone(&pool);
+        let mut stream = open_stream(
+            store,
+            PartitionedFile::new_from_meta(meta),
+            "cancel-stream.arrow".to_owned(),
+            None,
+            schema,
+            memory_pool,
+        )
+        .await
+        .unwrap();
+
+        assert!(stream.try_next().await.unwrap().is_some());
+        assert!(pool.reserved() > 0);
+        drop(stream);
+
+        assert_eq!(pool.reserved(), 0);
+    }
+
+    #[tokio::test]
     async fn representative_sampling_stops_after_the_batch_that_crosses_the_target() {
         let batches = [batch(60_000), batch(60_000), batch(60_000)];
         let schema = batches[0].schema();

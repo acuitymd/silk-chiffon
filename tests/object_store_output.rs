@@ -13,7 +13,16 @@ use arrow::{
 };
 use async_trait::async_trait;
 use clap::Command;
-use futures::stream::BoxStream;
+use datafusion::{
+    catalog::{TableProvider, streaming::StreamingTable},
+    error::DataFusionError,
+    execution::TaskContext,
+    physical_plan::{
+        SendableRecordBatchStream, stream::RecordBatchReceiverStreamBuilder,
+        streaming::PartitionStream,
+    },
+};
+use futures::{StreamExt, stream::BoxStream};
 use object_store::{
     CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
     ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload, PutResult, memory::InMemory,
@@ -25,6 +34,7 @@ use silk_chiffon::sinks::{
     parquet::{ParquetRuntimes, ParquetSink, ParquetSinkOptions},
     vortex::{VortexSink, VortexSinkOptions},
 };
+use silk_chiffon_core::{InputSources, Pipeline};
 use silk_chiffon_storage::{
     ExistingOutput, LocationInput, OutputPreparation, StorageAccess, StorageBackend, StorageHandle,
     StorageRegistry, StorageSession,
@@ -32,6 +42,129 @@ use silk_chiffon_storage::{
 
 static TRACKING_STORE: OnceLock<Arc<TrackingStore>> = OnceLock::new();
 static TRACKING_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+const SOURCE_BATCH_LIMIT: usize = 1_000_000;
+
+#[derive(Clone, Debug)]
+enum SourceTaskExit {
+    Endless,
+    CompleteAfter(usize),
+    FailAfter {
+        batches: usize,
+        release: Arc<tokio::sync::Barrier>,
+    },
+}
+
+#[derive(Debug)]
+struct SourceTaskState {
+    started: AtomicBool,
+    stopped: AtomicBool,
+    cancelled: AtomicBool,
+    batches_sent: AtomicUsize,
+    state_changed: tokio::sync::Notify,
+}
+
+impl SourceTaskState {
+    fn new() -> Self {
+        Self {
+            started: AtomicBool::new(false),
+            stopped: AtomicBool::new(false),
+            cancelled: AtomicBool::new(false),
+            batches_sent: AtomicUsize::new(0),
+            state_changed: tokio::sync::Notify::new(),
+        }
+    }
+
+    async fn wait_until_started(&self) {
+        loop {
+            let state_changed = self.state_changed.notified();
+            if self.started.load(Ordering::SeqCst) {
+                return;
+            }
+            state_changed.await;
+        }
+    }
+
+    async fn wait_until_stopped(&self) {
+        loop {
+            let state_changed = self.state_changed.notified();
+            if self.stopped.load(Ordering::SeqCst) {
+                return;
+            }
+            state_changed.await;
+        }
+    }
+}
+
+struct SourceTaskLifetime {
+    state: Arc<SourceTaskState>,
+    completed: bool,
+}
+
+impl Drop for SourceTaskLifetime {
+    fn drop(&mut self) {
+        self.state
+            .cancelled
+            .store(!self.completed, Ordering::SeqCst);
+        self.state.stopped.store(true, Ordering::SeqCst);
+        self.state.state_changed.notify_waiters();
+    }
+}
+
+#[derive(Debug)]
+struct StructuredServicePartition {
+    batch: RecordBatch,
+    state: Arc<SourceTaskState>,
+    exit: SourceTaskExit,
+}
+
+impl PartitionStream for StructuredServicePartition {
+    fn schema(&self) -> &arrow::datatypes::SchemaRef {
+        self.batch.schema_ref()
+    }
+
+    fn execute(&self, _context: Arc<TaskContext>) -> SendableRecordBatchStream {
+        let mut stream = RecordBatchReceiverStreamBuilder::new(self.batch.schema(), 1);
+        let sender = stream.tx();
+        let batch = self.batch.clone();
+        let state = Arc::clone(&self.state);
+        let exit = self.exit.clone();
+        stream.spawn(async move {
+            let mut lifetime = SourceTaskLifetime {
+                state: Arc::clone(&state),
+                completed: false,
+            };
+            state.started.store(true, Ordering::SeqCst);
+            state.state_changed.notify_waiters();
+            let batches = match &exit {
+                SourceTaskExit::Endless => SOURCE_BATCH_LIMIT,
+                SourceTaskExit::CompleteAfter(batches)
+                | SourceTaskExit::FailAfter { batches, .. } => *batches,
+            };
+            for _ in 0..batches {
+                if sender.send(Ok(batch.clone())).await.is_err() {
+                    return Ok(());
+                }
+                state.batches_sent.fetch_add(1, Ordering::SeqCst);
+            }
+            if let SourceTaskExit::FailAfter { release, .. } = exit {
+                release.wait().await;
+                if sender
+                    .send(Err(DataFusionError::Execution(
+                        "controlled source failure".to_owned(),
+                    )))
+                    .await
+                    .is_err()
+                {
+                    return Ok(());
+                }
+            }
+            lifetime.completed = true;
+            Ok(())
+        });
+        stream.build()
+    }
+}
 
 #[derive(Debug)]
 struct TrackingStore {
@@ -302,6 +435,39 @@ fn batch() -> RecordBatch {
     .unwrap()
 }
 
+fn source_provider(
+    batch: &RecordBatch,
+    state: Arc<SourceTaskState>,
+    exit: SourceTaskExit,
+) -> Arc<dyn TableProvider> {
+    let partition = Arc::new(StructuredServicePartition {
+        batch: batch.clone(),
+        state,
+        exit,
+    });
+    Arc::new(StreamingTable::try_new(batch.schema(), vec![partition]).unwrap())
+}
+
+async fn source_execution(
+    batch: &RecordBatch,
+    sources: Vec<(Arc<SourceTaskState>, SourceTaskExit)>,
+) -> SendableRecordBatchStream {
+    let providers = sources
+        .into_iter()
+        .map(|(state, exit)| source_provider(batch, state, exit))
+        .collect();
+    let mut pipeline = Pipeline::new().with_target_partitions(Some(1));
+    let session = pipeline.create_session_context().unwrap();
+    pipeline = pipeline.with_inputs(InputSources::try_new(&session, providers).unwrap());
+    pipeline
+        .prepare(session)
+        .await
+        .unwrap()
+        .begin_execution()
+        .unwrap()
+        .into_sendable_stream()
+}
+
 async fn assert_durable(completion: silk_chiffon_core::SinkCompletion, handle: &StorageHandle) {
     assert_eq!(completion.rows_written(), 3);
     assert_eq!(completion.durable_locations(), [handle.url().clone()]);
@@ -378,6 +544,28 @@ async fn wait_for_resource_release<T>(resource: &std::sync::Weak<T>, message: &s
     })
     .await
     .unwrap_or_else(|_| panic!("{message}"));
+}
+
+async fn wait_for_source_stop(state: &SourceTaskState) {
+    tokio::time::timeout(Duration::from_secs(5), state.wait_until_stopped())
+        .await
+        .expect("DataFusion source task did not stop when its execution stream was dropped");
+}
+
+async fn wait_for_sources_started(states: &[Arc<SourceTaskState>]) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        for state in states {
+            state.wait_until_started().await;
+        }
+    })
+    .await
+    .expect("DataFusion did not start every source task");
+}
+
+async fn wait_for_sources_stopped(states: &[Arc<SourceTaskState>]) {
+    for state in states {
+        wait_for_source_stop(state).await;
+    }
 }
 
 async fn assert_abort_cleans_multipart(
@@ -557,6 +745,190 @@ async fn vortex_sink_writes_a_memory_object() {
     sink.write_batch(batch).await.unwrap();
     let completion = Box::new(sink).finish().await.unwrap();
     assert_durable(completion, &handle).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn real_sink_failure_cancels_every_datafusion_source_task() {
+    let _lock = TRACKING_TEST_LOCK.lock().await;
+    let storage = tracking_storage();
+    let store = tracking_store();
+    let handle = prepared_handle(&storage, "tracking://bucket/source-cancellation.arrow").await;
+    let batch = batch();
+    let source_states = vec![
+        Arc::new(SourceTaskState::new()),
+        Arc::new(SourceTaskState::new()),
+    ];
+    let stream = source_execution(
+        &batch,
+        source_states
+            .iter()
+            .map(|state| (Arc::clone(state), SourceTaskExit::Endless))
+            .collect(),
+    )
+    .await;
+    let mut sink = ArrowSink::create(
+        handle.clone(),
+        &batch.schema(),
+        ArrowSinkOptions::new()
+            .with_record_batch_size(1)
+            .with_queue_depth(1),
+    )
+    .unwrap();
+    let blocked_parts = BlockParts::new(Arc::clone(&store));
+    let write_error = {
+        let write = sink.write_stream(stream);
+        tokio::pin!(write);
+
+        tokio::select! {
+            () = wait_for_sources_started(&source_states) => {}
+            result = &mut write => panic!("sink stopped before every source started: {result:?}"),
+        }
+        store.fail_next_part.store(true, Ordering::SeqCst);
+        drop(blocked_parts);
+        tokio::time::timeout(Duration::from_secs(5), &mut write)
+            .await
+            .expect("sink failure did not stop stream consumption")
+            .unwrap_err()
+    };
+    assert!(write_error.to_string().contains("writer task died"));
+    wait_for_sources_stopped(&source_states).await;
+    for state in &source_states {
+        assert!(state.started.load(Ordering::SeqCst));
+        assert!(state.cancelled.load(Ordering::SeqCst));
+        assert!(state.batches_sent.load(Ordering::SeqCst) < SOURCE_BATCH_LIMIT);
+    }
+
+    let cleanup_error = tokio::time::timeout(Duration::from_secs(5), Box::new(sink).abort())
+        .await
+        .expect("sink cleanup remained blocked after source cancellation")
+        .unwrap_err();
+    assert!(
+        format!("{cleanup_error:#}").contains("controlled part failure"),
+        "{cleanup_error:#}"
+    );
+    assert!(matches!(
+        store.head(handle.object_path()).await,
+        Err(object_store::Error::NotFound { .. })
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn source_failure_cancels_its_active_sibling() {
+    let storage = storage();
+    let handle = prepared_handle(&storage, "memory://bucket/source-failure.arrow").await;
+    let batch = batch();
+    let failing_state = Arc::new(SourceTaskState::new());
+    let sibling_state = Arc::new(SourceTaskState::new());
+    let source_states = vec![Arc::clone(&failing_state), Arc::clone(&sibling_state)];
+    let release_failure = Arc::new(tokio::sync::Barrier::new(2));
+    let stream = source_execution(
+        &batch,
+        vec![
+            (
+                Arc::clone(&failing_state),
+                SourceTaskExit::FailAfter {
+                    batches: 1,
+                    release: Arc::clone(&release_failure),
+                },
+            ),
+            (Arc::clone(&sibling_state), SourceTaskExit::Endless),
+        ],
+    )
+    .await;
+    let mut sink = ArrowSink::create(
+        handle.clone(),
+        &batch.schema(),
+        ArrowSinkOptions::new()
+            .with_record_batch_size(1)
+            .with_queue_depth(1),
+    )
+    .unwrap();
+    let write_error = {
+        let write = sink.write_stream(stream);
+        tokio::pin!(write);
+
+        tokio::select! {
+            () = wait_for_sources_started(&source_states) => {}
+            result = &mut write => panic!("source failed before its sibling started: {result:?}"),
+        }
+        release_failure.wait().await;
+        tokio::time::timeout(Duration::from_secs(5), &mut write)
+            .await
+            .expect("source failure did not stop stream consumption")
+            .unwrap_err()
+    };
+
+    assert!(
+        format!("{write_error:#}").contains("controlled source failure"),
+        "{write_error:#}"
+    );
+    wait_for_sources_stopped(&source_states).await;
+    assert!(!failing_state.cancelled.load(Ordering::SeqCst));
+    assert!(sibling_state.cancelled.load(Ordering::SeqCst));
+    Box::new(sink).abort().await.unwrap();
+    assert!(matches!(
+        handle.object_store().head(handle.object_path()).await,
+        Err(object_store::Error::NotFound { .. })
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dropping_the_pipeline_stream_cancels_every_active_source() {
+    let batch = batch();
+    let source_states = vec![
+        Arc::new(SourceTaskState::new()),
+        Arc::new(SourceTaskState::new()),
+    ];
+    let mut stream = source_execution(
+        &batch,
+        source_states
+            .iter()
+            .map(|state| (Arc::clone(state), SourceTaskExit::Endless))
+            .collect(),
+    )
+    .await;
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while source_states
+            .iter()
+            .any(|state| !state.started.load(Ordering::SeqCst))
+        {
+            stream
+                .next()
+                .await
+                .expect("endless input stopped before every source started")
+                .unwrap();
+        }
+    })
+    .await
+    .expect("DataFusion did not activate every source while polling");
+    drop(stream);
+
+    wait_for_sources_stopped(&source_states).await;
+    for state in &source_states {
+        assert!(state.cancelled.load(Ordering::SeqCst));
+        assert!(state.batches_sent.load(Ordering::SeqCst) < SOURCE_BATCH_LIMIT);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn draining_a_finite_source_records_normal_completion() {
+    let batch = batch();
+    let source_state = Arc::new(SourceTaskState::new());
+    let mut stream = source_execution(
+        &batch,
+        vec![(Arc::clone(&source_state), SourceTaskExit::CompleteAfter(3))],
+    )
+    .await;
+    let mut rows = 0;
+    while let Some(batch) = stream.next().await {
+        rows += batch.unwrap().num_rows();
+    }
+
+    wait_for_source_stop(&source_state).await;
+    assert_eq!(rows, 9);
+    assert_eq!(source_state.batches_sent.load(Ordering::SeqCst), 3);
+    assert!(!source_state.cancelled.load(Ordering::SeqCst));
 }
 
 #[tokio::test]

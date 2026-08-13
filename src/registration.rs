@@ -1173,7 +1173,7 @@ mod tests {
         num::NonZeroUsize,
         sync::{
             Arc, LazyLock, Mutex,
-            atomic::{AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
         },
     };
 
@@ -1182,7 +1182,13 @@ mod tests {
     use bytes::Bytes;
     use clap::{Args, CommandFactory, FromArgMatches};
     use datafusion::{
-        catalog::TableProvider, datasource::MemTable, physical_plan::SendableRecordBatchStream,
+        catalog::{TableProvider, streaming::StreamingTable},
+        datasource::MemTable,
+        execution::TaskContext,
+        physical_plan::{
+            SendableRecordBatchStream, stream::RecordBatchReceiverStreamBuilder,
+            streaming::PartitionStream,
+        },
         prelude::SessionContext,
     };
     use futures::{StreamExt, future::BoxFuture};
@@ -1213,6 +1219,8 @@ mod tests {
     static SERVICE_OUTPUT_RESULT: Mutex<Option<(String, usize)>> = Mutex::new(None);
     static TYPED_SERVICE_OUTPUT_RESULT: Mutex<Option<TypedServiceOutputResult>> = Mutex::new(None);
     static LARGE_LEAF_FILES: AtomicUsize = AtomicUsize::new(0);
+    static SERVICE_SOURCE_STATE: LazyLock<Arc<ServiceSourceState>> =
+        LazyLock::new(|| Arc::new(ServiceSourceState::new()));
     static REMOTE_STORES: LazyLock<Mutex<HashMap<String, Arc<InMemory>>>> =
         LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -1222,6 +1230,84 @@ mod tests {
         marker: usize,
         fields: Vec<String>,
         ids: Vec<i32>,
+    }
+
+    #[derive(Debug)]
+    struct ServiceSourceState {
+        started: AtomicBool,
+        stopped: AtomicBool,
+        cancelled: AtomicBool,
+        state_changed: tokio::sync::Notify,
+    }
+
+    impl ServiceSourceState {
+        fn new() -> Self {
+            Self {
+                started: AtomicBool::new(false),
+                stopped: AtomicBool::new(false),
+                cancelled: AtomicBool::new(false),
+                state_changed: tokio::sync::Notify::new(),
+            }
+        }
+
+        fn reset(&self) {
+            self.started.store(false, Ordering::SeqCst);
+            self.stopped.store(false, Ordering::SeqCst);
+            self.cancelled.store(false, Ordering::SeqCst);
+        }
+
+        async fn wait_until_stopped(&self) {
+            loop {
+                let state_changed = self.state_changed.notified();
+                if self.stopped.load(Ordering::SeqCst) {
+                    return;
+                }
+                state_changed.await;
+            }
+        }
+    }
+
+    struct ServiceSourceLifetime {
+        state: Arc<ServiceSourceState>,
+    }
+
+    impl Drop for ServiceSourceLifetime {
+        fn drop(&mut self) {
+            self.state.cancelled.store(true, Ordering::SeqCst);
+            self.state.stopped.store(true, Ordering::SeqCst);
+            self.state.state_changed.notify_waiters();
+        }
+    }
+
+    #[derive(Debug)]
+    struct StructuredServicePartition {
+        batch: RecordBatch,
+    }
+
+    impl PartitionStream for StructuredServicePartition {
+        fn schema(&self) -> &arrow::datatypes::SchemaRef {
+            self.batch.schema_ref()
+        }
+
+        fn execute(&self, _context: Arc<TaskContext>) -> SendableRecordBatchStream {
+            let mut stream = RecordBatchReceiverStreamBuilder::new(self.batch.schema(), 1);
+            let sender = stream.tx();
+            let batch = self.batch.clone();
+            let state = Arc::clone(&SERVICE_SOURCE_STATE);
+            stream.spawn(async move {
+                let _lifetime = ServiceSourceLifetime {
+                    state: Arc::clone(&state),
+                };
+                state.started.store(true, Ordering::SeqCst);
+                state.state_changed.notify_waiters();
+                loop {
+                    if sender.send(Ok(batch.clone())).await.is_err() {
+                        return Ok(());
+                    }
+                }
+            });
+            stream.build()
+        }
     }
 
     fn remote_store(root: &str) -> Arc<InMemory> {
@@ -1328,6 +1414,20 @@ mod tests {
         Box::pin(async { test_provider(TestBatch::simple_with(&[4, 5, 6], &["d", "e", "f"])) })
     }
 
+    fn create_structured_service_input<'a>(
+        _: &'a str,
+        _: &'a SessionContext,
+        _: &'a (),
+    ) -> BoxFuture<'a, Result<Arc<dyn TableProvider>>> {
+        Box::pin(async {
+            let batch = TestBatch::simple_with(&[4, 5, 6], &["d", "e", "f"]);
+            Ok(Arc::new(StreamingTable::try_new(
+                batch.schema(),
+                vec![Arc::new(StructuredServicePartition { batch })],
+            )?) as Arc<dyn TableProvider>)
+        })
+    }
+
     fn write_test_service_output<'a>(
         target: &'a str,
         mut stream: SendableRecordBatchStream,
@@ -1340,6 +1440,20 @@ mod tests {
             }
             *SERVICE_OUTPUT_RESULT.lock().unwrap() = Some((target.to_owned(), rows));
             Ok(())
+        })
+    }
+
+    fn fail_after_one_service_batch<'a>(
+        _: &'a str,
+        mut stream: SendableRecordBatchStream,
+        _: &'a (),
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            stream
+                .next()
+                .await
+                .ok_or_else(|| anyhow::anyhow!("service source ended before its first batch"))??;
+            anyhow::bail!("controlled service output failure")
         })
     }
 
@@ -2205,6 +2319,55 @@ mod tests {
                 ids: vec![40, 41, 42],
             })
         );
+    }
+
+    #[tokio::test]
+    async fn service_output_failure_cancels_the_service_input_execution() {
+        SERVICE_SOURCE_STATE.reset();
+        let input = ServiceInputDefinition::without_args(create_structured_service_input)
+            .name("structured-input")
+            .schemes(["structured-input"])
+            .build()
+            .unwrap();
+        let output = ServiceOutputDefinition::without_args(fail_after_one_service_batch)
+            .name("failing-output")
+            .schemes(["failing-output"])
+            .build()
+            .unwrap();
+        let definition = application_definition_with_services(
+            FormatRegistry::builder().build().unwrap(),
+            vec![input],
+            vec![output],
+        );
+        let cli = test_cli(
+            definition,
+            &[
+                "silk-chiffon",
+                "transform",
+                "--from",
+                "structured-input://dataset",
+                "--to",
+                "failing-output://result",
+            ],
+        );
+        let Command::Transform(command) = cli.command else {
+            panic!("expected transform command");
+        };
+
+        let error = crate::commands::transform::run(command).await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("controlled service output failure"),
+            "{error:#}"
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            SERVICE_SOURCE_STATE.wait_until_stopped().await;
+        })
+        .await
+        .expect("service input task survived its execution stream");
+        assert!(SERVICE_SOURCE_STATE.started.load(Ordering::SeqCst));
+        assert!(SERVICE_SOURCE_STATE.cancelled.load(Ordering::SeqCst));
     }
 
     #[tokio::test]

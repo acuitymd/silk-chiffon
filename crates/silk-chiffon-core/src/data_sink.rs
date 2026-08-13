@@ -30,6 +30,9 @@ pub trait SinkBinding: Send + Sync {
 #[async_trait]
 pub trait DataSink: Send {
     /// Writes every batch in a DataFusion stream without completing the sink.
+    ///
+    /// On failure, the input stream is dropped before this method returns. That starts upstream
+    /// execution cancellation before the caller awaits sink cleanup.
     async fn write_stream(&mut self, mut stream: SendableRecordBatchStream) -> Result<()> {
         while let Some(batch) = stream.next().await {
             self.write_batch(batch?).await?;
