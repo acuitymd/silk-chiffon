@@ -13,7 +13,7 @@ use futures::{Sink, SinkExt, StreamExt, channel::mpsc};
 use object_store::{MultipartUpload, ObjectStoreExt, PutPayload};
 use thiserror::Error;
 use tokio::{
-    sync::{Semaphore, oneshot},
+    sync::{OwnedSemaphorePermit, Semaphore, oneshot},
     task::{JoinHandle, JoinSet},
 };
 use tokio_util::sync::CancellationToken;
@@ -620,7 +620,11 @@ impl MultipartState {
         while self.tasks.len() >= self.settings.max_in_flight_parts.get() {
             self.join_one().await?;
         }
-        self.spawn_part(bytes);
+        let permit = Arc::clone(&self.part_permits)
+            .acquire_owned()
+            .await
+            .map_err(part_limiter_closed)?;
+        self.spawn_part(bytes, permit);
         Ok(())
     }
 
@@ -639,22 +643,24 @@ impl MultipartState {
         if cancellation.is_cancelled() {
             return Ok(WriteProgress::Cancelled);
         }
-        self.spawn_part(bytes);
+        let permit = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Ok(WriteProgress::Cancelled),
+            permit = Arc::clone(&self.part_permits).acquire_owned() => {
+                permit.map_err(part_limiter_closed)?
+            }
+        };
+        if cancellation.is_cancelled() {
+            return Ok(WriteProgress::Cancelled);
+        }
+        self.spawn_part(bytes, permit);
         Ok(WriteProgress::Written)
     }
 
-    fn spawn_part(&mut self, bytes: Bytes) {
+    fn spawn_part(&mut self, bytes: Bytes, permit: OwnedSemaphorePermit) {
         let part = self.upload.put_part(PutPayload::from_bytes(bytes));
-        let permits = Arc::clone(&self.part_permits);
         self.tasks.spawn(async move {
-            let _permit =
-                permits
-                    .acquire_owned()
-                    .await
-                    .map_err(|_| object_store::Error::Generic {
-                        store: "object upload",
-                        source: Box::new(io::Error::other("multipart part limiter closed")),
-                    })?;
+            let _permit = permit;
             part.await
         });
     }
@@ -683,6 +689,13 @@ impl MultipartState {
         self.tasks.shutdown().await;
         self.upload.abort().await?;
         Ok(())
+    }
+}
+
+fn part_limiter_closed(_: tokio::sync::AcquireError) -> object_store::Error {
+    object_store::Error::Generic {
+        store: "object upload",
+        source: Box::new(io::Error::other("multipart part limiter closed")),
     }
 }
 

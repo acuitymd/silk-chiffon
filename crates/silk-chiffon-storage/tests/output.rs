@@ -33,6 +33,7 @@ static NEXT_TARGET: AtomicUsize = AtomicUsize::new(0);
 struct UploadControl {
     active_parts: AtomicUsize,
     maximum_active_parts: AtomicUsize,
+    parts_created: AtomicUsize,
     puts: AtomicUsize,
     multipart_starts: AtomicUsize,
     completes: AtomicUsize,
@@ -54,6 +55,7 @@ impl UploadControl {
         Self {
             active_parts: AtomicUsize::new(0),
             maximum_active_parts: AtomicUsize::new(0),
+            parts_created: AtomicUsize::new(0),
             puts: AtomicUsize::new(0),
             multipart_starts: AtomicUsize::new(0),
             completes: AtomicUsize::new(0),
@@ -183,6 +185,7 @@ impl Drop for ActivePart {
 #[async_trait]
 impl MultipartUpload for ControlledMultipart {
     fn put_part(&mut self, payload: PutPayload) -> object_store::UploadPart {
+        self.control.parts_created.fetch_add(1, Ordering::SeqCst);
         let part = self.inner.put_part(payload);
         let control = Arc::clone(&self.control);
         Box::pin(async move {
@@ -893,6 +896,54 @@ async fn object_upload_bounds_shared_parts_backpressure_and_cleanup() {
     })
     .await
     .expect("drop fallback did not abort the multipart upload");
+}
+
+#[tokio::test]
+async fn shared_part_limit_gates_payload_creation_across_many_uploads() {
+    let storage = controlled_session(&[
+        "output-test",
+        "--object-store-upload-part-size",
+        "8",
+        "--object-store-max-in-flight-parts",
+        "2",
+    ]);
+    let root = unique_controlled_root("bounded-payloads");
+    let mut uploads = Vec::new();
+    let mut control = None;
+    for ordinal in 0..8 {
+        let (upload, store, _) =
+            controlled_upload(&storage, &root, &format!("output-{ordinal}")).await;
+        control.get_or_insert_with(|| Arc::clone(&store.control));
+        uploads.push((ordinal, upload));
+    }
+    let control = control.unwrap();
+    control.block_parts.store(true, Ordering::SeqCst);
+    let mut writes = Vec::new();
+    for (ordinal, upload) in uploads {
+        writes.push(tokio::spawn(async move {
+            let mut upload = upload;
+            upload.write(Bytes::from(vec![ordinal as u8; 32])).await?;
+            Ok::<_, silk_chiffon_storage::ObjectUploadError>(upload)
+        }));
+    }
+
+    wait_for_multipart_starts(&control, 8).await;
+    wait_for_active_parts(&control, 2).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(control.parts_created.load(Ordering::SeqCst), 2);
+
+    for write in writes {
+        write.abort();
+        let _ = write.await;
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while control.aborts.load(Ordering::SeqCst) < 8 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("dropping backpressured uploads did not abort them");
+    assert_eq!(control.active_parts.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
