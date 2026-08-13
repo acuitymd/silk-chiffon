@@ -7,6 +7,12 @@
 //! - **Writer task**: writes encoded row groups to the object upload in order. Uses an ordered
 //!   channel to ensure row groups are written sequentially even when encoded out of order.
 //!
+//! One task/upload owner settles the format task and object together. The pipeline task scope
+//! makes every stage cancellation-aware and tracks nested work on the dedicated runtimes. Normal
+//! completion drains the task tree before making the object durable. Cancellation drops blocked
+//! channel waits, aborts the upload to release the byte bridge, and joins the task tree before
+//! releasing the runtimes.
+//!
 //! # Dictionary and Bloom Filter Configuration
 //!
 //! Columns can be configured for dictionary encoding in three modes:
@@ -19,7 +25,7 @@ mod config;
 pub(crate) mod encoding;
 mod pipeline;
 
-use std::sync::Arc;
+use std::{future::Future, sync::Arc};
 
 use anyhow::{Result, anyhow};
 use arrow::array::RecordBatch;
@@ -27,21 +33,85 @@ use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use parquet::file::properties::WriterProperties;
 use silk_chiffon_storage::{ObjectUpload, StorageHandle};
-use tokio::sync::mpsc;
+use tokio::{runtime::Handle, sync::mpsc, task::JoinSet};
+use tokio_util::{
+    sync::CancellationToken,
+    task::{AbortOnDropHandle, TaskTracker},
+};
 use url::Url;
 
 pub use config::AdaptiveWriterConfig;
 
 use crate::sinks::{
+    object_sink_task::ObjectSinkTask,
     parquet::{ParquetRuntimes, ParquetWriter},
-    with_cleanup_error,
 };
-use pipeline::run_pipeline;
+use pipeline::{PipelineSetup, run_pipeline};
 
 pub struct AdaptiveParquetWriter {
     ingestion_sender: Option<mpsc::Sender<RecordBatch>>,
-    monitor_handle: Option<tokio::task::JoinHandle<Result<u64>>>,
-    upload: Option<ObjectUpload>,
+    task: Option<ObjectSinkTask<u64>>,
+}
+
+#[derive(Clone)]
+struct PipelineTaskScope {
+    cancellation: CancellationToken,
+    tracker: TaskTracker,
+}
+
+impl PipelineTaskScope {
+    fn new(cancellation: CancellationToken) -> Self {
+        Self {
+            cancellation,
+            tracker: TaskTracker::new(),
+        }
+    }
+
+    fn cancel(&self) {
+        self.cancellation.cancel();
+    }
+
+    async fn wait(&self) {
+        self.tracker.close();
+        self.tracker.wait().await;
+    }
+
+    fn spawn_stage<F>(&self, tasks: &mut JoinSet<Result<()>>, future: F)
+    where
+        F: Future<Output = Result<()>> + Send + 'static,
+    {
+        let cancellation = self.cancellation.clone();
+        tasks.spawn(self.tracker.track_future(async move {
+            cancellation
+                .run_until_cancelled(future)
+                .await
+                .unwrap_or(Ok(()))
+        }));
+    }
+
+    fn spawn<F>(&self, future: F) -> AbortOnDropHandle<F::Output>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        AbortOnDropHandle::new(self.tracker.spawn(future))
+    }
+
+    fn spawn_on<F>(&self, future: F, handle: &Handle) -> AbortOnDropHandle<F::Output>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        AbortOnDropHandle::new(self.tracker.spawn_on(future, handle))
+    }
+
+    fn spawn_in_on<F>(&self, tasks: &mut JoinSet<F::Output>, future: F, handle: &Handle)
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        tasks.spawn_on(self.tracker.track_future(future), handle);
+    }
 }
 
 impl AdaptiveParquetWriter {
@@ -58,15 +128,23 @@ impl AdaptiveParquetWriter {
             .blocking_writer()
             .expect("a new object upload accepts one byte writer");
 
-        let monitor_handle = tokio::spawn({
+        let task = ObjectSinkTask::spawn("Parquet writer", upload, {
             let schema = Arc::clone(schema);
-            async move { run_pipeline(writer, schema, base_props, runtimes, config, ingestion_rx).await }
+            move |cancellation| {
+                tokio::spawn(run_pipeline(PipelineSetup {
+                    writer,
+                    schema,
+                    base_props,
+                    runtimes,
+                    config,
+                    ingestion_rx,
+                    scope: PipelineTaskScope::new(cancellation),
+                }))
+            }
         });
-
         Self {
             ingestion_sender: Some(ingestion_tx),
-            monitor_handle: Some(monitor_handle),
-            upload: Some(upload),
+            task: Some(task),
         }
     }
 
@@ -75,11 +153,21 @@ impl AdaptiveParquetWriter {
             .ingestion_sender
             .as_ref()
             .ok_or_else(|| anyhow!("writer already closed"))?;
+        let cancellation = self
+            .task
+            .as_ref()
+            .ok_or_else(|| anyhow!("writer already closed"))?
+            .cancellation();
 
-        sender
-            .send(batch)
-            .await
-            .map_err(|_| anyhow!("batch send failed: writer pipeline closed"))
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => {
+                Err(anyhow!("batch send failed: writer pipeline closed"))
+            }
+            result = sender.send(batch) => {
+                result.map_err(|_| anyhow!("batch send failed: writer pipeline closed"))
+            }
+        }
     }
 
     pub fn blocking_write(&mut self, batch: RecordBatch) -> Result<()> {
@@ -87,6 +175,16 @@ impl AdaptiveParquetWriter {
             .ingestion_sender
             .as_ref()
             .ok_or_else(|| anyhow!("writer already closed"))?;
+
+        if self
+            .task
+            .as_ref()
+            .ok_or_else(|| anyhow!("writer already closed"))?
+            .cancellation()
+            .is_cancelled()
+        {
+            return Err(anyhow!("batch send failed: writer pipeline closed"));
+        }
 
         sender
             .blocking_send(batch)
@@ -97,32 +195,9 @@ impl AdaptiveParquetWriter {
         // drop sender to signal end of input
         self.ingestion_sender.take();
 
-        let handle = self
-            .monitor_handle
-            .take()
-            .ok_or_else(|| anyhow!("already closed"))?;
+        let task = self.task.take().ok_or_else(|| anyhow!("already closed"))?;
 
-        let result = match handle.await {
-            Ok(Ok(rows_written)) => rows_written,
-            Ok(Err(primary)) => {
-                let upload = self.upload.take().expect("upload exists until close");
-                let cleanup = upload.abort().await.err().map(anyhow::Error::new);
-                return Err(with_cleanup_error(primary, cleanup));
-            }
-            Err(error) => {
-                let primary = anyhow!("writer task panicked: {error}");
-                let upload = self.upload.take().expect("upload exists until close");
-                let cleanup = upload.abort().await.err().map(anyhow::Error::new);
-                return Err(with_cleanup_error(primary, cleanup));
-            }
-        };
-        let url = self
-            .upload
-            .take()
-            .expect("upload exists until close")
-            .complete()
-            .await?;
-        Ok((result, url))
+        task.finish().await
     }
 
     pub fn blocking_close(self) -> Result<(u64, Url)> {
@@ -131,37 +206,12 @@ impl AdaptiveParquetWriter {
 
     pub async fn cancel(mut self) -> Result<()> {
         self.ingestion_sender.take();
-        let upload_error = match self.upload.take() {
-            Some(upload) => upload.abort().await.err().map(anyhow::Error::new),
-            None => None,
-        };
-        let mut task_error = None;
-        if let Some(handle) = self.monitor_handle.take() {
-            handle.abort();
-            task_error = match handle.await {
-                Err(error) if error.is_cancelled() => None,
-                Err(error) => Some(anyhow::Error::new(error)),
-                Ok(Err(error)) => Some(error),
-                Ok(Ok(_)) => None,
-            };
-        }
-        match task_error {
-            Some(primary) => Err(with_cleanup_error(primary, upload_error)),
-            None => upload_error.map_or(Ok(()), Err),
-        }
+        let task = self.task.take().ok_or_else(|| anyhow!("already closed"))?;
+        task.abort().await
     }
 
     pub fn blocking_cancel(self) -> Result<()> {
         crate::utils::blocking::block_on(self.cancel())
-    }
-}
-
-impl Drop for AdaptiveParquetWriter {
-    fn drop(&mut self) {
-        if let Some(handle) = self.monitor_handle.take() {
-            handle.abort();
-        }
-        self.upload.take();
     }
 }
 

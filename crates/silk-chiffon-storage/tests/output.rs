@@ -14,7 +14,7 @@ use std::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use clap::Command;
-use futures::stream::BoxStream;
+use futures::{SinkExt, stream::BoxStream};
 use object_store::{
     CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
     ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload, PutResult, memory::InMemory,
@@ -37,6 +37,7 @@ struct UploadControl {
     multipart_starts: AtomicUsize,
     completes: AtomicUsize,
     aborts: AtomicUsize,
+    block_multipart_start: AtomicBool,
     block_parts: AtomicBool,
     fail_next_put: AtomicBool,
     fail_next_multipart_start: AtomicBool,
@@ -44,6 +45,7 @@ struct UploadControl {
     fail_next_complete: AtomicBool,
     fail_next_abort: AtomicBool,
     part_started: tokio::sync::Notify,
+    multipart_start_release: tokio::sync::Semaphore,
     part_release: tokio::sync::Semaphore,
 }
 
@@ -56,6 +58,7 @@ impl UploadControl {
             multipart_starts: AtomicUsize::new(0),
             completes: AtomicUsize::new(0),
             aborts: AtomicUsize::new(0),
+            block_multipart_start: AtomicBool::new(false),
             block_parts: AtomicBool::new(false),
             fail_next_put: AtomicBool::new(false),
             fail_next_multipart_start: AtomicBool::new(false),
@@ -63,6 +66,7 @@ impl UploadControl {
             fail_next_complete: AtomicBool::new(false),
             fail_next_abort: AtomicBool::new(false),
             part_started: tokio::sync::Notify::new(),
+            multipart_start_release: tokio::sync::Semaphore::new(0),
             part_release: tokio::sync::Semaphore::new(0),
         }
     }
@@ -109,6 +113,14 @@ impl ObjectStore for ControlledStore {
             return Err(controlled_error("controlled multipart start failure"));
         }
         let inner = self.inner.put_multipart_opts(location, options).await?;
+        if self.control.block_multipart_start.load(Ordering::SeqCst) {
+            self.control
+                .multipart_start_release
+                .acquire()
+                .await
+                .unwrap()
+                .forget();
+        }
         Ok(Box::new(ControlledMultipart {
             inner,
             control: Arc::clone(&self.control),
@@ -881,6 +893,158 @@ async fn object_upload_bounds_shared_parts_backpressure_and_cleanup() {
     })
     .await
     .expect("drop fallback did not abort the multipart upload");
+}
+
+#[tokio::test]
+async fn object_upload_abort_interrupts_a_backpressured_write() {
+    let storage = controlled_session(&[
+        "output-test",
+        "--object-store-upload-part-size",
+        "8",
+        "--object-store-max-in-flight-parts",
+        "1",
+    ]);
+    let root = unique_controlled_root("abort-backpressure");
+    let (mut upload, store, path) = controlled_upload(&storage, &root, "output").await;
+    let control = Arc::clone(&store.control);
+    control.block_parts.store(true, Ordering::SeqCst);
+
+    let mut writer = upload.writer().unwrap();
+    let mut write = tokio::spawn(async move {
+        for _ in 0..4 {
+            writer.send(Bytes::from_static(b"12345678")).await?;
+        }
+        Ok::<_, futures::channel::mpsc::SendError>(())
+    });
+    wait_for_active_parts(&control, 1).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut write)
+            .await
+            .is_err()
+    );
+
+    tokio::time::timeout(Duration::from_secs(5), upload.abort())
+        .await
+        .expect("upload abort remained blocked behind a multipart part")
+        .unwrap();
+    let _write_result = tokio::time::timeout(Duration::from_secs(5), write)
+        .await
+        .expect("byte writer remained blocked after upload abort")
+        .unwrap();
+
+    assert_eq!(control.active_parts.load(Ordering::SeqCst), 0);
+    assert_eq!(control.aborts.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        store.head(&path).await,
+        Err(object_store::Error::NotFound { .. })
+    ));
+}
+
+#[tokio::test]
+async fn object_upload_abort_acquires_a_started_multipart_before_cleanup() {
+    let storage = controlled_session(&[
+        "output-test",
+        "--object-store-upload-part-size",
+        "8",
+        "--object-store-max-in-flight-parts",
+        "1",
+    ]);
+    let root = unique_controlled_root("abort-multipart-start");
+    let (mut upload, store, path) = controlled_upload(&storage, &root, "output").await;
+    let control = Arc::clone(&store.control);
+    control.block_multipart_start.store(true, Ordering::SeqCst);
+
+    let mut writer = upload.writer().unwrap();
+    writer.send(Bytes::from_static(b"12345678")).await.unwrap();
+    wait_for_multipart_starts(&control, 1).await;
+    let mut abort = tokio::spawn(upload.abort());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut abort)
+            .await
+            .is_err()
+    );
+
+    control.multipart_start_release.add_permits(1);
+    abort.await.unwrap().unwrap();
+    drop(writer);
+
+    assert_eq!(control.aborts.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        store.head(&path).await,
+        Err(object_store::Error::NotFound { .. })
+    ));
+}
+
+#[tokio::test]
+async fn object_upload_drop_cleans_up_after_multipart_initialization_finishes() {
+    let storage = controlled_session(&[
+        "output-test",
+        "--object-store-upload-part-size",
+        "8",
+        "--object-store-max-in-flight-parts",
+        "1",
+    ]);
+    let root = unique_controlled_root("drop-multipart-start");
+    let (mut upload, store, path) = controlled_upload(&storage, &root, "output").await;
+    let control = Arc::clone(&store.control);
+    control.block_multipart_start.store(true, Ordering::SeqCst);
+
+    let mut writer = upload.writer().unwrap();
+    writer.send(Bytes::from_static(b"12345678")).await.unwrap();
+    wait_for_multipart_starts(&control, 1).await;
+    drop(upload);
+    assert_eq!(control.aborts.load(Ordering::SeqCst), 0);
+
+    control.multipart_start_release.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while control.aborts.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("drop fallback did not clean up the initialized multipart upload");
+    drop(writer);
+
+    assert_eq!(control.aborts.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        store.head(&path).await,
+        Err(object_store::Error::NotFound { .. })
+    ));
+}
+
+#[tokio::test]
+async fn object_upload_complete_preserves_a_backpressured_write() {
+    let storage = controlled_session(&[
+        "output-test",
+        "--object-store-upload-part-size",
+        "8",
+        "--object-store-max-in-flight-parts",
+        "1",
+    ]);
+    let root = unique_controlled_root("complete-backpressure");
+    let (mut upload, store, path) = controlled_upload(&storage, &root, "output").await;
+    let control = Arc::clone(&store.control);
+    control.block_parts.store(true, Ordering::SeqCst);
+
+    let mut writer = upload.writer().unwrap();
+    writer.send(Bytes::from(vec![1; 8])).await.unwrap();
+    writer.send(Bytes::from(vec![2; 8])).await.unwrap();
+    wait_for_active_parts(&control, 1).await;
+    drop(writer);
+    let mut complete = tokio::spawn(upload.complete());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut complete)
+            .await
+            .is_err()
+    );
+
+    control.part_release.add_permits(2);
+    complete.await.unwrap().unwrap();
+    let bytes = store.get(&path).await.unwrap().bytes().await.unwrap();
+
+    assert_eq!(bytes, [vec![1; 8], vec![2; 8]].concat());
+    assert_eq!(control.active_parts.load(Ordering::SeqCst), 0);
+    assert_eq!(control.completes.load(Ordering::SeqCst), 1);
 }
 
 #[cfg(feature = "local-bare-paths")]

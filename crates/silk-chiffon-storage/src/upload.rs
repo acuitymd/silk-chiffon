@@ -16,6 +16,7 @@ use tokio::{
     sync::{Semaphore, oneshot},
     task::{JoinHandle, JoinSet},
 };
+use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use crate::StorageHandle;
@@ -137,7 +138,62 @@ enum TerminalAction {
 
 struct ActiveUpload {
     terminal: Option<oneshot::Sender<TerminalAction>>,
+    cancellation: CancellationToken,
     task: JoinHandle<Result<Option<Url>, ObjectUploadError>>,
+}
+
+impl ActiveUpload {
+    async fn complete(mut self, target: &Url) -> Result<Url, ObjectUploadError> {
+        let terminal_sent = self
+            .terminal
+            .take()
+            .expect("terminal action has not been sent")
+            .send(TerminalAction::Complete)
+            .is_ok();
+        let result = self.join(target).await?;
+        if !terminal_sent {
+            return Err(ObjectUploadError::Complete {
+                target: target.clone(),
+                source: anyhow::anyhow!("upload task stopped before completion"),
+            });
+        }
+        result.ok_or_else(|| ObjectUploadError::Complete {
+            target: target.clone(),
+            source: anyhow::anyhow!("upload was aborted instead of completed"),
+        })
+    }
+
+    async fn abort(mut self, target: &Url) -> Result<(), ObjectUploadError> {
+        self.cancellation.cancel();
+        let terminal_sent = self
+            .terminal
+            .take()
+            .expect("terminal action has not been sent")
+            .send(TerminalAction::Abort)
+            .is_ok();
+        self.join(target).await?;
+        if !terminal_sent {
+            return Err(ObjectUploadError::Abort {
+                target: target.clone(),
+                source: anyhow::anyhow!("upload task stopped before abort"),
+            });
+        }
+        Ok(())
+    }
+
+    fn request_abort(&mut self) {
+        self.cancellation.cancel();
+        if let Some(terminal) = self.terminal.take() {
+            let _ = terminal.send(TerminalAction::Abort);
+        }
+    }
+
+    async fn join(self, target: &Url) -> Result<Option<Url>, ObjectUploadError> {
+        self.task.await.map_err(|source| ObjectUploadError::Task {
+            target: target.clone(),
+            source,
+        })?
+    }
 }
 
 /// Storage-owned state machine for writing exactly one object.
@@ -238,33 +294,11 @@ impl ObjectUpload {
         if let Some(worker) = self.worker.take() {
             return worker.complete().await;
         }
-        let mut active = self.active.take().expect("an active upload has a task");
-        let terminal_sent = active
-            .terminal
+        self.active
             .take()
-            .expect("terminal action has not been sent")
-            .send(TerminalAction::Complete)
-            .is_ok();
-        let result = active
-            .task
+            .expect("an active upload has a task")
+            .complete(&self.target)
             .await
-            .map_err(|source| ObjectUploadError::Task {
-                target: self.target.clone(),
-                source,
-            })??;
-        if !terminal_sent {
-            return Err(ObjectUploadError::Complete {
-                target: self.target.clone(),
-                source: anyhow::anyhow!("upload task stopped before completion"),
-            });
-        }
-        match result {
-            Some(url) => Ok(url),
-            None => Err(ObjectUploadError::Complete {
-                target: self.target.clone(),
-                source: anyhow::anyhow!("upload was aborted instead of completed"),
-            }),
-        }
     }
 
     /// Cancels in-flight work and awaits multipart cleanup.
@@ -273,27 +307,11 @@ impl ObjectUpload {
         if let Some(mut worker) = self.worker.take() {
             return worker.abort().await;
         }
-        let mut active = self.active.take().expect("an active upload has a task");
-        let terminal_sent = active
-            .terminal
+        self.active
             .take()
-            .expect("terminal action has not been sent")
-            .send(TerminalAction::Abort)
-            .is_ok();
-        active
-            .task
+            .expect("an active upload has a task")
+            .abort(&self.target)
             .await
-            .map_err(|source| ObjectUploadError::Task {
-                target: self.target.clone(),
-                source,
-            })??;
-        if !terminal_sent {
-            return Err(ObjectUploadError::Abort {
-                target: self.target.clone(),
-                source: anyhow::anyhow!("upload task stopped before abort"),
-            });
-        }
-        Ok(())
     }
 
     fn start_worker(&mut self) -> mpsc::Sender<Bytes> {
@@ -303,9 +321,16 @@ impl ObjectUpload {
             .expect("a writer can be created only once");
         let (sender, receiver) = mpsc::channel(1);
         let (terminal, terminal_receiver) = oneshot::channel();
+        let cancellation = CancellationToken::new();
         self.active = Some(ActiveUpload {
             terminal: Some(terminal),
-            task: tokio::spawn(run_upload(worker, receiver, terminal_receiver)),
+            cancellation: cancellation.clone(),
+            task: tokio::spawn(run_upload(
+                worker,
+                receiver,
+                terminal_receiver,
+                cancellation,
+            )),
         });
         sender
     }
@@ -314,10 +339,8 @@ impl ObjectUpload {
 impl Drop for ObjectUpload {
     fn drop(&mut self) {
         self.direct_writer.take();
-        if let Some(active) = self.active.as_mut()
-            && let Some(terminal) = active.terminal.take()
-        {
-            let _ = terminal.send(TerminalAction::Abort);
+        if let Some(active) = self.active.as_mut() {
+            active.request_abort();
         }
     }
 }
@@ -358,6 +381,7 @@ async fn run_upload(
     mut worker: UploadWorker,
     mut bytes: mpsc::Receiver<Bytes>,
     mut terminal: oneshot::Receiver<TerminalAction>,
+    cancellation: CancellationToken,
 ) -> Result<Option<Url>, ObjectUploadError> {
     loop {
         tokio::select! {
@@ -368,14 +392,20 @@ async fn run_upload(
                     TerminalAction::Complete => {
                         bytes.close();
                         while let Some(chunk) = bytes.next().await {
-                            worker.write(chunk).await?;
+                            if worker.write(chunk, &cancellation).await?.is_cancelled() {
+                                return worker.abort().await.map(|()| None);
+                            }
                         }
                         worker.complete().await.map(Some)
                     }
                 };
             }
             chunk = bytes.next() => match chunk {
-                Some(chunk) => worker.write(chunk).await?,
+                Some(chunk) => {
+                    if worker.write(chunk, &cancellation).await?.is_cancelled() {
+                        return worker.abort().await.map(|()| None);
+                    }
+                }
                 None => {
                     return match terminal.await.unwrap_or(TerminalAction::Abort) {
                         TerminalAction::Abort => worker.abort().await.map(|()| None),
@@ -396,6 +426,18 @@ struct UploadWorker {
     multipart: Option<MultipartState>,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum WriteProgress {
+    Written,
+    Cancelled,
+}
+
+impl WriteProgress {
+    fn is_cancelled(self) -> bool {
+        self == Self::Cancelled
+    }
+}
+
 impl UploadWorker {
     fn new(handle: StorageHandle) -> Self {
         let context = Arc::clone(&handle.object_upload_context);
@@ -409,50 +451,73 @@ impl UploadWorker {
         }
     }
 
-    async fn write(&mut self, bytes: Bytes) -> Result<(), ObjectUploadError> {
+    async fn write(
+        &mut self,
+        bytes: Bytes,
+        cancellation: &CancellationToken,
+    ) -> Result<WriteProgress, ObjectUploadError> {
+        if cancellation.is_cancelled() {
+            return Ok(WriteProgress::Cancelled);
+        }
         if self.multipart.is_none()
             && self.buffer.len().saturating_add(bytes.len()) < self.settings.part_size.get()
         {
             self.buffer.extend_from_slice(&bytes);
-            return Ok(());
+            return Ok(WriteProgress::Written);
         }
 
         if self.multipart.is_none() {
-            let upload = self
-                .handle
-                .object_store()
+            let store = self.handle.object_store();
+            // Multipart creation must yield a handle before cancellation can clean it up.
+            let upload = store
                 .put_multipart(self.handle.object_path())
                 .await
                 .map_err(|source| ObjectUploadError::Write {
                     target: self.target.clone(),
                     source: source.into(),
                 })?;
-            let mut multipart =
-                MultipartState::new(upload, self.settings, Arc::clone(&self.part_permits));
-            multipart
-                .write(self.buffer.split().freeze())
-                .await
-                .map_err(|source| ObjectUploadError::Write {
-                    target: self.target.clone(),
-                    source,
-                })?;
-            self.multipart = Some(multipart);
+            self.multipart = Some(MultipartState::new(
+                upload,
+                self.settings,
+                Arc::clone(&self.part_permits),
+            ));
+            if cancellation.is_cancelled() {
+                return Ok(WriteProgress::Cancelled);
+            }
+            let buffered = self.buffer.split().freeze();
+            if self
+                .write_multipart(buffered, cancellation)
+                .await?
+                .is_cancelled()
+            {
+                return Ok(WriteProgress::Cancelled);
+            }
         }
 
+        self.write_multipart(bytes, cancellation).await
+    }
+
+    async fn write_multipart(
+        &mut self,
+        bytes: Bytes,
+        cancellation: &CancellationToken,
+    ) -> Result<WriteProgress, ObjectUploadError> {
         let result = self
             .multipart
             .as_mut()
-            .expect("created above")
-            .write(bytes)
+            .expect("created before multipart writes")
+            .write(bytes, cancellation)
             .await;
-        if let Err(primary) = result {
-            let cleanup = self.abort_multipart().await.err();
-            return Err(ObjectUploadError::Write {
-                target: self.target.clone(),
-                source: primary_with_cleanup(primary, cleanup),
-            });
+        match result {
+            Ok(progress) => Ok(progress),
+            Err(primary) => {
+                let cleanup = self.abort_multipart().await.err();
+                Err(ObjectUploadError::Write {
+                    target: self.target.clone(),
+                    source: primary_with_cleanup(primary, cleanup),
+                })
+            }
         }
-        Ok(())
     }
 
     async fn complete(mut self) -> Result<Url, ObjectUploadError> {
@@ -524,24 +589,61 @@ impl MultipartState {
         }
     }
 
-    async fn write(&mut self, mut bytes: Bytes) -> anyhow::Result<()> {
+    async fn write(
+        &mut self,
+        mut bytes: Bytes,
+        cancellation: &CancellationToken,
+    ) -> anyhow::Result<WriteProgress> {
         let part_size = self.settings.part_size.get();
         while !bytes.is_empty() {
+            if cancellation.is_cancelled() {
+                return Ok(WriteProgress::Cancelled);
+            }
             let remaining = part_size - self.buffer.len();
             let length = bytes.len().min(remaining);
             self.buffer.extend_from_slice(&bytes.split_to(length));
             if self.buffer.len() == part_size {
                 let payload = self.buffer.split().freeze();
-                self.start_part(payload).await?;
+                if self
+                    .start_part_or_cancel(payload, cancellation)
+                    .await?
+                    .is_cancelled()
+                {
+                    return Ok(WriteProgress::Cancelled);
+                }
             }
         }
-        Ok(())
+        Ok(WriteProgress::Written)
     }
 
     async fn start_part(&mut self, bytes: Bytes) -> anyhow::Result<()> {
         while self.tasks.len() >= self.settings.max_in_flight_parts.get() {
             self.join_one().await?;
         }
+        self.spawn_part(bytes);
+        Ok(())
+    }
+
+    async fn start_part_or_cancel(
+        &mut self,
+        bytes: Bytes,
+        cancellation: &CancellationToken,
+    ) -> anyhow::Result<WriteProgress> {
+        while self.tasks.len() >= self.settings.max_in_flight_parts.get() {
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return Ok(WriteProgress::Cancelled),
+                result = self.join_one() => result?,
+            }
+        }
+        if cancellation.is_cancelled() {
+            return Ok(WriteProgress::Cancelled);
+        }
+        self.spawn_part(bytes);
+        Ok(WriteProgress::Written)
+    }
+
+    fn spawn_part(&mut self, bytes: Bytes) {
         let part = self.upload.put_part(PutPayload::from_bytes(bytes));
         let permits = Arc::clone(&self.part_permits);
         self.tasks.spawn(async move {
@@ -555,7 +657,6 @@ impl MultipartState {
                     })?;
             part.await
         });
-        Ok(())
     }
 
     async fn join_one(&mut self) -> anyhow::Result<()> {

@@ -12,13 +12,13 @@ use async_trait::async_trait;
 use datafusion::execution::SendableRecordBatchStream;
 use futures::stream::StreamExt;
 use silk_chiffon_storage::{BlockingObjectUploadWriter, ObjectUpload, StorageHandle};
-use tokio::{sync::mpsc, task::JoinHandle};
+use tokio::sync::mpsc;
 
 use crate::{
     ArrowCompression, ArrowIPCFormat,
     sinks::{
         data_sink::{DataSink, SinkCompletion},
-        with_cleanup_error,
+        object_sink_task::ObjectSinkTask,
     },
     utils::memory::estimate_row_bytes,
 };
@@ -93,8 +93,7 @@ struct WriterResult {
 
 pub struct ArrowSink {
     tx: Option<mpsc::Sender<RecordBatch>>,
-    handle: Option<JoinHandle<Result<WriterResult>>>,
-    upload: Option<tokio::sync::Mutex<ObjectUpload>>,
+    task: Option<ObjectSinkTask<WriterResult>>,
 }
 
 const DEFAULT_QUEUE_DEPTH: usize = 16;
@@ -129,12 +128,13 @@ impl ArrowSink {
         let writer = upload.blocking_writer()?;
 
         let schema = Arc::clone(schema);
-        let handle = tokio::task::spawn_blocking(move || writer_task(writer, &schema, options, rx));
+        let task = ObjectSinkTask::spawn("Arrow writer", upload, move |_cancellation| {
+            tokio::task::spawn_blocking(move || writer_task(writer, &schema, options, rx))
+        });
 
         Ok(Self {
             tx: Some(tx),
-            handle: Some(handle),
-            upload: Some(tokio::sync::Mutex::new(upload)),
+            task: Some(task),
         })
     }
 }
@@ -214,64 +214,22 @@ impl DataSink for ArrowSink {
         // drop sender to signal EOF
         self.tx.take();
 
-        let handle = self.handle.take().context("sink already finished")?;
-        let upload = self
-            .upload
+        let (result, url) = self
+            .task
             .take()
             .context("sink already finished")?
-            .into_inner();
-        let result = match handle
-            .await
-            .context("writer task panicked")
-            .and_then(|result| result)
-        {
-            Ok(result) => result,
-            Err(primary) => {
-                let cleanup = upload.abort().await.err().map(anyhow::Error::new);
-                return Err(with_cleanup_error(primary, cleanup));
-            }
-        };
-        let url = upload.complete().await?;
+            .finish()
+            .await?;
 
         Ok(SinkCompletion::new(url, [], result.rows_written))
     }
 
     async fn abort(mut self: Box<Self>) -> Result<()> {
         self.tx.take();
-        let task_error = if let Some(handle) = self.handle.take() {
-            handle.abort();
-            match handle.await {
-                Err(error) if error.is_cancelled() => None,
-                Err(error) => Some(anyhow::Error::new(error)),
-                Ok(Err(error)) => Some(error),
-                Ok(Ok(_)) => None,
-            }
-        } else {
-            None
-        };
-        let upload_error = match self.upload.take() {
-            Some(upload) => upload
-                .into_inner()
-                .abort()
-                .await
-                .err()
-                .map(anyhow::Error::new),
-            None => None,
-        };
-        match task_error {
-            Some(primary) => Err(with_cleanup_error(primary, upload_error)),
-            None => upload_error.map_or(Ok(()), Err),
+        match self.task.take() {
+            Some(task) => task.abort().await,
+            None => Ok(()),
         }
-    }
-}
-
-impl Drop for ArrowSink {
-    fn drop(&mut self) {
-        self.tx.take();
-        if let Some(handle) = self.handle.take() {
-            handle.abort();
-        }
-        self.upload.take();
     }
 }
 

@@ -1,12 +1,12 @@
 use std::{io, sync::Arc};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 use arrow::{array::RecordBatch, compute::BatchCoalescer, datatypes::SchemaRef};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{Sink, SinkExt, stream};
 use silk_chiffon_storage::{ObjectUpload, StorageHandle};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::mpsc;
 use vortex::{
     VortexSessionDefault,
     array::{ArrayRef, stream::ArrayStreamAdapter},
@@ -19,6 +19,7 @@ use vortex::{
 
 use crate::sinks::{
     data_sink::{DataSink, SinkCompletion},
+    object_sink_task::ObjectSinkTask,
     with_cleanup_error,
 };
 
@@ -81,9 +82,8 @@ impl VortexSinkInner {
 }
 
 pub struct VortexSink {
-    inner: Mutex<VortexSinkInner>,
-    writer_task: Option<tokio::task::JoinHandle<Result<()>>>,
-    upload: Option<Mutex<ObjectUpload>>,
+    inner: VortexSinkInner,
+    task: Option<ObjectSinkTask<()>>,
 }
 
 impl VortexSink {
@@ -97,17 +97,22 @@ impl VortexSink {
         let mut upload = ObjectUpload::new(handle);
         let writer = VortexUploadAdapter::new(upload.writer()?, upload.part_size().get());
         let schema = Arc::clone(schema);
-        let writer_task =
-            tokio::spawn(async move { Self::write_vortex_file(writer, schema, receiver).await });
+        let task = ObjectSinkTask::spawn("Vortex writer", upload, move |cancellation| {
+            tokio::spawn(async move {
+                cancellation
+                    .run_until_cancelled(Self::write_vortex_file(writer, schema, receiver))
+                    .await
+                    .unwrap_or(Ok(()))
+            })
+        });
 
         Ok(Self {
-            inner: Mutex::new(VortexSinkInner {
+            inner: VortexSinkInner {
                 rows_written: 0,
                 coalescer,
                 sender: Some(sender),
-            }),
-            writer_task: Some(writer_task),
-            upload: Some(Mutex::new(upload)),
+            },
+            task: Some(task),
         })
     }
 
@@ -136,23 +141,11 @@ impl VortexSink {
     }
 
     async fn abort_unfinished(&mut self) -> Vec<anyhow::Error> {
-        self.inner.lock().await.drop_sender();
-        let mut errors = Vec::new();
-        if let Some(handle) = self.writer_task.take() {
-            handle.abort();
-            match handle.await {
-                Err(error) if error.is_cancelled() => {}
-                Err(error) => errors.push(anyhow::Error::new(error)),
-                Ok(Err(error)) => errors.push(error),
-                Ok(Ok(())) => {}
-            }
+        self.inner.drop_sender();
+        match self.task.take() {
+            Some(task) => task.abort().await.err().into_iter().collect(),
+            None => Vec::new(),
         }
-        if let Some(upload) = self.upload.take()
-            && let Err(error) = upload.into_inner().abort().await
-        {
-            errors.push(anyhow::Error::new(error));
-        }
-        errors
     }
 }
 
@@ -200,22 +193,19 @@ where
 #[async_trait]
 impl DataSink for VortexSink {
     async fn write_batch(&mut self, batch: RecordBatch) -> Result<()> {
-        let mut inner = self.inner.lock().await;
-        inner.coalescer.push_batch(batch)?;
-        inner.flush_completed_batches().await
+        self.inner.coalescer.push_batch(batch)?;
+        self.inner.flush_completed_batches().await
     }
 
     async fn finish(mut self: Box<Self>) -> Result<SinkCompletion> {
         let rows_written = {
-            let mut inner = self.inner.lock().await;
             let result = async {
-                inner.finish_buffered_batch()?;
-                inner.flush_completed_batches().await?;
-                inner.drop_sender();
-                Ok::<_, anyhow::Error>(inner.rows_written)
+                self.inner.finish_buffered_batch()?;
+                self.inner.flush_completed_batches().await?;
+                self.inner.drop_sender();
+                Ok::<_, anyhow::Error>(self.inner.rows_written)
             }
             .await;
-            drop(inner);
             match result {
                 Ok(rows_written) => rows_written,
                 Err(primary) => {
@@ -227,26 +217,12 @@ impl DataSink for VortexSink {
             }
         };
 
-        let task_result = self
-            .writer_task
+        let (_, url) = self
+            .task
             .take()
             .ok_or_else(|| anyhow!("writer task already finished"))?
-            .await
-            .map_err(|error| anyhow!("error joining writer task: {error}"))
-            .and_then(|result| result.map_err(|error| anyhow!("writer task errored: {error}")));
-
-        if let Err(primary) = task_result {
-            let cleanup = self.abort_unfinished().await;
-            return Err(cleanup.into_iter().fold(primary, |primary, cleanup| {
-                with_cleanup_error(primary, Some(cleanup))
-            }));
-        }
-        let upload = self
-            .upload
-            .take()
-            .context("sink already finished")?
-            .into_inner();
-        let url = upload.complete().await?;
+            .finish()
+            .await?;
 
         Ok(SinkCompletion::new(url, [], rows_written))
     }
@@ -259,14 +235,5 @@ impl DataSink for VortexSink {
             })),
             None => Ok(()),
         }
-    }
-}
-
-impl Drop for VortexSink {
-    fn drop(&mut self) {
-        if let Some(handle) = self.writer_task.take() {
-            handle.abort();
-        }
-        self.upload.take();
     }
 }

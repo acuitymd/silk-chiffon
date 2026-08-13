@@ -23,7 +23,6 @@ use parquet::{
     schema::types::ColumnPath,
 };
 use std::{collections::HashMap, sync::Arc};
-use tokio::sync::Mutex;
 
 use anyhow::{Result, anyhow};
 use arrow::{
@@ -300,7 +299,7 @@ struct ParquetSinkInner {
 }
 
 pub struct ParquetSink {
-    inner: Mutex<ParquetSinkInner>,
+    inner: ParquetSinkInner,
 }
 
 fn column_path_from_dot_notation(name: &str) -> ColumnPath {
@@ -446,9 +445,9 @@ impl ParquetSink {
         ));
 
         Ok(Self {
-            inner: Mutex::new(ParquetSinkInner {
+            inner: ParquetSinkInner {
                 writer: Some(writer),
-            }),
+            },
         })
     }
 
@@ -625,9 +624,8 @@ impl ParquetSink {
 #[async_trait]
 impl DataSink for ParquetSink {
     async fn write_batch(&mut self, batch: RecordBatch) -> Result<()> {
-        let mut inner = self.inner.lock().await;
-
-        let writer = inner
+        let writer = self
+            .inner
             .writer
             .as_mut()
             .ok_or_else(|| anyhow!("Writer already closed"))?;
@@ -637,9 +635,8 @@ impl DataSink for ParquetSink {
     }
 
     async fn finish(mut self: Box<Self>) -> Result<SinkCompletion> {
-        let mut inner = self.inner.lock().await;
-
-        let writer = inner
+        let writer = self
+            .inner
             .writer
             .take()
             .ok_or_else(|| anyhow!("Writer already closed"))?;
@@ -650,7 +647,7 @@ impl DataSink for ParquetSink {
     }
 
     async fn abort(mut self: Box<Self>) -> Result<()> {
-        let writer = self.inner.lock().await.writer.take();
+        let writer = self.inner.writer.take();
         match writer {
             Some(writer) => writer.cancel().await,
             None => Ok(()),

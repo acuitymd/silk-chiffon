@@ -28,6 +28,7 @@ object_store = { workspace = true, features = ["cloud"] }
 parking_lot.workspace = true
 thiserror.workspace = true
 tokio = { version = "^1.53.1", features = ["fs", "rt", "sync"] }
+tokio-util.workspace = true
 url.workspace = true
 
 [dev-dependencies]
