@@ -24,9 +24,9 @@ pub(crate) fn detect(object: &InputObject) -> FormatFuture<'_, InputDetection> {
             if starts && ends {
                 return Ok(InputDetection::Match(IpcVariant::File.input_variant()));
             }
-            if starts || ends {
+            if starts {
                 return Ok(InputDetection::Malformed(anyhow!(
-                    "Arrow IPC file has only one of its two magic markers"
+                    "Arrow IPC file is missing its trailing magic marker"
                 )));
             }
         }
@@ -87,4 +87,73 @@ pub(crate) fn detect(object: &InputObject) -> FormatFuture<'_, InputDetection> {
             Ok(_) | Err(_) => Ok(InputDetection::Mismatch),
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use arrow::{
+        datatypes::{DataType, Field, Schema},
+        ipc::writer::StreamWriter,
+    };
+    use silk_chiffon_core::InputDetection;
+    use silk_chiffon_storage::{LocationInput, local};
+    use tempfile::tempdir;
+    use url::Url;
+
+    use super::*;
+
+    async fn detect_bytes(bytes: &[u8]) -> InputDetection {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("input");
+        std::fs::write(&path, bytes).unwrap();
+        let url = Url::from_file_path(path).unwrap();
+        let location = LocationInput::parse(url.as_str()).unwrap();
+        let object = local::session()
+            .unwrap()
+            .lookup_input(&location)
+            .await
+            .unwrap();
+        detect(&object).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn trailing_file_magic_does_not_claim_unrecognized_input() {
+        let mut bytes = b"not an Arrow input".to_vec();
+        bytes.extend_from_slice(ARROW_MAGIC);
+
+        assert!(matches!(
+            detect_bytes(&bytes).await,
+            InputDetection::Mismatch
+        ));
+    }
+
+    #[tokio::test]
+    async fn stream_schema_takes_precedence_over_incidental_trailing_file_magic() {
+        let schema = Schema::new(vec![Field::new("value", DataType::Utf8, true)]);
+        let mut bytes = Cursor::new(Vec::new());
+        StreamWriter::try_new(&mut bytes, &schema)
+            .unwrap()
+            .finish()
+            .unwrap();
+        let mut bytes = bytes.into_inner();
+        bytes.extend_from_slice(ARROW_MAGIC);
+
+        let InputDetection::Match(variant) = detect_bytes(&bytes).await else {
+            panic!("Arrow stream schema was not detected");
+        };
+        assert_eq!(variant.name(), Some("stream"));
+    }
+
+    #[tokio::test]
+    async fn leading_file_magic_without_a_trailer_remains_malformed() {
+        let mut bytes = ARROW_MAGIC.to_vec();
+        bytes.extend_from_slice(b"not a complete Arrow file");
+
+        assert!(matches!(
+            detect_bytes(&bytes).await,
+            InputDetection::Malformed(_)
+        ));
+    }
 }

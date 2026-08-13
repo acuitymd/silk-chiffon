@@ -1937,7 +1937,7 @@ mod tests {
             "{message}"
         );
         assert!(
-            message.contains("only one of its two magic markers"),
+            message.contains("missing its trailing magic marker"),
             "{message}"
         );
         assert!(!output.exists());
