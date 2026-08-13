@@ -145,6 +145,14 @@ impl AdaptiveParquetWriter {
         }
     }
 
+    fn stop_pipeline_input(&mut self) {
+        // Closing the channel looks like successful EOF, so publish cancellation first.
+        if let Some(task) = &self.task {
+            task.cancellation().cancel();
+        }
+        self.ingestion_sender.take();
+    }
+
     pub async fn write(&mut self, batch: RecordBatch) -> Result<()> {
         let sender = self
             .ingestion_sender
@@ -202,13 +210,19 @@ impl AdaptiveParquetWriter {
     }
 
     pub async fn cancel(mut self) -> Result<()> {
-        self.ingestion_sender.take();
+        self.stop_pipeline_input();
         let task = self.task.take().ok_or_else(|| anyhow!("already closed"))?;
         task.abort().await
     }
 
     pub fn blocking_cancel(self) -> Result<()> {
         crate::utils::blocking::block_on(self.cancel())
+    }
+}
+
+impl Drop for AdaptiveParquetWriter {
+    fn drop(&mut self) {
+        self.stop_pipeline_input();
     }
 }
 

@@ -721,10 +721,10 @@ fn detect_parquet(object: &InputObject) -> FormatFuture<'_, InputDetection> {
         let ends = magic[1].as_ref() == MAGIC;
         Ok(match (starts, ends) {
             (true, true) => InputDetection::Match(InputVariant::new()),
-            (true, false) | (false, true) => InputDetection::Malformed(anyhow!(
-                "Parquet input has only one of its two magic markers"
+            (true, false) => InputDetection::Malformed(anyhow!(
+                "Parquet input is missing its trailing magic marker"
             )),
-            (false, false) => InputDetection::Mismatch,
+            (false, true) | (false, false) => InputDetection::Mismatch,
         })
     })
 }
@@ -1940,6 +1940,71 @@ mod tests {
             message.contains("missing its trailing magic marker"),
             "{message}"
         );
+        assert!(!output.exists());
+    }
+
+    #[tokio::test]
+    async fn leading_parquet_magic_without_a_trailer_stops_format_fallback() {
+        let root = "test-remote://coverage-malformed-parquet/";
+        let mut bytes = b"PAR1".to_vec();
+        bytes.extend_from_slice(b"not a complete Parquet file");
+        put_remote_file(root, "input.parquet", bytes).await;
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("output.arrow");
+        let cli = test_cli(
+            remote_application_definition(),
+            &[
+                "silk-chiffon",
+                "transform",
+                "--from",
+                "test-remote://coverage-malformed-parquet/input.parquet",
+                "--to",
+                output.to_str().unwrap(),
+            ],
+        );
+        let Command::Transform(command) = cli.command else {
+            panic!("expected transform command");
+        };
+
+        let error = crate::commands::transform::run(command).await.unwrap_err();
+
+        let message = format!("{error:#}");
+        assert!(message.contains("malformed parquet input"), "{message}");
+        assert!(
+            message.contains("missing its trailing magic marker"),
+            "{message}"
+        );
+        assert!(!output.exists());
+    }
+
+    #[tokio::test]
+    async fn trailing_parquet_magic_does_not_claim_unknown_remote_input() {
+        let root = "test-remote://coverage-trailing-parquet/";
+        let mut bytes = b"not a known format".to_vec();
+        bytes.extend_from_slice(b"PAR1");
+        put_remote_file(root, "input.parquet", bytes).await;
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("output.arrow");
+        let cli = test_cli(
+            remote_application_definition(),
+            &[
+                "silk-chiffon",
+                "transform",
+                "--from",
+                "test-remote://coverage-trailing-parquet/input.parquet",
+                "--to",
+                output.to_str().unwrap(),
+            ],
+        );
+        let Command::Transform(command) = cli.command else {
+            panic!("expected transform command");
+        };
+
+        let error = crate::commands::transform::run(command).await.unwrap_err();
+
+        let message = format!("{error:#}");
+        assert!(message.contains("could not detect the format"), "{message}");
+        assert!(!message.contains("malformed parquet input"), "{message}");
         assert!(!output.exists());
     }
 

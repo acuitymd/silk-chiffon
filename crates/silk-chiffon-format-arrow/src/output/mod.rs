@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{io::Write, sync::Arc};
 
 use anyhow::{Context, Result};
 use arrow::{
@@ -11,10 +11,9 @@ use async_trait::async_trait;
 use datafusion::execution::SendableRecordBatchStream;
 use futures::stream::StreamExt;
 use silk_chiffon_core::{DataSink, SinkBinding, SinkCompletion};
-use silk_chiffon_storage::{
-    BlockingObjectUploadWriter, ObjectUpload, ObjectUploadTask, StorageHandle,
-};
+use silk_chiffon_storage::{ObjectUpload, ObjectUploadTask, StorageHandle};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     args::{Compression, TransformArgs},
@@ -61,9 +60,14 @@ struct WriteSummary {
     rows_written: u64,
 }
 
+enum WriteOutcome {
+    Completed(WriteSummary),
+    Cancelled,
+}
+
 pub(crate) struct Sink {
     tx: Option<mpsc::Sender<RecordBatch>>,
-    task: Option<ObjectUploadTask<WriteSummary>>,
+    task: Option<ObjectUploadTask<WriteOutcome>>,
 }
 
 impl Sink {
@@ -80,9 +84,17 @@ impl Sink {
         let writer = upload.blocking_writer()?;
 
         let schema = Arc::clone(schema);
-        let task = ObjectUploadTask::spawn("Arrow writer", upload, move |_cancellation| {
+        let task = ObjectUploadTask::spawn("Arrow writer", upload, move |cancellation| {
             tokio::task::spawn_blocking(move || {
-                writer_task(writer, &schema, variant, record_batch_size, compression, rx)
+                writer_task(
+                    writer,
+                    &schema,
+                    variant,
+                    record_batch_size,
+                    compression,
+                    &cancellation,
+                    rx,
+                )
             })
         });
 
@@ -91,16 +103,32 @@ impl Sink {
             task: Some(task),
         })
     }
+
+    fn stop_writer_input(&mut self) {
+        // Closing the channel looks like successful EOF, so publish cancellation first.
+        if let Some(task) = &self.task {
+            task.cancellation().cancel();
+        }
+        self.tx.take();
+    }
 }
 
-fn writer_task(
-    writer: BlockingObjectUploadWriter,
+fn writer_task<W>(
+    writer: W,
     schema: &SchemaRef,
     variant: IpcVariant,
     record_batch_size: usize,
     compression: Compression,
+    cancellation: &CancellationToken,
     mut rx: mpsc::Receiver<RecordBatch>,
-) -> Result<WriteSummary> {
+) -> Result<WriteOutcome>
+where
+    W: Write,
+{
+    if cancellation.is_cancelled() {
+        return Ok(WriteOutcome::Cancelled);
+    }
+
     let write_options = match compression {
         Compression::Zstd | Compression::Lz4 => {
             IpcWriteOptions::default().try_with_compression(compression.into())?
@@ -125,23 +153,38 @@ fn writer_task(
     let mut rows_written = 0u64;
 
     while let Some(batch) = rx.blocking_recv() {
+        if cancellation.is_cancelled() {
+            return Ok(WriteOutcome::Cancelled);
+        }
         coalescer.push_batch(batch)?;
 
         while let Some(completed_batch) = coalescer.next_completed_batch() {
+            if cancellation.is_cancelled() {
+                return Ok(WriteOutcome::Cancelled);
+            }
             writer.write(&completed_batch)?;
             rows_written += completed_batch.num_rows() as u64;
         }
     }
 
+    if cancellation.is_cancelled() {
+        return Ok(WriteOutcome::Cancelled);
+    }
     coalescer.finish_buffered_batch()?;
     if let Some(final_batch) = coalescer.next_completed_batch() {
+        if cancellation.is_cancelled() {
+            return Ok(WriteOutcome::Cancelled);
+        }
         writer.write(&final_batch)?;
         rows_written += final_batch.num_rows() as u64;
     }
 
+    if cancellation.is_cancelled() {
+        return Ok(WriteOutcome::Cancelled);
+    }
     writer.finish()?;
 
-    Ok(WriteSummary { rows_written })
+    Ok(WriteOutcome::Completed(WriteSummary { rows_written }))
 }
 
 #[async_trait]
@@ -164,18 +207,21 @@ impl DataSink for Sink {
     async fn finish(mut self: Box<Self>) -> Result<SinkCompletion> {
         self.tx.take();
 
-        let (result, url) = self
+        let (outcome, url) = self
             .task
             .take()
             .context("sink already finished")?
             .finish()
             .await?;
+        let WriteOutcome::Completed(result) = outcome else {
+            anyhow::bail!("Arrow writer stopped before finishing");
+        };
 
         Ok(SinkCompletion::new(url, [], result.rows_written))
     }
 
     async fn abort(mut self: Box<Self>) -> Result<()> {
-        self.tx.take();
+        self.stop_writer_input();
         match self.task.take() {
             Some(task) => task.abort().await,
             None => Ok(()),
@@ -183,12 +229,21 @@ impl DataSink for Sink {
     }
 }
 
-enum IpcWriter {
-    File(FileWriter<BlockingObjectUploadWriter>),
-    Stream(StreamWriter<BlockingObjectUploadWriter>),
+impl Drop for Sink {
+    fn drop(&mut self) {
+        self.stop_writer_input();
+    }
 }
 
-impl IpcWriter {
+enum IpcWriter<W> {
+    File(FileWriter<W>),
+    Stream(StreamWriter<W>),
+}
+
+impl<W> IpcWriter<W>
+where
+    W: Write,
+{
     fn write(&mut self, batch: &RecordBatch) -> arrow::error::Result<()> {
         match self {
             Self::File(writer) => writer.write(batch),
@@ -208,7 +263,29 @@ impl IpcWriter {
 mod tests {
     use super::*;
     use silk_chiffon_test_support::{TestBatch, TestFile, prepared_local_output};
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    };
     use tempfile::tempdir;
+
+    #[derive(Clone, Default)]
+    struct RecordingWriter {
+        bytes: Arc<Mutex<Vec<u8>>>,
+        started: Arc<AtomicBool>,
+    }
+
+    impl Write for RecordingWriter {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.started.store(true, Ordering::SeqCst);
+            self.bytes.lock().unwrap().extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
 
     async fn write(
         variant: IpcVariant,
@@ -290,5 +367,37 @@ mod tests {
         Box::new(sink).abort().await.unwrap();
 
         assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn cancellation_stops_the_writer_before_finalization() {
+        let batch = TestBatch::simple();
+        let writer = RecordingWriter::default();
+        let recorded = writer.clone();
+        let (tx, rx) = mpsc::channel(1);
+        let cancellation = CancellationToken::new();
+        let writer_cancellation = cancellation.clone();
+        let task = tokio::task::spawn_blocking(move || {
+            writer_task(
+                writer,
+                &batch.schema(),
+                IpcVariant::File,
+                122_880,
+                Compression::None,
+                &writer_cancellation,
+                rx,
+            )
+        });
+        while !recorded.started.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+
+        cancellation.cancel();
+        drop(tx);
+        let outcome = task.await.unwrap().unwrap();
+
+        assert!(matches!(outcome, WriteOutcome::Cancelled));
+        let bytes = recorded.bytes.lock().unwrap();
+        assert!(!bytes.ends_with(b"ARROW1"));
     }
 }

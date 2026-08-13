@@ -140,11 +140,25 @@ impl VortexSink {
     }
 
     async fn abort_unfinished(&mut self) -> Vec<anyhow::Error> {
-        self.inner.drop_sender();
+        self.stop_writer_input();
         match self.task.take() {
             Some(task) => task.abort().await.err().into_iter().collect(),
             None => Vec::new(),
         }
+    }
+
+    fn stop_writer_input(&mut self) {
+        // Closing the channel looks like successful EOF, so publish cancellation first.
+        if let Some(task) = &self.task {
+            task.cancellation().cancel();
+        }
+        self.inner.drop_sender();
+    }
+}
+
+impl Drop for VortexSink {
+    fn drop(&mut self) {
+        self.stop_writer_input();
     }
 }
 
