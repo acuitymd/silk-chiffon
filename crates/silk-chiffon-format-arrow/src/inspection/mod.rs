@@ -21,7 +21,7 @@ use crate::{
     args::InspectionArgs,
     detection,
     input::{
-        MAX_IPC_MESSAGE_BYTES, StreamMessageRead, block_size, read_block, read_file_layout,
+        MAX_IPC_SAFETY_BYTES, StreamMessageRead, block_size, read_block, read_file_layout,
         read_stream_message,
     },
     variant::IpcVariant,
@@ -65,10 +65,12 @@ impl Inspector {
     async fn open_file(object: &InputObject, location: String, count_rows: bool) -> Result<Self> {
         let handle = object.handle();
         let store = handle.object_store();
+        let layout_pool_capacity = usize::try_from(MAX_IPC_SAFETY_BYTES)
+            .context("Arrow IPC safety bound exceeds the platform address space")?;
         let layout = read_file_layout(
             &store,
             object.metadata(),
-            Arc::new(GreedyMemoryPool::new(usize::MAX)),
+            Arc::new(GreedyMemoryPool::new(layout_pool_capacity)),
             handle.url().as_str(),
         )
         .await?;
@@ -126,21 +128,16 @@ impl Inspector {
         let mut offset = 0_u64;
         let mut batches = Vec::new();
         while count_rows || decoder.schema().is_none() {
-            let message = match read_stream_message(
-                &store,
-                object.metadata(),
-                offset,
-                handle.url().as_str(),
-                true,
-            )
-            .await?
-            {
-                StreamMessageRead::End => break,
-                StreamMessageRead::SafetyBoundExceeded => {
-                    bail!("Arrow IPC message exceeds the 512 MiB inspection safety bound")
-                }
-                StreamMessageRead::Message(message) => message,
-            };
+            let message =
+                match read_stream_message(&store, object.metadata(), offset, handle.url().as_str())
+                    .await?
+                {
+                    StreamMessageRead::End => break,
+                    StreamMessageRead::SafetyBoundExceeded => {
+                        bail!("Arrow IPC message exceeds the 512 MiB inspection safety bound")
+                    }
+                    StreamMessageRead::Message(message) => message,
+                };
             offset = message.end;
             let mut buffer = Buffer::from(message.bytes);
             while !buffer.is_empty() {
@@ -300,7 +297,7 @@ impl Inspector {
 }
 
 fn ensure_block_is_bounded(block: &arrow::ipc::Block) -> Result<()> {
-    if u64::try_from(block_size(block)?)? > MAX_IPC_MESSAGE_BYTES {
+    if u64::try_from(block_size(block)?)? > MAX_IPC_SAFETY_BYTES {
         bail!("Arrow IPC message exceeds the 512 MiB inspection safety bound");
     }
     Ok(())
@@ -630,8 +627,12 @@ mod tests {
     #[tokio::test]
     async fn oversized_messages_stop_before_inspection_reads_their_payloads() {
         let _guard = test_guard().await;
-        let message_size = MAX_IPC_MESSAGE_BYTES + 1;
-        let file_block = arrow::ipc::Block::new(0, 0, i64::try_from(message_size).unwrap());
+        let message_size = MAX_IPC_SAFETY_BYTES + 1;
+        let file_block = arrow::ipc::Block::new(
+            0,
+            i32::try_from(message_size / 2 + 1).unwrap(),
+            i64::try_from(message_size / 2).unwrap(),
+        );
         assert!(
             ensure_block_is_bounded(&file_block)
                 .unwrap_err()
@@ -659,7 +660,7 @@ mod tests {
         };
 
         assert!(matches!(
-            read_stream_message(&store, &object, 0, "oversized-stream.arrow", true)
+            read_stream_message(&store, &object, 0, "oversized-stream.arrow")
                 .await
                 .unwrap(),
             StreamMessageRead::SafetyBoundExceeded

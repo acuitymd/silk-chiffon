@@ -46,7 +46,7 @@ use silk_chiffon_core::{
 use tokio::sync::OnceCell;
 
 const SAMPLE_ROWS: usize = 100_000;
-pub(crate) const MAX_IPC_MESSAGE_BYTES: u64 = 512 * 1024 * 1024;
+pub(crate) const MAX_IPC_SAFETY_BYTES: u64 = 512 * 1024 * 1024;
 
 pub(crate) async fn create_provider(
     leaf: &InputLeaf,
@@ -619,6 +619,11 @@ pub(crate) async fn read_file_layout(
             identity
         )));
     }
+    if footer_len > MAX_IPC_SAFETY_BYTES {
+        return Err(datafusion::common::DataFusionError::Execution(format!(
+            "Arrow IPC footer exceeds the 512 MiB safety bound for {identity}"
+        )));
+    }
     let reservation = MemoryConsumer::new("Arrow IPC file layout").register(&memory_pool);
     reservation.try_resize(
         usize::try_from(footer_len)
@@ -718,12 +723,12 @@ fn reserve_sample_block(
     let metadata =
         u64::try_from(block.metaDataLength()).context("Arrow IPC metadata length is negative")?;
     let body = u64::try_from(block.bodyLength()).context("Arrow IPC body length is negative")?;
-    if metadata > MAX_IPC_MESSAGE_BYTES || body > MAX_IPC_MESSAGE_BYTES {
-        return Ok(SampleReservation::SafetyBoundExceeded);
-    }
     let size = metadata
         .checked_add(body)
         .context("Arrow IPC sample block size overflow")?;
+    if size > MAX_IPC_SAFETY_BYTES {
+        return Ok(SampleReservation::SafetyBoundExceeded);
+    }
     reservation.try_resize(usize::try_from(size)?)?;
     Ok(SampleReservation::Reserved)
 }
@@ -736,7 +741,7 @@ async fn infer_stream_schema(
     let mut decoder = StreamDecoder::new();
     let mut offset = 0;
     loop {
-        match read_stream_message(store, object, offset, identity, false).await? {
+        match read_stream_message(store, object, offset, identity).await? {
             StreamMessageRead::Message(message) => {
                 offset = message.end;
                 let mut buffer = Buffer::from(message.bytes);
@@ -747,7 +752,9 @@ async fn infer_stream_schema(
             }
             StreamMessageRead::End => break,
             StreamMessageRead::SafetyBoundExceeded => {
-                unreachable!("schema inference does not request the sampling bound")
+                return Err(datafusion::common::DataFusionError::Execution(format!(
+                    "Arrow IPC message exceeds the 512 MiB safety bound for {identity}"
+                )));
             }
         }
     }
@@ -833,9 +840,7 @@ async fn sample_statistics(
             let mut offset = 0;
             loop {
                 let message =
-                    match read_stream_message(store, representative, offset, &identity, true)
-                        .await?
-                    {
+                    match read_stream_message(store, representative, offset, &identity).await? {
                         StreamMessageRead::Message(message) => message,
                         StreamMessageRead::End => break,
                         StreamMessageRead::SafetyBoundExceeded => {
@@ -932,7 +937,6 @@ pub(crate) async fn read_stream_message(
     object: &ObjectMeta,
     offset: u64,
     identity: &str,
-    bounded: bool,
 ) -> datafusion::common::Result<StreamMessageRead> {
     if offset == object.size {
         return Ok(StreamMessageRead::End);
@@ -985,7 +989,7 @@ pub(crate) async fn read_stream_message(
             identity
         ));
     }
-    if bounded && metadata_len > MAX_IPC_MESSAGE_BYTES {
+    if metadata_len > MAX_IPC_SAFETY_BYTES {
         return Ok(StreamMessageRead::SafetyBoundExceeded);
     }
     let metadata = store
@@ -1004,7 +1008,7 @@ pub(crate) async fn read_stream_message(
             identity
         ));
     }
-    if bounded && body_len > MAX_IPC_MESSAGE_BYTES {
+    if end - offset > MAX_IPC_SAFETY_BYTES {
         return Ok(StreamMessageRead::SafetyBoundExceeded);
     }
     let bytes = store.get_range(&object.location, offset..end).await?;
@@ -1100,6 +1104,8 @@ impl ActiveFiles {
 
 #[cfg(test)]
 mod tests {
+    use std::{io, sync::Mutex as StdMutex};
+
     use arrow::{
         array::{Array, NullArray, StringArray, StringDictionaryBuilder},
         datatypes::{DataType, Field, Int32Type, Schema},
@@ -1110,11 +1116,108 @@ mod tests {
         execution::{memory_pool::GreedyMemoryPool, object_store::ObjectStoreUrl},
         physical_plan::metrics::ExecutionPlanMetricsSet,
     };
-    use object_store::{ObjectStoreExt, memory::InMemory};
+    use futures::{StreamExt, stream, stream::BoxStream};
+    use object_store::{
+        Attributes, CopyOptions, GetOptions, GetRange, GetResult, GetResultPayload, ListResult,
+        MultipartUpload, ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload, PutResult,
+        Result as StoreResult, memory::InMemory, path::Path as ObjectPath,
+    };
     use silk_chiffon_core::InputVariant;
     use tokio::sync::Notify;
 
     use super::*;
+
+    #[derive(Debug)]
+    struct TrailerOnlyStore {
+        inner: InMemory,
+        object: ObjectMeta,
+        trailer: Bytes,
+        ranges: StdMutex<Vec<std::ops::Range<u64>>>,
+    }
+
+    impl fmt::Display for TrailerOnlyStore {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("TrailerOnlyStore")
+        }
+    }
+
+    #[async_trait]
+    impl ObjectStore for TrailerOnlyStore {
+        async fn put_opts(
+            &self,
+            location: &ObjectPath,
+            payload: PutPayload,
+            options: PutOptions,
+        ) -> StoreResult<PutResult> {
+            self.inner.put_opts(location, payload, options).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &ObjectPath,
+            options: PutMultipartOptions,
+        ) -> StoreResult<Box<dyn MultipartUpload>> {
+            self.inner.put_multipart_opts(location, options).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &ObjectPath,
+            options: GetOptions,
+        ) -> StoreResult<GetResult> {
+            if location != &self.object.location {
+                return self.inner.get_opts(location, options).await;
+            }
+            let GetRange::Bounded(range) = options.range.unwrap() else {
+                return Err(object_store::Error::Generic {
+                    store: "trailer-only",
+                    source: Box::new(io::Error::other("expected one bounded range")),
+                });
+            };
+            self.ranges.lock().unwrap().push(range.clone());
+            if range != (self.object.size - 10..self.object.size) {
+                return Err(object_store::Error::Generic {
+                    store: "trailer-only",
+                    source: Box::new(io::Error::other("footer payload must not be read")),
+                });
+            }
+            Ok(GetResult {
+                payload: GetResultPayload::Stream(
+                    stream::once(std::future::ready(Ok(self.trailer.clone()))).boxed(),
+                ),
+                meta: self.object.clone(),
+                range,
+                attributes: Attributes::new(),
+            })
+        }
+
+        fn delete_stream(
+            &self,
+            locations: BoxStream<'static, StoreResult<ObjectPath>>,
+        ) -> BoxStream<'static, StoreResult<ObjectPath>> {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(&self, prefix: Option<&ObjectPath>) -> BoxStream<'static, StoreResult<ObjectMeta>> {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&ObjectPath>,
+        ) -> StoreResult<ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &ObjectPath,
+            to: &ObjectPath,
+            options: CopyOptions,
+        ) -> StoreResult<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
+    }
 
     fn batch(rows: usize) -> RecordBatch {
         RecordBatch::try_new(
@@ -1201,7 +1304,13 @@ mod tests {
     fn oversized_message_makes_sampling_unavailable_without_reserving_it() {
         let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(usize::MAX));
         let reservation = MemoryConsumer::new("test").register(&pool);
-        let block = Block::new(0, 0, i64::try_from(MAX_IPC_MESSAGE_BYTES + 1).unwrap());
+        let metadata = MAX_IPC_SAFETY_BYTES / 2 + 1;
+        let body = MAX_IPC_SAFETY_BYTES / 2;
+        let block = Block::new(
+            0,
+            i32::try_from(metadata).unwrap(),
+            i64::try_from(body).unwrap(),
+        );
         let outcome = reserve_sample_block(&reservation, &block).unwrap();
 
         assert_eq!(outcome, SampleReservation::SafetyBoundExceeded);
@@ -1521,7 +1630,7 @@ mod tests {
         for (index, (bytes, expected)) in cases.into_iter().enumerate() {
             let location = format!("truncated-{index}.arrow");
             let (store, meta) = stored_bytes(&location, bytes).await;
-            let error = match read_stream_message(&store, &meta, 0, &location, false).await {
+            let error = match read_stream_message(&store, &meta, 0, &location).await {
                 Ok(_) => panic!("truncated message must fail"),
                 Err(error) => error,
             };
@@ -1547,14 +1656,14 @@ mod tests {
         }
         let (store, meta) = stored_bytes("complete.arrow", bytes.clone()).await;
         let StreamMessageRead::Message(schema) =
-            read_stream_message(&store, &meta, 0, "complete.arrow", false)
+            read_stream_message(&store, &meta, 0, "complete.arrow")
                 .await
                 .unwrap()
         else {
             panic!("the first stream message must contain the schema");
         };
         let StreamMessageRead::Message(record_batch) =
-            read_stream_message(&store, &meta, schema.end, "complete.arrow", false)
+            read_stream_message(&store, &meta, schema.end, "complete.arrow")
                 .await
                 .unwrap()
         else {
@@ -1563,9 +1672,7 @@ mod tests {
         bytes.truncate(usize::try_from(record_batch.end - 1).unwrap());
         let (store, meta) = stored_bytes("truncated-body.arrow", bytes).await;
         let error =
-            match read_stream_message(&store, &meta, schema.end, "truncated-body.arrow", false)
-                .await
-            {
+            match read_stream_message(&store, &meta, schema.end, "truncated-body.arrow").await {
                 Ok(_) => panic!("a truncated body must fail"),
                 Err(error) => error,
             };
@@ -1596,6 +1703,40 @@ mod tests {
         };
 
         assert!(error.to_string().contains("footer length"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn oversized_file_footers_stop_after_the_trailer_read() {
+        let footer_len = MAX_IPC_SAFETY_BYTES + 1;
+        let object = object("oversized-footer.arrow", footer_len + 10);
+        let trailer = [
+            u32::try_from(footer_len).unwrap().to_le_bytes().as_slice(),
+            b"ARROW1",
+        ]
+        .concat();
+        let store = Arc::new(TrailerOnlyStore {
+            inner: InMemory::new(),
+            object: object.clone(),
+            trailer: Bytes::from(trailer),
+            ranges: StdMutex::new(Vec::new()),
+        });
+        let object_store: Arc<dyn ObjectStore> = store.clone();
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(usize::MAX));
+
+        let error =
+            match read_file_layout(&object_store, &object, pool, "oversized-footer.arrow").await {
+                Ok(_) => panic!("an oversized footer must fail"),
+                Err(error) => error,
+            };
+
+        assert!(
+            error.to_string().contains("512 MiB safety bound"),
+            "{error}"
+        );
+        assert_eq!(
+            *store.ranges.lock().unwrap(),
+            [object.size - 10..object.size]
+        );
     }
 
     #[tokio::test]
