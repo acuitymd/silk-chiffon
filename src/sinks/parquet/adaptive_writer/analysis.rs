@@ -13,9 +13,9 @@ use datafusion::functions::string::expr_fn::octet_length;
 use datafusion::functions_aggregate::expr_fn::{approx_distinct, avg, count_distinct};
 use datafusion::prelude::{SessionConfig, SessionContext, col};
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
+use tokio_util::task::AbortOnDropHandle;
 
-use crate::sinks::parquet::adaptive_writer::encoding::is_analyzable;
+use crate::sinks::parquet::adaptive_writer::{PipelineTaskScope, encoding::is_analyzable};
 use crate::utils::channel_stream_provider::ChannelTableProvider;
 
 #[derive(Debug, Clone)]
@@ -27,17 +27,21 @@ pub struct ColumnAnalysis {
 /// Streams batches to background cardinality analysis.
 pub(crate) struct RowGroupAnalysisState {
     analysis_tx: mpsc::Sender<RecordBatch>,
-    query_handle: JoinHandle<Result<HashMap<String, ColumnAnalysis>>>,
+    query_handle: AbortOnDropHandle<Result<HashMap<String, ColumnAnalysis>>>,
 }
 
 impl RowGroupAnalysisState {
-    pub fn try_new(schema: &SchemaRef, columns_to_analyze: &[String]) -> Result<Self> {
+    pub fn try_new(
+        schema: &SchemaRef,
+        columns_to_analyze: &[String],
+        scope: &PipelineTaskScope,
+    ) -> Result<Self> {
         if columns_to_analyze.is_empty() {
             anyhow::bail!("no columns to analyze; use passthrough mode instead");
         }
 
         let (tx, rx) = mpsc::channel(16);
-        let query_handle = tokio::spawn(run_streaming_analysis(
+        let query_handle = scope.spawn(run_streaming_analysis(
             Arc::clone(schema),
             rx,
             columns_to_analyze.to_vec(),

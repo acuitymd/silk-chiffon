@@ -5,6 +5,13 @@
 //! and binds them once after parsing. The resulting [`ServiceInputBinding`] creates a table
 //! provider from one raw exact reference and the command's shared DataFusion session.
 //!
+//! Provider construction may establish reusable client or snapshot state, but it must not detach
+//! ongoing read tasks. Reading begins under the provider's physical
+//! [`ExecutionPlan`](datafusion::physical_plan::ExecutionPlan), and each stream returned by
+//! `ExecutionPlan::execute` owns its background work. Dropping that stream must promptly cancel the
+//! work and close its channels. DataFusion's `SpawnedTask`, `JoinSet`, and
+//! `RecordBatchReceiverStreamBuilder` provide drop-bound task ownership for custom service plans.
+//!
 //! Each connector keeps its settings type through parsing and binding. The private `binding`
 //! module erases the complete typed definition or binding behind a trait object, allowing
 //! connectors with different settings types to coexist without storing `Any` values or
@@ -22,6 +29,9 @@ use thiserror::Error;
 
 /// Creates one logical input provider from a raw exact reference, the shared session, and typed
 /// settings.
+///
+/// The returned provider owns reusable source state. Its physical execution streams own ongoing
+/// reads and must stop them when those streams are dropped.
 pub type ServiceInputProviderFn<T> =
     for<'a> fn(&'a str, &'a SessionContext, &'a T) -> BoxFuture<'a, Result<Arc<dyn TableProvider>>>;
 

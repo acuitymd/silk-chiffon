@@ -22,8 +22,7 @@ use parquet::{
     },
     schema::types::ColumnPath,
 };
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
-use tokio::sync::Mutex;
+use std::{collections::HashMap, sync::Arc};
 
 use anyhow::{Result, anyhow};
 use arrow::{
@@ -31,15 +30,13 @@ use arrow::{
     datatypes::{DataType, SchemaRef},
 };
 use async_trait::async_trait;
+use silk_chiffon_storage::StorageHandle;
 
 use crate::{
     BloomFilterConfig, ColumnDictionaryConfig, ColumnEncodingConfig, DictionaryMode,
     ParquetCompression, ParquetEncoding, ParquetStatistics, ParquetWriterVersion, SortDirection,
     SortSpec,
-    sinks::{
-        completed_file_url,
-        data_sink::{DataSink, SinkCompletion},
-    },
+    sinks::data_sink::{DataSink, SinkCompletion},
     utils::memory::estimate_row_bytes,
 };
 
@@ -298,12 +295,11 @@ impl ParquetSinkOptions {
 }
 
 struct ParquetSinkInner {
-    path: PathBuf,
     writer: Option<Box<dyn ParquetWriter>>,
 }
 
 pub struct ParquetSink {
-    inner: Mutex<ParquetSinkInner>,
+    inner: ParquetSinkInner,
 }
 
 fn column_path_from_dot_notation(name: &str) -> ColumnPath {
@@ -359,7 +355,7 @@ fn resolve_parquet_queue_sizes(
 
 impl ParquetSink {
     pub fn create(
-        path: PathBuf,
+        handle: StorageHandle,
         schema: &SchemaRef,
         options: &ParquetSinkOptions,
         runtimes: Arc<ParquetRuntimes>,
@@ -445,14 +441,13 @@ impl ParquetSink {
             ndv_map: options.ndv_map.clone(),
         };
         let writer: Box<dyn ParquetWriter> = Box::new(AdaptiveParquetWriter::new(
-            &path, schema, props, runtimes, config,
+            handle, schema, props, runtimes, config,
         ));
 
         Ok(Self {
-            inner: Mutex::new(ParquetSinkInner {
-                path,
+            inner: ParquetSinkInner {
                 writer: Some(writer),
-            }),
+            },
         })
     }
 
@@ -629,9 +624,8 @@ impl ParquetSink {
 #[async_trait]
 impl DataSink for ParquetSink {
     async fn write_batch(&mut self, batch: RecordBatch) -> Result<()> {
-        let mut inner = self.inner.lock().await;
-
-        let writer = inner
+        let writer = self
+            .inner
             .writer
             .as_mut()
             .ok_or_else(|| anyhow!("Writer already closed"))?;
@@ -641,17 +635,23 @@ impl DataSink for ParquetSink {
     }
 
     async fn finish(mut self: Box<Self>) -> Result<SinkCompletion> {
-        let mut inner = self.inner.lock().await;
-
-        let writer = inner
+        let writer = self
+            .inner
             .writer
             .take()
             .ok_or_else(|| anyhow!("Writer already closed"))?;
 
-        let rows_written = writer.close().await?;
-        let url = completed_file_url(&inner.path).await?;
+        let (rows_written, url) = writer.close().await?;
 
         Ok(SinkCompletion::new(url, [], rows_written))
+    }
+
+    async fn abort(mut self: Box<Self>) -> Result<()> {
+        let writer = self.inner.writer.take();
+        match writer {
+            Some(writer) => writer.cancel().await,
+            None => Ok(()),
+        }
     }
 }
 
@@ -664,7 +664,7 @@ mod tests {
         SortColumn, SortDirection,
         inspection::parquet::ParquetInspector,
         utils::parquet_inspection::read_entire_parquet_file,
-        utils::test_helpers::{test_data, verify},
+        utils::test_helpers::{prepared_local_output, test_data, verify},
     };
 
     use camino::Utf8Path;
@@ -820,7 +820,7 @@ mod tests {
                 test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["a", "b", "c"]);
 
             let mut sink = ParquetSink::create(
-                output_path.clone(),
+                prepared_local_output(&output_path),
                 &schema,
                 &ParquetSinkOptions::new(),
                 test_runtimes(),
@@ -854,7 +854,7 @@ mod tests {
                 test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["a", "b", "c"]);
 
             let mut sink = ParquetSink::create(
-                output_path.clone(),
+                prepared_local_output(&output_path),
                 &schema,
                 &ParquetSinkOptions::new(),
                 test_runtimes(),
@@ -884,7 +884,7 @@ mod tests {
             let batch2 = test_data::create_batch_with_ids_and_names(&schema, &[3, 4], &["c", "d"]);
 
             let mut sink = ParquetSink::create(
-                output_path.clone(),
+                prepared_local_output(&output_path),
                 &schema,
                 &ParquetSinkOptions::new(),
                 test_runtimes(),
@@ -916,7 +916,7 @@ mod tests {
             let batch3 = test_data::create_batch_with_ids_and_names(&schema, &[5], &["e"]);
 
             let mut sink = ParquetSink::create(
-                output_path.clone(),
+                prepared_local_output(&output_path),
                 &schema,
                 &ParquetSinkOptions::new().with_max_row_group_size(3),
                 test_runtimes(),
@@ -977,7 +977,7 @@ mod tests {
                 );
 
                 let mut compressed_sink = ParquetSink::create(
-                    output_path.clone(),
+                    prepared_local_output(&output_path),
                     &schema,
                     &ParquetSinkOptions::new().with_compression(compression),
                     test_runtimes(),
@@ -1001,7 +1001,7 @@ mod tests {
             let schema = test_data::simple_schema();
 
             let sink = ParquetSink::create(
-                output_path.clone(),
+                prepared_local_output(&output_path),
                 &schema,
                 &ParquetSinkOptions::new(),
                 test_runtimes(),
@@ -1043,7 +1043,7 @@ mod tests {
                 .unwrap();
 
             let mut sink = ParquetSink::create(
-                output_path.clone(),
+                prepared_local_output(&output_path),
                 &schema,
                 &ParquetSinkOptions::new(),
                 test_runtimes(),
@@ -1075,7 +1075,7 @@ mod tests {
             };
 
             let mut sink = ParquetSink::create(
-                output_path.clone(),
+                prepared_local_output(&output_path),
                 &schema,
                 &ParquetSinkOptions::new().with_sort_spec(sort_spec),
                 test_runtimes(),
@@ -1101,7 +1101,7 @@ mod tests {
             let sort_spec = SortSpec { columns: vec![] };
 
             let mut sink = ParquetSink::create(
-                output_path.clone(),
+                prepared_local_output(&output_path),
                 &schema,
                 &ParquetSinkOptions::new().with_sort_spec(sort_spec),
                 test_runtimes(),
@@ -1128,9 +1128,13 @@ mod tests {
 
             let options = ParquetSinkOptions::new().with_bloom_filters(bloom_filters);
 
-            let mut sink =
-                ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
-                    .unwrap();
+            let mut sink = ParquetSink::create(
+                prepared_local_output(&output_path),
+                &schema,
+                &options,
+                test_runtimes(),
+            )
+            .unwrap();
 
             sink.write_batch(batch).await.unwrap();
             Box::new(sink).finish().await.unwrap();
@@ -1162,9 +1166,13 @@ mod tests {
 
             let options = ParquetSinkOptions::new().with_bloom_filters(bloom_filters);
 
-            let mut sink =
-                ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
-                    .unwrap();
+            let mut sink = ParquetSink::create(
+                prepared_local_output(&output_path),
+                &schema,
+                &options,
+                test_runtimes(),
+            )
+            .unwrap();
 
             sink.write_batch(batch).await.unwrap();
             Box::new(sink).finish().await.unwrap();
@@ -1198,9 +1206,13 @@ mod tests {
 
             let options = ParquetSinkOptions::new().with_bloom_filters(bloom_filters);
 
-            let mut sink =
-                ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
-                    .unwrap();
+            let mut sink = ParquetSink::create(
+                prepared_local_output(&output_path),
+                &schema,
+                &options,
+                test_runtimes(),
+            )
+            .unwrap();
 
             sink.write_batch(batch).await.unwrap();
             Box::new(sink).finish().await.unwrap();
@@ -1232,9 +1244,13 @@ mod tests {
 
             let options = ParquetSinkOptions::new().with_bloom_filters(bloom_filters);
 
-            let mut sink =
-                ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
-                    .unwrap();
+            let mut sink = ParquetSink::create(
+                prepared_local_output(&output_path),
+                &schema,
+                &options,
+                test_runtimes(),
+            )
+            .unwrap();
 
             sink.write_batch(batch).await.unwrap();
             Box::new(sink).finish().await.unwrap();
@@ -1264,7 +1280,7 @@ mod tests {
             );
 
             let mut sink = ParquetSink::create(
-                output_path.clone(),
+                prepared_local_output(&output_path),
                 &schema,
                 &ParquetSinkOptions::new().with_no_dictionary(true),
                 test_runtimes(),
@@ -1293,7 +1309,7 @@ mod tests {
             let batch = test_data::create_batch_with_ids_and_names(&schema, &ids, &names);
 
             let mut sink = ParquetSink::create(
-                output_path.clone(),
+                prepared_local_output(&output_path),
                 &schema,
                 &ParquetSinkOptions::new().with_no_dictionary(false),
                 test_runtimes(),
@@ -1325,7 +1341,7 @@ mod tests {
                 );
 
                 let mut sink = ParquetSink::create(
-                    output_path.clone(),
+                    prepared_local_output(&output_path),
                     &schema,
                     &ParquetSinkOptions::new().with_statistics(statistics),
                     test_runtimes(),
@@ -1374,7 +1390,7 @@ mod tests {
                 );
 
                 let mut sink = ParquetSink::create(
-                    output_path.clone(),
+                    prepared_local_output(&output_path),
                     &schema,
                     &ParquetSinkOptions::new().with_writer_version(version),
                     test_runtimes(),
@@ -1404,7 +1420,7 @@ mod tests {
             };
 
             let result = ParquetSink::create(
-                output_path.clone(),
+                prepared_local_output(&output_path),
                 &schema,
                 &ParquetSinkOptions::new().with_sort_spec(sort_spec),
                 test_runtimes(),
@@ -1444,9 +1460,13 @@ mod tests {
 
             let options = ParquetSinkOptions::new().with_bloom_filters(bloom_filters);
 
-            let mut sink =
-                ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
-                    .unwrap();
+            let mut sink = ParquetSink::create(
+                prepared_local_output(&output_path),
+                &schema,
+                &options,
+                test_runtimes(),
+            )
+            .unwrap();
 
             sink.write_batch(batch).await.unwrap();
             Box::new(sink).finish().await.unwrap();
@@ -1475,9 +1495,13 @@ mod tests {
 
             let options = ParquetSinkOptions::new().with_bloom_filters(bloom_filters);
 
-            let mut sink =
-                ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
-                    .unwrap();
+            let mut sink = ParquetSink::create(
+                prepared_local_output(&output_path),
+                &schema,
+                &options,
+                test_runtimes(),
+            )
+            .unwrap();
 
             sink.write_batch(batch).await.unwrap();
             Box::new(sink).finish().await.unwrap();
@@ -1515,9 +1539,13 @@ mod tests {
                 .with_bloom_filters(bloom_filters)
                 .with_ndv_map(ndv_map);
 
-            let mut sink =
-                ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
-                    .unwrap();
+            let mut sink = ParquetSink::create(
+                prepared_local_output(&output_path),
+                &schema,
+                &options,
+                test_runtimes(),
+            )
+            .unwrap();
 
             sink.write_batch(batch).await.unwrap();
             Box::new(sink).finish().await.unwrap();
@@ -1557,9 +1585,13 @@ mod tests {
                 .with_bloom_filters(bloom_filters)
                 .with_ndv_map(ndv_map);
 
-            let mut sink =
-                ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
-                    .unwrap();
+            let mut sink = ParquetSink::create(
+                prepared_local_output(&output_path),
+                &schema,
+                &options,
+                test_runtimes(),
+            )
+            .unwrap();
 
             sink.write_batch(batch).await.unwrap();
             Box::new(sink).finish().await.unwrap();
@@ -1593,7 +1625,7 @@ mod tests {
             };
 
             let mut sink = ParquetSink::create(
-                output_path.clone(),
+                prepared_local_output(&output_path),
                 &schema,
                 &ParquetSinkOptions::new().with_sort_spec(sort_spec),
                 test_runtimes(),
@@ -1625,9 +1657,13 @@ mod tests {
             let options =
                 ParquetSinkOptions::new().with_column_dictionary_always(vec!["id".to_string()]);
 
-            let mut sink =
-                ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
-                    .unwrap();
+            let mut sink = ParquetSink::create(
+                prepared_local_output(&output_path),
+                &schema,
+                &options,
+                test_runtimes(),
+            )
+            .unwrap();
             sink.write_batch(batch).await.unwrap();
             Box::new(sink).finish().await.unwrap();
 
@@ -1659,9 +1695,13 @@ mod tests {
                 .with_bloom_filters(bloom_filters)
                 .with_no_dictionary(true);
 
-            let mut sink =
-                ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
-                    .unwrap();
+            let mut sink = ParquetSink::create(
+                prepared_local_output(&output_path),
+                &schema,
+                &options,
+                test_runtimes(),
+            )
+            .unwrap();
             sink.write_batch(batch).await.unwrap();
             Box::new(sink).finish().await.unwrap();
 
@@ -1699,9 +1739,13 @@ mod tests {
                 .with_ndv_map(ndv_map)
                 .with_no_dictionary(true);
 
-            let mut sink =
-                ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
-                    .unwrap();
+            let mut sink = ParquetSink::create(
+                prepared_local_output(&output_path),
+                &schema,
+                &options,
+                test_runtimes(),
+            )
+            .unwrap();
             sink.write_batch(batch).await.unwrap();
             Box::new(sink).finish().await.unwrap();
 
@@ -1723,9 +1767,13 @@ mod tests {
             let options =
                 ParquetSinkOptions::new().with_column_dictionary_analyze(vec!["id".to_string()]);
 
-            let mut sink =
-                ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
-                    .unwrap();
+            let mut sink = ParquetSink::create(
+                prepared_local_output(&output_path),
+                &schema,
+                &options,
+                test_runtimes(),
+            )
+            .unwrap();
             sink.write_batch(batch).await.unwrap();
             Box::new(sink).finish().await.unwrap();
 
@@ -1746,9 +1794,13 @@ mod tests {
             let options =
                 ParquetSinkOptions::new().with_column_dictionary_analyze(vec!["id".to_string()]);
 
-            let mut sink =
-                ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
-                    .unwrap();
+            let mut sink = ParquetSink::create(
+                prepared_local_output(&output_path),
+                &schema,
+                &options,
+                test_runtimes(),
+            )
+            .unwrap();
             sink.write_batch(batch).await.unwrap();
             Box::new(sink).finish().await.unwrap();
 
@@ -1781,9 +1833,13 @@ mod tests {
                 .with_bloom_filters(bloom_filters)
                 .with_column_dictionary_analyze(vec!["id".to_string()]);
 
-            let mut sink =
-                ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
-                    .unwrap();
+            let mut sink = ParquetSink::create(
+                prepared_local_output(&output_path),
+                &schema,
+                &options,
+                test_runtimes(),
+            )
+            .unwrap();
             sink.write_batch(batch).await.unwrap();
             Box::new(sink).finish().await.unwrap();
 
@@ -1818,9 +1874,13 @@ mod tests {
                 .with_bloom_filters(bloom_filters)
                 .with_column_dictionary_analyze(vec!["id".to_string()]);
 
-            let mut sink =
-                ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
-                    .unwrap();
+            let mut sink = ParquetSink::create(
+                prepared_local_output(&output_path),
+                &schema,
+                &options,
+                test_runtimes(),
+            )
+            .unwrap();
             sink.write_batch(batch).await.unwrap();
             Box::new(sink).finish().await.unwrap();
 
@@ -1847,9 +1907,13 @@ mod tests {
                 .with_column_dictionary_always(vec!["id".to_string()])
                 .with_column_dictionary_analyze(vec!["name".to_string()]);
 
-            let mut sink =
-                ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
-                    .unwrap();
+            let mut sink = ParquetSink::create(
+                prepared_local_output(&output_path),
+                &schema,
+                &options,
+                test_runtimes(),
+            )
+            .unwrap();
             sink.write_batch(batch).await.unwrap();
             Box::new(sink).finish().await.unwrap();
 
@@ -1889,9 +1953,13 @@ mod tests {
             let options =
                 ParquetSinkOptions::new().with_column_dictionary_always(vec!["col".to_string()]);
 
-            let mut sink =
-                ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
-                    .unwrap();
+            let mut sink = ParquetSink::create(
+                prepared_local_output(&output_path),
+                &schema,
+                &options,
+                test_runtimes(),
+            )
+            .unwrap();
             sink.write_batch(batch).await.unwrap();
             Box::new(sink).finish().await.unwrap();
 
@@ -1950,9 +2018,13 @@ mod tests {
 
             let options = ParquetSinkOptions::new().with_metadata(metadata);
 
-            let mut sink =
-                ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
-                    .unwrap();
+            let mut sink = ParquetSink::create(
+                prepared_local_output(&output_path),
+                &schema,
+                &options,
+                test_runtimes(),
+            )
+            .unwrap();
             sink.write_batch(batch).await.unwrap();
             Box::new(sink).finish().await.unwrap();
 
@@ -1994,9 +2066,13 @@ mod tests {
                 .with_max_row_group_size(100)
                 .with_column_dictionary_analyze(vec!["col".to_string()]);
 
-            let mut sink =
-                ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
-                    .unwrap();
+            let mut sink = ParquetSink::create(
+                prepared_local_output(&output_path),
+                &schema,
+                &options,
+                test_runtimes(),
+            )
+            .unwrap();
 
             // batch 1: LOW cardinality (5 distinct values in 100 rows = 5%)
             let low_cardinality_values: Vec<&str> =
@@ -2230,7 +2306,7 @@ mod tests {
                 test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["a", "b", "c"]);
 
             let mut sink = ParquetSink::create(
-                output_path.clone(),
+                prepared_local_output(&output_path),
                 &schema,
                 &ParquetSinkOptions::new().with_encoding(Some(ParquetEncoding::Plain)),
                 test_runtimes(),
@@ -2257,7 +2333,7 @@ mod tests {
                 test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["a", "b", "c"]);
 
             let mut sink = ParquetSink::create(
-                output_path.clone(),
+                prepared_local_output(&output_path),
                 &schema,
                 &ParquetSinkOptions::new().with_column_encodings(vec![ColumnEncodingConfig {
                     name: "id".to_string(),
@@ -2287,7 +2363,7 @@ mod tests {
                 test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["a", "b", "c"]);
 
             let mut sink = ParquetSink::create(
-                output_path.clone(),
+                prepared_local_output(&output_path),
                 &schema,
                 &ParquetSinkOptions::new().with_column_encodings(vec![
                     ColumnEncodingConfig {
@@ -2336,7 +2412,7 @@ mod tests {
 
             // use nested column path for encoding
             let mut sink = ParquetSink::create(
-                output_path.clone(),
+                prepared_local_output(&output_path),
                 &schema,
                 &ParquetSinkOptions::new().with_column_encodings(vec![ColumnEncodingConfig {
                     name: "outer.inner".to_string(),
@@ -2375,9 +2451,13 @@ mod tests {
             let options = ParquetSinkOptions::new()
                 .with_column_dictionary_always(vec!["outer.inner".to_string()]);
 
-            let mut sink =
-                ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
-                    .unwrap();
+            let mut sink = ParquetSink::create(
+                prepared_local_output(&output_path),
+                &schema,
+                &options,
+                test_runtimes(),
+            )
+            .unwrap();
             sink.write_batch(batch).await.unwrap();
             Box::new(sink).finish().await.unwrap();
 
@@ -2421,9 +2501,13 @@ mod tests {
 
             let options = ParquetSinkOptions::new().with_bloom_filters(bloom_config);
 
-            let mut sink =
-                ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
-                    .unwrap();
+            let mut sink = ParquetSink::create(
+                prepared_local_output(&output_path),
+                &schema,
+                &options,
+                test_runtimes(),
+            )
+            .unwrap();
             sink.write_batch(batch).await.unwrap();
             Box::new(sink).finish().await.unwrap();
 
@@ -2453,9 +2537,13 @@ mod tests {
             let options = ParquetSinkOptions::new()
                 .with_column_no_dictionary(vec!["outer.inner".to_string()]);
 
-            let mut sink =
-                ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
-                    .unwrap();
+            let mut sink = ParquetSink::create(
+                prepared_local_output(&output_path),
+                &schema,
+                &options,
+                test_runtimes(),
+            )
+            .unwrap();
             sink.write_batch(batch).await.unwrap();
             Box::new(sink).finish().await.unwrap();
 
@@ -2515,7 +2603,12 @@ mod tests {
                 .with_column_dictionary_always(vec!["name".to_string()])
                 .with_column_no_dictionary(vec!["name".to_string()]);
 
-            let result = ParquetSink::create(output_path, &schema, &options, test_runtimes());
+            let result = ParquetSink::create(
+                prepared_local_output(&output_path),
+                &schema,
+                &options,
+                test_runtimes(),
+            );
             match result {
                 Ok(_) => panic!("should reject conflicting dictionary settings"),
                 Err(err) => {
@@ -2581,9 +2674,13 @@ mod tests {
                 .with_writer_version(ParquetWriterVersion::V2)
                 .with_no_dictionary(true); // disable dict to see the fallback encoding
 
-            let mut sink =
-                ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
-                    .unwrap();
+            let mut sink = ParquetSink::create(
+                prepared_local_output(&output_path),
+                &schema,
+                &options,
+                test_runtimes(),
+            )
+            .unwrap();
             sink.write_batch(batch).await.unwrap();
             Box::new(sink).finish().await.unwrap();
 
@@ -2612,9 +2709,13 @@ mod tests {
                 .with_writer_version(ParquetWriterVersion::V2)
                 .with_no_dictionary(true);
 
-            let mut sink =
-                ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
-                    .unwrap();
+            let mut sink = ParquetSink::create(
+                prepared_local_output(&output_path),
+                &schema,
+                &options,
+                test_runtimes(),
+            )
+            .unwrap();
             sink.write_batch(batch).await.unwrap();
             Box::new(sink).finish().await.unwrap();
 
@@ -2639,9 +2740,13 @@ mod tests {
                 .with_writer_version(ParquetWriterVersion::V2)
                 .with_no_dictionary(true);
 
-            let mut sink =
-                ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
-                    .unwrap();
+            let mut sink = ParquetSink::create(
+                prepared_local_output(&output_path),
+                &schema,
+                &options,
+                test_runtimes(),
+            )
+            .unwrap();
             sink.write_batch(batch).await.unwrap();
             Box::new(sink).finish().await.unwrap();
 
@@ -2667,9 +2772,13 @@ mod tests {
                 .with_writer_version(ParquetWriterVersion::V2)
                 .with_no_dictionary(true);
 
-            let mut sink =
-                ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
-                    .unwrap();
+            let mut sink = ParquetSink::create(
+                prepared_local_output(&output_path),
+                &schema,
+                &options,
+                test_runtimes(),
+            )
+            .unwrap();
             sink.write_batch(batch).await.unwrap();
             Box::new(sink).finish().await.unwrap();
 
@@ -2697,9 +2806,13 @@ mod tests {
                 .with_writer_version(ParquetWriterVersion::V1)
                 .with_no_dictionary(true);
 
-            let mut sink =
-                ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
-                    .unwrap();
+            let mut sink = ParquetSink::create(
+                prepared_local_output(&output_path),
+                &schema,
+                &options,
+                test_runtimes(),
+            )
+            .unwrap();
             sink.write_batch(batch).await.unwrap();
             Box::new(sink).finish().await.unwrap();
 
@@ -2739,9 +2852,13 @@ mod tests {
                     encoding: ParquetEncoding::Plain,
                 }]);
 
-            let mut sink =
-                ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
-                    .unwrap();
+            let mut sink = ParquetSink::create(
+                prepared_local_output(&output_path),
+                &schema,
+                &options,
+                test_runtimes(),
+            )
+            .unwrap();
             sink.write_batch(batch).await.unwrap();
             Box::new(sink).finish().await.unwrap();
 
@@ -2784,9 +2901,13 @@ mod tests {
                     encoding: ParquetEncoding::DeltaBinaryPacked,
                 }]);
 
-            let mut sink =
-                ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
-                    .unwrap();
+            let mut sink = ParquetSink::create(
+                prepared_local_output(&output_path),
+                &schema,
+                &options,
+                test_runtimes(),
+            )
+            .unwrap();
             sink.write_batch(batch).await.unwrap();
             Box::new(sink).finish().await.unwrap();
 
@@ -2821,9 +2942,13 @@ mod tests {
                     encoding: ParquetEncoding::ByteStreamSplit,
                 }]);
 
-            let mut sink =
-                ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
-                    .unwrap();
+            let mut sink = ParquetSink::create(
+                prepared_local_output(&output_path),
+                &schema,
+                &options,
+                test_runtimes(),
+            )
+            .unwrap();
             sink.write_batch(batch).await.unwrap();
             Box::new(sink).finish().await.unwrap();
 
@@ -2860,9 +2985,13 @@ mod tests {
                     encoding: ParquetEncoding::DeltaLengthByteArray,
                 }]);
 
-            let mut sink =
-                ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
-                    .unwrap();
+            let mut sink = ParquetSink::create(
+                prepared_local_output(&output_path),
+                &schema,
+                &options,
+                test_runtimes(),
+            )
+            .unwrap();
             sink.write_batch(batch).await.unwrap();
             Box::new(sink).finish().await.unwrap();
 
@@ -2903,9 +3032,13 @@ mod tests {
                     encoding: ParquetEncoding::DeltaByteArray,
                 }]);
 
-            let mut sink =
-                ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
-                    .unwrap();
+            let mut sink = ParquetSink::create(
+                prepared_local_output(&output_path),
+                &schema,
+                &options,
+                test_runtimes(),
+            )
+            .unwrap();
             sink.write_batch(batch).await.unwrap();
             Box::new(sink).finish().await.unwrap();
 

@@ -299,6 +299,7 @@ mod tests {
 
     use crate::sinks::data_sink::DataSink;
     use crate::sinks::vortex::{VortexSink, VortexSinkOptions};
+    use crate::utils::test_helpers::prepared_local_output;
 
     fn simple_schema() -> SchemaRef {
         Arc::new(Schema::new(vec![
@@ -321,8 +322,12 @@ mod tests {
     fn write_vortex_file(path: &Path, schema: &SchemaRef, batch: RecordBatch) {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            let mut sink =
-                VortexSink::create(path.to_path_buf(), schema, VortexSinkOptions::new()).unwrap();
+            let mut sink = VortexSink::create(
+                prepared_local_output(path),
+                schema,
+                VortexSinkOptions::new(),
+            )
+            .unwrap();
             sink.write_batch(batch).await.unwrap();
             Box::new(sink).finish().await.unwrap();
         });

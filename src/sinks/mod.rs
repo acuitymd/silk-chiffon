@@ -1,21 +1,38 @@
 pub mod arrow;
 pub mod data_sink;
+mod object_sink_task;
 pub mod parquet;
 pub mod vortex;
 
-use std::path::Path;
+use std::fmt;
 
-use anyhow::{Context, Result, anyhow};
-use url::Url;
+use anyhow::Error;
 
-pub(crate) async fn completed_file_url(path: &Path) -> Result<Url> {
-    let absolute_path = tokio::fs::canonicalize(path)
-        .await
-        .with_context(|| format!("failed to resolve output path: {}", path.display()))?;
-    Url::from_file_path(&absolute_path).map_err(|()| {
-        anyhow!(
-            "failed to convert output path to file URL: {}",
-            absolute_path.display()
+pub(crate) fn with_cleanup_error(primary: Error, cleanup: Option<Error>) -> Error {
+    match cleanup {
+        Some(cleanup) => Error::new(PrimaryWithCleanup { primary, cleanup }),
+        None => primary,
+    }
+}
+
+#[derive(Debug)]
+struct PrimaryWithCleanup {
+    primary: Error,
+    cleanup: Error,
+}
+
+impl fmt::Display for PrimaryWithCleanup {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{}; cleanup also failed: {:#}",
+            self.primary, self.cleanup
         )
-    })
+    }
+}
+
+impl std::error::Error for PrimaryWithCleanup {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.primary.source()
+    }
 }

@@ -66,6 +66,16 @@ silk-chiffon transform --from events.arrow \
   --to-many 'by-date/{{year}}/{{month}}.parquet' --by year,month
 ```
 
+The `sort-single` and `nosort-multi` strategies render that template as the complete target and write one file per logical partition. `nosort-evict` can reopen a partition after eviction, so it requires a direct unconditional `{{ file_number }}` interpolation. The value is a zero-based integer and can appear anywhere in the object path; Silk Chiffon never inserts or scans suffixes on its own:
+
+```bash
+silk-chiffon transform --from events.arrow \
+  --to-many 'by-region/{{region}}_{{file_number}}.parquet' --by region \
+  --partition-strategy nosort-evict --max-open-partitions 100
+```
+
+Object uploads use a 10 MiB adaptive single-put threshold and multipart part size by default, with at most eight multipart part requests in flight across the command. Tune these with `--object-store-upload-part-size` and `--object-store-max-in-flight-parts`.
+
 ### Reshape with SQL
 
 `--query` runs a DataFusion query over the input, which is registered as a table named `data`. Filter it, or re-cast a column's type and keep the rest:

@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fs::File, io::BufWriter, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, io::Write, sync::Arc};
 
 use anyhow::{Context, Result};
 use arrow::{
@@ -11,13 +11,14 @@ use arrow::{
 use async_trait::async_trait;
 use datafusion::execution::SendableRecordBatchStream;
 use futures::stream::StreamExt;
-use tokio::{sync::mpsc, task::JoinHandle};
+use silk_chiffon_storage::{BlockingObjectUploadWriter, ObjectUpload, StorageHandle};
+use tokio::sync::mpsc;
 
 use crate::{
     ArrowCompression, ArrowIPCFormat,
     sinks::{
-        completed_file_url,
         data_sink::{DataSink, SinkCompletion},
+        object_sink_task::ObjectSinkTask,
     },
     utils::memory::estimate_row_bytes,
 };
@@ -87,13 +88,12 @@ impl ArrowSinkOptions {
 }
 
 struct WriterResult {
-    path: PathBuf,
     rows_written: u64,
 }
 
 pub struct ArrowSink {
     tx: Option<mpsc::Sender<RecordBatch>>,
-    handle: Option<JoinHandle<Result<WriterResult>>>,
+    task: Option<ObjectSinkTask<WriterResult>>,
 }
 
 const DEFAULT_QUEUE_DEPTH: usize = 16;
@@ -117,27 +117,34 @@ fn resolve_arrow_queue_depth(options: &ArrowSinkOptions, schema: &SchemaRef) -> 
 }
 
 impl ArrowSink {
-    pub fn create(path: PathBuf, schema: &SchemaRef, options: ArrowSinkOptions) -> Result<Self> {
+    pub fn create(
+        handle: StorageHandle,
+        schema: &SchemaRef,
+        options: ArrowSinkOptions,
+    ) -> Result<Self> {
         let queue_depth = resolve_arrow_queue_depth(&options, schema);
         let (tx, rx) = mpsc::channel::<RecordBatch>(queue_depth);
+        let mut upload = ObjectUpload::new(handle);
+        let writer = upload.blocking_writer()?;
 
         let schema = Arc::clone(schema);
-        let handle = tokio::task::spawn_blocking(move || writer_task(path, &schema, options, rx));
+        let task = ObjectSinkTask::spawn("Arrow writer", upload, move |_cancellation| {
+            tokio::task::spawn_blocking(move || writer_task(writer, &schema, options, rx))
+        });
 
         Ok(Self {
             tx: Some(tx),
-            handle: Some(handle),
+            task: Some(task),
         })
     }
 }
 
 fn writer_task(
-    path: PathBuf,
+    writer: BlockingObjectUploadWriter,
     schema: &SchemaRef,
     options: ArrowSinkOptions,
     mut rx: mpsc::Receiver<RecordBatch>,
 ) -> Result<WriterResult> {
-    let file = BufWriter::new(File::create(&path)?);
     let write_options = match options.compression {
         ArrowCompression::Zstd | ArrowCompression::Lz4 => {
             IpcWriteOptions::default().try_with_compression(options.compression.into())?
@@ -147,12 +154,12 @@ fn writer_task(
 
     let mut writer: Box<dyn ArrowRecordBatchWriter> = match options.format {
         ArrowIPCFormat::File => Box::new(FileWriter::try_new_with_options(
-            file,
+            writer,
             schema,
             write_options,
         )?),
         ArrowIPCFormat::Stream => Box::new(StreamWriter::try_new_with_options(
-            file,
+            writer,
             schema,
             write_options,
         )?),
@@ -183,7 +190,7 @@ fn writer_task(
 
     writer.finish()?;
 
-    Ok(WriterResult { path, rows_written })
+    Ok(WriterResult { rows_written })
 }
 
 #[async_trait]
@@ -207,11 +214,22 @@ impl DataSink for ArrowSink {
         // drop sender to signal EOF
         self.tx.take();
 
-        let handle = self.handle.take().context("sink already finished")?;
-        let result = handle.await.context("writer task panicked")??;
-        let url = completed_file_url(&result.path).await?;
+        let (result, url) = self
+            .task
+            .take()
+            .context("sink already finished")?
+            .finish()
+            .await?;
 
         Ok(SinkCompletion::new(url, [], result.rows_written))
+    }
+
+    async fn abort(mut self: Box<Self>) -> Result<()> {
+        self.tx.take();
+        match self.task.take() {
+            Some(task) => task.abort().await,
+            None => Ok(()),
+        }
     }
 }
 
@@ -220,7 +238,7 @@ pub trait ArrowRecordBatchWriter: RecordBatchWriter + Send {
     fn write_metadata(&mut self, key: &str, value: &str);
 }
 
-impl ArrowRecordBatchWriter for FileWriter<BufWriter<File>> {
+impl<W: Write + Send> ArrowRecordBatchWriter for FileWriter<W> {
     fn finish(&mut self) -> Result<(), ArrowError> {
         self.finish()
     }
@@ -229,7 +247,7 @@ impl ArrowRecordBatchWriter for FileWriter<BufWriter<File>> {
         self.write_metadata(key, value);
     }
 }
-impl ArrowRecordBatchWriter for StreamWriter<BufWriter<File>> {
+impl<W: Write + Send> ArrowRecordBatchWriter for StreamWriter<W> {
     fn finish(&mut self) -> Result<(), ArrowError> {
         self.finish()
     }
@@ -243,7 +261,30 @@ impl ArrowRecordBatchWriter for StreamWriter<BufWriter<File>> {
 mod tests {
     use super::*;
     use crate::utils::test_helpers::{test_data, verify};
+    use silk_chiffon_storage::{ExistingOutput, LocationInput, OutputPreparation};
     use tempfile::tempdir;
+
+    fn prepared_output(path: &std::path::Path) -> StorageHandle {
+        let path = path.to_path_buf();
+        std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async move {
+                    silk_chiffon_storage::local::session()
+                        .unwrap()
+                        .prepare_output_target(
+                            &LocationInput::parse(path.to_str().unwrap()).unwrap(),
+                            &OutputPreparation::new(ExistingOutput::Allow, false),
+                        )
+                        .await
+                        .unwrap()
+                })
+        })
+        .join()
+        .unwrap()
+    }
 
     mod arrow_sink_tests {
         use super::*;
@@ -257,8 +298,12 @@ mod tests {
             let batch =
                 test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["a", "b", "c"]);
 
-            let mut sink =
-                ArrowSink::create(output_path.clone(), &schema, ArrowSinkOptions::new()).unwrap();
+            let mut sink = ArrowSink::create(
+                prepared_output(&output_path),
+                &schema,
+                ArrowSinkOptions::new(),
+            )
+            .unwrap();
 
             sink.write_batch(batch).await.unwrap();
             let result = Box::new(sink).finish().await.unwrap();
@@ -284,8 +329,12 @@ mod tests {
             let batch1 = test_data::create_batch_with_ids_and_names(&schema, &[1, 2], &["a", "b"]);
             let batch2 = test_data::create_batch_with_ids_and_names(&schema, &[3, 4], &["c", "d"]);
 
-            let mut sink =
-                ArrowSink::create(output_path.clone(), &schema, ArrowSinkOptions::new()).unwrap();
+            let mut sink = ArrowSink::create(
+                prepared_output(&output_path),
+                &schema,
+                ArrowSinkOptions::new(),
+            )
+            .unwrap();
 
             sink.write_batch(batch1).await.unwrap();
             sink.write_batch(batch2).await.unwrap();
@@ -309,7 +358,7 @@ mod tests {
             let batch3 = test_data::create_batch_with_ids_and_names(&schema, &[5], &["e"]);
 
             let mut sink = ArrowSink::create(
-                output_path.clone(),
+                prepared_output(&output_path),
                 &schema,
                 ArrowSinkOptions::new().with_record_batch_size(3),
             )
@@ -338,7 +387,7 @@ mod tests {
                 test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["a", "b", "c"]);
 
             let mut sink = ArrowSink::create(
-                output_path.clone(),
+                prepared_output(&output_path),
                 &schema,
                 ArrowSinkOptions::new().with_format(ArrowIPCFormat::Stream),
             )
@@ -388,7 +437,7 @@ mod tests {
                 );
 
                 let mut compressed_sink = ArrowSink::create(
-                    output_path.clone(),
+                    prepared_output(&output_path),
                     &schema,
                     ArrowSinkOptions::new().with_compression(compression),
                 )
@@ -398,9 +447,12 @@ mod tests {
                 let compressed_result = Box::new(compressed_sink).finish().await.unwrap();
                 let compressed_size = output_path.metadata().unwrap().len();
 
-                let mut uncompressed_sink =
-                    ArrowSink::create(output_path.clone(), &schema, ArrowSinkOptions::new())
-                        .unwrap();
+                let mut uncompressed_sink = ArrowSink::create(
+                    prepared_output(&output_path),
+                    &schema,
+                    ArrowSinkOptions::new(),
+                )
+                .unwrap();
                 uncompressed_sink.write_batch(batch).await.unwrap();
                 let uncompressed_result = Box::new(uncompressed_sink).finish().await.unwrap();
                 let uncompressed_size = output_path.metadata().unwrap().len();
@@ -427,7 +479,7 @@ mod tests {
             metadata.insert("key2".to_string(), "value2".to_string());
 
             let mut sink = ArrowSink::create(
-                output_path.clone(),
+                prepared_output(&output_path),
                 &schema,
                 ArrowSinkOptions::new().with_metadata(metadata.clone()),
             )
@@ -452,8 +504,12 @@ mod tests {
             let batch =
                 test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["a", "b", "c"]);
 
-            let mut sink =
-                ArrowSink::create(output_path.clone(), &schema, ArrowSinkOptions::new()).unwrap();
+            let mut sink = ArrowSink::create(
+                prepared_output(&output_path),
+                &schema,
+                ArrowSinkOptions::new(),
+            )
+            .unwrap();
 
             sink.write_batch(batch).await.unwrap();
             Box::new(sink).finish().await.unwrap();
@@ -472,8 +528,12 @@ mod tests {
 
             let schema = test_data::simple_schema();
 
-            let sink =
-                ArrowSink::create(output_path.clone(), &schema, ArrowSinkOptions::new()).unwrap();
+            let sink = ArrowSink::create(
+                prepared_output(&output_path),
+                &schema,
+                ArrowSinkOptions::new(),
+            )
+            .unwrap();
 
             let result = Box::new(sink).finish().await.unwrap();
 
@@ -509,8 +569,12 @@ mod tests {
                 .await
                 .unwrap();
 
-            let mut sink =
-                ArrowSink::create(output_path.clone(), &schema, ArrowSinkOptions::new()).unwrap();
+            let mut sink = ArrowSink::create(
+                prepared_output(&output_path),
+                &schema,
+                ArrowSinkOptions::new(),
+            )
+            .unwrap();
 
             sink.write_stream(stream).await.unwrap();
             let result = Box::new(sink).finish().await.unwrap();

@@ -16,8 +16,8 @@ use object_store::{ObjectStore, local::LocalFileSystem};
 use crate::{Location, LocationPattern};
 #[cfg(feature = "local")]
 use crate::{
-    StorageAccess, StorageBackend, StorageBackendBuildError, StorageRegistry, StorageSession,
-    StorageSessionCreationError,
+    OutputPreparation, StorageAccess, StorageBackend, StorageBackendBuildError, StorageHandle,
+    StorageRegistry, StorageSession, StorageSessionCreationError,
 };
 
 /// Builds the built-in local backend definition for canonical `file:///` locations.
@@ -35,7 +35,8 @@ pub fn backend() -> Result<StorageBackend, StorageBackendBuildError> {
         .schemes(["file"])
         .access(StorageAccess::ReadWrite)
         .allow_any_location()
-        .object_store_creator(create_object_store);
+        .object_store_creator(create_object_store)
+        .prepare_output_target(prepare_output_target);
 
     #[cfg(feature = "local-bare-paths")]
     let builder = builder
@@ -71,6 +72,31 @@ fn create_object_store(
     _retry: Option<&crate::RetryConfig>,
 ) -> anyhow::Result<Arc<dyn ObjectStore>> {
     Ok(Arc::new(LocalFileSystem::new()))
+}
+
+#[cfg(feature = "local")]
+fn prepare_output_target<'a>(
+    handle: &'a StorageHandle,
+    preparation: &'a OutputPreparation,
+    _settings: &'a (),
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + 'a>> {
+    Box::pin(async move {
+        let path = handle.local_path()?;
+        let Some(parent) = path.parent() else {
+            return Ok(());
+        };
+        if preparation.create_parent_directories() {
+            tokio::fs::create_dir_all(parent).await?;
+        } else {
+            let metadata = tokio::fs::metadata(parent).await?;
+            anyhow::ensure!(
+                metadata.is_dir(),
+                "output parent is not a directory: {}",
+                parent.display()
+            );
+        }
+        Ok(())
+    })
 }
 
 #[cfg(feature = "local-bare-paths")]

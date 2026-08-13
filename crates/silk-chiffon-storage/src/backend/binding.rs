@@ -50,9 +50,9 @@ use url::Url;
 
 use super::{
     BareLocationMapper, BarePatternMapper, CliArgumentKey, LocationValidator, ObjectStoreCreatorFn,
-    StorageAccess, StorageDirection,
+    PrepareOutputTargetFn, StorageAccess, StorageDirection,
 };
-use crate::{Location, LocationPattern};
+use crate::{Location, LocationPattern, OutputPreparation, StorageHandle};
 
 /// Definition-time behavior shared by storage backends with different settings types.
 pub(super) trait BackendDefinition: Send + Sync {
@@ -92,6 +92,12 @@ pub(crate) trait BackendBinding: Send + Sync {
         store_url: &Url,
         retry: Option<&RetryConfig>,
     ) -> anyhow::Result<std::sync::Arc<dyn ObjectStore>>;
+
+    fn prepare_output_target<'a>(
+        &'a self,
+        handle: &'a StorageHandle,
+        preparation: &'a OutputPreparation,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + 'a>>;
 }
 
 /// One complete backend before command arguments have been parsed.
@@ -103,6 +109,7 @@ pub(super) struct TypedBackendDefinition<T> {
     pub(super) bare_pattern_mapper: Option<BarePatternMapper<T>>,
     pub(super) location_validator: LocationValidator<T>,
     pub(super) object_store_creator: ObjectStoreCreatorFn<T>,
+    pub(super) prepare_output_target: PrepareOutputTargetFn<T>,
     pub(super) uses_shared_retries: bool,
     pub(super) cli_argument_keys: Box<[CliArgumentKey]>,
     pub(super) augment_args: fn(Command) -> Command,
@@ -150,6 +157,7 @@ where
             bare_pattern_mapper: self.bare_pattern_mapper,
             location_validator: self.location_validator,
             object_store_creator: self.object_store_creator,
+            prepare_output_target: self.prepare_output_target,
             uses_shared_retries: self.uses_shared_retries,
         }))
     }
@@ -164,6 +172,7 @@ struct TypedBackendBinding<T> {
     bare_pattern_mapper: Option<BarePatternMapper<T>>,
     location_validator: LocationValidator<T>,
     object_store_creator: ObjectStoreCreatorFn<T>,
+    prepare_output_target: PrepareOutputTargetFn<T>,
     uses_shared_retries: bool,
 }
 
@@ -203,5 +212,13 @@ where
         retry: Option<&RetryConfig>,
     ) -> anyhow::Result<std::sync::Arc<dyn ObjectStore>> {
         (self.object_store_creator)(store_url, &self.settings, retry)
+    }
+
+    fn prepare_output_target<'a>(
+        &'a self,
+        handle: &'a StorageHandle,
+        preparation: &'a OutputPreparation,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + 'a>> {
+        (self.prepare_output_target)(handle, preparation, &self.settings)
     }
 }

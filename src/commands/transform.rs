@@ -11,7 +11,7 @@ use camino::Utf8Path;
 use datafusion::catalog::TableProvider;
 use owo_colors::OwoColorize;
 use silk_chiffon_core::{
-    InputSources, OutputOrderingColumn, Pipeline, SinkBindingConfig, SinkConcurrency,
+    InputSources, OpenSinkMode, OutputOrderingColumn, Pipeline, SinkBindingConfig,
     SortDirection as CoreSortDirection,
 };
 use tabled::{builder::Builder, settings::Style};
@@ -21,7 +21,7 @@ mod file_output;
 mod scheme;
 
 use file_input::FileInputRoute;
-use file_output::{FileOutputReport, FileOutputRoute, FileOutputTarget};
+use file_output::{FileOutputBinder, FileOutputReport, FileOutputRequest};
 use scheme::explicit_scheme;
 
 pub async fn run(args: TransformCommand) -> Result<()> {
@@ -296,28 +296,28 @@ pub async fn run(args: TransformCommand) -> Result<()> {
     } else {
         three_quarter_cpus
     };
-    let sink_concurrency = if to_many.is_some()
+    let open_sink_mode = if to_many.is_some()
         && matches!(
             partition_strategy,
             PartitionStrategy::NosortMulti | PartitionStrategy::NosortEvict
         ) {
-        SinkConcurrency::Concurrent
+        OpenSinkMode::Multiple
     } else {
-        SinkConcurrency::Sequential
+        OpenSinkMode::OneAtATime
     };
     let sink_context = SinkBindingConfig::new(
         NonZeroUsize::new(output_threads).expect("the thread budget is always positive"),
-        sink_concurrency,
+        open_sink_mode,
         output_ordering,
     );
     let target = match (to, to_many) {
-        (Some(target), None) => FileOutputTarget::Exact {
+        (Some(target), None) => FileOutputRequest::Exact {
             target,
             exclude_columns,
             create_dirs,
             overwrite,
         },
-        (None, Some(pattern)) => FileOutputTarget::Template {
+        (None, Some(pattern)) => FileOutputRequest::Template {
             pattern,
             partition_fields: partition_columns,
             strategy: partition_strategy,
@@ -328,12 +328,26 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         },
         _ => unreachable!("Clap requires exactly one output mode"),
     };
-    let output = FileOutputRoute::new(&storage, &formats, output_format.as_deref())
+    let output = FileOutputBinder::new(&storage, &formats, output_format.as_deref())
         .bind(target, &sink_context, &prepared.output_schema())
         .await?;
 
     let execution = prepared.begin_execution()?;
-    let report = output.write(execution.into_sendable_stream()).await?;
+    let report = match output.write(execution.into_sendable_stream()).await {
+        Ok(report) => report,
+        Err(failure) => {
+            if let Some(format) = list_outputs_format
+                && let Err(reporting) =
+                    print_output_files(failure.report(), format, list_outputs_file.as_deref())
+            {
+                return Err(crate::sinks::with_cleanup_error(
+                    failure.into(),
+                    Some(reporting),
+                ));
+            }
+            return Err(failure.into());
+        }
+    };
 
     if let Some(format) = list_outputs_format {
         print_output_files(&report, format, list_outputs_file.as_deref())?;

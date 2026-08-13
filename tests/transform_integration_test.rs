@@ -4,7 +4,10 @@ use camino::Utf8PathBuf;
 use silk_chiffon::{
     Cli, Command, ListOutputsFormat, PartitionStrategy, PoolReserveSpec, SortColumn, SortDirection,
     SortSpec,
-    utils::test_data::{TestBatch, TestFile},
+    utils::{
+        test_data::{TestBatch, TestFile},
+        test_helpers::prepared_local_output,
+    },
 };
 use silk_chiffon_core::QueryDialect;
 use std::ffi::OsString;
@@ -489,6 +492,99 @@ async fn test_transform_to_many_rejects_malformed_template() {
             .to_string()
             .contains("invalid file output template")
     );
+}
+
+#[tokio::test]
+async fn test_nosort_evict_requires_direct_file_number_interpolation() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    TestFile::write_arrow_batch(&input, &TestBatch::simple_with(&[1], &["a"]));
+
+    let result = run_transform(TestTransformCommand {
+        from: Some(input.to_string_lossy().to_string()),
+        to_many: Some(
+            temp_dir
+                .path()
+                .join("{{name}}.arrow")
+                .to_string_lossy()
+                .to_string(),
+        ),
+        by: Some("name".to_string()),
+        partition_strategy: PartitionStrategy::NosortEvict,
+        ..transform_defaults()
+    })
+    .await;
+
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("must directly interpolate { file_number }")
+    );
+}
+
+#[tokio::test]
+async fn test_partition_targets_are_not_rewritten_after_a_session_collision() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    TestFile::write_arrow_batch(&input, &TestBatch::simple_with(&[1, 2], &["a", "b"]));
+
+    let result = run_transform(TestTransformCommand {
+        from: Some(input.to_string_lossy().to_string()),
+        to_many: Some(
+            temp_dir
+                .path()
+                .join("same.arrow")
+                .to_string_lossy()
+                .to_string(),
+        ),
+        by: Some("name".to_string()),
+        partition_strategy: PartitionStrategy::NosortMulti,
+        overwrite: true,
+        ..transform_defaults()
+    })
+    .await;
+
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("already claimed by this storage session")
+    );
+    assert!(!temp_dir.path().join("same_1.arrow").exists());
+}
+
+#[tokio::test]
+async fn test_dynamic_partition_extension_requires_explicit_format() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    TestFile::write_arrow_batch(&input, &TestBatch::simple_with(&[1], &["a"]));
+    let template = temp_dir.path().join("{{name}}.{{ 'arrow' }}");
+
+    let result = run_transform(TestTransformCommand {
+        from: Some(input.to_string_lossy().to_string()),
+        to_many: Some(template.to_string_lossy().to_string()),
+        by: Some("name".to_string()),
+        ..transform_defaults()
+    })
+    .await;
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("Could not detect format")
+    );
+
+    run_transform(TestTransformCommand {
+        from: Some(input.to_string_lossy().to_string()),
+        to_many: Some(template.to_string_lossy().to_string()),
+        by: Some("name".to_string()),
+        output_format: Some("arrow".to_string()),
+        ..transform_defaults()
+    })
+    .await
+    .unwrap();
+    assert!(temp_dir.path().join("a.arrow").exists());
 }
 
 #[tokio::test]
@@ -1488,7 +1584,7 @@ async fn empty_vortex_files_still_participate_in_leaf_schema_validation() {
         false,
     )]));
     let sink = VortexSink::create(
-        mismatched.clone(),
+        prepared_local_output(&mismatched),
         &mismatched_schema,
         VortexSinkOptions::new(),
     )
@@ -1496,7 +1592,7 @@ async fn empty_vortex_files_still_participate_in_leaf_schema_validation() {
     Box::new(sink).finish().await.unwrap();
     let representative_batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
     let mut sink = VortexSink::create(
-        representative.clone(),
+        prepared_local_output(&representative),
         &representative_batch.schema(),
         VortexSinkOptions::new(),
     )
@@ -2070,6 +2166,41 @@ async fn test_transform_partition_list_outputs_json() {
         assert_eq!(output["partition_fields"][0]["field"], "name");
         assert!(output["partition_fields"][0]["value"].is_string());
     }
+}
+
+#[tokio::test]
+async fn test_transform_partition_failure_writes_completed_outputs_only() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let report = temp_dir.path().join("outputs.json");
+    let target = temp_dir.path().join("shared.arrow");
+
+    TestFile::write_arrow_batch(&input, &TestBatch::simple_with(&[1, 2], &["a", "b"]));
+
+    let error = run_transform(TestTransformCommand {
+        from: Some(input.to_string_lossy().into_owned()),
+        to_many: Some(target.to_string_lossy().into_owned()),
+        by: Some("name".to_owned()),
+        partition_strategy: PartitionStrategy::SortSingle,
+        list_outputs: Some(ListOutputsFormat::Json),
+        list_outputs_file: Some(Utf8PathBuf::from_path_buf(report.clone()).unwrap()),
+        create_dirs: false,
+        ..transform_defaults()
+    })
+    .await
+    .unwrap_err();
+
+    assert!(
+        format!("{error:#}").contains("already claimed by this storage session"),
+        "{error:#}"
+    );
+    let outputs: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(report).unwrap()).unwrap();
+    let outputs = outputs.as_array().unwrap();
+    assert_eq!(outputs.len(), 1);
+    assert_eq!(outputs[0]["partition_fields"][0]["value"], "a");
+    let target_url = url::Url::from_file_path(&target).unwrap();
+    assert_eq!(outputs[0]["durable_locations"][0], target_url.as_str());
 }
 
 #[tokio::test]
@@ -3997,7 +4128,7 @@ async fn test_nosort_evict_partitioned_write() {
     .unwrap();
     TestFile::write_arrow_batch(&input, &batch);
 
-    let template = output_dir.join("{{category}}.parquet");
+    let template = output_dir.join("{{category}}_{{file_number}}.parquet");
     run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to_many: Some(template.to_string_lossy().to_string()),
@@ -4010,14 +4141,14 @@ async fn test_nosort_evict_partitioned_write() {
     .await
     .unwrap();
 
-    // with max_open=2, x and y open first; z evicts x; then x reopens as x_1
-    assert!(output_dir.join("x.parquet").exists());
-    assert!(output_dir.join("y.parquet").exists());
-    assert!(output_dir.join("z.parquet").exists());
+    assert!(output_dir.join("x_0.parquet").exists());
+    assert!(output_dir.join("y_0.parquet").exists());
+    assert!(output_dir.join("z_0.parquet").exists());
     assert!(
         output_dir.join("x_1.parquet").exists(),
-        "evicted partition should reopen with _1 suffix"
+        "the template should render the reopened partition's next file number"
     );
+    assert!(output_dir.join("y_1.parquet").exists());
 
     // verify data correctness: all 5 rows present across files
     let mut total_rows = 0;

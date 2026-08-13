@@ -16,7 +16,7 @@
 //!      │        ◄───────────────┼────────┘              │
 //!      │        │                                       │
 //!      └─► writer_task ─────────────────────────────────┼─► I/O tasks
-//!               │                                       │   (file ops)
+//!               │                                       │   (upload bridge)
 //!               └───────────────────────────────────────┘
 //! ```
 //!
@@ -31,13 +31,15 @@
 //! 3. **Encoder Coordinator** (1 task): Uses `FuturesOrdered` to spawn encoding tasks
 //!    on `CpuRuntime` (up to `max_row_group_concurrency`). Results come out in order.
 //!
-//! 4. **Writing** (1 task): Receives encoded row groups in order, writes to disk
-//!    via `IoRuntime`.
+//! 4. **Writing** (1 task): Receives encoded row groups in order and feeds the object-upload
+//!    bridge via `IoRuntime`.
+//!
+//! Every stage and nested task is spawned through one pipeline scope. The scope applies the
+//! operation's cancellation token to stages, tracks work on the dedicated runtimes, and waits for
+//! that work before the pipeline task releases those runtimes.
 
 use std::collections::HashMap;
-use std::fs::File;
 use std::io::BufWriter;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -56,14 +58,26 @@ use parquet::arrow::arrow_writer::{
 use parquet::file::properties::{WriterProperties, WriterPropertiesPtr};
 use parquet::file::writer::SerializedFileWriter;
 use parquet::schema::types::SchemaDescPtr;
+use silk_chiffon_storage::BlockingObjectUploadWriter;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
+use super::PipelineTaskScope;
 use super::analysis::{ColumnAnalysis, RowGroupAnalysisState};
 use super::config::{AdaptiveWriterConfig, ResolvedColumnConfigs};
 use super::encoding::build_row_group_properties;
 use crate::sinks::parquet::pools::ParquetRuntimes;
+
+pub(super) struct PipelineSetup {
+    pub(super) writer: BlockingObjectUploadWriter,
+    pub(super) schema: SchemaRef,
+    pub(super) base_props: WriterProperties,
+    pub(super) runtimes: Arc<ParquetRuntimes>,
+    pub(super) config: AdaptiveWriterConfig,
+    pub(super) ingestion_rx: mpsc::Receiver<RecordBatch>,
+    pub(super) scope: PipelineTaskScope,
+}
 
 pub(crate) struct RowGroupWork {
     pub batch: RecordBatch,
@@ -77,30 +91,13 @@ pub(crate) struct EncodedRowGroup {
     pub num_rows: usize,
 }
 
-pub(crate) async fn create_file(
-    path: PathBuf,
-    buffer_size: usize,
-    runtimes: &ParquetRuntimes,
-) -> Result<BufWriter<File>> {
-    let mut tasks = JoinSet::new();
-    tasks.spawn_on(
-        async move { Ok(BufWriter::with_capacity(buffer_size, File::create(&path)?)) },
-        runtimes.io.handle(),
-    );
-    tasks
-        .join_next()
-        .await
-        .ok_or_else(|| anyhow!("file create task set unexpectedly empty"))?
-        .context("file create task failed")?
-}
-
 pub(crate) fn create_arrow_writer(
-    file: BufWriter<File>,
+    file: BufWriter<BlockingObjectUploadWriter>,
     schema: &SchemaRef,
     base_props: WriterProperties,
     skip_arrow_metadata: bool,
 ) -> Result<(
-    SerializedFileWriter<BufWriter<File>>,
+    SerializedFileWriter<BufWriter<BlockingObjectUploadWriter>>,
     SchemaDescPtr,
     WriterPropertiesPtr,
 )> {
@@ -124,15 +121,17 @@ pub(crate) fn create_arrow_writer(
     Ok((file_writer, parquet_schema, base_props))
 }
 
-pub(crate) async fn run_pipeline(
-    path: PathBuf,
-    schema: SchemaRef,
-    base_props: WriterProperties,
-    runtimes: Arc<ParquetRuntimes>,
-    config: AdaptiveWriterConfig,
-    ingestion_rx: mpsc::Receiver<RecordBatch>,
-) -> Result<u64> {
-    let file = create_file(path, config.buffer_size, &runtimes).await?;
+pub(super) async fn run_pipeline(setup: PipelineSetup) -> Result<u64> {
+    let PipelineSetup {
+        writer,
+        schema,
+        base_props,
+        runtimes,
+        config,
+        ingestion_rx,
+        scope,
+    } = setup;
+    let file = BufWriter::with_capacity(config.buffer_size, writer);
 
     let (encoding_tx, encoding_rx) = mpsc::channel::<RowGroupWork>(config.encoding_queue_size);
     let (writing_tx, writing_rx) = mpsc::channel::<EncodedRowGroup>(config.writing_queue_size);
@@ -141,51 +140,67 @@ pub(crate) async fn run_pipeline(
         create_arrow_writer(file, &schema, base_props, config.skip_arrow_metadata)?;
 
     let total_rows = Arc::new(AtomicU64::new(0));
-    let mut tasks: JoinSet<Result<()>> = JoinSet::new();
+    let mut pipeline_tasks: JoinSet<Result<()>> = JoinSet::new();
+    let max_row_group_concurrency = config.max_row_group_concurrency;
 
-    tasks.spawn(ingestion_task(
-        ingestion_rx,
-        encoding_tx,
-        Arc::clone(&schema),
-        Arc::clone(&parquet_schema),
-        Arc::clone(&base_props),
-        config.clone(),
-    ));
+    scope.spawn_stage(
+        &mut pipeline_tasks,
+        ingestion_task(
+            ingestion_rx,
+            encoding_tx,
+            schema,
+            parquet_schema,
+            base_props,
+            config,
+            scope.clone(),
+        ),
+    );
 
     // encoder coordinator on main runtime (spawns to CpuRuntime)
     let cpu_handle = runtimes.cpu.handle().clone();
-    tasks.spawn(encoder_coordinator(
-        encoding_rx,
-        writing_tx,
-        cpu_handle,
-        config.max_row_group_concurrency,
-    ));
+    scope.spawn_stage(
+        &mut pipeline_tasks,
+        encoder_coordinator(
+            encoding_rx,
+            writing_tx,
+            cpu_handle,
+            max_row_group_concurrency,
+            scope.clone(),
+        ),
+    );
 
     // writer task on main runtime (spawns I/O to IoRuntime)
     let io_handle = runtimes.io.handle().clone();
-    tasks.spawn(writer_task(
-        writing_rx,
-        file_writer,
-        io_handle,
-        Arc::clone(&total_rows),
-    ));
+    scope.spawn_stage(
+        &mut pipeline_tasks,
+        writer_task(
+            writing_rx,
+            file_writer,
+            io_handle,
+            Arc::clone(&total_rows),
+            scope.clone(),
+        ),
+    );
 
     let mut errors: Vec<anyhow::Error> = Vec::new();
-    while let Some(result) = tasks.join_next().await {
+    while let Some(result) = pipeline_tasks.join_next().await {
         match result {
             Err(e) if e.is_panic() => {
                 errors.push(anyhow!("task panicked: {e}"));
-                tasks.abort_all();
+                scope.cancel();
+                pipeline_tasks.abort_all();
             }
             Err(e) if e.is_cancelled() => continue,
             Err(e) => {
                 // unexpected join error
                 errors.push(anyhow!("task join error: {e}"));
-                tasks.abort_all();
+                scope.cancel();
+                pipeline_tasks.abort_all();
             }
             Ok(Err(e)) => {
                 if errors.is_empty() {
-                    tasks.abort_all();
+                    scope.cancel();
+                    pipeline_tasks.abort_all();
                 }
                 errors.push(e);
             }
@@ -193,7 +208,7 @@ pub(crate) async fn run_pipeline(
         }
     }
 
-    match errors.len() {
+    let result = match errors.len() {
         0 => Ok(total_rows.load(Ordering::SeqCst)),
         1 => Err(errors.pop().unwrap()),
         _ => Err(anyhow!(
@@ -205,7 +220,9 @@ pub(crate) async fn run_pipeline(
                 .collect::<Vec<_>>()
                 .join("\n")
         )),
-    }
+    };
+    scope.wait().await;
+    result
 }
 
 async fn ingestion_task(
@@ -215,6 +232,7 @@ async fn ingestion_task(
     parquet_schema: SchemaDescPtr,
     base_props: WriterPropertiesPtr,
     config: AdaptiveWriterConfig,
+    scope: PipelineTaskScope,
 ) -> Result<()> {
     let resolved = ResolvedColumnConfigs::resolve(&schema, &config);
     let columns_to_analyze = resolved.columns_needing_analysis();
@@ -239,6 +257,7 @@ async fn ingestion_task(
             base_props,
             config,
             resolved,
+            scope,
         )
         .await
     }
@@ -365,11 +384,12 @@ async fn ingestion_task_analyze(
     base_props: WriterPropertiesPtr,
     config: AdaptiveWriterConfig,
     resolved: ResolvedColumnConfigs,
+    scope: PipelineTaskScope,
 ) -> Result<()> {
     let columns_to_analyze = resolved.columns_needing_analysis();
     let max_rows = config.max_row_group_size;
     let mut coalescer = HardLimitBatchCoalescer::new(&schema, max_rows);
-    let mut analysis = RowGroupAnalysisState::try_new(&schema, &columns_to_analyze)?;
+    let mut analysis = RowGroupAnalysisState::try_new(&schema, &columns_to_analyze, &scope)?;
 
     while let Some(batch) = ingestion_rx.recv().await {
         let mut remaining = Some(batch);
@@ -403,7 +423,7 @@ async fn ingestion_task_analyze(
                     return Ok(());
                 }
                 coalescer = HardLimitBatchCoalescer::new(&schema, max_rows);
-                analysis = RowGroupAnalysisState::try_new(&schema, &columns_to_analyze)?;
+                analysis = RowGroupAnalysisState::try_new(&schema, &columns_to_analyze, &scope)?;
             }
         }
     }
@@ -437,6 +457,7 @@ async fn encoder_coordinator(
     writing_tx: mpsc::Sender<EncodedRowGroup>,
     cpu_handle: Handle,
     max_concurrent: usize,
+    scope: PipelineTaskScope,
 ) -> Result<()> {
     let mut pending: FuturesOrdered<_> = FuturesOrdered::new();
     let mut input_done = false;
@@ -448,9 +469,14 @@ async fn encoder_coordinator(
                 match work {
                     Some(work) => {
                         let handle = cpu_handle.clone();
-                        pending.push_back(async move {
-                            encode_row_group(work, &handle).await
-                        });
+                        let nested_scope = scope.clone();
+                        let task = scope.spawn_on(
+                            async move {
+                                encode_row_group(work, handle, nested_scope).await
+                            },
+                            &cpu_handle,
+                        );
+                        pending.push_back(task);
                     }
                     None => {
                         input_done = true;
@@ -460,7 +486,7 @@ async fn encoder_coordinator(
 
             // yield completed tasks (in submission order)
             Some(result) = pending.next(), if !pending.is_empty() => {
-                let encoded = result.context("encoding failed")?;
+                let encoded = result.context("encoding failed")??;
                 writing_tx
                     .send(encoded)
                     .await
@@ -476,19 +502,23 @@ async fn encoder_coordinator(
 
 async fn writer_task(
     mut encoded_rx: mpsc::Receiver<EncodedRowGroup>,
-    file_writer: SerializedFileWriter<BufWriter<File>>,
+    file_writer: SerializedFileWriter<BufWriter<BlockingObjectUploadWriter>>,
     io_handle: Handle,
     total_rows: Arc<AtomicU64>,
+    scope: PipelineTaskScope,
 ) -> Result<()> {
     let mut fw = file_writer;
 
     while let Some(rg) = encoded_rx.recv().await {
         total_rows.fetch_add(rg.num_rows as u64, Ordering::Relaxed);
-        fw = write_row_group(&io_handle, fw, rg).await?;
+        fw = write_row_group(&io_handle, fw, rg, &scope).await?;
     }
 
-    io_handle
-        .spawn(async move { fw.close().map_err(|e| anyhow!(e)) })
+    scope
+        .spawn_on(
+            async move { fw.close().map_err(|e| anyhow!(e)) },
+            &io_handle,
+        )
         .await
         .context("file close task failed")??;
 
@@ -497,24 +527,32 @@ async fn writer_task(
 
 async fn write_row_group(
     io_handle: &Handle,
-    fw: SerializedFileWriter<BufWriter<File>>,
+    fw: SerializedFileWriter<BufWriter<BlockingObjectUploadWriter>>,
     rg: EncodedRowGroup,
-) -> Result<SerializedFileWriter<BufWriter<File>>> {
-    io_handle
-        .spawn(async move {
-            let mut fw = fw;
-            let mut row_group = fw.next_row_group()?;
-            for chunk in rg.chunks {
-                chunk.append_to_row_group(&mut row_group)?;
-            }
-            row_group.close()?;
-            Ok(fw)
-        })
+    scope: &PipelineTaskScope,
+) -> Result<SerializedFileWriter<BufWriter<BlockingObjectUploadWriter>>> {
+    scope
+        .spawn_on(
+            async move {
+                let mut fw = fw;
+                let mut row_group = fw.next_row_group()?;
+                for chunk in rg.chunks {
+                    chunk.append_to_row_group(&mut row_group)?;
+                }
+                row_group.close()?;
+                Ok(fw)
+            },
+            io_handle,
+        )
         .await
         .context("row group write task failed")?
 }
 
-async fn encode_row_group(work: RowGroupWork, cpu_handle: &Handle) -> Result<EncodedRowGroup> {
+async fn encode_row_group(
+    work: RowGroupWork,
+    cpu_handle: Handle,
+    scope: PipelineTaskScope,
+) -> Result<EncodedRowGroup> {
     let num_rows = work.batch.num_rows();
 
     #[allow(deprecated)]
@@ -531,14 +569,14 @@ async fn encode_row_group(work: RowGroupWork, cpu_handle: &Handle) -> Result<Enc
         }
     }
 
-    // JoinSet aborts all tasks on drop (proper cancellation)
     let mut col_tasks = JoinSet::new();
     for (col_idx, (writer, leaves)) in column_writers
         .into_iter()
         .zip(leaves_per_column)
         .enumerate()
     {
-        col_tasks.spawn_on(
+        scope.spawn_in_on(
+            &mut col_tasks,
             async move {
                 let mut writer = writer;
                 for leaf in leaves {
@@ -547,7 +585,7 @@ async fn encode_row_group(work: RowGroupWork, cpu_handle: &Handle) -> Result<Enc
                 let chunk = writer.close().map_err(|e| anyhow!(e))?;
                 Ok::<_, anyhow::Error>((col_idx, chunk))
             },
-            cpu_handle,
+            &cpu_handle,
         );
     }
 

@@ -200,13 +200,18 @@ async fn write_test_data(path: &Path, schema: &SchemaRef, ext: &str) {
     let mut rng = SmallRng::from_rng(&mut rand::rng());
     let mut sink: Box<dyn DataSink> = match ext {
         "arrow" => Box::new(
-            ArrowSink::create(path.to_path_buf(), schema, ArrowSinkOptions::default()).unwrap(),
+            ArrowSink::create(
+                silk_chiffon::utils::test_helpers::prepared_local_output(path),
+                schema,
+                ArrowSinkOptions::default(),
+            )
+            .unwrap(),
         ),
         "parquet" => {
             let runtimes = Arc::new(ParquetRuntimes::try_default().unwrap());
             Box::new(
                 ParquetSink::create(
-                    path.to_path_buf(),
+                    silk_chiffon::utils::test_helpers::prepared_local_output(path),
                     schema,
                     &ParquetSinkOptions::default(),
                     runtimes,
@@ -215,7 +220,12 @@ async fn write_test_data(path: &Path, schema: &SchemaRef, ext: &str) {
             )
         }
         "vortex" => Box::new(
-            VortexSink::create(path.to_path_buf(), schema, VortexSinkOptions::default()).unwrap(),
+            VortexSink::create(
+                silk_chiffon::utils::test_helpers::prepared_local_output(path),
+                schema,
+                VortexSinkOptions::default(),
+            )
+            .unwrap(),
         ),
         _ => panic!("unsupported format: {ext}"),
     };

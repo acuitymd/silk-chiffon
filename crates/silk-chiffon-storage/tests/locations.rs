@@ -7,9 +7,9 @@ use bytes::Bytes;
 use futures::TryStreamExt;
 #[cfg(feature = "local-bare-paths")]
 use object_store::ObjectStoreExt;
-use silk_chiffon_storage::{Location, LocationInput, StorageError};
 #[cfg(feature = "local-bare-paths")]
-use silk_chiffon_storage::{LocationPattern, ensure_output_absent};
+use silk_chiffon_storage::{ExistingOutput, LocationPattern, OutputPreparation};
+use silk_chiffon_storage::{Location, LocationInput, StorageError};
 #[cfg(feature = "local-bare-paths")]
 use std::sync::Arc;
 #[cfg(feature = "local-bare-paths")]
@@ -354,10 +354,13 @@ async fn absent_output_is_allowed() {
     let location = location(path.to_str().unwrap()).unwrap();
     let handle = silk_chiffon_storage::local::session()
         .unwrap()
-        .output_handle(&location)
+        .prepare_output_target(
+            &location,
+            &OutputPreparation::new(ExistingOutput::RejectIfObserved, false),
+        )
+        .await
         .unwrap();
-
-    ensure_output_absent(&handle).await.unwrap();
+    assert_eq!(handle.url().scheme(), "file");
 }
 
 #[tokio::test]
@@ -366,17 +369,23 @@ async fn existing_output_is_rejected() {
     let working_directory = TempDir::new().unwrap();
     let path = working_directory.path().join("existing.parquet");
     let location = location(path.to_str().unwrap()).unwrap();
-    let handle = silk_chiffon_storage::local::session()
-        .unwrap()
-        .output_handle(&location)
-        .unwrap();
+    let storage = silk_chiffon_storage::local::session().unwrap();
+    let handle = storage.input_handle(&location).unwrap();
     handle
         .object_store()
         .put(handle.object_path(), Bytes::from_static(b"existing").into())
         .await
         .unwrap();
 
-    assert!(ensure_output_absent(&handle).await.is_err());
+    assert!(
+        storage
+            .prepare_output_target(
+                &location,
+                &OutputPreparation::new(ExistingOutput::RejectIfObserved, false),
+            )
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -387,7 +396,11 @@ async fn local_store_supports_object_operations() {
     let location = location(path.to_str().unwrap()).unwrap();
     let handle = silk_chiffon_storage::local::session()
         .unwrap()
-        .output_handle(&location)
+        .prepare_output_target(
+            &location,
+            &OutputPreparation::new(ExistingOutput::Allow, true),
+        )
+        .await
         .unwrap();
     let object_store = handle.object_store();
 

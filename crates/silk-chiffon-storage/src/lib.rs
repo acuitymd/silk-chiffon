@@ -8,8 +8,9 @@
 //! [`StorageRegistry::create_session`] binds the host's parsed arguments to one command invocation.
 //! The resulting [`StorageSession`] owns each backend's typed settings, shared retry
 //! configuration, routing indexes, and object-store cache. Calling
-//! [`StorageSession::input_handle`] or [`StorageSession::output_handle`] produces a
-//! [`StorageHandle`] without checking object existence or overwrite policy.
+//! [`StorageSession::input_handle`] produces an unobserved read handle, while
+//! [`StorageSession::prepare_output_target`] claims a write target and applies its preparation
+//! policy before returning a [`StorageHandle`].
 //!
 //! # First handle
 //!
@@ -46,21 +47,29 @@ pub mod handle;
 pub mod input;
 pub mod local;
 pub mod location;
+pub mod output;
 pub mod pattern;
 pub mod registry;
 pub mod retry;
 pub mod session;
+pub mod upload;
 
 pub use backend::{
-    BareLocationMapper, BarePatternMapper, LocationValidator, ObjectStoreCreatorFn, StorageAccess,
-    StorageBackend, StorageBackendBuildError, StorageBackendBuilder, StorageDirection,
+    BareLocationMapper, BarePatternMapper, LocationValidator, ObjectStoreCreatorFn,
+    PrepareOutputTargetFn, StorageAccess, StorageBackend, StorageBackendBuildError,
+    StorageBackendBuilder, StorageDirection,
 };
 pub use error::StorageError;
-pub use handle::{StorageHandle, ensure_output_absent};
+pub use handle::StorageHandle;
 pub use input::InputObject;
 pub use location::{Location, LocationInput};
 pub use object_store::RetryConfig;
+pub use output::{ExistingOutput, OutputPreparation};
 pub use pattern::LocationPattern;
 pub use registry::{StorageRegistry, StorageRegistryBuilder, StorageRegistryError};
 pub use retry::{RetryArgs, RetryConfigurationError};
 pub use session::{StorageSession, StorageSessionCreationError};
+pub use upload::{
+    BlockingObjectUploadWriter, ObjectUpload, ObjectUploadArgs, ObjectUploadError,
+    ObjectUploadSettings,
+};
