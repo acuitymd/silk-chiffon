@@ -1,6 +1,6 @@
 use assert_cmd::cargo;
 use predicates::prelude::*;
-use silk_chiffon::utils::test_data::{TestBatch, TestFile};
+use silk_chiffon_test_support::{TestBatch, TestFile};
 use tempfile::TempDir;
 use url::Url;
 

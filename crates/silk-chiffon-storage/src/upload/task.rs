@@ -1,41 +1,75 @@
-use anyhow::{Context, Result};
-use silk_chiffon_storage::ObjectUpload;
+//! Producer task and upload lifecycle for one encoded object.
+
+use std::fmt;
+
+use anyhow::{Context, Error, Result};
 use tokio::task::{JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use super::with_cleanup_error;
+use super::ObjectUpload;
+
+fn with_cleanup_error(primary: Error, cleanup: Option<Error>) -> Error {
+    match cleanup {
+        Some(cleanup) => Error::new(PrimaryWithCleanup { primary, cleanup }),
+        None => primary,
+    }
+}
+
+#[derive(Debug)]
+struct PrimaryWithCleanup {
+    primary: Error,
+    cleanup: Error,
+}
+
+impl fmt::Display for PrimaryWithCleanup {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{}; cleanup also failed: {:#}",
+            self.primary, self.cleanup
+        )
+    }
+}
+
+impl std::error::Error for PrimaryWithCleanup {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.primary.source()
+    }
+}
 
 fn task_error_after_cancel<T>(
     was_finished: bool,
-    result: Result<anyhow::Result<T>, JoinError>,
+    result: Result<Result<T>, JoinError>,
 ) -> Option<anyhow::Error> {
     match result {
         Err(error) if error.is_cancelled() => None,
         Err(error) => Some(anyhow::Error::new(error)),
         Ok(Err(error)) if was_finished => Some(error),
-        // Cancellation can make a running codec return an error.
+        // A running producer may report its own error after observing cancellation.
         Ok(_) => None,
     }
 }
 
-/// Owns one format task and the object upload fed by that task.
+/// Owns one format producer task and the object upload fed by that task.
 ///
-/// Explicit completion and cancellation always join the format task and settle
-/// the upload. Dropping the owner is only a best-effort fallback because async
-/// cleanup cannot be awaited from `Drop`.
-pub(crate) struct ObjectSinkTask<T> {
+/// Formats use this owner after creating their bounded channel or writer bridge. The format keeps
+/// responsibility for encoding and its producer result, while this type couples producer shutdown
+/// to the upload's exactly-once completion or abort. Explicit terminal operations always join the
+/// producer and settle the upload; dropping the owner can only request nonblocking cleanup.
+pub struct ObjectUploadTask<T> {
     task_name: &'static str,
     cancellation: CancellationToken,
     task: Option<JoinHandle<Result<T>>>,
     upload: Option<ObjectUpload>,
 }
 
-impl<T> ObjectSinkTask<T>
+impl<T> ObjectUploadTask<T>
 where
     T: Send + 'static,
 {
-    pub(crate) fn spawn<F>(task_name: &'static str, upload: ObjectUpload, spawn_task: F) -> Self
+    /// Starts a producer with the cancellation token paired to its upload.
+    pub fn spawn<F>(task_name: &'static str, upload: ObjectUpload, spawn_task: F) -> Self
     where
         F: FnOnce(CancellationToken) -> JoinHandle<Result<T>>,
     {
@@ -49,11 +83,13 @@ where
         }
     }
 
-    pub(crate) fn cancellation(&self) -> &CancellationToken {
+    /// Returns the token that coordinates producer and caller cancellation.
+    pub fn cancellation(&self) -> &CancellationToken {
         &self.cancellation
     }
 
-    pub(crate) async fn finish(mut self) -> Result<(T, Url)> {
+    /// Joins the producer, then completes its upload and returns both results.
+    pub async fn finish(mut self) -> Result<(T, Url)> {
         let task = self.task.take().expect("task exists until finish");
         let upload = self.upload.take().expect("upload exists until finish");
         let task_result = task
@@ -71,7 +107,8 @@ where
         Ok((value, url))
     }
 
-    pub(crate) async fn abort(mut self) -> Result<()> {
+    /// Cancels and joins the producer while aborting its upload.
+    pub async fn abort(mut self) -> Result<()> {
         let task = self.task.take().expect("task exists until abort");
         let was_finished = task.is_finished();
         self.cancellation.cancel();
@@ -86,7 +123,7 @@ where
     }
 }
 
-impl<T> Drop for ObjectSinkTask<T> {
+impl<T> Drop for ObjectUploadTask<T> {
     fn drop(&mut self) {
         self.cancellation.cancel();
         self.task.take();

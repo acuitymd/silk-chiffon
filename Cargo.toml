@@ -1,7 +1,9 @@
 [workspace]
 members = [
   "crates/silk-chiffon-core",
+  "crates/silk-chiffon-format-arrow",
   "crates/silk-chiffon-storage",
+  "crates/silk-chiffon-test-support",
 ]
 resolver = "3"
 
@@ -77,6 +79,7 @@ percent-encoding = "^2.3.2"
 serde = { version = "^1.0.229", features = ["derive"] }
 serde_json.workspace = true
 silk-chiffon-core = { path = "crates/silk-chiffon-core" }
+silk-chiffon-format-arrow = { path = "crates/silk-chiffon-format-arrow" }
 silk-chiffon-storage = { path = "crates/silk-chiffon-storage", default-features = false }
 strum_macros = "^0.28.0"
 sysinfo = "^0.39.6"
@@ -107,6 +110,7 @@ assert_cmd = "^2.2.2"
 criterion = { version = "^0.8.2", features = ["html_reports"] }
 predicates = "^3.1.4"
 rand = "^0.10.2"
+silk-chiffon-test-support = { path = "crates/silk-chiffon-test-support" }
 
 [[bench]]
 name = "parquet_writer"

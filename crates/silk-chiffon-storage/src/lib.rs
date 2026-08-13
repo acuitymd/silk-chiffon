@@ -71,5 +71,5 @@ pub use retry::{RetryArgs, RetryConfigurationError};
 pub use session::{StorageSession, StorageSessionCreationError};
 pub use upload::{
     BlockingObjectUploadWriter, ObjectUpload, ObjectUploadArgs, ObjectUploadError,
-    ObjectUploadSettings,
+    ObjectUploadSettings, ObjectUploadTask,
 };

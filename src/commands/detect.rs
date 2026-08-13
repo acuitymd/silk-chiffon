@@ -39,21 +39,9 @@ fn detection_text(detected: Option<&DetectedFormat>) -> String {
     let Some(detected) = detected else {
         return dim("Unknown");
     };
-    let name = if detected.format() == "arrow" {
-        "Arrow IPC".to_owned()
-    } else {
-        title_case(detected.format())
-    };
-    match detected.variant() {
+    let name = detected.display_name();
+    match detected.variant_display_name() {
         Some(variant) => format!("{} {}", value(name), dim(format!("({variant})"))),
         None => value(name),
-    }
-}
-
-fn title_case(value: &str) -> String {
-    let mut chars = value.chars();
-    match chars.next() {
-        Some(first) => first.to_uppercase().chain(chars).collect(),
-        None => String::new(),
     }
 }

@@ -32,7 +32,7 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use parquet::file::properties::WriterProperties;
-use silk_chiffon_storage::{ObjectUpload, StorageHandle};
+use silk_chiffon_storage::{ObjectUpload, ObjectUploadTask, StorageHandle};
 use tokio::{runtime::Handle, sync::mpsc, task::JoinSet};
 use tokio_util::{
     sync::CancellationToken,
@@ -42,15 +42,12 @@ use url::Url;
 
 pub use config::AdaptiveWriterConfig;
 
-use crate::sinks::{
-    object_sink_task::ObjectSinkTask,
-    parquet::{ParquetRuntimes, ParquetWriter},
-};
+use crate::sinks::parquet::{ParquetRuntimes, ParquetWriter};
 use pipeline::{PipelineSetup, run_pipeline};
 
 pub struct AdaptiveParquetWriter {
     ingestion_sender: Option<mpsc::Sender<RecordBatch>>,
-    task: Option<ObjectSinkTask<u64>>,
+    task: Option<ObjectUploadTask<u64>>,
 }
 
 #[derive(Clone)]
@@ -128,7 +125,7 @@ impl AdaptiveParquetWriter {
             .blocking_writer()
             .expect("a new object upload accepts one byte writer");
 
-        let task = ObjectSinkTask::spawn("Parquet writer", upload, {
+        let task = ObjectUploadTask::spawn("Parquet writer", upload, {
             let schema = Arc::clone(schema);
             move |cancellation| {
                 tokio::spawn(run_pipeline(PipelineSetup {
@@ -255,8 +252,9 @@ mod tests {
 
     use crate::{
         AllColumnsBloomFilterConfig, BloomFilterConfigBuilder, ColumnBloomFilterConfig,
-        ColumnSpecificBloomFilterConfig, utils::test_helpers::prepared_local_output,
+        ColumnSpecificBloomFilterConfig,
     };
+    use silk_chiffon_test_support::prepared_local_output;
 
     fn test_runtimes() -> Arc<ParquetRuntimes> {
         Arc::new(ParquetRuntimes::try_new(2, 1).unwrap())

@@ -270,9 +270,7 @@ fn bench_transform(c: &mut Criterion) {
                                     ..Default::default()
                                 };
                                 let mut writer = AdaptiveParquetWriter::new(
-                                    silk_chiffon::utils::test_helpers::prepared_local_output(
-                                        &out_path,
-                                    ),
+                                    silk_chiffon_test_support::prepared_local_output(&out_path),
                                     &schema,
                                     props,
                                     Arc::clone(runtimes),

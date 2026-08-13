@@ -4,6 +4,7 @@ use std::{
     sync::{Arc, Weak},
 };
 
+use crate::variant::IpcVariant;
 use anyhow::{Context, Result};
 use arrow::{
     buffer::Buffer,
@@ -39,41 +40,25 @@ use datafusion_datasource::{
 use futures::TryStreamExt;
 use object_store::{ObjectMeta, ObjectStore, ObjectStoreExt};
 use parking_lot::Mutex;
-use silk_chiffon_core::{CanonicalInput, InputLeaf, InputVariant, file_table_provider};
+use silk_chiffon_core::{
+    CanonicalInput, InputLeaf, file_table_provider, schemas_match_ignoring_metadata,
+};
 use tokio::sync::OnceCell;
 
-use crate::sources::file::structurally_equal;
-
 const SAMPLE_ROWS: usize = 100_000;
-const MAX_IPC_MESSAGE_BYTES: u64 = 512 * 1024 * 1024;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ArrowIpcVariant {
-    File,
-    Stream,
-}
-
-impl ArrowIpcVariant {
-    fn parse(variant: &InputVariant) -> Result<Self> {
-        match variant.name() {
-            Some("file") => Ok(Self::File),
-            Some("stream") => Ok(Self::Stream),
-            other => anyhow::bail!("unknown Arrow IPC input variant {other:?}"),
-        }
-    }
-}
+pub(crate) const MAX_IPC_MESSAGE_BYTES: u64 = 512 * 1024 * 1024;
 
 pub(crate) async fn create_provider(
     leaf: &InputLeaf,
     session: &SessionContext,
 ) -> Result<Arc<dyn TableProvider>> {
-    let variant = ArrowIpcVariant::parse(leaf.variant())?;
+    let variant = IpcVariant::parse(leaf.variant())?;
     let store_url = leaf.object_store_url().clone();
     let files = leaf.files().to_vec();
     let store = session.runtime_env().object_store(&store_url)?;
     let active_files = Arc::new(ActiveFiles::default());
     let memory_pool = Arc::clone(&session.runtime_env().memory_pool);
-    let format = Arc::new(ArrowIpcFormat {
+    let format = Arc::new(IpcFileFormat {
         variant,
         active_files,
         memory_pool: Arc::clone(&memory_pool),
@@ -86,7 +71,7 @@ pub(crate) async fn create_provider(
         .url()
         .as_str();
     let schema = match variant {
-        ArrowIpcVariant::File => {
+        IpcVariant::File => {
             let lease = format.active_files.lease(representative_meta);
             Ok::<_, datafusion::common::DataFusionError>(Arc::clone(
                 &lease
@@ -102,7 +87,7 @@ pub(crate) async fn create_provider(
                     .schema,
             ))
         }
-        ArrowIpcVariant::Stream => {
+        IpcVariant::Stream => {
             infer_stream_schema(&store, representative_meta, representative_url).await
         }
     }
@@ -141,14 +126,14 @@ pub(crate) async fn create_provider(
 }
 
 #[derive(Debug)]
-struct ArrowIpcFormat {
-    variant: ArrowIpcVariant,
+struct IpcFileFormat {
+    variant: IpcVariant,
     active_files: Arc<ActiveFiles>,
     memory_pool: Arc<dyn MemoryPool>,
 }
 
 #[async_trait]
-impl FileFormat for ArrowIpcFormat {
+impl FileFormat for IpcFileFormat {
     fn get_ext(&self) -> String {
         "arrow".to_owned()
     }
@@ -179,7 +164,7 @@ impl FileFormat for ArrowIpcFormat {
             internal_datafusion_err!("Arrow schema inference requires one object")
         })?;
         match self.variant {
-            ArrowIpcVariant::File => {
+            IpcVariant::File => {
                 let lease = self.active_files.lease(object);
                 let memory_pool = Arc::clone(&self.memory_pool);
                 let identity = object.location.to_string();
@@ -190,7 +175,7 @@ impl FileFormat for ArrowIpcFormat {
                         .schema,
                 ))
             }
-            ArrowIpcVariant::Stream => {
+            IpcVariant::Stream => {
                 let identity = object.location.to_string();
                 infer_stream_schema(store, object, &identity).await
             }
@@ -235,12 +220,12 @@ impl FileFormat for ArrowIpcFormat {
         _ordering: Option<LexRequirement>,
     ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
         Err(datafusion::common::DataFusionError::NotImplemented(
-            "ArrowIpcFormat is input-only".to_owned(),
+            "IpcFileFormat is input-only".to_owned(),
         ))
     }
 
     fn file_source(&self, table_schema: TableSchema) -> Arc<dyn FileSource> {
-        Arc::new(ArrowIpcSource {
+        Arc::new(IpcFileSource {
             variant: self.variant,
             table_schema: table_schema.clone(),
             projection: SplitProjection::unprojected(&table_schema),
@@ -252,8 +237,8 @@ impl FileFormat for ArrowIpcFormat {
 }
 
 #[derive(Clone)]
-struct ArrowIpcSource {
-    variant: ArrowIpcVariant,
+struct IpcFileSource {
+    variant: IpcVariant,
     table_schema: TableSchema,
     projection: SplitProjection,
     metrics: ExecutionPlanMetricsSet,
@@ -261,7 +246,7 @@ struct ArrowIpcSource {
     memory_pool: Arc<dyn MemoryPool>,
 }
 
-impl FileSource for ArrowIpcSource {
+impl FileSource for IpcFileSource {
     fn create_file_opener(
         &self,
         object_store: Arc<dyn ObjectStore>,
@@ -269,7 +254,7 @@ impl FileSource for ArrowIpcSource {
         _partition: usize,
     ) -> datafusion::common::Result<Arc<dyn FileOpener>> {
         let projection = Some(self.projection.file_indices.clone());
-        let opener: Arc<dyn FileOpener> = Arc::new(ArrowIpcOpener {
+        let opener: Arc<dyn FileOpener> = Arc::new(IpcFileOpener {
             variant: self.variant,
             object_store,
             projection,
@@ -314,8 +299,8 @@ impl FileSource for ArrowIpcSource {
 
     fn file_type(&self) -> &str {
         match self.variant {
-            ArrowIpcVariant::File => "arrow",
-            ArrowIpcVariant::Stream => "arrow_stream",
+            IpcVariant::File => "arrow",
+            IpcVariant::Stream => "arrow_stream",
         }
     }
 
@@ -327,15 +312,15 @@ impl FileSource for ArrowIpcSource {
         config: &FileScanConfig,
     ) -> datafusion::common::Result<Option<FileScanConfig>> {
         let file_groups = match self.variant {
-            ArrowIpcVariant::File => FileGroupPartitioner::new()
+            IpcVariant::File => FileGroupPartitioner::new()
                 .with_target_partitions(target_partitions)
                 .with_repartition_file_min_size(repartition_file_min_size)
                 .with_preserve_order_within_groups(output_ordering.is_some())
                 .repartition_file_groups(&config.file_groups),
-            ArrowIpcVariant::Stream if output_ordering.is_none() => {
+            IpcVariant::Stream if output_ordering.is_none() => {
                 repartition_whole_files(&config.file_groups, target_partitions)
             }
-            ArrowIpcVariant::Stream => None,
+            IpcVariant::Stream => None,
         };
         Ok(file_groups.map(|file_groups| {
             let mut config = config.clone();
@@ -345,7 +330,7 @@ impl FileSource for ArrowIpcSource {
     }
 
     fn supports_repartitioning(&self) -> bool {
-        self.variant == ArrowIpcVariant::File
+        self.variant == IpcVariant::File
     }
 }
 
@@ -391,8 +376,8 @@ fn repartition_whole_files(
     )
 }
 
-struct ArrowIpcOpener {
-    variant: ArrowIpcVariant,
+struct IpcFileOpener {
+    variant: IpcVariant,
     object_store: Arc<dyn ObjectStore>,
     projection: Option<Vec<usize>>,
     expected_schema: SchemaRef,
@@ -400,7 +385,7 @@ struct ArrowIpcOpener {
     memory_pool: Arc<dyn MemoryPool>,
 }
 
-impl FileOpener for ArrowIpcOpener {
+impl FileOpener for IpcFileOpener {
     fn open(&self, file: PartitionedFile) -> datafusion::common::Result<FileOpenFuture> {
         let canonical_url = file
             .extension::<CanonicalInput>()
@@ -416,7 +401,7 @@ impl FileOpener for ArrowIpcOpener {
         Ok(Box::pin(async move {
             let read_url = canonical_url.clone();
             let stream = match variant {
-                ArrowIpcVariant::File => {
+                IpcVariant::File => {
                     open_file(
                         store,
                         file,
@@ -428,7 +413,7 @@ impl FileOpener for ArrowIpcOpener {
                     )
                     .await
                 }
-                ArrowIpcVariant::Stream => {
+                IpcVariant::Stream => {
                     open_stream(
                         store,
                         file,
@@ -484,7 +469,7 @@ async fn open_file(
             })
             .await?,
     );
-    if !structurally_equal(&expected_schema, &layout.schema) {
+    if !schemas_match_ignoring_metadata(&expected_schema, &layout.schema) {
         return Err(datafusion::common::DataFusionError::Execution(format!(
             "Arrow input schema mismatch for {}: expected {expected_schema:?}, got {:?}",
             canonical_url, layout.schema
@@ -565,7 +550,7 @@ async fn open_stream(
             while !buffer.is_empty() {
                 let batch = decoder.decode(&mut buffer)?;
                 if !schema_checked && let Some(schema) = decoder.schema() {
-                    if !structurally_equal(&expected_schema, &schema) {
+                    if !schemas_match_ignoring_metadata(&expected_schema, &schema) {
                         Err(datafusion::common::DataFusionError::Execution(format!(
                             "Arrow input schema mismatch for {}: expected {expected_schema:?}, got {schema:?}",
                             canonical_url
@@ -597,15 +582,15 @@ async fn open_stream(
 }
 
 #[derive(Debug)]
-struct FileLayout {
-    schema: SchemaRef,
-    version: MetadataVersion,
-    dictionaries: Vec<Block>,
-    record_batches: Vec<Block>,
+pub(crate) struct FileLayout {
+    pub(crate) schema: SchemaRef,
+    pub(crate) version: MetadataVersion,
+    pub(crate) dictionaries: Vec<Block>,
+    pub(crate) record_batches: Vec<Block>,
     _reservation: MemoryReservation,
 }
 
-async fn read_file_layout(
+pub(crate) async fn read_file_layout(
     store: &Arc<dyn ObjectStore>,
     object: &ObjectMeta,
     memory_pool: Arc<dyn MemoryPool>,
@@ -646,7 +631,7 @@ async fn read_file_layout(
         )
         .await?;
     let footer = arrow::ipc::root_as_footer(&footer_bytes)
-        .map_err(|error| datafusion::common::DataFusionError::External(Box::new(error)))?;
+        .map_err(|error| datafusion::common::DataFusionError::Execution(error.to_string()))?;
     let schema =
         Arc::new(fb_to_schema(footer.schema().ok_or_else(|| {
             internal_datafusion_err!("Arrow IPC footer has no schema")
@@ -704,7 +689,7 @@ fn validate_blocks<'a>(
     Ok(())
 }
 
-async fn read_block(
+pub(crate) async fn read_block(
     store: &Arc<dyn ObjectStore>,
     location: &object_store::path::Path,
     block: &Block,
@@ -716,7 +701,7 @@ async fn read_block(
     Ok(store.get_range(location, start..start + length).await?)
 }
 
-fn block_size(block: &Block) -> datafusion::common::Result<usize> {
+pub(crate) fn block_size(block: &Block) -> datafusion::common::Result<usize> {
     let metadata = usize::try_from(block.metaDataLength())
         .map_err(|_| internal_datafusion_err!("Arrow IPC metadata length is negative"))?;
     let body = usize::try_from(block.bodyLength())
@@ -773,7 +758,7 @@ async fn infer_stream_schema(
 }
 
 async fn sample_statistics(
-    variant: ArrowIpcVariant,
+    variant: IpcVariant,
     store: &Arc<dyn ObjectStore>,
     representative_file: &PartitionedFile,
     schema: &SchemaRef,
@@ -796,7 +781,7 @@ async fn sample_statistics(
     let mut represented_encoded_bytes = 0u64;
     let mut reached_eof = true;
     match variant {
-        ArrowIpcVariant::File => {
+        IpcVariant::File => {
             let layout =
                 read_file_layout(store, representative, Arc::clone(&memory_pool), &identity)
                     .await?;
@@ -843,7 +828,7 @@ async fn sample_statistics(
                 }
             }
         }
-        ArrowIpcVariant::Stream => {
+        IpcVariant::Stream => {
             let mut decoder = StreamDecoder::new();
             let mut offset = 0;
             loop {
@@ -931,18 +916,18 @@ enum SampleStatistics {
     Unavailable,
 }
 
-struct StreamMessage {
-    bytes: Bytes,
-    end: u64,
+pub(crate) struct StreamMessage {
+    pub(crate) bytes: Bytes,
+    pub(crate) end: u64,
 }
 
-enum StreamMessageRead {
+pub(crate) enum StreamMessageRead {
     End,
     Message(StreamMessage),
     SafetyBoundExceeded,
 }
 
-async fn read_stream_message(
+pub(crate) async fn read_stream_message(
     store: &Arc<dyn ObjectStore>,
     object: &ObjectMeta,
     offset: u64,
@@ -1007,7 +992,7 @@ async fn read_stream_message(
         .get_range(&object.location, metadata_start..metadata_end)
         .await?;
     let message = arrow::ipc::root_as_message(&metadata)
-        .map_err(|error| datafusion::common::DataFusionError::External(Box::new(error)))?;
+        .map_err(|error| datafusion::common::DataFusionError::Execution(error.to_string()))?;
     let body_len = u64::try_from(message.bodyLength())
         .map_err(|_| internal_datafusion_err!("Arrow IPC stream body length is negative"))?;
     let end = metadata_end
@@ -1126,6 +1111,7 @@ mod tests {
         physical_plan::metrics::ExecutionPlanMetricsSet,
     };
     use object_store::{ObjectStoreExt, memory::InMemory};
+    use silk_chiffon_core::InputVariant;
     use tokio::sync::Notify;
 
     use super::*;
@@ -1152,10 +1138,10 @@ mod tests {
         }
     }
 
-    fn source(variant: ArrowIpcVariant) -> ArrowIpcSource {
+    fn source(variant: IpcVariant) -> IpcFileSource {
         let schema = Arc::new(Schema::new(vec![Field::new("value", DataType::Null, true)]));
         let table_schema = TableSchema::new(schema, Vec::new());
-        ArrowIpcSource {
+        IpcFileSource {
             variant,
             table_schema: table_schema.clone(),
             projection: SplitProjection::unprojected(&table_schema),
@@ -1165,7 +1151,7 @@ mod tests {
         }
     }
 
-    fn scan_config(source: &ArrowIpcSource, files: Vec<PartitionedFile>) -> FileScanConfig {
+    fn scan_config(source: &IpcFileSource, files: Vec<PartitionedFile>) -> FileScanConfig {
         datafusion::datasource::physical_plan::FileScanConfigBuilder::new(
             ObjectStoreUrl::local_filesystem(),
             Arc::new(source.clone()),
@@ -1224,7 +1210,7 @@ mod tests {
 
     #[test]
     fn arrow_variants_reject_unknown_detector_output() {
-        let error = ArrowIpcVariant::parse(&InputVariant::named("unknown")).unwrap_err();
+        let error = IpcVariant::parse(&InputVariant::named("unknown", "unknown")).unwrap_err();
 
         assert!(
             error
@@ -1235,8 +1221,8 @@ mod tests {
 
     #[tokio::test]
     async fn arrow_file_format_declares_its_input_contract() {
-        let format = ArrowIpcFormat {
-            variant: ArrowIpcVariant::File,
+        let format = IpcFileFormat {
+            variant: IpcVariant::File,
             active_files: Arc::new(ActiveFiles::default()),
             memory_pool: Arc::new(GreedyMemoryPool::new(usize::MAX)),
         };
@@ -1287,8 +1273,8 @@ mod tests {
 
     #[test]
     fn arrow_sources_distinguish_seekable_files_from_whole_streams() {
-        let file = source(ArrowIpcVariant::File);
-        let stream = source(ArrowIpcVariant::Stream);
+        let file = source(IpcVariant::File);
+        let stream = source(IpcVariant::Stream);
 
         assert_eq!(file.file_type(), "arrow");
         assert!(file.supports_repartitioning());
@@ -1327,7 +1313,7 @@ mod tests {
 
     #[test]
     fn stream_repartitioning_distributes_whole_files() {
-        let source = source(ArrowIpcVariant::Stream);
+        let source = source(IpcVariant::Stream);
         let files = (0..6)
             .map(|index| PartitionedFile::new(format!("{index}.arrow"), index + 1))
             .collect::<Vec<_>>();
@@ -1358,7 +1344,7 @@ mod tests {
 
     #[test]
     fn stream_repartitioning_preserves_required_order_and_existing_groups() {
-        let source = source(ArrowIpcVariant::Stream);
+        let source = source(IpcVariant::Stream);
         let files = (0..3)
             .map(|index| PartitionedFile::new(format!("{index}.arrow"), index + 1))
             .collect::<Vec<_>>();
@@ -1386,7 +1372,7 @@ mod tests {
 
     #[test]
     fn file_repartitioning_splits_seekable_inputs_into_byte_ranges() {
-        let source = source(ArrowIpcVariant::File);
+        let source = source(IpcVariant::File);
         let config = scan_config(
             &source,
             vec![PartitionedFile::new("large.arrow", 1_000_000)],
@@ -1429,7 +1415,7 @@ mod tests {
         let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(usize::MAX));
 
         let error = sample_statistics(
-            ArrowIpcVariant::Stream,
+            IpcVariant::Stream,
             &store,
             &PartitionedFile::new_from_meta(object.clone()),
             &batch.schema(),
@@ -1636,8 +1622,8 @@ mod tests {
         }
 
         for (variant, location, bytes) in [
-            (ArrowIpcVariant::File, "sample-file.arrow", file_bytes),
-            (ArrowIpcVariant::Stream, "sample-stream.arrow", stream_bytes),
+            (IpcVariant::File, "sample-file.arrow", file_bytes),
+            (IpcVariant::Stream, "sample-stream.arrow", stream_bytes),
         ] {
             let (store, meta) = stored_bytes(location, bytes).await;
             let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(usize::MAX));
@@ -1769,8 +1755,8 @@ mod tests {
         }
 
         for (variant, location, bytes) in [
-            (ArrowIpcVariant::File, "prefix-file.arrow", file_bytes),
-            (ArrowIpcVariant::Stream, "prefix-stream.arrow", stream_bytes),
+            (IpcVariant::File, "prefix-file.arrow", file_bytes),
+            (IpcVariant::Stream, "prefix-stream.arrow", stream_bytes),
         ] {
             let (store, meta) = stored_bytes(location, bytes).await;
             let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(usize::MAX));
@@ -1842,7 +1828,7 @@ mod tests {
         let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(usize::MAX));
 
         let statistics = sample_statistics(
-            ArrowIpcVariant::File,
+            IpcVariant::File,
             &store,
             &PartitionedFile::new_from_meta(meta.clone()),
             &schema,
@@ -1942,7 +1928,7 @@ mod tests {
         assert_eq!(values, ["alpha", "beta", "gamma", "delta"]);
 
         let statistics = sample_statistics(
-            ArrowIpcVariant::File,
+            IpcVariant::File,
             &store,
             &PartitionedFile::new_from_meta(meta.clone()),
             &schema,

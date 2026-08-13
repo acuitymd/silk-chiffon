@@ -18,7 +18,7 @@ use std::{future::Future, pin::Pin, sync::Arc};
 
 use clap::{ArgMatches, Args, Command, FromArgMatches};
 use datafusion::{catalog::TableProvider, prelude::SessionContext};
-use silk_chiffon_storage::StorageHandle;
+use silk_chiffon_storage::InputObject;
 
 use super::{
     FormatOperation, FormatOperationError, InputProviderFn, InspectionMode, InspectorFn,
@@ -248,7 +248,7 @@ pub(super) trait ErasedInspectionBinding: Send + Sync {
     fn inspect<'a>(
         &'a self,
         format: &'static str,
-        handle: &'a StorageHandle,
+        object: &'a InputObject,
         mode: InspectionMode,
     ) -> BindingFuture<'a, InspectionOutput>;
 }
@@ -294,11 +294,11 @@ where
     fn inspect<'a>(
         &'a self,
         format: &'static str,
-        handle: &'a StorageHandle,
+        object: &'a InputObject,
         mode: InspectionMode,
     ) -> BindingFuture<'a, InspectionOutput> {
         Box::pin(async move {
-            (self.inspector)(handle, mode, &self.settings)
+            (self.inspector)(object, mode, &self.settings)
                 .await
                 .map_err(|source| FormatOperationError::Failed {
                     format,

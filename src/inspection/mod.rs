@@ -1,6 +1,5 @@
 //! File inspection utilities for various columnar data formats.
 
-pub mod arrow;
 pub mod inspectable;
 pub mod parquet;
 pub mod style;

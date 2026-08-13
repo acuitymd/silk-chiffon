@@ -567,9 +567,11 @@ mod tests {
             let session = SessionContext::new();
 
             let first_leaf =
-                InputLeaf::try_new(&session, &[first], InputVariant::named("file")).unwrap();
+                InputLeaf::try_new(&session, &[first], InputVariant::named("file", "file"))
+                    .unwrap();
             let second_leaf =
-                InputLeaf::try_new(&session, &[second], InputVariant::named("file")).unwrap();
+                InputLeaf::try_new(&session, &[second], InputVariant::named("file", "file"))
+                    .unwrap();
 
             assert_eq!(
                 first_leaf.object_store_url(),
@@ -660,7 +662,7 @@ mod tests {
             let leaf = InputLeaf::try_new(
                 &SessionContext::new(),
                 &[smaller, larger],
-                InputVariant::named("stream"),
+                InputVariant::named("stream", "stream"),
             )
             .unwrap();
 

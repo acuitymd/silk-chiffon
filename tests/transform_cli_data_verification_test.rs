@@ -2,7 +2,7 @@ use arrow::array::{Array, Int32Array, Int64Array, RecordBatch, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use assert_cmd::cargo;
 use datafusion::prelude::*;
-use silk_chiffon::utils::test_data::{TestBatch, TestExtract, TestFile};
+use silk_chiffon_test_support::{TestBatch, TestExtract, TestFile};
 use std::sync::Arc;
 use tempfile::TempDir;
 

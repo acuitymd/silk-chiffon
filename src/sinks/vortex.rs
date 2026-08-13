@@ -5,7 +5,7 @@ use arrow::{array::RecordBatch, compute::BatchCoalescer, datatypes::SchemaRef};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{Sink, SinkExt, stream};
-use silk_chiffon_storage::{ObjectUpload, StorageHandle};
+use silk_chiffon_storage::{ObjectUpload, ObjectUploadTask, StorageHandle};
 use tokio::sync::mpsc;
 use vortex::{
     VortexSessionDefault,
@@ -19,7 +19,6 @@ use vortex::{
 
 use crate::sinks::{
     data_sink::{DataSink, SinkCompletion},
-    object_sink_task::ObjectSinkTask,
     with_cleanup_error,
 };
 
@@ -83,7 +82,7 @@ impl VortexSinkInner {
 
 pub struct VortexSink {
     inner: VortexSinkInner,
-    task: Option<ObjectSinkTask<()>>,
+    task: Option<ObjectUploadTask<()>>,
 }
 
 impl VortexSink {
@@ -97,7 +96,7 @@ impl VortexSink {
         let mut upload = ObjectUpload::new(handle);
         let writer = VortexUploadAdapter::new(upload.writer()?, upload.part_size().get());
         let schema = Arc::clone(schema);
-        let task = ObjectSinkTask::spawn("Vortex writer", upload, move |cancellation| {
+        let task = ObjectUploadTask::spawn("Vortex writer", upload, move |cancellation| {
             tokio::spawn(async move {
                 cancellation
                     .run_until_cancelled(Self::write_vortex_file(writer, schema, receiver))
