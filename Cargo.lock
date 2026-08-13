@@ -4366,6 +4366,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "bytes",
+ "bytesize",
  "clap",
  "futures",
  "glob",

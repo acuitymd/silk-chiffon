@@ -17,8 +17,8 @@ use datafusion::{catalog::TableProvider, datasource::empty::EmptyTable, prelude:
 use silk_chiffon_core::{
     DataSink, DetectedFormat, FormatDefinition, FormatFuture, FormatOperation,
     FormatOperationError, FormatRegistry, FormatRegistryError, InputDetection, InputLeaf,
-    InputVariant, InspectionDefinition, InspectionMode, InspectionOutput, OutputOrderingColumn,
-    SinkBinding, SinkBindingConfig, SinkCompletion, SinkConcurrency, SortDirection,
+    InputVariant, InspectionDefinition, InspectionMode, InspectionOutput, OpenSinkMode,
+    OutputOrderingColumn, SinkBinding, SinkBindingConfig, SinkCompletion, SortDirection,
     TransformDefinition,
 };
 use silk_chiffon_storage::{InputObject, LocationInput, StorageHandle, local};
@@ -44,6 +44,7 @@ struct SharedArgs {
 
 struct TestSinkBinding {
     opened: Arc<AtomicUsize>,
+    aborted: Arc<AtomicUsize>,
     workers: usize,
     thread_budget: NonZeroUsize,
     output_ordering: Arc<[OutputOrderingColumn]>,
@@ -52,6 +53,7 @@ struct TestSinkBinding {
 struct TestSink {
     output: url::Url,
     opened: Arc<AtomicUsize>,
+    aborted: Arc<AtomicUsize>,
     workers: usize,
     thread_budget: NonZeroUsize,
     output_ordering: Arc<[OutputOrderingColumn]>,
@@ -64,6 +66,7 @@ impl SinkBinding for TestSinkBinding {
         Ok(Box::new(TestSink {
             output: handle.url().clone(),
             opened: Arc::clone(&self.opened),
+            aborted: Arc::clone(&self.aborted),
             workers: self.workers,
             thread_budget: self.thread_budget,
             output_ordering: Arc::clone(&self.output_ordering),
@@ -97,6 +100,11 @@ impl DataSink for TestSink {
                 + self.opened.load(Ordering::SeqCst)
                 + ordering_score) as u64,
         ))
+    }
+
+    async fn abort(self: Box<Self>) -> Result<()> {
+        self.aborted.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
 }
 
@@ -153,6 +161,7 @@ fn bind_sink<'a>(
     Box::pin(async move {
         Ok(Box::new(TestSinkBinding {
             opened: Arc::new(AtomicUsize::new(0)),
+            aborted: Arc::new(AtomicUsize::new(0)),
             workers: settings.test_workers,
             thread_budget: config.thread_budget(),
             output_ordering: Arc::from(config.output_ordering()),
@@ -488,7 +497,7 @@ fn one_sink_binding_shares_state_across_opened_sinks() {
     let transform = bindings.get("test").unwrap();
     let config = SinkBindingConfig::new(
         NonZeroUsize::new(3).unwrap(),
-        SinkConcurrency::Concurrent,
+        OpenSinkMode::Multiple,
         vec![OutputOrderingColumn::new(
             "event_time",
             SortDirection::Descending,
@@ -516,6 +525,28 @@ fn one_sink_binding_shares_state_across_opened_sinks() {
     let expected_rows = 6 + 3 + 2 + "event_time".len() + 2;
     assert_eq!(first_result.rows_written(), expected_rows as u64);
     assert_eq!(second_result.rows_written(), expected_rows as u64);
+}
+
+#[test]
+fn an_open_sink_can_be_consumed_by_abort() {
+    let registry = FormatRegistry::builder()
+        .register(test_format("test"))
+        .build()
+        .unwrap();
+    let bindings = bind_test_transform(&registry, &["test"]);
+    let transform = bindings.get("test").unwrap();
+    let config = SinkBindingConfig::new(
+        NonZeroUsize::new(1).unwrap(),
+        OpenSinkMode::OneAtATime,
+        Vec::new(),
+    );
+    let binding = futures::executor::block_on(transform.bind_sink(&config)).unwrap();
+    let sink = futures::executor::block_on(
+        binding.open_sink(local_handle("aborted.test"), Arc::new(Schema::empty())),
+    )
+    .unwrap();
+
+    futures::executor::block_on(sink.abort()).unwrap();
 }
 
 #[test]

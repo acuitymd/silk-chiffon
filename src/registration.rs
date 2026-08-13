@@ -18,9 +18,9 @@ use datafusion::{catalog::TableProvider, prelude::SessionContext};
 use object_store::ObjectStoreExt;
 use silk_chiffon_core::{
     DataSink, FormatDefinition, FormatFuture, FormatRegistry, InputDetection, InputLeaf,
-    InputVariant, InspectionDefinition, InspectionMode, InspectionOutput, OutputOrderingColumn,
-    ServiceInputBinding, ServiceInputDefinition, ServiceOutputBinding, ServiceOutputDefinition,
-    SinkBinding, SinkBindingConfig, SinkConcurrency, TransformDefinition,
+    InputVariant, InspectionDefinition, InspectionMode, InspectionOutput, OpenSinkMode,
+    OutputOrderingColumn, ServiceInputBinding, ServiceInputDefinition, ServiceOutputBinding,
+    ServiceOutputDefinition, SinkBinding, SinkBindingConfig, TransformDefinition,
 };
 use silk_chiffon_storage::{InputObject, StorageDirection, StorageHandle, StorageRegistry};
 use thiserror::Error;
@@ -1008,7 +1008,7 @@ fn parquet_options(context: &SinkBindingConfig, args: &ParquetArgs) -> Result<Pa
         )
         .apply_if_some(sort_spec, ParquetSinkOptions::with_sort_spec);
 
-    if context.sink_concurrency() == SinkConcurrency::Concurrent {
+    if context.open_sink_mode() == OpenSinkMode::Multiple {
         // Several open Parquet pipelines multiply their buffered row groups, so keep each
         // pipeline single-slot.
         options = options
@@ -1043,7 +1043,7 @@ impl SinkBinding for ArrowSinkBinding {
         schema: SchemaRef,
     ) -> Result<Box<dyn DataSink>> {
         Ok(Box::new(ArrowSink::create(
-            handle.local_path()?,
+            handle,
             &schema,
             self.options.clone(),
         )?))
@@ -1063,7 +1063,7 @@ impl SinkBinding for ParquetSinkBinding {
         schema: SchemaRef,
     ) -> Result<Box<dyn DataSink>> {
         Ok(Box::new(ParquetSink::create(
-            handle.local_path()?,
+            handle,
             &schema,
             &self.options,
             Arc::clone(&self.runtimes),
@@ -1082,11 +1082,7 @@ impl SinkBinding for VortexSinkBinding {
         handle: StorageHandle,
         schema: SchemaRef,
     ) -> Result<Box<dyn DataSink>> {
-        Ok(Box::new(VortexSink::create(
-            handle.local_path()?,
-            &schema,
-            self.options,
-        )?))
+        Ok(Box::new(VortexSink::create(handle, &schema, self.options)?))
     }
 }
 
@@ -1192,11 +1188,13 @@ mod tests {
     use futures::{StreamExt, future::BoxFuture};
     use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory, path::Path as ObjectPath};
     use silk_chiffon_core::{
-        DataSink, FormatDefinition, FormatFuture, FormatRegistry, InputLeaf,
+        DataSink, FormatDefinition, FormatFuture, FormatRegistry, InputLeaf, OpenSinkMode,
         ServiceInputDefinition, ServiceOutputDefinition, SinkBinding, SinkBindingConfig,
-        SinkConcurrency, TransformDefinition,
+        TransformDefinition,
     };
-    use silk_chiffon_storage::{StorageAccess, StorageBackend, StorageRegistry};
+    use silk_chiffon_storage::{
+        OutputPreparation, StorageAccess, StorageBackend, StorageHandle, StorageRegistry,
+    };
     use url::Url;
 
     use super::{
@@ -1205,7 +1203,10 @@ mod tests {
     };
     use crate::{
         CliSchema, Command, ParquetArgs,
-        utils::test_data::{TestBatch, TestExtract, TestFile},
+        utils::{
+            test_data::{TestBatch, TestExtract, TestFile},
+            test_helpers::prepared_local_output,
+        },
     };
     static SINK_BINDINGS: AtomicUsize = AtomicUsize::new(0);
     static SERVICE_INPUT_REFERENCES: Mutex<Vec<String>> = Mutex::new(Vec::new());
@@ -1241,13 +1242,22 @@ mod tests {
         Ok(remote_store(store_url.as_str()))
     }
 
+    fn prepare_remote_output<'a>(
+        _: &'a StorageHandle,
+        _: &'a OutputPreparation,
+        _: &'a (),
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
     fn remote_backend() -> StorageBackend {
         StorageBackend::without_args()
             .name("test-remote")
             .schemes(["test-remote"])
-            .access(StorageAccess::ReadOnly)
+            .access(StorageAccess::ReadWrite)
             .allow_any_location()
             .object_store_creator(create_remote_store)
+            .prepare_output_target(prepare_remote_output)
             .build()
             .unwrap()
     }
@@ -1289,7 +1299,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("input.vortex");
         let mut sink = crate::sinks::vortex::VortexSink::create(
-            path.clone(),
+            prepared_local_output(&path),
             &batch.schema(),
             crate::sinks::vortex::VortexSinkOptions::new(),
         )
@@ -1748,6 +1758,96 @@ mod tests {
         let batches = TestFile::read_arrow(&output);
         assert_eq!(batches[0].schema().fields().len(), 1);
         assert_eq!(TestExtract::string_all(&batches, "name"), ["b", "c"]);
+    }
+
+    #[tokio::test]
+    async fn exact_remote_output_runs_through_the_complete_application_route() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("input.arrow");
+        TestFile::write_arrow_batch(
+            &input,
+            &TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]),
+        );
+        let cli = test_cli(
+            remote_application_definition(),
+            &[
+                "silk-chiffon",
+                "transform",
+                "--from",
+                input.to_str().unwrap(),
+                "--to",
+                "test-remote://coverage-output/exact/output.arrow",
+            ],
+        );
+        let Command::Transform(command) = cli.command else {
+            panic!("expected transform command");
+        };
+
+        crate::commands::transform::run(command).await.unwrap();
+
+        let bytes = remote_store("test-remote://coverage-output/")
+            .get(&ObjectPath::from("exact/output.arrow"))
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        let downloaded = directory.path().join("downloaded.arrow");
+        std::fs::write(&downloaded, bytes).unwrap();
+        assert_eq!(
+            TestExtract::i32_all(&TestFile::read_arrow(&downloaded), "id"),
+            [1, 2, 3]
+        );
+    }
+
+    #[tokio::test]
+    async fn partitioned_remote_output_prepares_and_completes_each_object_lazily() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("input.arrow");
+        TestFile::write_arrow_batch(
+            &input,
+            &TestBatch::simple_with(&[1, 2, 3], &["a", "b", "a"]),
+        );
+        let cli = test_cli(
+            remote_application_definition(),
+            &[
+                "silk-chiffon",
+                "transform",
+                "--from",
+                input.to_str().unwrap(),
+                "--to-many",
+                "test-remote://coverage-partitioned/{{name}}.parquet",
+                "--by",
+                "name",
+                "--partition-strategy",
+                "nosort-multi",
+            ],
+        );
+        let Command::Transform(command) = cli.command else {
+            panic!("expected transform command");
+        };
+
+        crate::commands::transform::run(command).await.unwrap();
+
+        let store = remote_store("test-remote://coverage-partitioned/");
+        let mut ids = Vec::new();
+        for name in ["a", "b"] {
+            let bytes = store
+                .get(&ObjectPath::from(format!("{name}.parquet")))
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap();
+            let downloaded = directory.path().join(format!("{name}.parquet"));
+            std::fs::write(&downloaded, bytes).unwrap();
+            ids.extend(TestExtract::i32_all(
+                &TestFile::read_parquet(&downloaded),
+                "id",
+            ));
+        }
+        ids.sort_unstable();
+        assert_eq!(ids, [1, 2, 3]);
     }
 
     #[tokio::test]
@@ -2388,7 +2488,7 @@ mod tests {
         let args = ParquetArgs::from_arg_matches(matches).unwrap();
         let context = SinkBindingConfig::new(
             NonZeroUsize::new(4).unwrap(),
-            SinkConcurrency::Concurrent,
+            OpenSinkMode::Multiple,
             Vec::new(),
         );
         let options = parquet_options(&context, &args).unwrap();

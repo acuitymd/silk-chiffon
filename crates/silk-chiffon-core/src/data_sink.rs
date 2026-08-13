@@ -41,6 +41,9 @@ pub trait DataSink: Send + Sync {
 
     /// Completes the output and reports the durable objects it produced.
     async fn finish(self: Box<Self>) -> Result<SinkCompletion>;
+
+    /// Cancels an unfinished output and awaits its cleanup.
+    async fn abort(self: Box<Self>) -> Result<()>;
 }
 
 /// Durable locations and row count produced by one completed sink.

@@ -1,25 +1,25 @@
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::{io, sync::Arc};
 
 use anyhow::{Context, Result, anyhow};
-use arrow::array::RecordBatch;
-use arrow::compute::BatchCoalescer;
-use arrow::datatypes::SchemaRef;
+use arrow::{array::RecordBatch, compute::BatchCoalescer, datatypes::SchemaRef};
 use async_trait::async_trait;
-use futures::stream;
-use tokio::sync::mpsc;
-use tokio::{fs::File, sync::Mutex};
-use vortex::VortexSessionDefault;
-use vortex::array::ArrayRef;
-use vortex::array::stream::ArrayStreamAdapter;
-use vortex::arrow::{FromArrowArray, FromArrowType};
-use vortex::dtype::DType;
-use vortex::file::WriteOptionsSessionExt;
-use vortex::session::VortexSession;
+use bytes::Bytes;
+use futures::{Sink, SinkExt, stream};
+use silk_chiffon_storage::{ObjectUpload, StorageHandle};
+use tokio::sync::{Mutex, mpsc};
+use vortex::{
+    VortexSessionDefault,
+    array::{ArrayRef, stream::ArrayStreamAdapter},
+    arrow::{FromArrowArray, FromArrowType},
+    dtype::DType,
+    file::WriteOptionsSessionExt,
+    io::{IoBuf, VortexWrite},
+    session::VortexSession,
+};
 
 use crate::sinks::{
-    completed_file_url,
     data_sink::{DataSink, SinkCompletion},
+    with_cleanup_error,
 };
 
 #[derive(Clone, Copy)]
@@ -72,7 +72,7 @@ impl VortexSinkInner {
     fn finish_buffered_batch(&mut self) -> Result<()> {
         self.coalescer
             .finish_buffered_batch()
-            .map_err(|e| anyhow!("failed to finish buffered batch: {e}"))
+            .map_err(|error| anyhow!("failed to finish buffered batch: {error}"))
     }
 
     fn drop_sender(&mut self) {
@@ -81,69 +81,119 @@ impl VortexSinkInner {
 }
 
 pub struct VortexSink {
-    path: PathBuf,
     inner: Mutex<VortexSinkInner>,
     writer_task: Option<tokio::task::JoinHandle<Result<()>>>,
+    upload: Option<Mutex<ObjectUpload>>,
 }
 
 impl VortexSink {
-    pub fn create(path: PathBuf, schema: &SchemaRef, options: VortexSinkOptions) -> Result<Self> {
+    pub fn create(
+        handle: StorageHandle,
+        schema: &SchemaRef,
+        options: VortexSinkOptions,
+    ) -> Result<Self> {
         let coalescer = BatchCoalescer::new(Arc::clone(schema), options.record_batch_size);
         let (sender, receiver) = mpsc::channel(16);
-
-        let path_clone = path.clone();
-        let schema_clone = Arc::clone(schema);
-
-        // the vortex lib doesn't support push-based writing in a way that
-        // results in a Send struct, which we need for storing it in a struct that
-        // implements async_trait. so we hack this by giving it a stream hooked up
-        // to a channel and spawning a task that writes the arrays to the file
-        // and can block until the channel is closed. the non-Send struct only
-        // exists within the task, which is then safe to store a handle to within
-        // the Sink struct.
-        let writer_task = tokio::spawn(async move {
-            Self::write_vortex_file(path_clone, schema_clone, receiver).await
-        });
-
-        let inner = VortexSinkInner {
-            rows_written: 0,
-            coalescer,
-            sender: Some(sender),
-        };
+        let mut upload = ObjectUpload::new(handle);
+        let writer = VortexUploadAdapter::new(upload.writer()?, upload.part_size().get());
+        let schema = Arc::clone(schema);
+        let writer_task =
+            tokio::spawn(async move { Self::write_vortex_file(writer, schema, receiver).await });
 
         Ok(Self {
-            path,
-            inner: Mutex::new(inner),
+            inner: Mutex::new(VortexSinkInner {
+                rows_written: 0,
+                coalescer,
+                sender: Some(sender),
+            }),
             writer_task: Some(writer_task),
+            upload: Some(Mutex::new(upload)),
         })
     }
 
-    async fn write_vortex_file(
-        path: PathBuf,
+    async fn write_vortex_file<W>(
+        writer: VortexUploadAdapter<W>,
         schema: SchemaRef,
         mut receiver: mpsc::Receiver<ArrayRef>,
-    ) -> Result<()> {
-        let file = File::create(&path)
-            .await
-            .context("Failed to create Vortex file")?;
-
+    ) -> Result<()>
+    where
+        W: Sink<Bytes, Error = futures::channel::mpsc::SendError> + Send + Unpin,
+    {
         let session = VortexSession::default();
-
         let dtype = DType::from_arrow(schema);
-
         let array_stream = ArrayStreamAdapter::new(
             dtype.clone(),
-            // a little hack to turn a channel into a stream
-            stream::poll_fn(move |cx| receiver.poll_recv(cx).map(|opt| opt.map(Ok))),
+            stream::poll_fn(move |context| receiver.poll_recv(context).map(|item| item.map(Ok))),
         );
 
         session
             .write_options()
-            .write(file, array_stream)
+            .write(writer, array_stream)
             .await
-            .map_err(|e| anyhow::anyhow!("failed to write vortex file: {}", e))?;
+            .map_err(|error| anyhow!("failed to write vortex file: {error}"))?;
 
         Ok(())
+    }
+
+    async fn abort_unfinished(&mut self) -> Vec<anyhow::Error> {
+        self.inner.lock().await.drop_sender();
+        let mut errors = Vec::new();
+        if let Some(handle) = self.writer_task.take() {
+            handle.abort();
+            match handle.await {
+                Err(error) if error.is_cancelled() => {}
+                Err(error) => errors.push(anyhow::Error::new(error)),
+                Ok(Err(error)) => errors.push(error),
+                Ok(Ok(())) => {}
+            }
+        }
+        if let Some(upload) = self.upload.take()
+            && let Err(error) = upload.into_inner().abort().await
+        {
+            errors.push(anyhow::Error::new(error));
+        }
+        errors
+    }
+}
+
+/// Bounded async adapter from Vortex's writer interface to one object upload.
+struct VortexUploadAdapter<W> {
+    writer: W,
+    part_size: usize,
+}
+
+impl<W> VortexUploadAdapter<W> {
+    fn new(writer: W, part_size: usize) -> Self {
+        Self { writer, part_size }
+    }
+}
+
+impl<W> VortexWrite for VortexUploadAdapter<W>
+where
+    W: Sink<Bytes, Error = futures::channel::mpsc::SendError> + Unpin,
+{
+    async fn write_all<B: IoBuf>(&mut self, buffer: B) -> io::Result<B> {
+        for chunk in buffer.as_slice().chunks(self.part_size) {
+            self.writer
+                .send(Bytes::copy_from_slice(chunk))
+                .await
+                .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "object upload stopped"))?;
+        }
+        Ok(buffer)
+    }
+
+    async fn flush(&mut self) -> io::Result<()> {
+        self.writer
+            .flush()
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "object upload stopped"))
+    }
+
+    async fn shutdown(&mut self) -> io::Result<()> {
+        self.writer
+            .close()
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "object upload stopped"))
     }
 }
 
@@ -152,33 +202,71 @@ impl DataSink for VortexSink {
     async fn write_batch(&mut self, batch: RecordBatch) -> Result<()> {
         let mut inner = self.inner.lock().await;
         inner.coalescer.push_batch(batch)?;
-        inner.flush_completed_batches().await?;
-
-        Ok(())
+        inner.flush_completed_batches().await
     }
 
     async fn finish(mut self: Box<Self>) -> Result<SinkCompletion> {
-        let mut inner = self.inner.lock().await;
-        inner.finish_buffered_batch()?;
-        inner.flush_completed_batches().await?;
+        let rows_written = {
+            let mut inner = self.inner.lock().await;
+            let result = async {
+                inner.finish_buffered_batch()?;
+                inner.flush_completed_batches().await?;
+                inner.drop_sender();
+                Ok::<_, anyhow::Error>(inner.rows_written)
+            }
+            .await;
+            drop(inner);
+            match result {
+                Ok(rows_written) => rows_written,
+                Err(primary) => {
+                    let cleanup = self.abort_unfinished().await;
+                    return Err(cleanup.into_iter().fold(primary, |primary, cleanup| {
+                        with_cleanup_error(primary, Some(cleanup))
+                    }));
+                }
+            }
+        };
 
-        // make it impossible to write to the channel again, dropping the sender
-        // which will also cause the writer task to finish.
-        // IMPORTANT: rows_written must be updated when the batch is pushed, not when it's written
-        //            in order for this to be correct
-        inner.drop_sender();
-
-        // wait for the writer task to finish. the sender was dropped above,
-        // which will cause the writer task to finish. so we just need to wait
-        // for it to finish writing its last batches.
-        self.writer_task
+        let task_result = self
+            .writer_task
             .take()
             .ok_or_else(|| anyhow!("writer task already finished"))?
             .await
-            .map_err(|e| anyhow!("error joining writer task: {e}"))?
-            .map_err(|e| anyhow!("writer task errored: {e}"))?;
-        let url = completed_file_url(&self.path).await?;
+            .map_err(|error| anyhow!("error joining writer task: {error}"))
+            .and_then(|result| result.map_err(|error| anyhow!("writer task errored: {error}")));
 
-        Ok(SinkCompletion::new(url, [], inner.rows_written))
+        if let Err(primary) = task_result {
+            let cleanup = self.abort_unfinished().await;
+            return Err(cleanup.into_iter().fold(primary, |primary, cleanup| {
+                with_cleanup_error(primary, Some(cleanup))
+            }));
+        }
+        let upload = self
+            .upload
+            .take()
+            .context("sink already finished")?
+            .into_inner();
+        let url = upload.complete().await?;
+
+        Ok(SinkCompletion::new(url, [], rows_written))
+    }
+
+    async fn abort(mut self: Box<Self>) -> Result<()> {
+        let mut errors = self.abort_unfinished().await.into_iter();
+        match errors.next() {
+            Some(primary) => Err(errors.fold(primary, |primary, cleanup| {
+                with_cleanup_error(primary, Some(cleanup))
+            })),
+            None => Ok(()),
+        }
+    }
+}
+
+impl Drop for VortexSink {
+    fn drop(&mut self) {
+        if let Some(handle) = self.writer_task.take() {
+            handle.abort();
+        }
+        self.upload.take();
     }
 }

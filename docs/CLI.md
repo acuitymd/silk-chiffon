@@ -140,13 +140,13 @@ Examples:
 
   Possible values:
   - `sort-single`:
-    Sort by partition columns first, then write one file at a time. Uses minimal file handles but requires sorting the entire dataset. Best for high-cardinality partition columns, or when partition columns are highly fragmented
+    Sort by partition columns first, then write one file at a time. Keeps at most one output sink open but requires sorting the entire dataset. Best for high-cardinality partition columns, or when partition columns are highly fragmented
   - `nosort-multi`:
-    Keep a file handle open per partition, write rows directly. No sorting required, preserves input order within each partition. Best for low-cardinality partition columns with low fragmentation
+    Keep one output sink open per partition and write rows directly. No sorting required, preserves input order within each partition. Best for low-cardinality partition columns with low fragmentation
   - `nosort-evict`:
-    Like nosort-multi but caps the number of simultaneously open partition writers. When the cap is hit, the least-recently-written partition is finalized. If that partition reappears, a new numbered file is created. Best for high-cardinality partitions where sorting is too expensive. Per-writer concurrency is minimized (sequential encoding) since parallelism comes from having many partition writers active simultaneously
+    Like nosort-multi but caps the number of simultaneously open partition writers. When the cap is hit, the least-recently-written partition is finalized. If that partition reappears, `file_number` advances and the complete template is rendered again. Requires a direct unconditional `{{ file_number }}` interpolation in `--to-many`. Best for high-cardinality partitions where sorting is too expensive. Per-writer concurrency is minimized (sequential encoding) since parallelism comes from having many partition writers active simultaneously
 
-- `--max-open-partitions <MAX_OPEN_PARTITIONS>` — Maximum number of partition file handles to keep open simultaneously. When this limit is reached, the least-recently-written partition is finalized. Only used with --partition-strategy=nosort-evict. Defaults to 100
+- `--max-open-partitions <MAX_OPEN_PARTITIONS>` — Maximum number of partition output sinks to keep open simultaneously. When this limit is reached, the least-recently-written partition is finalized. Only used with --partition-strategy=nosort-evict. Defaults to 100
 - `-l`, `--list-outputs <LIST_OUTPUTS>` — List the output files after creation (only with --to-many)
 
   Possible values: `none`, `text`, `json`
@@ -156,6 +156,12 @@ Examples:
 
   Default value: `true`
 - `--overwrite` — Overwrite existing file outputs
+- `--object-store-upload-part-size <PART_SIZE>` — Adaptive single-put threshold and multipart part size
+
+  Default value: `10MiB`
+- `--object-store-max-in-flight-parts <MAX_IN_FLIGHT_PARTS>` — Maximum multipart part requests in flight across the command
+
+  Default value: `8`
 - `--arrow-compression <ARROW_COMPRESSION>` — Arrow IPC compression codec
 
   Default value: `none`
@@ -259,9 +265,9 @@ Examples:
       --parquet-bloom-all --parquet-bloom-column-off user_id  # All except user_id
       --parquet-bloom-column-off "user.address"  # Disable all user.address leaves
       --parquet-bloom-column-off col1 --parquet-bloom-column-off col2  # Disable multiple
-- `--parquet-buffer-size <PARQUET_BUFFER_SIZE>` — I/O buffer size for Parquet writing (e.g., "32MB", "64MB", "1GB").
+- `--parquet-buffer-size <PARQUET_BUFFER_SIZE>` — Encoding buffer size for Parquet writing (e.g., "32MB", "64MB", "1GB").
 
-  Controls the size of the buffer used when writing encoded data to disk. Supports suffixes: B, KB, MB, GB, TB (or KiB, MiB, GiB, TiB for binary). Default: 32MB.
+  Controls the bytes buffered between Parquet encoding and the object upload. Supports suffixes: B, KB, MB, GB, TB (or KiB, MiB, GiB, TiB for binary). Default: 32MB.
 - `--parquet-dictionary-all-off` — Disable dictionary encoding globally for all Parquet columns.
 
   Dictionary encoding builds a dictionary of unique values and stores references to it,
@@ -343,7 +349,7 @@ Examples:
   Controls backpressure between ingestion and encoding stages. Higher values allow more row groups to be assembled while encoders are busy.
 
   Default value: `4`
-- `--parquet-writing-queue-size <PARQUET_WRITING_QUEUE_SIZE>` — Queue size for encoded row groups waiting to be written to disk.
+- `--parquet-writing-queue-size <PARQUET_WRITING_QUEUE_SIZE>` — Queue size for encoded row groups waiting to be serialized to the output.
 
   Controls backpressure between encoding and I/O stages. Higher values allow more encoding to proceed while I/O is in progress.
 
@@ -399,9 +405,9 @@ Examples:
 
   Possible values: `plain`, `rle`, `delta-binary-packed`, `delta-length-byte-array`, `delta-byte-array`, `byte-stream-split`
 
-- `--parquet-io-threads <PARQUET_IO_THREADS>` — Number of threads for blocking parquet I/O operations.
+- `--parquet-io-threads <PARQUET_IO_THREADS>` — Number of threads for blocking Parquet writer operations.
 
-  Controls the rayon thread pool size for file writes during parquet output. Typically needs fewer threads than encoding since I/O is less CPU-intensive. Defaults to 1.
+  Controls the runtime used to serialize Parquet row groups into the object upload. Typically needs fewer threads than column encoding. Defaults to 1.
 - `--parquet-row-group-concurrency <PARQUET_ROW_GROUP_CONCURRENCY>` — Maximum number of row groups that can be encoding concurrently.
 
   Controls how many row groups can be actively encoding at once. Higher values increase parallelism but use more memory. Each row group encodes its columns in parallel using --parquet-column-encoding-threads. Defaults to 4.
@@ -472,6 +478,13 @@ Detect the format of an input
   - `json`:
     JSON output
 
+- `--object-store-upload-part-size <PART_SIZE>` — Adaptive single-put threshold and multipart part size
+
+  Default value: `10MiB`
+- `--object-store-max-in-flight-parts <MAX_IN_FLIGHT_PARTS>` — Maximum multipart part requests in flight across the command
+
+  Default value: `8`
+
 ## `silk-chiffon inspect`
 
 Inspect file metadata and structure.
@@ -518,6 +531,12 @@ Inspect arrow file metadata and structure
 
 - `--batches` — Show per-record-batch details
 - `--row-count` — Count total rows (requires reading entire file)
+- `--object-store-upload-part-size <PART_SIZE>` — Adaptive single-put threshold and multipart part size
+
+  Default value: `10MiB`
+- `--object-store-max-in-flight-parts <MAX_IN_FLIGHT_PARTS>` — Maximum multipart part requests in flight across the command
+
+  Default value: `8`
 
 ## `silk-chiffon inspect parquet`
 
@@ -547,6 +566,12 @@ Inspect parquet file metadata and structure
 
   Default value: `0`
 - `-p`, `--pages <PAGES>` — Show page details for columns (comma-separated, or omit value for all columns)
+- `--object-store-upload-part-size <PART_SIZE>` — Adaptive single-put threshold and multipart part size
+
+  Default value: `10MiB`
+- `--object-store-max-in-flight-parts <MAX_IN_FLIGHT_PARTS>` — Maximum multipart part requests in flight across the command
+
+  Default value: `8`
 
 ## `silk-chiffon inspect vortex`
 
@@ -575,6 +600,12 @@ Inspect vortex file metadata and structure
 - `--schema` — Show full schema details
 - `--stats` — Show per-column statistics
 - `--layout` — Show layout structure
+- `--object-store-upload-part-size <PART_SIZE>` — Adaptive single-put threshold and multipart part size
+
+  Default value: `10MiB`
+- `--object-store-max-in-flight-parts <MAX_IN_FLIGHT_PARTS>` — Maximum multipart part requests in flight across the command
+
+  Default value: `8`
 
 ## `silk-chiffon completions`
 

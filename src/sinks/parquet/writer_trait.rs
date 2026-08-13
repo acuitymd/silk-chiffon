@@ -3,10 +3,10 @@
 use anyhow::Result;
 use arrow::array::RecordBatch;
 use async_trait::async_trait;
+use url::Url;
 
 /// Trait for parquet writers supporting both async and blocking operations.
 ///
-/// Implemented by both `SequentialParquetWriter` and `ParallelParquetWriter`.
 #[async_trait]
 pub trait ParquetWriter: Send {
     /// Write a batch of records.
@@ -15,13 +15,13 @@ pub trait ParquetWriter: Send {
     /// Write a batch of records (blocking version).
     fn blocking_write(&mut self, batch: RecordBatch) -> Result<()>;
 
-    /// Close the writer and return the number of rows written.
+    /// Close the writer and return the number of rows written and durable target.
     ///
     /// Takes `Box<Self>` to support trait objects.
-    async fn close(self: Box<Self>) -> Result<u64>;
+    async fn close(self: Box<Self>) -> Result<(u64, Url)>;
 
     /// Close the writer (blocking version).
-    fn blocking_close(self: Box<Self>) -> Result<u64>;
+    fn blocking_close(self: Box<Self>) -> Result<(u64, Url)>;
 
     /// Cancel writing and discard partial output.
     async fn cancel(self: Box<Self>) -> Result<()>;

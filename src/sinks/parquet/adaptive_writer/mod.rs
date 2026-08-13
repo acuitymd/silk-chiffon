@@ -4,8 +4,8 @@
 //!   and optionally runs cardinality analysis via DataFusion streaming aggregation.
 //! - **Encoder tasks**: encodes row groups in parallel using the parquet-rs encoder.
 //!   Multiple encoder tasks allow CPU-bound encoding to proceed concurrently.
-//! - **Writer task**: writes encoded row groups to disk in order. Uses an ordered channel
-//!   to ensure row groups are written sequentially even when encoded out of order.
+//! - **Writer task**: writes encoded row groups to the object upload in order. Uses an ordered
+//!   channel to ensure row groups are written sequentially even when encoded out of order.
 //!
 //! # Dictionary and Bloom Filter Configuration
 //!
@@ -19,7 +19,6 @@ mod config;
 pub(crate) mod encoding;
 mod pipeline;
 
-use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
@@ -27,37 +26,47 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use parquet::file::properties::WriterProperties;
+use silk_chiffon_storage::{ObjectUpload, StorageHandle};
 use tokio::sync::mpsc;
+use url::Url;
 
 pub use config::AdaptiveWriterConfig;
 
-use crate::sinks::parquet::{ParquetRuntimes, ParquetWriter};
+use crate::sinks::{
+    parquet::{ParquetRuntimes, ParquetWriter},
+    with_cleanup_error,
+};
 use pipeline::run_pipeline;
 
 pub struct AdaptiveParquetWriter {
     ingestion_sender: Option<mpsc::Sender<RecordBatch>>,
     monitor_handle: Option<tokio::task::JoinHandle<Result<u64>>>,
+    upload: Option<ObjectUpload>,
 }
 
 impl AdaptiveParquetWriter {
     pub fn new(
-        path: &Path,
+        handle: StorageHandle,
         schema: &SchemaRef,
         base_props: WriterProperties,
         runtimes: Arc<ParquetRuntimes>,
         config: AdaptiveWriterConfig,
     ) -> Self {
         let (ingestion_tx, ingestion_rx) = mpsc::channel(config.ingestion_queue_size);
+        let mut upload = ObjectUpload::new(handle);
+        let writer = upload
+            .blocking_writer()
+            .expect("a new object upload accepts one byte writer");
 
         let monitor_handle = tokio::spawn({
-            let path = path.to_path_buf();
             let schema = Arc::clone(schema);
-            async move { run_pipeline(path, schema, base_props, runtimes, config, ingestion_rx).await }
+            async move { run_pipeline(writer, schema, base_props, runtimes, config, ingestion_rx).await }
         });
 
         Self {
             ingestion_sender: Some(ingestion_tx),
             monitor_handle: Some(monitor_handle),
+            upload: Some(upload),
         }
     }
 
@@ -84,7 +93,7 @@ impl AdaptiveParquetWriter {
             .map_err(|_| anyhow!("batch send failed: writer pipeline closed"))
     }
 
-    pub async fn close(mut self) -> Result<u64> {
+    pub async fn close(mut self) -> Result<(u64, Url)> {
         // drop sender to signal end of input
         self.ingestion_sender.take();
 
@@ -93,23 +102,53 @@ impl AdaptiveParquetWriter {
             .take()
             .ok_or_else(|| anyhow!("already closed"))?;
 
-        match handle.await {
-            Ok(result) => result,
-            Err(e) => Err(anyhow!("writer task panicked: {e}")),
-        }
+        let result = match handle.await {
+            Ok(Ok(rows_written)) => rows_written,
+            Ok(Err(primary)) => {
+                let upload = self.upload.take().expect("upload exists until close");
+                let cleanup = upload.abort().await.err().map(anyhow::Error::new);
+                return Err(with_cleanup_error(primary, cleanup));
+            }
+            Err(error) => {
+                let primary = anyhow!("writer task panicked: {error}");
+                let upload = self.upload.take().expect("upload exists until close");
+                let cleanup = upload.abort().await.err().map(anyhow::Error::new);
+                return Err(with_cleanup_error(primary, cleanup));
+            }
+        };
+        let url = self
+            .upload
+            .take()
+            .expect("upload exists until close")
+            .complete()
+            .await?;
+        Ok((result, url))
     }
 
-    pub fn blocking_close(self) -> Result<u64> {
+    pub fn blocking_close(self) -> Result<(u64, Url)> {
         crate::utils::blocking::block_on(self.close())
     }
 
     pub async fn cancel(mut self) -> Result<()> {
         self.ingestion_sender.take();
+        let upload_error = match self.upload.take() {
+            Some(upload) => upload.abort().await.err().map(anyhow::Error::new),
+            None => None,
+        };
+        let mut task_error = None;
         if let Some(handle) = self.monitor_handle.take() {
             handle.abort();
-            let _ = handle.await;
+            task_error = match handle.await {
+                Err(error) if error.is_cancelled() => None,
+                Err(error) => Some(anyhow::Error::new(error)),
+                Ok(Err(error)) => Some(error),
+                Ok(Ok(_)) => None,
+            };
         }
-        Ok(())
+        match task_error {
+            Some(primary) => Err(with_cleanup_error(primary, upload_error)),
+            None => upload_error.map_or(Ok(()), Err),
+        }
     }
 
     pub fn blocking_cancel(self) -> Result<()> {
@@ -122,6 +161,7 @@ impl Drop for AdaptiveParquetWriter {
         if let Some(handle) = self.monitor_handle.take() {
             handle.abort();
         }
+        self.upload.take();
     }
 }
 
@@ -135,11 +175,11 @@ impl ParquetWriter for AdaptiveParquetWriter {
         AdaptiveParquetWriter::blocking_write(self, batch)
     }
 
-    async fn close(self: Box<Self>) -> Result<u64> {
+    async fn close(self: Box<Self>) -> Result<(u64, Url)> {
         AdaptiveParquetWriter::close(*self).await
     }
 
-    fn blocking_close(self: Box<Self>) -> Result<u64> {
+    fn blocking_close(self: Box<Self>) -> Result<(u64, Url)> {
         AdaptiveParquetWriter::blocking_close(*self)
     }
 
@@ -160,12 +200,12 @@ mod tests {
     use arrow::datatypes::{DataType, Field};
     use parquet::file::reader::FileReader;
     use parquet::file::serialized_reader::SerializedFileReader;
-    use std::fs::File as StdFile;
+    use std::{fs::File as StdFile, path::Path};
     use tempfile::tempdir;
 
     use crate::{
         AllColumnsBloomFilterConfig, BloomFilterConfigBuilder, ColumnBloomFilterConfig,
-        ColumnSpecificBloomFilterConfig,
+        ColumnSpecificBloomFilterConfig, utils::test_helpers::prepared_local_output,
     };
 
     fn test_runtimes() -> Arc<ParquetRuntimes> {
@@ -220,10 +260,15 @@ mod tests {
         let props = WriterProperties::builder().build();
         let config = AdaptiveWriterConfig::default();
 
-        let mut writer =
-            AdaptiveParquetWriter::new(&output_path, &schema, props, test_runtimes(), config);
+        let mut writer = AdaptiveParquetWriter::new(
+            prepared_local_output(&output_path),
+            &schema,
+            props,
+            test_runtimes(),
+            config,
+        );
         writer.write(batch).await.unwrap();
-        let rows = Box::new(writer).close().await.unwrap();
+        let (rows, _) = Box::new(writer).close().await.unwrap();
 
         assert_eq!(rows, 3);
         assert!(output_path.exists());
@@ -242,8 +287,13 @@ mod tests {
             ..Default::default()
         };
 
-        let mut writer =
-            AdaptiveParquetWriter::new(&output_path, &schema, props, test_runtimes(), config);
+        let mut writer = AdaptiveParquetWriter::new(
+            prepared_local_output(&output_path),
+            &schema,
+            props,
+            test_runtimes(),
+            config,
+        );
 
         for i in 0..5 {
             let ids: Vec<i32> = (i * 10..(i + 1) * 10).collect();
@@ -253,7 +303,7 @@ mod tests {
             writer.write(batch).await.unwrap();
         }
 
-        let rows = Box::new(writer).close().await.unwrap();
+        let (rows, _) = Box::new(writer).close().await.unwrap();
         assert_eq!(rows, 50);
 
         let file = StdFile::open(&output_path).unwrap();
@@ -275,8 +325,13 @@ mod tests {
             ..Default::default()
         };
 
-        let mut writer =
-            AdaptiveParquetWriter::new(&output_path, &schema, props, test_runtimes(), config);
+        let mut writer = AdaptiveParquetWriter::new(
+            prepared_local_output(&output_path),
+            &schema,
+            props,
+            test_runtimes(),
+            config,
+        );
         writer.write(batch).await.unwrap();
         Box::new(writer).close().await.unwrap();
 
@@ -302,8 +357,13 @@ mod tests {
             ..Default::default()
         };
 
-        let mut writer =
-            AdaptiveParquetWriter::new(&output_path, &schema, props, test_runtimes(), config);
+        let mut writer = AdaptiveParquetWriter::new(
+            prepared_local_output(&output_path),
+            &schema,
+            props,
+            test_runtimes(),
+            config,
+        );
         writer.write(batch).await.unwrap();
         Box::new(writer).close().await.unwrap();
 
@@ -330,8 +390,13 @@ mod tests {
             ..Default::default()
         };
 
-        let mut writer =
-            AdaptiveParquetWriter::new(&output_path, &schema, props, test_runtimes(), config);
+        let mut writer = AdaptiveParquetWriter::new(
+            prepared_local_output(&output_path),
+            &schema,
+            props,
+            test_runtimes(),
+            config,
+        );
         writer.write(batch).await.unwrap();
         Box::new(writer).close().await.unwrap();
 
@@ -368,8 +433,13 @@ mod tests {
             ..Default::default()
         };
 
-        let mut writer =
-            AdaptiveParquetWriter::new(&output_path, &schema, props, test_runtimes(), config);
+        let mut writer = AdaptiveParquetWriter::new(
+            prepared_local_output(&output_path),
+            &schema,
+            props,
+            test_runtimes(),
+            config,
+        );
         writer.write(batch).await.unwrap();
         Box::new(writer).close().await.unwrap();
 
@@ -401,8 +471,13 @@ mod tests {
             ..Default::default()
         };
 
-        let mut writer =
-            AdaptiveParquetWriter::new(&output_path, &schema, props, test_runtimes(), config);
+        let mut writer = AdaptiveParquetWriter::new(
+            prepared_local_output(&output_path),
+            &schema,
+            props,
+            test_runtimes(),
+            config,
+        );
         writer.write(batch).await.unwrap();
         Box::new(writer).close().await.unwrap();
 
@@ -437,8 +512,13 @@ mod tests {
             ..Default::default()
         };
 
-        let mut writer =
-            AdaptiveParquetWriter::new(&output_path, &schema, props, test_runtimes(), config);
+        let mut writer = AdaptiveParquetWriter::new(
+            prepared_local_output(&output_path),
+            &schema,
+            props,
+            test_runtimes(),
+            config,
+        );
         writer.write(batch).await.unwrap();
         Box::new(writer).close().await.unwrap();
 
@@ -462,8 +542,13 @@ mod tests {
         let props = WriterProperties::builder().build();
         let config = AdaptiveWriterConfig::default();
 
-        let mut writer =
-            AdaptiveParquetWriter::new(&output_path, &schema, props, test_runtimes(), config);
+        let mut writer = AdaptiveParquetWriter::new(
+            prepared_local_output(&output_path),
+            &schema,
+            props,
+            test_runtimes(),
+            config,
+        );
         writer.write(batch).await.unwrap();
         Box::new(writer).close().await.unwrap();
 
@@ -501,8 +586,13 @@ mod tests {
             ..Default::default()
         };
 
-        let mut writer =
-            AdaptiveParquetWriter::new(&output_path, &schema, props, test_runtimes(), config);
+        let mut writer = AdaptiveParquetWriter::new(
+            prepared_local_output(&output_path),
+            &schema,
+            props,
+            test_runtimes(),
+            config,
+        );
         writer.write(batch).await.unwrap();
         Box::new(writer).close().await.unwrap();
 
@@ -539,8 +629,13 @@ mod tests {
             ..Default::default()
         };
 
-        let mut writer =
-            AdaptiveParquetWriter::new(&output_path, &schema, props, test_runtimes(), config);
+        let mut writer = AdaptiveParquetWriter::new(
+            prepared_local_output(&output_path),
+            &schema,
+            props,
+            test_runtimes(),
+            config,
+        );
         writer.write(batch).await.unwrap();
         Box::new(writer).close().await.unwrap();
 
@@ -578,8 +673,13 @@ mod tests {
             ..Default::default()
         };
 
-        let mut writer =
-            AdaptiveParquetWriter::new(&output_path, &schema, props, test_runtimes(), config);
+        let mut writer = AdaptiveParquetWriter::new(
+            prepared_local_output(&output_path),
+            &schema,
+            props,
+            test_runtimes(),
+            config,
+        );
         writer.write(batch).await.unwrap();
         Box::new(writer).close().await.unwrap();
 
@@ -618,8 +718,13 @@ mod tests {
             .build();
         let config = AdaptiveWriterConfig::default();
 
-        let mut writer =
-            AdaptiveParquetWriter::new(&output_path, &schema, props, test_runtimes(), config);
+        let mut writer = AdaptiveParquetWriter::new(
+            prepared_local_output(&output_path),
+            &schema,
+            props,
+            test_runtimes(),
+            config,
+        );
         writer.write(batch).await.unwrap();
         Box::new(writer).close().await.unwrap();
 
@@ -696,8 +801,13 @@ mod tests {
             ..Default::default()
         };
 
-        let mut writer =
-            AdaptiveParquetWriter::new(&output_path, &schema, props, test_runtimes(), config);
+        let mut writer = AdaptiveParquetWriter::new(
+            prepared_local_output(&output_path),
+            &schema,
+            props,
+            test_runtimes(),
+            config,
+        );
         writer.write(batch).await.unwrap();
         Box::new(writer).close().await.unwrap();
 
@@ -760,8 +870,13 @@ mod tests {
             ..Default::default()
         };
 
-        let mut writer =
-            AdaptiveParquetWriter::new(&output_path, &schema, props, test_runtimes(), config);
+        let mut writer = AdaptiveParquetWriter::new(
+            prepared_local_output(&output_path),
+            &schema,
+            props,
+            test_runtimes(),
+            config,
+        );
         writer.write(batch).await.unwrap();
         Box::new(writer).close().await.unwrap();
 

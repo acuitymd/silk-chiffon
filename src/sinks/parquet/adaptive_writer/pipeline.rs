@@ -16,7 +16,7 @@
 //!      │        ◄───────────────┼────────┘              │
 //!      │        │                                       │
 //!      └─► writer_task ─────────────────────────────────┼─► I/O tasks
-//!               │                                       │   (file ops)
+//!               │                                       │   (upload bridge)
 //!               └───────────────────────────────────────┘
 //! ```
 //!
@@ -31,13 +31,11 @@
 //! 3. **Encoder Coordinator** (1 task): Uses `FuturesOrdered` to spawn encoding tasks
 //!    on `CpuRuntime` (up to `max_row_group_concurrency`). Results come out in order.
 //!
-//! 4. **Writing** (1 task): Receives encoded row groups in order, writes to disk
-//!    via `IoRuntime`.
+//! 4. **Writing** (1 task): Receives encoded row groups in order and feeds the object-upload
+//!    bridge via `IoRuntime`.
 
 use std::collections::HashMap;
-use std::fs::File;
 use std::io::BufWriter;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -56,6 +54,7 @@ use parquet::arrow::arrow_writer::{
 use parquet::file::properties::{WriterProperties, WriterPropertiesPtr};
 use parquet::file::writer::SerializedFileWriter;
 use parquet::schema::types::SchemaDescPtr;
+use silk_chiffon_storage::BlockingObjectUploadWriter;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -77,30 +76,13 @@ pub(crate) struct EncodedRowGroup {
     pub num_rows: usize,
 }
 
-pub(crate) async fn create_file(
-    path: PathBuf,
-    buffer_size: usize,
-    runtimes: &ParquetRuntimes,
-) -> Result<BufWriter<File>> {
-    let mut tasks = JoinSet::new();
-    tasks.spawn_on(
-        async move { Ok(BufWriter::with_capacity(buffer_size, File::create(&path)?)) },
-        runtimes.io.handle(),
-    );
-    tasks
-        .join_next()
-        .await
-        .ok_or_else(|| anyhow!("file create task set unexpectedly empty"))?
-        .context("file create task failed")?
-}
-
 pub(crate) fn create_arrow_writer(
-    file: BufWriter<File>,
+    file: BufWriter<BlockingObjectUploadWriter>,
     schema: &SchemaRef,
     base_props: WriterProperties,
     skip_arrow_metadata: bool,
 ) -> Result<(
-    SerializedFileWriter<BufWriter<File>>,
+    SerializedFileWriter<BufWriter<BlockingObjectUploadWriter>>,
     SchemaDescPtr,
     WriterPropertiesPtr,
 )> {
@@ -125,14 +107,14 @@ pub(crate) fn create_arrow_writer(
 }
 
 pub(crate) async fn run_pipeline(
-    path: PathBuf,
+    writer: BlockingObjectUploadWriter,
     schema: SchemaRef,
     base_props: WriterProperties,
     runtimes: Arc<ParquetRuntimes>,
     config: AdaptiveWriterConfig,
     ingestion_rx: mpsc::Receiver<RecordBatch>,
 ) -> Result<u64> {
-    let file = create_file(path, config.buffer_size, &runtimes).await?;
+    let file = BufWriter::with_capacity(config.buffer_size, writer);
 
     let (encoding_tx, encoding_rx) = mpsc::channel::<RowGroupWork>(config.encoding_queue_size);
     let (writing_tx, writing_rx) = mpsc::channel::<EncodedRowGroup>(config.writing_queue_size);
@@ -476,7 +458,7 @@ async fn encoder_coordinator(
 
 async fn writer_task(
     mut encoded_rx: mpsc::Receiver<EncodedRowGroup>,
-    file_writer: SerializedFileWriter<BufWriter<File>>,
+    file_writer: SerializedFileWriter<BufWriter<BlockingObjectUploadWriter>>,
     io_handle: Handle,
     total_rows: Arc<AtomicU64>,
 ) -> Result<()> {
@@ -497,9 +479,9 @@ async fn writer_task(
 
 async fn write_row_group(
     io_handle: &Handle,
-    fw: SerializedFileWriter<BufWriter<File>>,
+    fw: SerializedFileWriter<BufWriter<BlockingObjectUploadWriter>>,
     rg: EncodedRowGroup,
-) -> Result<SerializedFileWriter<BufWriter<File>>> {
+) -> Result<SerializedFileWriter<BufWriter<BlockingObjectUploadWriter>>> {
     io_handle
         .spawn(async move {
             let mut fw = fw;
