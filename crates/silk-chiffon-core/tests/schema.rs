@@ -112,3 +112,29 @@ fn schema_comparison_strips_metadata_from_every_nested_container() {
         ));
     }
 }
+
+#[test]
+fn schema_comparison_does_not_recurse_on_the_call_stack() {
+    fn deeply_nested_schema(depth: usize) -> Schema {
+        let mut data_type = DataType::Utf8;
+        for _ in 0..depth {
+            data_type = DataType::List(Arc::new(Field::new("item", data_type, true)));
+        }
+        Schema::new(vec![Field::new("value", data_type, true)])
+    }
+
+    let left = deeply_nested_schema(10_000);
+    let right = deeply_nested_schema(10_000);
+    std::thread::Builder::new()
+        .stack_size(64 * 1024)
+        .spawn(move || {
+            let matches = schemas_match_ignoring_metadata(&left, &right);
+            // Deeply recursive Arrow values also recurse when dropped.
+            std::mem::forget(left);
+            std::mem::forget(right);
+            assert!(matches);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
