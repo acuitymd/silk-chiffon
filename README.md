@@ -36,6 +36,40 @@ silk-chiffon reads the format from each file's extension (`.arrow`, `.parquet`, 
 silk-chiffon inspect parquet data.parquet
 ```
 
+## Cloud storage
+
+Google Cloud Storage and Amazon S3 are optional build features. Enable `gcs`, `s3`, or both when installing from source. Release binaries built with the default features accept local paths only.
+
+```bash
+cargo install --git https://github.com/acuitymd/silk-chiffon --features gcs,s3
+```
+
+Cloud URLs work for exact input, pattern input, inspection, and output arguments:
+
+```bash
+silk-chiffon transform \
+  --from-pattern 'gs://source-bucket/shards/*.arrow' \
+  --to s3://result-bucket/combined.parquet
+
+silk-chiffon detect gs://source-bucket/mystery.bin
+silk-chiffon inspect parquet s3://result-bucket/combined.parquet
+```
+
+Credentials come from the cloud provider's standard discovery chain. GCS uses Application Default Credentials and its supported environment settings. S3 uses its supported AWS environment, web-identity, container, and instance sources. Silk Chiffon does not accept access keys, tokens, service-account JSON, or private keys as command arguments.
+
+GCS adds `--gcs-endpoint`, `--gcs-anonymous`, and `--gcs-request-timeout`. S3 adds `--s3-region`, `--s3-endpoint`, `--s3-addressing-style`, `--s3-anonymous`, and `--s3-request-timeout`. Both providers use the shared `--storage-*` retry settings and `--object-store-*` upload settings in the [command reference](docs/CLI.md). Anonymous mode disables credential discovery and signing. It does not grant write permission.
+
+For an S3-compatible endpoint, path-style addressing appends the bucket to the endpoint. With virtual-hosted addressing, the endpoint must already include the bucket name:
+
+```bash
+silk-chiffon detect s3://example-bucket/data.parquet \
+  --s3-endpoint https://storage.example.com \
+  --s3-addressing-style path \
+  --s3-region example-region
+```
+
+Only canonical `gs://` and `s3://` URLs are registered. `s3a://` is intentionally unsupported because treating it as a second spelling for the same S3 object would split cache and output-claim identity.
+
 ## Recipes
 
 ### Merge many files into one
