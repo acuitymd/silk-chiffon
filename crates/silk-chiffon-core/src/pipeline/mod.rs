@@ -2,7 +2,7 @@
 
 mod config;
 mod error;
-mod input_sources;
+mod input;
 mod memory_pool;
 
 use std::{
@@ -13,7 +13,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use arrow::{array::RecordBatch, datatypes::SchemaRef};
 use camino::Utf8PathBuf;
 use datafusion::{
@@ -23,18 +23,17 @@ use datafusion::{
         memory_pool::{FairSpillPool, MemoryPool, TrackConsumersPool},
     },
     physical_plan::{ExecutionPlan, RecordBatchStream, SendableRecordBatchStream, execute_stream},
-    prelude::{SessionConfig, SessionContext},
+    prelude::{DataFrame, SessionConfig, SessionContext},
 };
 use futures::Stream;
 use sysinfo::System;
 use tempfile::TempDir;
 
-use crate::DataOperation;
 use memory_pool::ReservedSpillPool;
 
 pub use config::{QueryDialect, SpillCompression};
 pub use error::{PipelineExecutionStartError, PipelinePreparationError};
-pub use input_sources::InputSources;
+pub use input::union_input_providers_by_name;
 
 struct PipelineConfig {
     query_dialect: QueryDialect,
@@ -65,12 +64,10 @@ impl Default for PipelineConfig {
 /// A transform definition before its final DataFusion plan has been built.
 ///
 /// The host creates the session first, constructs every input provider in that
-/// session, and then attaches the nonempty inputs and logical operations. Output
-/// behavior is intentionally absent.
+/// session, and applies command-owned transformations before passing the final
+/// logical frame here. Output behavior is intentionally absent.
 #[derive(Default)]
 pub struct Pipeline {
-    inputs: Option<InputSources>,
-    operations: Vec<Box<dyn DataOperation>>,
     config: PipelineConfig,
     spill_path: Option<TempDir>,
 }
@@ -79,18 +76,6 @@ impl Pipeline {
     /// Creates an empty pipeline with default execution settings.
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Sets the command's nonempty logical input.
-    pub fn with_inputs(mut self, inputs: InputSources) -> Self {
-        self.inputs = Some(inputs);
-        self
-    }
-
-    /// Appends an operation in command order.
-    pub fn with_operation(mut self, operation: Box<dyn DataOperation>) -> Self {
-        self.operations.push(operation);
-        self
     }
 
     /// Selects the SQL dialect used by logical query operations.
@@ -205,9 +190,10 @@ impl Pipeline {
     /// Builds, validates, and retains the final physical plan.
     pub async fn prepare(
         mut self,
-        mut session: SessionContext,
+        input: DataFrame,
+        session: SessionContext,
     ) -> std::result::Result<PreparedPipeline, PipelinePreparationError> {
-        self.prepare_inner(&mut session)
+        self.prepare_inner(input)
             .await
             .map_err(PipelinePreparationError::new)
             .map(|plan| PreparedPipeline {
@@ -218,18 +204,7 @@ impl Pipeline {
             })
     }
 
-    async fn prepare_inner(
-        &mut self,
-        session: &mut SessionContext,
-    ) -> Result<Arc<dyn ExecutionPlan>> {
-        let inputs = self
-            .inputs
-            .take()
-            .ok_or_else(|| anyhow!("no inputs provided"))?;
-        let mut data_frame = inputs.data_frame();
-        for operation in &self.operations {
-            data_frame = operation.apply(session, data_frame).await?;
-        }
+    async fn prepare_inner(&mut self, data_frame: DataFrame) -> Result<Arc<dyn ExecutionPlan>> {
         let plan = data_frame.create_physical_plan().await?;
         if plan.properties().boundedness.is_unbounded() {
             anyhow::bail!("current outputs require a bounded final plan");

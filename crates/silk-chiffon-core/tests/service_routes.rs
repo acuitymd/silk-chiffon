@@ -32,11 +32,11 @@ struct OutputArgs {
 fn create_provider<'a>(
     reference: &'a str,
     session: &'a SessionContext,
-    settings: &'a InputArgs,
+    state: &'a InputArgs,
 ) -> BoxFuture<'a, Result<Arc<dyn TableProvider>>> {
     Box::pin(async move {
         ensure!(reference == "svc-in://project/table");
-        ensure!(settings.service_input_marker == 17);
+        ensure!(state.service_input_marker == 17);
         ensure!(session.state().config_options().execution.target_partitions == 3);
         let schema = Arc::new(Schema::new(vec![Field::new(
             "value",
@@ -51,14 +51,14 @@ fn create_provider<'a>(
     })
 }
 
-fn write_output<'a>(
+fn consume_output<'a>(
     target: &'a str,
     stream: SendableRecordBatchStream,
-    settings: &'a OutputArgs,
+    state: &'a OutputArgs,
 ) -> BoxFuture<'a, Result<()>> {
     Box::pin(async move {
         ensure!(target == "svc-out://project/table?mode=replace");
-        ensure!(settings.service_output_marker == 23);
+        ensure!(state.service_output_marker == 23);
         let batches = stream.try_collect::<Vec<_>>().await?;
         ensure!(batches.iter().map(RecordBatch::num_rows).sum::<usize>() == 3);
         Ok(())
@@ -66,7 +66,7 @@ fn write_output<'a>(
 }
 
 #[test]
-fn service_input_keeps_typed_settings_with_its_provider_function() {
+fn service_input_keeps_typed_state_with_its_provider_function() {
     let definition = ServiceInputDefinition::with_args::<InputArgs>(create_provider)
         .name("test-input")
         .schemes(["svc-in"])
@@ -92,8 +92,8 @@ fn service_input_keeps_typed_settings_with_its_provider_function() {
 }
 
 #[test]
-fn service_output_keeps_typed_settings_with_its_write_operation() {
-    let definition = ServiceOutputDefinition::with_args::<OutputArgs>(write_output)
+fn service_output_keeps_typed_state_with_its_consumer() {
+    let definition = ServiceOutputDefinition::with_args::<OutputArgs>(consume_output)
         .name("test-output")
         .schemes(["svc-out"])
         .build()
@@ -118,7 +118,7 @@ fn service_output_keeps_typed_settings_with_its_write_operation() {
         futures::stream::iter([Ok::<_, DataFusionError>(batch)]),
     ));
 
-    futures::executor::block_on(binding.write("svc-out://project/table?mode=replace", stream))
+    futures::executor::block_on(binding.consume("svc-out://project/table?mode=replace", stream))
         .unwrap();
 
     assert_eq!(definition.name(), "test-output");

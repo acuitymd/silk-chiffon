@@ -16,7 +16,7 @@ use object_store::{ObjectStore, local::LocalFileSystem};
 use crate::{Location, LocationPattern};
 #[cfg(feature = "local")]
 use crate::{
-    OutputPreparation, StorageAccess, StorageBackend, StorageBackendBuildError, StorageHandle,
+    OutputPreparation, OutputTarget, StorageAccess, StorageBackend, StorageBackendBuildError,
     StorageRegistry, StorageSession, StorageSessionCreationError,
 };
 
@@ -76,12 +76,12 @@ fn create_object_store(
 
 #[cfg(feature = "local")]
 fn prepare_output_target<'a>(
-    handle: &'a StorageHandle,
+    target: &'a OutputTarget,
     preparation: &'a OutputPreparation,
     _settings: &'a (),
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + 'a>> {
     Box::pin(async move {
-        let path = handle.local_path()?;
+        let path = target.local_path()?;
         let Some(parent) = path.parent() else {
             return Ok(());
         };
@@ -157,7 +157,7 @@ mod tests {
                 .unwrap();
 
             assert_eq!(matches.len(), 1, "working directory {directory_name:?}");
-            assert_eq!(matches[0].handle().local_path().unwrap(), input);
+            assert_eq!(matches[0].input_handle().local_path().unwrap(), input);
         }
     }
 
@@ -179,6 +179,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].handle().local_path().unwrap(), input);
+        assert_eq!(matches[0].input_handle().local_path().unwrap(), input);
     }
 }

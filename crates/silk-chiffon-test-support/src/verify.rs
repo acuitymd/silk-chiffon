@@ -1,43 +1,9 @@
-use anyhow::Result;
 use arrow::{
     array::{Array, Int32Array, RecordBatch, StringArray},
     datatypes::Schema,
-    ipc::reader::{FileReader, StreamReader},
 };
-use std::{collections::HashMap, fs::File, path::Path};
 
 use crate::batch as test_data;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-
-pub fn read_output_file(path: &Path) -> Result<Vec<RecordBatch>> {
-    let file = File::open(path)?;
-    let reader = FileReader::try_new_buffered(file, None)?;
-    reader.collect::<Result<Vec<_>, _>>().map_err(Into::into)
-}
-
-pub fn read_parquet_file(path: &Path) -> Result<Vec<RecordBatch>> {
-    let file = File::open(path)?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
-    let reader = builder.build()?;
-    let mut batches = Vec::new();
-    for batch in reader {
-        batches.push(batch?);
-    }
-    Ok(batches)
-}
-
-pub fn read_output_stream(path: &Path) -> Result<Vec<RecordBatch>> {
-    let file = File::open(path)?;
-    let reader = StreamReader::try_new(file, None)?;
-    reader.collect::<Result<Vec<_>, _>>().map_err(Into::into)
-}
-
-pub fn read_file_metadata(path: &Path) -> Result<HashMap<String, String>> {
-    let file = File::open(path)?;
-    let reader = FileReader::try_new_buffered(file, None)?;
-    let metadata = reader.custom_metadata().clone();
-    Ok(metadata)
-}
 
 pub fn assert_schema_matches(actual: &Schema, expected: &Schema) {
     assert_eq!(actual.fields().len(), expected.fields().len());

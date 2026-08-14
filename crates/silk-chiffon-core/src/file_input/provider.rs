@@ -14,9 +14,12 @@ use datafusion::{
 };
 use futures::{StreamExt, TryStreamExt};
 
-use crate::{CanonicalInput, InputLeaf, file_table_provider, schemas_match_ignoring_metadata};
+use crate::{
+    CanonicalInputUrl, ExactFileTableProviderBuilder, FileInputGroup,
+    schemas_match_ignoring_metadata,
+};
 
-impl InputLeaf {
+impl FileInputGroup {
     /// Prepares a DataFusion provider using one file format's metadata operations.
     ///
     /// The representative file determines the logical schema. Every file is then
@@ -33,7 +36,7 @@ impl InputLeaf {
         let store = session.runtime_env().object_store(&store_url)?;
         let representative = self.representative();
         let representative_url = representative
-            .extension::<CanonicalInput>()
+            .extension::<CanonicalInputUrl>()
             .expect("prepared input files retain their canonical URL")
             .url();
         let schema = format
@@ -59,7 +62,7 @@ impl InputLeaf {
                 let state = session.state();
                 async move {
                     let canonical_url = file
-                        .extension::<CanonicalInput>()
+                        .extension::<CanonicalInputUrl>()
                         .expect("registered input files retain their canonical URL")
                         .url()
                         .clone();
@@ -88,7 +91,7 @@ impl InputLeaf {
                         })?;
                     if !schemas_match_ignoring_metadata(&schema, &physical_schema) {
                         return Err(datafusion::common::DataFusionError::Execution(format!(
-                            "input {canonical_url} schema does not match leaf schema: expected {schema:?}, got {physical_schema:?}"
+                            "input {canonical_url} schema does not match group schema: expected {schema:?}, got {physical_schema:?}"
                         )));
                     }
                     Ok((index, file, meta))
@@ -114,16 +117,16 @@ impl InputLeaf {
         )?;
         let output_ordering = common_output_ordering(&files);
 
-        file_table_provider(
-            store_url,
-            schema,
-            files,
-            statistics,
-            output_ordering,
-            format,
-            Some(Arc::new(StrictPhysicalExprAdapterFactory)),
-        )
-        .map_err(Into::into)
+        ExactFileTableProviderBuilder::new()
+            .object_store_url(store_url)
+            .schema(schema)
+            .files(files)
+            .statistics(statistics)
+            .output_ordering(output_ordering)
+            .format(format)
+            .expression_adapter_factory(Arc::new(StrictPhysicalExprAdapterFactory))
+            .build()
+            .map_err(Into::into)
     }
 }
 
@@ -160,7 +163,7 @@ impl PhysicalExprAdapterFactory for StrictPhysicalExprAdapterFactory {
     ) -> datafusion::common::Result<Arc<dyn PhysicalExprAdapter>> {
         if !schemas_match_ignoring_metadata(&logical_file_schema, &physical_file_schema) {
             return Err(datafusion::common::DataFusionError::Execution(format!(
-                "input file schema does not match leaf schema: expected {logical_file_schema:?}, got {physical_file_schema:?}"
+                "input file schema does not match group schema: expected {logical_file_schema:?}, got {physical_file_schema:?}"
             )));
         }
         DefaultPhysicalExprAdapterFactory.create(logical_file_schema, physical_file_schema)
@@ -192,7 +195,7 @@ mod tests {
             .create(logical, physical)
             .expect_err("a structurally different file schema must fail");
 
-        assert!(error.to_string().contains("does not match leaf schema"));
+        assert!(error.to_string().contains("does not match group schema"));
     }
 
     #[test]

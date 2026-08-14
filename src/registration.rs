@@ -10,8 +10,8 @@ use clap::{
     builder::{PossibleValue, PossibleValuesParser},
 };
 use silk_chiffon_core::{
-    FormatRegistry, InspectionMode, ServiceInputBinding, ServiceInputDefinition,
-    ServiceOutputBinding, ServiceOutputDefinition,
+    FormatRegistry, ServiceInputBinding, ServiceInputDefinition, ServiceOutputBinding,
+    ServiceOutputDefinition,
 };
 use silk_chiffon_storage::{StorageDirection, StorageRegistry};
 use thiserror::Error;
@@ -25,11 +25,11 @@ use silk_chiffon_storage::s3;
 
 use crate::{
     Cli, Command as RuntimeCommand, DetectArgs, DetectCommand, InspectCommand, InspectionArgs,
-    OutputFormat, TransformArgs, TransformCommand,
+    TransformArgs, TransformCommand,
 };
 
 /// Builds the executable's set of available data formats.
-pub fn format_registry() -> FormatRegistry {
+pub(crate) fn format_registry() -> FormatRegistry {
     FormatRegistry::builder()
         .register(silk_chiffon_format_arrow::definition())
         .register(silk_chiffon_format_parquet::definition())
@@ -39,7 +39,7 @@ pub fn format_registry() -> FormatRegistry {
 }
 
 /// Builds the executable's feature-selected storage backends.
-pub fn storage_registry() -> StorageRegistry {
+pub(crate) fn storage_registry() -> StorageRegistry {
     let builder = StorageRegistry::builder();
     #[cfg(feature = "gcs")]
     let builder = builder.register(gcs::backend().expect("built-in GCS backend must be valid"));
@@ -633,18 +633,10 @@ fn parse_inspect(
     let inspection = bind_inspection(formats, name, matches)?;
     Ok(InspectCommand::from_parsed(
         args.file,
-        inspection_mode(args.format),
+        args.presentation.resolve(),
         inspection,
         storage,
     ))
-}
-
-fn inspection_mode(format: OutputFormat) -> InspectionMode {
-    if format.resolves_to_json() {
-        InspectionMode::Json
-    } else {
-        InspectionMode::Text
-    }
 }
 
 fn bind_inspection(
@@ -689,11 +681,12 @@ mod tests {
     use futures::{StreamExt, future::BoxFuture};
     use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory, path::Path as ObjectPath};
     use silk_chiffon_core::{
-        DataSink, FormatDefinition, FormatFuture, FormatRegistry, InputLeaf,
+        DataSink, FileInputGroup, FormatDefinition, FormatFuture, FormatRegistry,
         ServiceInputDefinition, ServiceOutputDefinition, SinkBinding, TransformDefinition,
     };
     use silk_chiffon_storage::{
-        OutputPreparation, StorageAccess, StorageBackend, StorageHandle, StorageRegistry,
+        OutputPreparation, OutputTarget, PreparedOutputTarget, StorageAccess, StorageBackend,
+        StorageRegistry,
     };
     use url::Url;
 
@@ -704,7 +697,7 @@ mod tests {
     static SERVICE_INPUT_REFERENCES: Mutex<Vec<String>> = Mutex::new(Vec::new());
     static SERVICE_OUTPUT_RESULT: Mutex<Option<(String, usize)>> = Mutex::new(None);
     static TYPED_SERVICE_OUTPUT_RESULT: Mutex<Option<TypedServiceOutputResult>> = Mutex::new(None);
-    static LARGE_LEAF_FILES: AtomicUsize = AtomicUsize::new(0);
+    static LARGE_GROUP_FILES: AtomicUsize = AtomicUsize::new(0);
     static SERVICE_SOURCE_STATE: LazyLock<Arc<ServiceSourceState>> =
         LazyLock::new(|| Arc::new(ServiceSourceState::new()));
     static REMOTE_STORES: LazyLock<Mutex<HashMap<String, Arc<InMemory>>>> =
@@ -815,7 +808,7 @@ mod tests {
     }
 
     fn prepare_remote_output<'a>(
-        _: &'a StorageHandle,
+        _: &'a OutputTarget,
         _: &'a OutputPreparation,
         _: &'a (),
     ) -> BoxFuture<'a, Result<()>> {
@@ -1044,19 +1037,19 @@ mod tests {
     }
 
     fn input_only_provider<'a>(
-        _: &'a InputLeaf,
+        _: &'a FileInputGroup,
         _: &'a SessionContext,
         _: &'a (),
     ) -> FormatFuture<'a, Arc<dyn TableProvider>> {
         Box::pin(async { test_provider(TestBatch::simple_with(&[3, 1, 2], &["c", "a", "b"])) })
     }
 
-    fn large_leaf_provider<'a>(
-        leaf: &'a InputLeaf,
+    fn large_group_provider<'a>(
+        group: &'a FileInputGroup,
         _: &'a SessionContext,
         _: &'a (),
     ) -> FormatFuture<'a, Arc<dyn TableProvider>> {
-        LARGE_LEAF_FILES.store(leaf.files().len(), Ordering::SeqCst);
+        LARGE_GROUP_FILES.store(group.files().len(), Ordering::SeqCst);
         Box::pin(async { test_provider(TestBatch::simple_with(&[1], &["one"])) })
     }
 
@@ -1071,12 +1064,12 @@ mod tests {
             .build()
     }
 
-    fn large_leaf_format() -> FormatDefinition {
-        FormatDefinition::builder("large-leaf-test", "Large leaf test")
-            .extensions(["large-leaf-test"])
+    fn large_group_format() -> FormatDefinition {
+        FormatDefinition::builder("large-group-test", "Large group test")
+            .extensions(["large-group-test"])
             .transform(
                 TransformDefinition::without_args()
-                    .input_provider(large_leaf_provider)
+                    .input_provider(large_group_provider)
                     .build(),
             )
             .build()
@@ -1096,7 +1089,7 @@ mod tests {
     impl SinkBinding for UnavailableSinkBinding {
         async fn open_sink(
             &self,
-            _: StorageHandle,
+            _: PreparedOutputTarget,
             _: arrow::datatypes::SchemaRef,
         ) -> Result<Box<dyn DataSink>> {
             anyhow::bail!("test sink is not opened")
@@ -1318,7 +1311,7 @@ mod tests {
             panic!("expected transform command");
         };
 
-        crate::commands::transform::run(command).await.unwrap();
+        Command::Transform(command).execute().await.unwrap();
 
         assert_eq!(
             SERVICE_INPUT_REFERENCES.lock().unwrap().as_slice(),
@@ -1354,7 +1347,7 @@ mod tests {
             panic!("expected transform command");
         };
 
-        crate::commands::transform::run(command).await.unwrap();
+        Command::Transform(command).execute().await.unwrap();
 
         let batches = TestFile::read_arrow(&output);
         assert_eq!(batches[0].schema().fields().len(), 1);
@@ -1384,7 +1377,7 @@ mod tests {
             panic!("expected transform command");
         };
 
-        crate::commands::transform::run(command).await.unwrap();
+        Command::Transform(command).execute().await.unwrap();
 
         let bytes = remote_store("test-remote://coverage-output/")
             .get(&ObjectPath::from("exact/output.arrow"))
@@ -1445,7 +1438,7 @@ mod tests {
             panic!("expected transform command");
         };
 
-        crate::commands::transform::run(command).await.unwrap();
+        Command::Transform(command).execute().await.unwrap();
 
         let bytes = remote_store("test-remote://coverage-parquet-output/")
             .get(&ObjectPath::from("output.parquet"))
@@ -1504,7 +1497,7 @@ mod tests {
             panic!("expected transform command");
         };
 
-        crate::commands::transform::run(command).await.unwrap();
+        Command::Transform(command).execute().await.unwrap();
 
         let store = remote_store("test-remote://coverage-partitioned/");
         let mut ids = Vec::new();
@@ -1558,7 +1551,7 @@ mod tests {
             panic!("expected transform command");
         };
 
-        crate::commands::transform::run(command).await.unwrap();
+        Command::Transform(command).execute().await.unwrap();
 
         let batches = TestFile::read_arrow(&output);
         assert_eq!(batches[0].schema().fields().len(), 1);
@@ -1585,7 +1578,7 @@ mod tests {
             panic!("expected transform command");
         };
 
-        let error = crate::commands::transform::run(command).await.unwrap_err();
+        let error = Command::Transform(command).execute().await.unwrap_err();
 
         let message = format!("{error:#}");
         assert!(message.contains(input), "{message}");
@@ -1621,7 +1614,7 @@ mod tests {
             panic!("expected transform command");
         };
 
-        crate::commands::transform::run(command).await.unwrap();
+        Command::Transform(command).execute().await.unwrap();
 
         assert_eq!(
             TestExtract::i32_all(&TestFile::read_arrow(&output), "id"),
@@ -1652,7 +1645,7 @@ mod tests {
             panic!("expected transform command");
         };
 
-        let error = crate::commands::transform::run(command).await.unwrap_err();
+        let error = Command::Transform(command).execute().await.unwrap_err();
 
         let message = format!("{error:#}");
         assert!(message.contains("malformed arrow input"), "{message}");
@@ -1690,7 +1683,7 @@ mod tests {
             panic!("expected transform command");
         };
 
-        let error = crate::commands::transform::run(command).await.unwrap_err();
+        let error = Command::Transform(command).execute().await.unwrap_err();
 
         let message = format!("{error:#}");
         assert!(message.contains("malformed parquet input"), "{message}");
@@ -1724,7 +1717,7 @@ mod tests {
             panic!("expected transform command");
         };
 
-        let error = crate::commands::transform::run(command).await.unwrap_err();
+        let error = Command::Transform(command).execute().await.unwrap_err();
 
         let message = format!("{error:#}");
         assert!(message.contains("could not detect the format"), "{message}");
@@ -1753,7 +1746,7 @@ mod tests {
             panic!("expected transform command");
         };
 
-        let error = crate::commands::transform::run(command).await.unwrap_err();
+        let error = Command::Transform(command).execute().await.unwrap_err();
 
         let message = format!("{error:#}");
         assert!(message.contains("could not detect the format"), "{message}");
@@ -1799,7 +1792,7 @@ mod tests {
             panic!("expected transform command");
         };
 
-        crate::commands::transform::run(command).await.unwrap();
+        Command::Transform(command).execute().await.unwrap();
 
         let mut ids = TestExtract::i32_all(&TestFile::read_arrow(&output), "id");
         ids.sort_unstable();
@@ -1838,7 +1831,7 @@ mod tests {
             panic!("expected transform command");
         };
 
-        crate::commands::transform::run(command).await.unwrap();
+        Command::Transform(command).execute().await.unwrap();
 
         let mut ids = TestExtract::i32_all(&TestFile::read_arrow(&output), "id");
         ids.sort_unstable();
@@ -1848,14 +1841,14 @@ mod tests {
     #[tokio::test]
     async fn six_figure_remote_pattern_builds_one_leaf_and_executes() {
         const FILES: usize = 100_000;
-        LARGE_LEAF_FILES.store(0, Ordering::SeqCst);
+        LARGE_GROUP_FILES.store(0, Ordering::SeqCst);
         SERVICE_OUTPUT_RESULT.lock().unwrap().take();
         let root = "test-remote://coverage-large/";
         let store = remote_store(root);
         for index in 0..FILES {
             store
                 .put(
-                    &ObjectPath::from(format!("dataset/{index:06}.large-leaf-test")),
+                    &ObjectPath::from(format!("dataset/{index:06}.large-group-test")),
                     Bytes::new().into(),
                 )
                 .await
@@ -1863,7 +1856,7 @@ mod tests {
         }
         let definition = ApplicationDefinition::from_parts(
             FormatRegistry::builder()
-                .register(large_leaf_format())
+                .register(large_group_format())
                 .build()
                 .unwrap(),
             remote_storage_registry(),
@@ -1877,9 +1870,9 @@ mod tests {
                 "silk-chiffon",
                 "transform",
                 "--from-pattern",
-                "test-remote://coverage-large/dataset/*.large-leaf-test",
+                "test-remote://coverage-large/dataset/*.large-group-test",
                 "--input-format",
-                "large-leaf-test",
+                "large-group-test",
                 "--to",
                 "test-output://large",
             ],
@@ -1888,9 +1881,9 @@ mod tests {
             panic!("expected transform command");
         };
 
-        crate::commands::transform::run(command).await.unwrap();
+        Command::Transform(command).execute().await.unwrap();
 
-        assert_eq!(LARGE_LEAF_FILES.load(Ordering::SeqCst), FILES);
+        assert_eq!(LARGE_GROUP_FILES.load(Ordering::SeqCst), FILES);
         assert_eq!(
             SERVICE_OUTPUT_RESULT.lock().unwrap().as_ref(),
             Some(&("test-output://large".to_owned(), 1))
@@ -1936,7 +1929,7 @@ mod tests {
             panic!("expected transform command");
         };
 
-        crate::commands::transform::run(command).await.unwrap();
+        Command::Transform(command).execute().await.unwrap();
 
         assert_eq!(
             TYPED_SERVICE_OUTPUT_RESULT.lock().unwrap().as_ref(),
@@ -1982,7 +1975,7 @@ mod tests {
             panic!("expected transform command");
         };
 
-        let error = crate::commands::transform::run(command).await.unwrap_err();
+        let error = Command::Transform(command).execute().await.unwrap_err();
         assert!(
             error
                 .to_string()
@@ -2025,7 +2018,7 @@ mod tests {
             panic!("expected transform command");
         };
 
-        let error = crate::commands::transform::run(command).await.unwrap_err();
+        let error = Command::Transform(command).execute().await.unwrap_err();
         assert!(
             error
                 .to_string()
@@ -2061,7 +2054,7 @@ mod tests {
             panic!("expected transform command");
         };
 
-        crate::commands::transform::run(command).await.unwrap();
+        Command::Transform(command).execute().await.unwrap();
 
         assert_eq!(
             SERVICE_OUTPUT_RESULT.lock().unwrap().as_ref(),
@@ -2102,7 +2095,7 @@ mod tests {
             panic!("expected transform command");
         };
 
-        let error = crate::commands::transform::run(command).await.unwrap_err();
+        let error = Command::Transform(command).execute().await.unwrap_err();
         assert!(error.to_string().contains("does not support --to-many"));
     }
 
@@ -2195,7 +2188,7 @@ mod tests {
                 panic!("expected transform command");
             };
 
-            let error = crate::commands::transform::run(command).await.unwrap_err();
+            let error = Command::Transform(command).execute().await.unwrap_err();
             assert!(
                 error.to_string().contains(expected),
                 "expected {expected:?}, got {error:#}"

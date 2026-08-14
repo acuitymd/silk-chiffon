@@ -1,11 +1,8 @@
 use arrow::array::{Array, Int32Array, Int64Array, NullArray, RecordBatch, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use camino::Utf8PathBuf;
-use silk_chiffon::{
-    Cli, Command, ListOutputsFormat, PartitionStrategy, PoolReserveSpec, SortColumn, SortDirection,
-    SortSpec,
-};
-use silk_chiffon_core::QueryDialect;
+use silk_chiffon::{Cli, Command, PartitionStrategy, PoolReserveSpec, SortSpec};
+use silk_chiffon_core::{PresentationMode, QueryDialect};
 use silk_chiffon_test_support::{TestBatch, TestExtract, TestFile};
 use std::ffi::OsString;
 use std::sync::Arc;
@@ -32,7 +29,7 @@ struct TestTransformCommand {
     by: Option<String>,
     partition_strategy: PartitionStrategy,
     max_open_partitions: Option<usize>,
-    list_outputs: Option<ListOutputsFormat>,
+    list_outputs: Option<PresentationMode>,
     list_outputs_file: Option<Utf8PathBuf>,
     create_dirs: bool,
     overwrite: bool,
@@ -139,7 +136,10 @@ async fn run_transform(command: TestTransformCommand) -> anyhow::Result<()> {
         push_value!("--max-open-partitions", max_open.to_string());
     }
     if let Some(format) = command.list_outputs {
-        push_value!("--list-outputs", format.to_string());
+        push_value!(
+            "--list-outputs",
+            format.to_possible_value().unwrap().get_name()
+        );
     }
     if let Some(path) = command.list_outputs_file {
         push_value!("--list-outputs-file", path.into_os_string());
@@ -158,7 +158,7 @@ async fn run_transform(command: TestTransformCommand) -> anyhow::Result<()> {
     else {
         unreachable!()
     };
-    silk_chiffon::commands::transform::run(command).await
+    Command::Transform(command).execute().await
 }
 
 mod test_helpers {
@@ -618,12 +618,7 @@ async fn test_transform_with_sorting() {
     run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        sort_by: Some(SortSpec {
-            columns: vec![silk_chiffon::SortColumn {
-                name: "id".to_string(),
-                direction: SortDirection::Ascending,
-            }],
-        }),
+        sort_by: Some("id".parse().unwrap()),
         ..transform_defaults()
     })
     .await
@@ -702,12 +697,7 @@ async fn test_transform_with_sorted_metadata() {
     run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        sort_by: Some(SortSpec {
-            columns: vec![silk_chiffon::SortColumn {
-                name: "id".to_string(),
-                direction: SortDirection::Ascending,
-            }],
-        }),
+        sort_by: Some("id".parse().unwrap()),
         output_format: Some("parquet".to_owned()),
         ..transform_defaults_with(["--parquet-sorted-metadata"])
     })
@@ -991,12 +981,7 @@ async fn test_transform_query_and_sort_combined() {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
         query: Some("SELECT * FROM data WHERE id > 1".to_string()),
-        sort_by: Some(SortSpec {
-            columns: vec![SortColumn {
-                name: "id".to_string(),
-                direction: SortDirection::Ascending,
-            }],
-        }),
+        sort_by: Some("id".parse().unwrap()),
         ..transform_defaults()
     })
     .await
@@ -1039,18 +1024,7 @@ async fn test_transform_multi_column_sort() {
     run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        sort_by: Some(SortSpec {
-            columns: vec![
-                SortColumn {
-                    name: "category".to_string(),
-                    direction: SortDirection::Ascending,
-                },
-                SortColumn {
-                    name: "value".to_string(),
-                    direction: SortDirection::Ascending,
-                },
-            ],
-        }),
+        sort_by: Some("category,value".parse().unwrap()),
         ..transform_defaults()
     })
     .await
@@ -1091,12 +1065,7 @@ async fn test_transform_sort_descending() {
     run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        sort_by: Some(SortSpec {
-            columns: vec![SortColumn {
-                name: "id".to_string(),
-                direction: SortDirection::Descending,
-            }],
-        }),
+        sort_by: Some("id:desc".parse().unwrap()),
         ..transform_defaults()
     })
     .await
@@ -2090,7 +2059,7 @@ async fn test_transform_partition_list_outputs_text() {
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("name".to_string()),
-        list_outputs: Some(ListOutputsFormat::Text),
+        list_outputs: Some(PresentationMode::Text),
         create_dirs: false,
         ..transform_defaults()
     })
@@ -2121,7 +2090,7 @@ async fn test_transform_partition_list_outputs_json() {
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("name".to_string()),
         exclude_columns: vec!["name".to_string()],
-        list_outputs: Some(ListOutputsFormat::Json),
+        list_outputs: Some(PresentationMode::Json),
         list_outputs_file: Some(Utf8PathBuf::from_path_buf(report.clone()).unwrap()),
         create_dirs: false,
         ..transform_defaults()
@@ -2160,7 +2129,7 @@ async fn test_transform_partition_failure_writes_completed_outputs_only() {
         to_many: Some(target.to_string_lossy().into_owned()),
         by: Some("name".to_owned()),
         partition_strategy: PartitionStrategy::SortSingle,
-        list_outputs: Some(ListOutputsFormat::Json),
+        list_outputs: Some(PresentationMode::Json),
         list_outputs_file: Some(Utf8PathBuf::from_path_buf(report.clone()).unwrap()),
         create_dirs: false,
         ..transform_defaults()
@@ -2393,12 +2362,7 @@ async fn test_transform_partition_with_query_and_sort() {
         by: Some("region".to_string()),
         create_dirs: false,
         query: Some("SELECT * FROM data WHERE score > 100".to_string()),
-        sort_by: Some(SortSpec {
-            columns: vec![SortColumn {
-                name: "score".to_string(),
-                direction: SortDirection::Ascending,
-            }],
-        }),
+        sort_by: Some("score".parse().unwrap()),
         ..transform_defaults()
     })
     .await
@@ -3363,7 +3327,7 @@ async fn test_multi_column_partition_verifies_output_paths_arrow() {
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("year,month".to_string()),
-        list_outputs: Some(ListOutputsFormat::Json),
+        list_outputs: Some(PresentationMode::Json),
         list_outputs_file: Some(Utf8PathBuf::from_path_buf(list_output.clone()).unwrap()),
         output_format: Some("arrow".to_owned()),
         ..transform_defaults()
@@ -3476,7 +3440,7 @@ async fn test_multi_column_partition_verifies_output_paths_parquet() {
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("region,year".to_string()),
-        list_outputs: Some(ListOutputsFormat::Json),
+        list_outputs: Some(PresentationMode::Json),
         list_outputs_file: Some(Utf8PathBuf::from_path_buf(list_output.clone()).unwrap()),
         output_format: Some("parquet".to_owned()),
         ..transform_defaults()
@@ -3887,12 +3851,7 @@ async fn test_transform_sort_uses_final_plan_statistics_for_spill_reservation() 
     run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        sort_by: Some(SortSpec {
-            columns: vec![SortColumn {
-                name: "id".to_string(),
-                direction: SortDirection::Ascending,
-            }],
-        }),
+        sort_by: Some("id".parse().unwrap()),
         output_format: Some("parquet".to_owned()),
         ..transform_defaults()
     })
@@ -3934,12 +3893,7 @@ async fn test_transform_sort_multi_file_with_spill_reservation() {
             input2.to_string_lossy().to_string(),
         ],
         to: Some(output.to_string_lossy().to_string()),
-        sort_by: Some(SortSpec {
-            columns: vec![SortColumn {
-                name: "id".to_string(),
-                direction: SortDirection::Ascending,
-            }],
-        }),
+        sort_by: Some("id".parse().unwrap()),
         ..transform_defaults()
     })
     .await
@@ -3998,12 +3952,7 @@ async fn test_reserved_spill_pool_with_sorting() {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
         non_spillable_reserve: Some(PoolReserveSpec::Percent(10)),
-        sort_by: Some(SortSpec {
-            columns: vec![SortColumn {
-                name: "id".to_string(),
-                direction: SortDirection::Ascending,
-            }],
-        }),
+        sort_by: Some("id".parse().unwrap()),
         ..transform_defaults()
     })
     .await
@@ -4035,12 +3984,7 @@ async fn test_reserved_spill_pool_with_fixed_reserve() {
         to: Some(output.to_string_lossy().to_string()),
         output_format: Some("parquet".to_owned()),
         non_spillable_reserve: Some(PoolReserveSpec::Fixed(50 * 1024 * 1024)), // 50MB
-        sort_by: Some(SortSpec {
-            columns: vec![SortColumn {
-                name: "name".to_string(),
-                direction: SortDirection::Ascending,
-            }],
-        }),
+        sort_by: Some("name".parse().unwrap()),
         ..transform_defaults()
     })
     .await

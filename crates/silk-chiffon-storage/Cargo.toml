@@ -20,6 +20,7 @@ s3 = ["object_store/aws"]
 
 [dependencies]
 anyhow.workspace = true
+async-trait.workspace = true
 bytes = "^1.12.1"
 bytesize = "^2.4.2"
 clap.workspace = true
@@ -34,7 +35,6 @@ tokio-util.workspace = true
 url.workspace = true
 
 [dev-dependencies]
-async-trait.workspace = true
 bytes = "^1.12.1"
 http = "^1.4.0"
 http-body-util = "^0.1.3"

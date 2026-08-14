@@ -1,3 +1,3 @@
-pub mod detect;
-pub mod inspect;
-pub mod transform;
+pub(crate) mod detect;
+pub(crate) mod inspect;
+pub(crate) mod transform;

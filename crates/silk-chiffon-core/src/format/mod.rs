@@ -20,10 +20,10 @@ mod definition;
 mod registry;
 
 pub use definition::{
-    DetectedFormat, FormatDefinition, FormatDefinitionBuilder, FormatFuture, FormatOperation,
-    FormatOperationError, InputDetection, InputDetectorFn, InputProviderFn, InputVariant,
-    InspectionBinding, InspectionDefinition, InspectionMode, InspectorFn, OpenSinkMode,
-    OutputOrderingColumn, SinkBinderFn, SinkBindingConfig, SortDirection, TransformBinding,
+    DetectedFormat, FormatDefinition, FormatDefinitionBuilder, FormatFuture, FormatInputVariant,
+    FormatOperation, FormatOperationError, InputDetection, InputDetectorFn, InputProviderFn,
+    InspectionBinding, InspectionDefinition, InspectorFn, NullPlacement, OpenSinkMode,
+    PresentationMode, SinkBinderFn, SinkBindingConfig, SortColumn, SortDirection, TransformBinding,
     TransformBindings, TransformDefinition, TransformDefinitionBuilder,
 };
 pub use registry::{FormatRegistry, FormatRegistryBuilder, FormatRegistryError};

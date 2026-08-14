@@ -18,10 +18,11 @@ use thiserror::Error;
 use url::{Position, Url};
 
 use crate::{
-    ExistingOutput, InputObject, Location, LocationInput, LocationPattern, ObjectUploadSettings,
-    OutputPreparation, RetryConfigurationError, StorageBackendBuildError, StorageDirection,
-    StorageError, StorageHandle, StorageRegistryError, backend::BackendBinding,
-    pattern::PatternInput, registry::RoutingIndex, upload::ObjectUploadContext,
+    ExistingOutput, InputHandle, InputObject, Location, LocationInput, LocationPattern,
+    ObjectUploadSettings, OutputPreparation, OutputTarget, PreparedOutputTarget,
+    RetryConfigurationError, StorageBackendBuildError, StorageDirection, StorageError,
+    StorageRegistryError, backend::BackendBinding, handle::StorageHandle, pattern::PatternInput,
+    registry::RoutingIndex, upload::ObjectUploadContext,
 };
 
 /// Storage state bound to one command invocation.
@@ -57,9 +58,15 @@ struct SessionState {
     backends: Box<[Box<dyn BackendBinding>]>,
     routing: Arc<RoutingIndex>,
     retry: Option<RetryConfig>,
-    object_store_cache: Mutex<HashMap<Url, Arc<dyn ObjectStore>>>,
+    object_store_cache: Mutex<HashMap<Url, CachedObjectStore>>,
     object_upload_context: Arc<ObjectUploadContext>,
     claimed_output_targets: Mutex<HashSet<OutputTargetIdentity>>,
+}
+
+#[derive(Clone)]
+struct CachedObjectStore {
+    writable: Arc<dyn ObjectStore>,
+    read_only: Arc<dyn ObjectStore>,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -106,8 +113,9 @@ impl StorageSession {
     ///
     /// Returns [`StorageError`] when no backend owns the route, the selected backend rejects input,
     /// a bare mapper returns a scheme not owned by that backend, or a backend callback fails.
-    pub fn input_handle(&self, input: &LocationInput) -> Result<StorageHandle, StorageError> {
+    pub fn input_handle(&self, input: &LocationInput) -> Result<InputHandle, StorageError> {
         self.create_handle(input, StorageDirection::Input)
+            .map(InputHandle::new)
     }
 
     /// Resolves an exact input and records the object's current metadata.
@@ -132,23 +140,23 @@ impl StorageSession {
         &self,
         input: &LocationInput,
         preparation: &OutputPreparation,
-    ) -> Result<StorageHandle, StorageError> {
-        let handle = self.create_handle(input, StorageDirection::Output)?;
+    ) -> Result<PreparedOutputTarget, StorageError> {
+        let target = OutputTarget::new(self.create_handle(input, StorageDirection::Output)?);
         let identity = OutputTargetIdentity {
-            store_url: handle.store_url().clone(),
-            object_path: handle.object_path().clone(),
+            store_url: target.store_url().clone(),
+            object_path: target.object_path().clone(),
         };
         if !self.state.claimed_output_targets.lock().insert(identity) {
             return Err(StorageError::OutputTargetAlreadyClaimed {
-                target: handle.url().clone(),
+                target: target.url().clone(),
             });
         }
 
         if preparation.existing_output() == ExistingOutput::RejectIfObserved {
-            match handle.object_store().head(handle.object_path()).await {
+            match target.object_store().head(target.object_path()).await {
                 Ok(_) => {
                     return Err(StorageError::OutputTargetAlreadyExists {
-                        target: handle.url().clone(),
+                        target: target.url().clone(),
                     });
                 }
                 Err(object_store::Error::NotFound { .. }) => {}
@@ -156,17 +164,17 @@ impl StorageSession {
             }
         }
 
-        let backend_index = self.backend_index_for_url(handle.url())?;
+        let backend_index = self.backend_index_for_url(target.url())?;
         let backend = &self.state.backends[backend_index];
         backend
-            .prepare_output_target(&handle, preparation)
+            .prepare_output_target(&target, preparation)
             .await
             .map_err(|source| StorageError::OutputTargetPreparation {
                 backend: backend.name(),
-                target: handle.url().clone(),
+                target: target.url().clone(),
                 source,
             })?;
-        Ok(handle)
+        Ok(PreparedOutputTarget::new(target))
     }
 
     /// Expands one exact location or object-path glob into zero or more input objects.
@@ -219,11 +227,11 @@ impl StorageSession {
         match &pattern.input {
             PatternInput::Exact(LocationInput::Url(location)) => {
                 self.require_pattern_backend(location, backend_index)?;
-                let handle = self.create_handle_for_location(
+                let handle = InputHandle::new(self.create_handle_for_location(
                     location,
                     backend_index,
                     StorageDirection::Input,
-                )?;
+                )?);
                 self.head_pattern(handle, location.url().as_str()).await
             }
             PatternInput::Url { location, .. } => {
@@ -253,7 +261,7 @@ impl StorageSession {
 
     async fn head_pattern(
         &self,
-        handle: StorageHandle,
+        handle: InputHandle,
         pattern: &str,
     ) -> Result<Vec<InputObject>, StorageError> {
         match handle.object_store().head(handle.object_path()).await {
@@ -284,8 +292,11 @@ impl StorageSession {
             Some(index) => index,
             None => self.backend_index_for_location(location)?,
         };
-        let pattern_handle =
-            self.create_handle_for_location(location, backend_index, StorageDirection::Input)?;
+        let pattern_handle = InputHandle::new(self.create_handle_for_location(
+            location,
+            backend_index,
+            StorageDirection::Input,
+        )?);
         let listing_prefix = if literal_prefix.is_empty() {
             None
         } else {
@@ -325,13 +336,14 @@ impl StorageSession {
                     location: url.clone(),
                     source,
                 })?;
-            let handle = StorageHandle::new(
+            let handle = InputHandle::new(StorageHandle::new(
                 url,
+                pattern_handle.inner_object_store(),
                 pattern_handle.object_store(),
                 metadata.location.clone(),
                 pattern_handle.store_url().clone(),
                 Arc::clone(&self.state.object_upload_context),
-            );
+            ));
             handles.push(InputObject::new(handle, metadata));
         }
         Ok(handles)
@@ -458,7 +470,7 @@ impl StorageSession {
 
         let mut object_store_cache = self.state.object_store_cache.lock();
         let object_store = match object_store_cache.entry(store_url.clone()) {
-            std::collections::hash_map::Entry::Occupied(entry) => Arc::clone(entry.get()),
+            std::collections::hash_map::Entry::Occupied(entry) => entry.get().clone(),
             std::collections::hash_map::Entry::Vacant(entry) => {
                 let retry = if backend.uses_shared_retries() {
                     self.state.retry.as_ref()
@@ -467,7 +479,7 @@ impl StorageSession {
                 };
                 // The lock spans construction so concurrent requests cannot create duplicate
                 // clients for the same store URL.
-                let object_store =
+                let writable =
                     backend
                         .create_object_store(&store_url, retry)
                         .map_err(|source| StorageError::ObjectStoreCreation {
@@ -475,13 +487,18 @@ impl StorageSession {
                             store_url: store_url.clone(),
                             source,
                         })?;
-                Arc::clone(entry.insert(object_store))
+                let object_store = CachedObjectStore {
+                    read_only: crate::handle::read_only_store(Arc::clone(&writable)),
+                    writable,
+                };
+                entry.insert(object_store).clone()
             }
         };
 
         Ok(StorageHandle::new(
             location.url().clone(),
-            object_store,
+            object_store.writable,
+            object_store.read_only,
             object_path,
             store_url,
             Arc::clone(&self.state.object_upload_context),

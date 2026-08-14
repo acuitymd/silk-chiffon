@@ -19,7 +19,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-A `StorageHandle` keeps the canonical location URL, an `Arc<dyn ObjectStore>`, the object path decoded from that URL, the root URL that identifies the cached client, and command-scoped upload settings. Its fields are private so values from different handle requests cannot be mixed accidentally. `StorageHandle::local_path` adapts a `file:` handle for input and inspection code that still requires a filesystem path.
+The public handle types record what the caller may do. `InputHandle` exposes a read-only object-store view. `OutputTarget` exists only while the backend applies its output policy. `PreparedOutputTarget` proves that the session claim, existence policy, and backend preparation have succeeded, so a sink can begin writing. All three retain the same canonical URL, decoded object path, store-root URL, and cached client identity without allowing an input capability to be passed to an output API.
 
 Input handle creation selects and invokes a backend without checking existence. `StorageSession::prepare_output_target` resolves and claims an output, optionally observes external existence, then invokes backend preparation such as local parent-directory handling.
 
@@ -27,13 +27,15 @@ Input handle creation selects and invokes a backend without checking existence. 
 
 The public types separate configuration that lasts for the executable from state that lasts for one command invocation.
 
-| Type              | Lifetime and responsibility                                                                                                              |
-| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `LocationPattern` | One parsed exact location or object-path glob. It contains syntax only and owns no store or command policy.                              |
-| `StorageBackend`  | One immutable backend definition: registry name, schemes, access, Clap behavior, and typed callbacks.                                    |
-| `StorageRegistry` | One validated and indexed collection of the backends available in this build. It contains no parsed command settings.                    |
-| `StorageSession`  | One command invocation's parsed backend settings, retry configuration, routing indexes, and object-store cache. Clones share this state. |
-| `StorageHandle`   | One canonical exact location paired with the object store and object path needed to access it.                                           |
+| Type                   | Lifetime and responsibility                                                                                                              |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `LocationPattern`      | One parsed exact location or object-path glob. It contains syntax only and owns no store or command policy.                              |
+| `StorageBackend`       | One immutable backend definition: registry name, schemes, access, Clap behavior, and typed callbacks.                                    |
+| `StorageRegistry`      | One validated and indexed collection of the backends available in this build. It contains no parsed command settings.                    |
+| `StorageSession`       | One command invocation's parsed backend settings, retry configuration, routing indexes, and object-store cache. Clones share this state. |
+| `InputHandle`          | One canonical exact input with a read-only object-store view.                                                                            |
+| `OutputTarget`         | One selected and claimed output visible to backend preparation code.                                                                     |
+| `PreparedOutputTarget` | One output whose claim, external-existence policy, and backend preparation succeeded.                                                    |
 
 The host executable chooses which backends exist, lets the registry augment its Clap command, parses the complete host command, and gives those matches back to the registry:
 
@@ -60,10 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await?;
 
-    assert!(std::sync::Arc::ptr_eq(
-        &input.object_store(),
-        &output.object_store(),
-    ));
+    assert_eq!(input.store_url(), output.store_url());
     Ok(())
 }
 ```
@@ -175,7 +174,7 @@ Backends that do not opt in receive no retry configuration. Participating object
 
 A session caches one object-store client per store-root URL: scheme, host, and port, with the path reset to `/` and the query and fragment removed. Location validation and generic object-path derivation still run on cache hits. The object-store creator runs only on a cache miss while the cache lock is held, so concurrent requests cannot create duplicate clients for the same root.
 
-`StorageHandle::store_url` exposes the cache key, and `StorageHandle::object_store` returns a cheap clone of the shared client pointer. A host may register the pair directly or place a root-scoped view in front of it for DataFusion-specific cache identity and diagnostics. This crate itself remains independent of DataFusion.
+Each directional handle exposes the cache key through `store_url` and returns cheap shared ownership of its permitted object-store interface through `object_store`. A host may register an input pair directly or place a root-scoped view in front of it for DataFusion-specific cache identity and diagnostics. This crate itself remains independent of DataFusion.
 
 ## Existence and output policy
 

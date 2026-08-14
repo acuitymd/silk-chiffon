@@ -19,9 +19,8 @@ use clap::Command;
 use datafusion::{datasource::file_format::options::ArrowReadOptions, prelude::SessionContext};
 use rand::rngs::SmallRng;
 use rand::{Rng, RngExt, SeedableRng};
-use silk_chiffon::sinks::data_sink::DataSink;
-use silk_chiffon_core::{FormatRegistry, OpenSinkMode, SinkBindingConfig};
-use silk_chiffon_test_support::prepared_local_output;
+use silk_chiffon_core::{DataSink, FormatRegistry, OpenSinkMode, SinkBindingConfig};
+use silk_chiffon_test_support::prepared_local_output_target;
 use tempfile::TempDir;
 
 const NUM_ROWS: usize = 10_000_000;
@@ -48,7 +47,7 @@ async fn open_registered_arrow_sink(path: &Path, schema: &SchemaRef) -> Box<dyn 
         .await
         .unwrap();
     sink_binding
-        .open_sink(prepared_local_output(path), Arc::clone(schema))
+        .open_sink(prepared_local_output_target(path), Arc::clone(schema))
         .await
         .unwrap()
 }
@@ -74,7 +73,7 @@ async fn open_registered_parquet_sink(path: &Path, schema: &SchemaRef) -> Box<dy
         .await
         .unwrap();
     sink_binding
-        .open_sink(prepared_local_output(path), Arc::clone(schema))
+        .open_sink(prepared_local_output_target(path), Arc::clone(schema))
         .await
         .unwrap()
 }
@@ -100,7 +99,7 @@ async fn open_registered_vortex_sink(path: &Path, schema: &SchemaRef) -> Box<dyn
         .await
         .unwrap();
     sink_binding
-        .open_sink(prepared_local_output(path), Arc::clone(schema))
+        .open_sink(prepared_local_output_target(path), Arc::clone(schema))
         .await
         .unwrap()
 }
@@ -258,7 +257,8 @@ async fn register_table(ctx: &mut SessionContext, name: &str, path: &Path, ext: 
         else {
             unreachable!()
         };
-        silk_chiffon::commands::transform::run(command)
+        silk_chiffon::Command::Transform(command)
+            .execute()
             .await
             .unwrap();
         arrow_path
@@ -319,7 +319,8 @@ async fn round_trip_split_merge(ext: &str) {
     else {
         unreachable!()
     };
-    silk_chiffon::commands::transform::run(command)
+    silk_chiffon::Command::Transform(command)
+        .execute()
         .await
         .unwrap();
 
@@ -340,7 +341,8 @@ async fn round_trip_split_merge(ext: &str) {
     else {
         unreachable!()
     };
-    silk_chiffon::commands::transform::run(command)
+    silk_chiffon::Command::Transform(command)
+        .execute()
         .await
         .unwrap();
 

@@ -1,4 +1,4 @@
-mod partitioner;
+mod partition_runs;
 mod report;
 mod target_template;
 
@@ -18,13 +18,13 @@ use silk_chiffon_core::{
     DataSink, SinkBinding, SinkBindingConfig, SinkCompletion, TransformBinding, TransformBindings,
 };
 use silk_chiffon_storage::{
-    ExistingOutput, LocationInput, OutputPreparation, StorageHandle, StorageSession,
+    ExistingOutput, LocationInput, OutputPreparation, PreparedOutputTarget, StorageSession,
 };
 
-use crate::{PartitionStrategy, utils::projected_stream::project_stream};
+use crate::{PartitionStrategy, commands::transform::projection::project_stream};
 
-use partitioner::{
-    PartitionValues, Partitioner, partition_key, partition_values_equal,
+use partition_runs::{
+    PartitionRunStream, PartitionValues, partition_key, partition_values_equal,
     validate_partition_columns_primitive,
 };
 pub(super) use report::FileOutputReport;
@@ -77,27 +77,27 @@ impl<'a> FileOutputBinder<'a> {
     ) -> Result<BoundFileOutput> {
         match target {
             FileOutputRequest::Exact {
-                target,
+                target: reference,
                 exclude_columns,
                 create_dirs,
                 overwrite,
             } => {
                 validate_excluded_columns(output_schema, &exclude_columns)?;
-                let location = LocationInput::parse(&target)
-                    .with_context(|| format!("while parsing exact file output {target:?}"))?;
-                let handle = self
+                let location = LocationInput::parse(&reference)
+                    .with_context(|| format!("while parsing exact file output {reference:?}"))?;
+                let target = self
                     .storage
                     .prepare_output_target(&location, &output_preparation(overwrite, create_dirs))
                     .await
-                    .with_context(|| format!("while preparing exact file output {target:?}"))?;
-                let format = self.format_for_handle(&handle, &target)?;
+                    .with_context(|| format!("while preparing exact file output {reference:?}"))?;
+                let format = self.format_for_target(&target, &reference)?;
                 let sink_binding =
                     Arc::from(format.bind_sink(sink_config).await.with_context(|| {
-                        format!("while binding format for exact file output {target:?}")
+                        format!("while binding format for exact file output {reference:?}")
                     })?);
                 Ok(BoundFileOutput::Exact {
+                    reference,
                     target,
-                    handle,
                     sink_binding,
                     exclude_columns,
                 })
@@ -153,7 +153,7 @@ impl<'a> FileOutputBinder<'a> {
                         format!("while binding format for partitioned file output {pattern:?}")
                     })?);
                 Ok(BoundFileOutput::Partitioned {
-                    writer: PartitionedFileWriter {
+                    writer: PartitionedOutputWriter {
                         storage: self.storage.clone(),
                         sink_binding,
                         partition_fields,
@@ -168,10 +168,10 @@ impl<'a> FileOutputBinder<'a> {
         }
     }
 
-    fn format_for_handle<'b>(
+    fn format_for_target<'b>(
         &'b self,
-        handle: &StorageHandle,
-        target: &str,
+        target: &PreparedOutputTarget,
+        reference: &str,
     ) -> Result<&'b TransformBinding> {
         if let Some(format) = self.explicit_format {
             return self
@@ -179,7 +179,7 @@ impl<'a> FileOutputBinder<'a> {
                 .get(format)
                 .ok_or_else(|| anyhow!("format is not registered: {format}"));
         }
-        self.format_for_extension(handle.object_path().extension(), target)
+        self.format_for_extension(target.object_path().extension(), reference)
     }
 
     fn format_for_extension(
@@ -206,13 +206,13 @@ impl<'a> FileOutputBinder<'a> {
 
 pub(super) enum BoundFileOutput {
     Exact {
-        target: String,
-        handle: StorageHandle,
+        reference: String,
+        target: PreparedOutputTarget,
         sink_binding: Arc<dyn SinkBinding>,
         exclude_columns: Vec<String>,
     },
     Partitioned {
-        writer: PartitionedFileWriter,
+        writer: PartitionedOutputWriter,
         strategy: PartitionStrategy,
         max_open: NonZeroUsize,
     },
@@ -225,11 +225,11 @@ impl BoundFileOutput {
     ) -> std::result::Result<FileOutputReport, FileOutputFailure> {
         match self {
             Self::Exact {
+                reference,
                 target,
-                handle,
                 sink_binding,
                 exclude_columns,
-            } => write_exact(target, handle, sink_binding, stream, exclude_columns).await,
+            } => write_exact(reference, target, sink_binding, stream, exclude_columns).await,
             Self::Partitioned {
                 writer,
                 strategy,
@@ -257,7 +257,7 @@ impl FileOutputFailure {
         let primary = cleanup_errors
             .into_iter()
             .fold(primary, |primary, cleanup| {
-                crate::sinks::with_cleanup_error(primary, Some(cleanup))
+                super::with_cleanup_error(primary, cleanup)
             });
         Self {
             primary,
@@ -298,8 +298,8 @@ impl std::error::Error for FileOutputFailure {
 }
 
 async fn write_exact(
-    target: String,
-    handle: StorageHandle,
+    reference: String,
+    target: PreparedOutputTarget,
     sink_binding: Arc<dyn SinkBinding>,
     stream: SendableRecordBatchStream,
     exclude_columns: Vec<String>,
@@ -310,14 +310,14 @@ async fn write_exact(
         None => stream,
     };
     let mut sink = sink_binding
-        .open_sink(handle, Arc::clone(&stream.schema()))
+        .open_sink(target, Arc::clone(&stream.schema()))
         .await
-        .with_context(|| format!("while opening exact file output {target:?}"))
+        .with_context(|| format!("while opening exact file output {reference:?}"))
         .map_err(|error| FileOutputFailure::new(error, Vec::new(), Vec::new()))?;
     if let Err(primary) = sink
         .write_stream(stream)
         .await
-        .with_context(|| format!("while writing exact file output {target:?}"))
+        .with_context(|| format!("while writing exact file output {reference:?}"))
     {
         let cleanup = sink.abort().await.err().into_iter().collect();
         return Err(FileOutputFailure::new(primary, Vec::new(), cleanup));
@@ -325,7 +325,7 @@ async fn write_exact(
     let completion = sink
         .finish()
         .await
-        .with_context(|| format!("while completing exact file output {target:?}"))
+        .with_context(|| format!("while completing exact file output {reference:?}"))
         .map_err(|error| FileOutputFailure::new(error, Vec::new(), Vec::new()))?;
     Ok(FileOutputReport::new(vec![completed_output(
         &completion,
@@ -348,7 +348,7 @@ impl OpenFileSink {
     }
 }
 
-pub(super) struct PartitionedFileWriter {
+pub(super) struct PartitionedOutputWriter {
     storage: StorageSession,
     sink_binding: Arc<dyn SinkBinding>,
     partition_fields: Vec<String>,
@@ -357,7 +357,7 @@ pub(super) struct PartitionedFileWriter {
     preparation: OutputPreparation,
 }
 
-impl PartitionedFileWriter {
+impl PartitionedOutputWriter {
     async fn write_sort_single(
         &self,
         stream: SendableRecordBatchStream,
@@ -368,19 +368,20 @@ impl PartitionedFileWriter {
             &self.exclude_columns,
         )
         .map_err(|error| FileOutputFailure::new(error, Vec::new(), Vec::new()))?;
-        let mut partitioned =
-            Partitioner::new(self.partition_fields.clone()).partition_stream(stream);
+        let mut partitioned = PartitionRunStream::new(stream, self.partition_fields.clone());
         let mut current: Option<OpenFileSink> = None;
         let mut completed = Vec::new();
 
         while let Some(item) = partitioned.next().await {
-            let (values, batch) = match item {
-                Ok(item) => item,
+            let run = match item {
+                Ok(run) => run,
                 Err(primary) => {
                     let cleanup = self.abort_all(current.take().into_iter().collect()).await;
                     return Err(FileOutputFailure::new(primary, completed, cleanup));
                 }
             };
+            let values = run.values;
+            let batch = run.batch;
             let changed = current
                 .as_ref()
                 .is_some_and(|open| !partition_values_equal(&open.partition_values, &values));
@@ -439,18 +440,19 @@ impl PartitionedFileWriter {
             &self.exclude_columns,
         )
         .map_err(|error| FileOutputFailure::new(error, Vec::new(), Vec::new()))?;
-        let mut partitioned =
-            Partitioner::new(self.partition_fields.clone()).partition_stream(stream);
+        let mut partitioned = PartitionRunStream::new(stream, self.partition_fields.clone());
         let mut open = HashMap::<String, OpenFileSink>::new();
 
         while let Some(item) = partitioned.next().await {
-            let (values, batch) = match item {
-                Ok(item) => item,
+            let run = match item {
+                Ok(run) => run,
                 Err(primary) => {
                     let cleanup = self.abort_all(open.into_values().collect()).await;
                     return Err(FileOutputFailure::new(primary, Vec::new(), cleanup));
                 }
             };
+            let values = run.values;
+            let batch = run.batch;
             let key = partition_key(&values, &context.field_order);
             let sink = match open.entry(key) {
                 Entry::Occupied(entry) => entry.into_mut(),
@@ -505,15 +507,14 @@ impl PartitionedFileWriter {
             &self.exclude_columns,
         )
         .map_err(|error| FileOutputFailure::new(error, Vec::new(), Vec::new()))?;
-        let mut partitioned =
-            Partitioner::new(self.partition_fields.clone()).partition_stream(stream);
+        let mut partitioned = PartitionRunStream::new(stream, self.partition_fields.clone());
         let mut open = LruCache::<String, OpenFileSink>::new(max_open);
         let mut file_numbers = HashMap::<String, usize>::new();
         let mut completed = Vec::new();
 
         while let Some(item) = partitioned.next().await {
-            let (values, batch) = match item {
-                Ok(item) => item,
+            let run = match item {
+                Ok(run) => run,
                 Err(primary) => {
                     let cleanup = self
                         .abort_all(open.into_iter().map(|(_, sink)| sink).collect())
@@ -521,6 +522,8 @@ impl PartitionedFileWriter {
                     return Err(FileOutputFailure::new(primary, completed, cleanup));
                 }
             };
+            let values = run.values;
+            let batch = run.batch;
             let key = partition_key(&values, &context.field_order);
             if !open.contains(&key) {
                 if open.len() == max_open.get() {
@@ -596,19 +599,19 @@ impl PartitionedFileWriter {
         file_number: Option<usize>,
     ) -> Result<OpenFileSink> {
         let location = self.template.render(values, file_number)?;
-        let handle = self
+        let target = self
             .storage
             .prepare_output_target(&location, &self.preparation)
             .await
             .context("while preparing partitioned file output")?;
-        let target = handle.url().to_string();
+        let reference = target.url().to_string();
         let sink = self
             .sink_binding
-            .open_sink(handle, Arc::clone(schema))
+            .open_sink(target, Arc::clone(schema))
             .await
-            .with_context(|| format!("while opening partitioned file output {target:?}"))?;
+            .with_context(|| format!("while opening partitioned file output {reference:?}"))?;
         Ok(OpenFileSink {
-            target,
+            target: reference,
             sink,
             partition_values: values.clone(),
         })
@@ -740,7 +743,7 @@ mod tests {
     use futures::stream;
 
     use super::*;
-    use silk_chiffon_test_support::prepared_local_output;
+    use silk_chiffon_test_support::prepared_local_output_target;
 
     struct FailingSinkBinding {
         aborts: Arc<AtomicUsize>,
@@ -775,7 +778,7 @@ mod tests {
     impl SinkBinding for FailingSinkBinding {
         async fn open_sink(
             &self,
-            _handle: StorageHandle,
+            _handle: PreparedOutputTarget,
             _schema: SchemaRef,
         ) -> Result<Box<dyn DataSink>> {
             Ok(Box::new(FailingSink {
@@ -804,26 +807,27 @@ mod tests {
     impl SinkBinding for ScriptedSinkBinding {
         async fn open_sink(
             &self,
-            handle: StorageHandle,
+            target: PreparedOutputTarget,
             _schema: SchemaRef,
         ) -> Result<Box<dyn DataSink>> {
-            let target = handle
+            let target_url = target.url().clone();
+            let reference = target
                 .url()
                 .path_segments()
                 .and_then(|mut segments| segments.next_back())
                 .expect("test target has a filename")
                 .to_owned();
             let mut state = self.state.lock().unwrap();
-            state.events.push(format!("open:{target}"));
-            if state.fail_open.as_ref() == Some(&target) {
-                return Err(anyhow!("scripted open failure for {target}"));
+            state.events.push(format!("open:{reference}"));
+            if state.fail_open.as_ref() == Some(&reference) {
+                return Err(anyhow!("scripted open failure for {reference}"));
             }
             state.active += 1;
             state.maximum_active = state.maximum_active.max(state.active);
             drop(state);
             Ok(Box::new(ScriptedSink {
-                target,
-                target_url: handle.url().clone(),
+                target: reference,
+                target_url,
                 rows_written: 0,
                 state: Arc::clone(&self.state),
             }))
@@ -886,8 +890,8 @@ mod tests {
     fn scripted_partition_writer(
         pattern: &std::path::Path,
         state: Arc<Mutex<ScriptedState>>,
-    ) -> PartitionedFileWriter {
-        PartitionedFileWriter {
+    ) -> PartitionedOutputWriter {
+        PartitionedOutputWriter {
             storage: silk_chiffon_storage::local::session().unwrap(),
             sink_binding: Arc::new(ScriptedSinkBinding { state }),
             partition_fields: vec!["category".to_owned()],
@@ -900,8 +904,8 @@ mod tests {
     #[tokio::test]
     async fn exact_write_failure_awaits_abort_and_retains_cleanup_context() {
         let temporary = tempfile::tempdir().unwrap();
-        let target = temporary.path().join("output.arrow");
-        let handle = prepared_local_output(&target);
+        let path = temporary.path().join("output.arrow");
+        let target = prepared_local_output_target(&path);
         let schema = Arc::new(arrow::datatypes::Schema::empty());
         let batch = RecordBatch::new_empty(Arc::clone(&schema));
         let stream = Box::pin(RecordBatchStreamAdapter::new(
@@ -911,8 +915,8 @@ mod tests {
         let aborts = Arc::new(AtomicUsize::new(0));
 
         let failure = write_exact(
-            target.to_string_lossy().into_owned(),
-            handle,
+            path.to_string_lossy().into_owned(),
+            target,
             Arc::new(FailingSinkBinding {
                 aborts: Arc::clone(&aborts),
             }),

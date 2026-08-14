@@ -32,13 +32,13 @@ pub type FormatFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + '
 /// The registry supplies the canonical format name, so detector functions do not repeat it.
 pub type InputDetectorFn = for<'a> fn(&'a InputObject) -> FormatFuture<'a, InputDetection>;
 
-/// Creates one provider from a host-validated input leaf and typed transform state.
+/// Creates one provider from a host-validated input group and typed transform state.
 ///
-/// The leaf already owns the exact file descriptors, scoped store, deterministic
+/// The group already owns the exact file descriptors, scoped store, deterministic
 /// representative, and format variant. Formats do not rediscover those choices
 /// during schema inference or scanning.
 pub type InputProviderFn<T> = for<'a> fn(
-    &'a crate::InputLeaf,
+    &'a crate::FileInputGroup,
     &'a SessionContext,
     &'a T,
 ) -> FormatFuture<'a, Arc<dyn TableProvider>>;
@@ -52,7 +52,7 @@ pub type SinkBinderFn<T> =
 
 /// Inspects one input using typed inspection settings and the host-selected output mode.
 pub type InspectorFn<T> =
-    for<'a> fn(&'a InputObject, InspectionMode, &'a T) -> FormatFuture<'a, InspectionOutput>;
+    for<'a> fn(&'a InputObject, PresentationMode, &'a T) -> FormatFuture<'a, InspectionOutput>;
 
 /// Host-owned execution settings used to bind a format's output behavior.
 ///
@@ -62,7 +62,7 @@ pub type InspectorFn<T> =
 pub struct SinkBindingConfig {
     thread_budget: NonZeroUsize,
     open_sink_mode: OpenSinkMode,
-    output_ordering: Vec<OutputOrderingColumn>,
+    output_ordering: Vec<SortColumn>,
 }
 
 impl SinkBindingConfig {
@@ -70,7 +70,7 @@ impl SinkBindingConfig {
     pub fn new(
         thread_budget: NonZeroUsize,
         open_sink_mode: OpenSinkMode,
-        output_ordering: Vec<OutputOrderingColumn>,
+        output_ordering: Vec<SortColumn>,
     ) -> Self {
         Self {
             thread_budget,
@@ -90,7 +90,7 @@ impl SinkBindingConfig {
     }
 
     /// Returns the order guaranteed within each output sink's input stream.
-    pub fn output_ordering(&self) -> &[OutputOrderingColumn] {
+    pub fn output_ordering(&self) -> &[SortColumn] {
         &self.output_ordering
     }
 }
@@ -104,19 +104,25 @@ pub enum OpenSinkMode {
     Multiple,
 }
 
-/// One column in the order produced within each output.
+/// One column in a requested or guaranteed ordering.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct OutputOrderingColumn {
+pub struct SortColumn {
     name: String,
     direction: SortDirection,
+    null_placement: NullPlacement,
 }
 
-impl OutputOrderingColumn {
-    /// Describes one column in the order supplied to each output sink.
-    pub fn new(name: impl Into<String>, direction: SortDirection) -> Self {
+impl SortColumn {
+    /// Describes one complete column ordering.
+    pub fn new(
+        name: impl Into<String>,
+        direction: SortDirection,
+        null_placement: NullPlacement,
+    ) -> Self {
         Self {
             name: name.into(),
             direction,
+            null_placement,
         }
     }
 
@@ -129,6 +135,11 @@ impl OutputOrderingColumn {
     pub const fn direction(&self) -> SortDirection {
         self.direction
     }
+
+    /// Returns where null values appear in this ordering.
+    pub const fn null_placement(&self) -> NullPlacement {
+        self.null_placement
+    }
 }
 
 /// The direction of one column in an output ordering.
@@ -140,28 +151,38 @@ pub enum SortDirection {
     Descending,
 }
 
-/// The output representation selected by the host for an inspection.
+/// Where null values appear within one sorted column.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum InspectionMode {
+pub enum NullPlacement {
+    /// Null values precede non-null values.
+    First,
+    /// Null values follow non-null values.
+    Last,
+}
+
+/// The concrete representation selected for command output.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, Eq, PartialEq)]
+#[value(rename_all = "lowercase")]
+pub enum PresentationMode {
     /// Human-readable text selected by the host CLI.
     Text,
     /// Structured JSON selected by the host CLI.
     Json,
 }
 
-/// A format-specific container variant identified before leaf construction.
+/// A format-specific container variant identified before group construction.
 ///
 /// Named variants carry a canonical identifier for grouping and dispatch plus a
 /// human-readable name for presentation. Equality and hashing deliberately use
 /// only the canonical identifier, so presentation changes cannot split an input
 /// group. Unnamed variants represent formats with no container distinction.
 #[derive(Clone, Debug, Default)]
-pub struct InputVariant {
+pub struct FormatInputVariant {
     name: Option<String>,
     display_name: Option<String>,
 }
 
-impl InputVariant {
+impl FormatInputVariant {
     /// Describes a format with no more specific container variant.
     pub fn new() -> Self {
         Self::default()
@@ -186,15 +207,15 @@ impl InputVariant {
     }
 }
 
-impl PartialEq for InputVariant {
+impl PartialEq for FormatInputVariant {
     fn eq(&self, other: &Self) -> bool {
         self.name == other.name
     }
 }
 
-impl Eq for InputVariant {}
+impl Eq for FormatInputVariant {}
 
-impl Hash for InputVariant {
+impl Hash for FormatInputVariant {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.name.hash(state);
     }
@@ -206,7 +227,7 @@ pub enum InputDetection {
     /// The object is not this format.
     Mismatch,
     /// The object is this format and has the supplied container variant.
-    Match(InputVariant),
+    Match(FormatInputVariant),
     /// The object is recognizably this format but is structurally malformed.
     Malformed(anyhow::Error),
 }
@@ -216,7 +237,7 @@ pub enum InputDetection {
 pub struct DetectedFormat {
     format: &'static str,
     display_name: &'static str,
-    variant: InputVariant,
+    variant: FormatInputVariant,
 }
 
 impl DetectedFormat {
@@ -231,7 +252,7 @@ impl DetectedFormat {
     }
 
     /// Returns the format-specific variant reported by its detector.
-    pub fn variant(&self) -> Option<&str> {
+    pub fn variant_name(&self) -> Option<&str> {
         self.variant.name()
     }
 
@@ -241,7 +262,7 @@ impl DetectedFormat {
     }
 
     /// Returns the bound container variant.
-    pub fn input_variant(&self) -> &InputVariant {
+    pub fn variant(&self) -> &FormatInputVariant {
         &self.variant
     }
 }
@@ -500,7 +521,7 @@ impl FormatDefinition {
             })),
             InputDetection::Malformed(source) => Err(FormatOperationError::MalformedInput {
                 format: self.name,
-                input: object.handle().url().to_string(),
+                input: object.input_handle().url().to_string(),
                 source,
             }),
         }
@@ -544,7 +565,7 @@ impl InspectionBinding {
     pub async fn inspect(
         &self,
         object: &InputObject,
-        mode: InspectionMode,
+        mode: PresentationMode,
     ) -> Result<InspectionOutput, FormatOperationError> {
         let binding = self
             .binding
@@ -642,7 +663,7 @@ impl TransformBinding {
     pub async fn detect(
         &self,
         object: &InputObject,
-    ) -> Result<Option<InputVariant>, FormatOperationError> {
+    ) -> Result<Option<FormatInputVariant>, FormatOperationError> {
         let detector = self.detector.ok_or(FormatOperationError::Unsupported {
             format: self.format,
             operation: FormatOperation::Detection,
@@ -658,7 +679,7 @@ impl TransformBinding {
             InputDetection::Match(variant) => Ok(Some(variant)),
             InputDetection::Malformed(source) => Err(FormatOperationError::MalformedInput {
                 format: self.format,
-                input: object.handle().url().to_string(),
+                input: object.input_handle().url().to_string(),
                 source,
             }),
         }
@@ -667,11 +688,20 @@ impl TransformBinding {
     /// Creates one homogeneous input provider using this binding's command state.
     pub async fn create_input_provider(
         &self,
-        leaf: &crate::InputLeaf,
+        objects: &[InputObject],
+        variant: FormatInputVariant,
         session: &SessionContext,
     ) -> Result<Arc<dyn TableProvider>, FormatOperationError> {
+        let group =
+            crate::FileInputGroup::try_new(session, objects, variant).map_err(|source| {
+                FormatOperationError::Failed {
+                    format: self.format,
+                    operation: FormatOperation::InputProviderCreation,
+                    source,
+                }
+            })?;
         self.binding
-            .create_input_provider(self.format, leaf, session)
+            .create_input_provider(self.format, &group, session)
             .await
     }
 
@@ -719,9 +749,9 @@ impl TransformBindings {
     pub async fn detect(
         &self,
         object: &InputObject,
-    ) -> Result<Option<(&TransformBinding, InputVariant)>, FormatOperationError> {
+    ) -> Result<Option<(&TransformBinding, FormatInputVariant)>, FormatOperationError> {
         let preferred = object
-            .handle()
+            .input_handle()
             .object_path()
             .extension()
             .and_then(|extension| {

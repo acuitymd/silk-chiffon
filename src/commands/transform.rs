@@ -1,30 +1,31 @@
 use std::{num::NonZeroUsize, sync::Arc};
 
-use crate::{
-    ListOutputsFormat, PartitionStrategy, SortDirection, SortSpec, TransformCommand,
-    default_thread_budget,
-    operations::{query::QueryOperation, sort::SortOperation},
-    utils::projected_stream::project_stream,
-};
+use crate::{PartitionStrategy, SortSpec, TransformCommand, default_thread_budget};
 use anyhow::{Result, anyhow};
 use camino::Utf8Path;
 use datafusion::catalog::TableProvider;
 use owo_colors::OwoColorize;
 use silk_chiffon_core::{
-    InputSources, OpenSinkMode, OutputOrderingColumn, Pipeline, SinkBindingConfig,
-    SortDirection as CoreSortDirection,
+    OpenSinkMode, Pipeline, PresentationMode, SinkBindingConfig, union_input_providers_by_name,
 };
 use tabled::{builder::Builder, settings::Style};
 
 mod file_input;
 mod file_output;
+mod projection;
+mod query;
 mod scheme;
+mod sort;
+mod sort_memory;
 
-use file_input::FileInputRoute;
+use file_input::FileInputPreparer;
 use file_output::{FileOutputBinder, FileOutputReport, FileOutputRequest};
+use projection::project_stream;
+use query::apply_query;
 use scheme::explicit_scheme;
+use sort::apply_sort;
 
-pub async fn run(args: TransformCommand) -> Result<()> {
+pub(crate) async fn run(args: TransformCommand) -> Result<()> {
     let TransformCommand {
         inputs,
         to,
@@ -112,7 +113,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         .with_spill_compression(spill_compression);
     let session = pipeline.create_session_context()?;
 
-    let file_inputs = FileInputRoute::new(&storage, &formats, input_format.as_deref(), &session);
+    let file_inputs = FileInputPreparer::new(&storage, &formats, input_format.as_deref(), &session);
     let mut providers: Vec<Arc<dyn TableProvider>> = Vec::new();
     let mut used_file_input = false;
     for pattern in &inputs.file_patterns {
@@ -134,7 +135,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         let (provider, is_file) = match explicit_scheme(reference) {
             Some(scheme) => match input_schemes.owner(scheme) {
                 Some(crate::registration::InputSchemeOwner::FileInput) => {
-                    (file_inputs.create_exact_provider(reference).await?, true)
+                    (file_inputs.prepare_exact(reference).await?, true)
                 }
                 Some(crate::registration::InputSchemeOwner::ServiceInput(index)) => (
                     service_inputs
@@ -145,13 +146,13 @@ pub async fn run(args: TransformCommand) -> Result<()> {
                 ),
                 None => anyhow::bail!("unsupported input scheme {scheme:?}"),
             },
-            None => (file_inputs.create_exact_provider(reference).await?, true),
+            None => (file_inputs.prepare_exact(reference).await?, true),
         };
         used_file_input |= is_file;
         providers.push(provider);
     }
     let pattern_providers = file_inputs
-        .create_pattern_providers(&inputs.file_patterns, allow_unmatched_patterns)
+        .prepare_patterns(&inputs.file_patterns, allow_unmatched_patterns)
         .await?;
     used_file_input |= !pattern_providers.is_empty();
     providers.extend(pattern_providers);
@@ -161,9 +162,9 @@ pub async fn run(args: TransformCommand) -> Result<()> {
     if providers.is_empty() {
         anyhow::bail!("no inputs were selected");
     }
-    let input_sources = InputSources::try_new(&session, providers)?;
+    let mut input = union_input_providers_by_name(&session, providers)?;
 
-    let list_outputs_format = list_outputs;
+    let list_outputs_mode = list_outputs;
 
     // The overall sort order is determined by the following:
     //
@@ -211,22 +212,20 @@ pub async fn run(args: TransformCommand) -> Result<()> {
     full_sort_spec.extend(&user_sort_spec_without_partition_cols);
 
     if let Some(q) = &query {
-        pipeline = pipeline.with_operation(Box::new(QueryOperation::new(q.clone())));
+        input = apply_query(&session, input, q).await?;
     }
 
     if !full_sort_spec.is_empty() {
-        pipeline =
-            pipeline.with_operation(Box::new(SortOperation::new(full_sort_spec.columns.clone())));
+        input = apply_sort(input, &full_sort_spec.columns)?;
     }
 
-    pipeline = pipeline.with_inputs(input_sources);
-    let mut prepared = pipeline.prepare(session).await?;
+    let mut prepared = pipeline.prepare(input, session).await?;
 
     if has_sort {
         let memory_limit = effective_memory_limit.unwrap_or(total_budget * 60 / 100);
         let partitions = effective_target_partitions.unwrap_or(three_quarter_cpus);
         let memory_per_partition = memory_limit / partitions.max(1);
-        let reservation = crate::utils::memory::sort_spill_reservation_from_plan(
+        let reservation = sort_memory::sort_spill_reservation_from_plan(
             prepared.execution_plan(),
             memory_per_partition,
             8192,
@@ -256,7 +255,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
                 if let Some(indices) = projection {
                     stream = project_stream(stream, indices)?;
                 }
-                service_outputs.get(*index).write(target, stream).await?;
+                service_outputs.get(*index).consume(target, stream).await?;
                 return Ok(());
             }
             Some(crate::registration::OutputSchemeOwner::FileOutput) => {}
@@ -278,19 +277,7 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         }
     }
 
-    let output_ordering = user_sort_spec_without_partition_cols
-        .columns
-        .iter()
-        .map(|column| {
-            OutputOrderingColumn::new(
-                column.name.clone(),
-                match column.direction {
-                    SortDirection::Ascending => CoreSortDirection::Ascending,
-                    SortDirection::Descending => CoreSortDirection::Descending,
-                },
-            )
-        })
-        .collect();
+    let output_ordering = user_sort_spec_without_partition_cols.columns.clone();
     let output_threads = if has_sort {
         (usable_cpus / 4).max(1)
     } else {
@@ -336,21 +323,18 @@ pub async fn run(args: TransformCommand) -> Result<()> {
     let report = match output.write(execution.into_sendable_stream()).await {
         Ok(report) => report,
         Err(failure) => {
-            if let Some(format) = list_outputs_format
+            if let Some(mode) = list_outputs_mode
                 && let Err(reporting) =
-                    print_output_files(failure.report(), format, list_outputs_file.as_deref())
+                    print_output_files(failure.report(), mode, list_outputs_file.as_deref())
             {
-                return Err(crate::sinks::with_cleanup_error(
-                    failure.into(),
-                    Some(reporting),
-                ));
+                return Err(with_cleanup_error(failure.into(), reporting));
             }
             return Err(failure.into());
         }
     };
 
-    if let Some(format) = list_outputs_format {
-        print_output_files(&report, format, list_outputs_file.as_deref())?;
+    if let Some(mode) = list_outputs_mode {
+        print_output_files(&report, mode, list_outputs_file.as_deref())?;
     }
 
     Ok(())
@@ -358,12 +342,11 @@ pub async fn run(args: TransformCommand) -> Result<()> {
 
 fn print_output_files(
     report: &FileOutputReport,
-    format: ListOutputsFormat,
+    mode: PresentationMode,
     output_path: Option<&Utf8Path>,
 ) -> Result<()> {
-    let output = match format {
-        ListOutputsFormat::None => return Ok(()),
-        ListOutputsFormat::Text => {
+    let output = match mode {
+        PresentationMode::Text => {
             if report.outputs().is_empty() {
                 return Ok(());
             }
@@ -417,7 +400,7 @@ fn print_output_files(
 
             builder.build().with(Style::rounded()).to_string()
         }
-        ListOutputsFormat::Json => serde_json::to_string_pretty(report)?,
+        PresentationMode::Json => serde_json::to_string_pretty(report)?,
     };
 
     if let Some(path) = output_path {
@@ -450,6 +433,32 @@ fn to_title_case(s: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+pub(super) fn with_cleanup_error(primary: anyhow::Error, cleanup: anyhow::Error) -> anyhow::Error {
+    anyhow::Error::new(PrimaryWithCleanup { primary, cleanup })
+}
+
+#[derive(Debug)]
+struct PrimaryWithCleanup {
+    primary: anyhow::Error,
+    cleanup: anyhow::Error,
+}
+
+impl std::fmt::Display for PrimaryWithCleanup {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{}; cleanup also failed: {:#}",
+            self.primary, self.cleanup
+        )
+    }
+}
+
+impl std::error::Error for PrimaryWithCleanup {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.primary.source()
+    }
 }
 
 fn validate_excluded_columns(

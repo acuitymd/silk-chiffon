@@ -395,11 +395,17 @@ async fn injected_faults_cross_the_storage_backend_and_session_boundary() {
         .unwrap();
     let storage = registry.create_session(&matches).unwrap();
     let input = LocationInput::parse("faulty://bucket/input.arrow").unwrap();
-    let handle = storage.input_handle(&input).unwrap();
+    let target = storage
+        .prepare_output_target(
+            &input,
+            &OutputPreparation::new(ExistingOutput::Allow, false),
+        )
+        .await
+        .unwrap();
     let store = SESSION_STORE.get().unwrap();
-    handle
+    target
         .object_store()
-        .put(handle.object_path(), Bytes::from_static(b"input").into())
+        .put(target.object_path(), Bytes::from_static(b"input").into())
         .await
         .unwrap();
 

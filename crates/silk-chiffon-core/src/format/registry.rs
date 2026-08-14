@@ -177,7 +177,7 @@ impl FormatRegistry {
         object: &InputObject,
     ) -> Result<Option<DetectedFormat>, FormatOperationError> {
         let preferred = object
-            .handle()
+            .input_handle()
             .object_path()
             .extension()
             .and_then(|extension| {

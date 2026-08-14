@@ -24,11 +24,13 @@ use datafusion::{
 };
 use futures::StreamExt;
 use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory};
-use silk_chiffon::sinks::data_sink::DataSink;
-use silk_chiffon_core::{FormatRegistry, InputSources, OpenSinkMode, Pipeline, SinkBindingConfig};
+use silk_chiffon_core::{
+    DataSink, FormatRegistry, OpenSinkMode, Pipeline, SinkBindingConfig,
+    union_input_providers_by_name,
+};
 use silk_chiffon_storage::{
-    ExistingOutput, LocationInput, OutputPreparation, StorageAccess, StorageBackend, StorageHandle,
-    StorageRegistry, StorageSession,
+    ExistingOutput, LocationInput, OutputPreparation, PreparedOutputTarget, StorageAccess,
+    StorageBackend, StorageRegistry, StorageSession,
 };
 use silk_chiffon_test_support::controlled_upload::{
     ControlledUploadStore, controlled_upload_lock, controlled_upload_storage,
@@ -40,7 +42,7 @@ type TrackingStore = ControlledUploadStore;
 const SOURCE_BATCH_LIMIT: usize = 1_000_000;
 
 async fn open_registered_arrow_sink(
-    handle: StorageHandle,
+    target: PreparedOutputTarget,
     schema: arrow::datatypes::SchemaRef,
     arguments: &[&str],
 ) -> Box<dyn DataSink> {
@@ -62,11 +64,11 @@ async fn open_registered_arrow_sink(
         ))
         .await
         .unwrap();
-    sink_binding.open_sink(handle, schema).await.unwrap()
+    sink_binding.open_sink(target, schema).await.unwrap()
 }
 
 async fn open_registered_parquet_sink(
-    handle: StorageHandle,
+    target: PreparedOutputTarget,
     schema: arrow::datatypes::SchemaRef,
     arguments: &[&str],
 ) -> Box<dyn DataSink> {
@@ -89,11 +91,11 @@ async fn open_registered_parquet_sink(
         ))
         .await
         .unwrap();
-    sink_binding.open_sink(handle, schema).await.unwrap()
+    sink_binding.open_sink(target, schema).await.unwrap()
 }
 
 async fn open_registered_vortex_sink(
-    handle: StorageHandle,
+    target: PreparedOutputTarget,
     schema: arrow::datatypes::SchemaRef,
     arguments: &[&str],
 ) -> Box<dyn DataSink> {
@@ -116,7 +118,7 @@ async fn open_registered_vortex_sink(
         ))
         .await
         .unwrap();
-    sink_binding.open_sink(handle, schema).await.unwrap()
+    sink_binding.open_sink(target, schema).await.unwrap()
 }
 
 #[derive(Clone, Debug)]
@@ -274,7 +276,7 @@ fn storage() -> StorageSession {
     registry.create_session(&matches).unwrap()
 }
 
-async fn prepared_handle(storage: &StorageSession, target: &str) -> StorageHandle {
+async fn prepared_target(storage: &StorageSession, target: &str) -> PreparedOutputTarget {
     storage
         .prepare_output_target(
             &LocationInput::parse(target).unwrap(),
@@ -322,9 +324,9 @@ async fn source_execution(
         .collect();
     let mut pipeline = Pipeline::new().with_target_partitions(Some(1));
     let session = pipeline.create_session_context().unwrap();
-    pipeline = pipeline.with_inputs(InputSources::try_new(&session, providers).unwrap());
+    let input = union_input_providers_by_name(&session, providers).unwrap();
     pipeline
-        .prepare(session)
+        .prepare(input, session)
         .await
         .unwrap()
         .begin_execution()
@@ -332,13 +334,16 @@ async fn source_execution(
         .into_sendable_stream()
 }
 
-async fn assert_durable(completion: silk_chiffon_core::SinkCompletion, handle: &StorageHandle) {
+async fn assert_durable(
+    completion: silk_chiffon_core::SinkCompletion,
+    target: &PreparedOutputTarget,
+) {
     assert_eq!(completion.rows_written(), 3);
-    assert_eq!(completion.durable_locations(), [handle.url().clone()]);
+    assert_eq!(completion.durable_locations(), [target.url().clone()]);
     assert!(
-        handle
+        target
             .object_store()
-            .head(handle.object_path())
+            .head(target.object_path())
             .await
             .unwrap()
             .size
@@ -348,7 +353,7 @@ async fn assert_durable(completion: silk_chiffon_core::SinkCompletion, handle: &
 
 async fn drive_to_active_part(
     sink: &mut dyn DataSink,
-    handle: &StorageHandle,
+    target: &PreparedOutputTarget,
     store: &TrackingStore,
 ) {
     let active_before = store.active_parts();
@@ -369,7 +374,7 @@ async fn drive_to_active_part(
                 result.unwrap_or_else(|_| {
                     panic!(
                         "format did not start its multipart upload for {}",
-                        handle.url()
+                        target.url()
                     )
                 });
                 break;
@@ -384,7 +389,7 @@ async fn drive_to_active_part(
     .unwrap_or_else(|_| {
         panic!(
             "format did not start its multipart upload for {}",
-            handle.url()
+            target.url()
         )
     });
 }
@@ -432,17 +437,17 @@ async fn wait_for_sources_stopped(states: &[Arc<SourceTaskState>]) {
 
 async fn assert_abort_cleans_multipart(
     mut sink: Box<dyn DataSink>,
-    handle: &StorageHandle,
+    target: &PreparedOutputTarget,
     store: &TrackingStore,
 ) {
     let starts_before = store.multipart_starts();
     let aborts_before = store.aborts();
     let active_before = store.active_parts();
-    drive_to_active_part(sink.as_mut(), handle, store).await;
+    drive_to_active_part(sink.as_mut(), target, store).await;
 
     tokio::time::timeout(Duration::from_secs(5), sink.abort())
         .await
-        .unwrap_or_else(|_| panic!("format abort timed out for {}", handle.url()))
+        .unwrap_or_else(|_| panic!("format abort timed out for {}", target.url()))
         .unwrap();
 
     assert_eq!(
@@ -452,23 +457,23 @@ async fn assert_abort_cleans_multipart(
     wait_for_multipart_cleanup(store, active_before).await;
     assert_eq!(store.active_parts(), active_before);
     assert!(matches!(
-        store.head(handle.object_path()).await,
+        store.head(target.object_path()).await,
         Err(object_store::Error::NotFound { .. })
     ));
 }
 
 async fn assert_abort_reports_cleanup_failure(
     mut sink: Box<dyn DataSink>,
-    handle: &StorageHandle,
+    target: &PreparedOutputTarget,
     store: &TrackingStore,
 ) {
     let active_before = store.active_parts();
-    drive_to_active_part(sink.as_mut(), handle, store).await;
+    drive_to_active_part(sink.as_mut(), target, store).await;
     store.fail_next_abort();
 
     let error = tokio::time::timeout(Duration::from_secs(5), sink.abort())
         .await
-        .unwrap_or_else(|_| panic!("format abort timed out for {}", handle.url()))
+        .unwrap_or_else(|_| panic!("format abort timed out for {}", target.url()))
         .unwrap_err();
 
     assert!(
@@ -477,19 +482,19 @@ async fn assert_abort_reports_cleanup_failure(
     );
     wait_for_multipart_cleanup(store, active_before).await;
     assert!(matches!(
-        store.head(handle.object_path()).await,
+        store.head(target.object_path()).await,
         Err(object_store::Error::NotFound { .. })
     ));
 }
 
 async fn assert_drop_cleans_multipart(
     mut sink: Box<dyn DataSink>,
-    handle: &StorageHandle,
+    target: &PreparedOutputTarget,
     store: &TrackingStore,
 ) {
     let aborts_before = store.aborts();
     let active_before = store.active_parts();
-    drive_to_active_part(sink.as_mut(), handle, store).await;
+    drive_to_active_part(sink.as_mut(), target, store).await;
     drop(sink);
 
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -501,19 +506,19 @@ async fn assert_drop_cleans_multipart(
     .expect("format drop did not abort its multipart upload");
     wait_for_multipart_cleanup(store, active_before).await;
     assert!(matches!(
-        store.head(handle.object_path()).await,
+        store.head(target.object_path()).await,
         Err(object_store::Error::NotFound { .. })
     ));
 }
 
 async fn assert_cancelled_finish_cleans_multipart(
     mut sink: Box<dyn DataSink>,
-    handle: &StorageHandle,
+    target: &PreparedOutputTarget,
     store: &TrackingStore,
 ) {
     let aborts_before = store.aborts();
     let active_before = store.active_parts();
-    drive_to_active_part(sink.as_mut(), handle, store).await;
+    drive_to_active_part(sink.as_mut(), target, store).await;
 
     let mut finish = tokio::spawn(sink.finish());
     assert!(
@@ -521,7 +526,7 @@ async fn assert_cancelled_finish_cleans_multipart(
             .await
             .is_err(),
         "format finish was not blocked for {}",
-        handle.url()
+        target.url()
     );
     finish.abort();
     assert!(finish.await.unwrap_err().is_cancelled());
@@ -535,14 +540,14 @@ async fn assert_cancelled_finish_cleans_multipart(
     .expect("cancelling format finish did not abort its multipart upload");
     wait_for_multipart_cleanup(store, active_before).await;
     assert!(matches!(
-        store.head(handle.object_path()).await,
+        store.head(target.object_path()).await,
         Err(object_store::Error::NotFound { .. })
     ));
 }
 
 async fn assert_finish_failure_cleans_multipart(
     mut sink: Box<dyn DataSink>,
-    handle: &StorageHandle,
+    target: &PreparedOutputTarget,
     store: &TrackingStore,
 ) {
     let aborts_before = store.aborts();
@@ -551,7 +556,7 @@ async fn assert_finish_failure_cleans_multipart(
 
     let error = tokio::time::timeout(Duration::from_secs(5), sink.finish())
         .await
-        .unwrap_or_else(|_| panic!("format finish timed out for {}", handle.url()))
+        .unwrap_or_else(|_| panic!("format finish timed out for {}", target.url()))
         .unwrap_err();
 
     assert!(
@@ -560,14 +565,14 @@ async fn assert_finish_failure_cleans_multipart(
     );
     assert_eq!(store.aborts(), aborts_before + 1);
     assert!(matches!(
-        store.head(handle.object_path()).await,
+        store.head(target.object_path()).await,
         Err(object_store::Error::NotFound { .. })
     ));
 }
 
 async fn assert_controlled_write_failure(
     mut sink: Box<dyn DataSink>,
-    handle: &StorageHandle,
+    target: &PreparedOutputTarget,
     expected: &str,
 ) {
     let error = match sink.write_batch(batch()).await {
@@ -580,7 +585,7 @@ async fn assert_controlled_write_failure(
 
     assert!(format!("{error:#}").contains(expected), "{error:#}");
     assert!(matches!(
-        handle.object_store().head(handle.object_path()).await,
+        target.object_store().head(target.object_path()).await,
         Err(object_store::Error::NotFound { .. })
     ));
 }
@@ -588,23 +593,23 @@ async fn assert_controlled_write_failure(
 #[tokio::test]
 async fn arrow_sink_writes_a_memory_object() {
     let storage = storage();
-    let handle = prepared_handle(&storage, "memory://bucket/output.arrow").await;
+    let target = prepared_target(&storage, "memory://bucket/output.arrow").await;
     let batch = batch();
-    let mut sink = open_registered_arrow_sink(handle.clone(), batch.schema(), &[]).await;
+    let mut sink = open_registered_arrow_sink(target.clone(), batch.schema(), &[]).await;
 
     sink.write_batch(batch).await.unwrap();
     let completion = sink.finish().await.unwrap();
-    assert_durable(completion, &handle).await;
+    assert_durable(completion, &target).await;
 }
 
 #[tokio::test]
 async fn arrow_stream_sink_writes_a_readable_memory_object() {
     let storage = storage();
-    let handle = prepared_handle(&storage, "memory://bucket/output.arrows").await;
+    let target = prepared_target(&storage, "memory://bucket/output.arrows").await;
     let batch = batch();
     let expected_rows = batch.num_rows();
     let mut sink = open_registered_arrow_sink(
-        handle.clone(),
+        target.clone(),
         batch.schema(),
         &["--arrow-format", "stream"],
     )
@@ -616,9 +621,9 @@ async fn arrow_stream_sink_writes_a_readable_memory_object() {
         completion.rows_written(),
         u64::try_from(expected_rows).unwrap()
     );
-    let bytes = handle
+    let bytes = target
         .object_store()
-        .get(handle.object_path())
+        .get(target.object_path())
         .await
         .unwrap()
         .bytes()
@@ -637,18 +642,18 @@ async fn arrow_stream_sink_writes_a_readable_memory_object() {
 #[tokio::test]
 async fn parquet_sink_writes_a_memory_object() {
     let storage = storage();
-    let handle = prepared_handle(&storage, "memory://bucket/output.parquet").await;
+    let target = prepared_target(&storage, "memory://bucket/output.parquet").await;
     let batch = batch();
-    let mut sink = open_registered_parquet_sink(handle.clone(), batch.schema(), &[]).await;
+    let mut sink = open_registered_parquet_sink(target.clone(), batch.schema(), &[]).await;
 
     sink.write_batch(batch).await.unwrap();
     let completion = sink.finish().await.unwrap();
-    assert_durable(completion, &handle).await;
+    assert_durable(completion, &target).await;
 }
 
 async fn assert_schema_mismatch_is_rejected_before_encoding(
     mut sink: Box<dyn DataSink>,
-    handle: &StorageHandle,
+    target: &PreparedOutputTarget,
 ) {
     let actual_schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Int64, false),
@@ -671,7 +676,7 @@ async fn assert_schema_mismatch_is_rejected_before_encoding(
     );
     sink.abort().await.unwrap();
     assert!(matches!(
-        handle.object_store().head(handle.object_path()).await,
+        target.object_store().head(target.object_path()).await,
         Err(object_store::Error::NotFound { .. })
     ));
 }
@@ -681,16 +686,16 @@ async fn every_format_rejects_schema_mismatch_before_encoding() {
     let storage = storage();
     let schema = batch().schema();
 
-    let arrow_handle = prepared_handle(&storage, "memory://bucket/schema-mismatch.arrow").await;
+    let arrow_handle = prepared_target(&storage, "memory://bucket/schema-mismatch.arrow").await;
     let arrow = open_registered_arrow_sink(arrow_handle.clone(), Arc::clone(&schema), &[]).await;
     assert_schema_mismatch_is_rejected_before_encoding(arrow, &arrow_handle).await;
 
-    let parquet_handle = prepared_handle(&storage, "memory://bucket/schema-mismatch.parquet").await;
+    let parquet_handle = prepared_target(&storage, "memory://bucket/schema-mismatch.parquet").await;
     let parquet =
         open_registered_parquet_sink(parquet_handle.clone(), Arc::clone(&schema), &[]).await;
     assert_schema_mismatch_is_rejected_before_encoding(parquet, &parquet_handle).await;
 
-    let vortex_handle = prepared_handle(&storage, "memory://bucket/schema-mismatch.vortex").await;
+    let vortex_handle = prepared_target(&storage, "memory://bucket/schema-mismatch.vortex").await;
     let vortex = open_registered_vortex_sink(vortex_handle.clone(), schema, &[]).await;
     assert_schema_mismatch_is_rejected_before_encoding(vortex, &vortex_handle).await;
 }
@@ -718,20 +723,20 @@ async fn every_format_accepts_metadata_only_schema_differences() {
     )
     .unwrap();
 
-    let arrow_handle = prepared_handle(&storage, "memory://bucket/metadata.arrow").await;
+    let arrow_handle = prepared_target(&storage, "memory://bucket/metadata.arrow").await;
     let mut arrow =
         open_registered_arrow_sink(arrow_handle.clone(), Arc::clone(&expected_schema), &[]).await;
     arrow.write_batch(metadata_batch.clone()).await.unwrap();
     assert_durable(arrow.finish().await.unwrap(), &arrow_handle).await;
 
-    let parquet_handle = prepared_handle(&storage, "memory://bucket/metadata.parquet").await;
+    let parquet_handle = prepared_target(&storage, "memory://bucket/metadata.parquet").await;
     let mut parquet =
         open_registered_parquet_sink(parquet_handle.clone(), Arc::clone(&expected_schema), &[])
             .await;
     parquet.write_batch(metadata_batch.clone()).await.unwrap();
     assert_durable(parquet.finish().await.unwrap(), &parquet_handle).await;
 
-    let vortex_handle = prepared_handle(&storage, "memory://bucket/metadata.vortex").await;
+    let vortex_handle = prepared_target(&storage, "memory://bucket/metadata.vortex").await;
     let mut vortex = open_registered_vortex_sink(vortex_handle.clone(), expected_schema, &[]).await;
     vortex.write_batch(metadata_batch).await.unwrap();
     assert_durable(vortex.finish().await.unwrap(), &vortex_handle).await;
@@ -740,13 +745,13 @@ async fn every_format_accepts_metadata_only_schema_differences() {
 #[tokio::test]
 async fn vortex_sink_writes_a_memory_object() {
     let storage = storage();
-    let handle = prepared_handle(&storage, "memory://bucket/output.vortex").await;
+    let target = prepared_target(&storage, "memory://bucket/output.vortex").await;
     let batch = batch();
-    let mut sink = open_registered_vortex_sink(handle.clone(), batch.schema(), &[]).await;
+    let mut sink = open_registered_vortex_sink(target.clone(), batch.schema(), &[]).await;
 
     sink.write_batch(batch).await.unwrap();
     let completion = sink.finish().await.unwrap();
-    assert_durable(completion, &handle).await;
+    assert_durable(completion, &target).await;
 }
 
 #[tokio::test]
@@ -756,17 +761,17 @@ async fn every_format_reports_single_put_failures_without_durable_outputs() {
     let store = controlled_upload_store();
     let multipart_starts = store.multipart_starts();
 
-    let arrow_handle = prepared_handle(&storage, "tracking://bucket/put-error.arrow").await;
+    let arrow_handle = prepared_target(&storage, "tracking://bucket/put-error.arrow").await;
     let arrow = open_registered_arrow_sink(arrow_handle.clone(), batch().schema(), &[]).await;
     store.fail_next_put();
     assert_controlled_write_failure(arrow, &arrow_handle, "controlled put failure").await;
 
-    let parquet_handle = prepared_handle(&storage, "tracking://bucket/put-error.parquet").await;
+    let parquet_handle = prepared_target(&storage, "tracking://bucket/put-error.parquet").await;
     let parquet = open_registered_parquet_sink(parquet_handle.clone(), batch().schema(), &[]).await;
     store.fail_next_put();
     assert_controlled_write_failure(parquet, &parquet_handle, "controlled put failure").await;
 
-    let vortex_handle = prepared_handle(&storage, "tracking://bucket/put-error.vortex").await;
+    let vortex_handle = prepared_target(&storage, "tracking://bucket/put-error.vortex").await;
     let vortex = open_registered_vortex_sink(vortex_handle.clone(), batch().schema(), &[]).await;
     store.fail_next_put();
     assert_controlled_write_failure(vortex, &vortex_handle, "controlled put failure").await;
@@ -780,7 +785,7 @@ async fn every_format_reports_multipart_start_failures_without_durable_outputs()
     let storage = controlled_upload_storage();
     let store = controlled_upload_store();
 
-    let arrow_handle = prepared_handle(&storage, "tracking://bucket/start-error.arrow").await;
+    let arrow_handle = prepared_target(&storage, "tracking://bucket/start-error.arrow").await;
     let arrow = open_registered_arrow_sink(
         arrow_handle.clone(),
         batch().schema(),
@@ -791,7 +796,7 @@ async fn every_format_reports_multipart_start_failures_without_durable_outputs()
     assert_controlled_write_failure(arrow, &arrow_handle, "controlled multipart-start failure")
         .await;
 
-    let parquet_handle = prepared_handle(&storage, "tracking://bucket/start-error.parquet").await;
+    let parquet_handle = prepared_target(&storage, "tracking://bucket/start-error.parquet").await;
     let parquet = open_registered_parquet_sink(
         parquet_handle.clone(),
         batch().schema(),
@@ -811,7 +816,7 @@ async fn every_format_reports_multipart_start_failures_without_durable_outputs()
     )
     .await;
 
-    let vortex_handle = prepared_handle(&storage, "tracking://bucket/start-error.vortex").await;
+    let vortex_handle = prepared_target(&storage, "tracking://bucket/start-error.vortex").await;
     let vortex = open_registered_vortex_sink(
         vortex_handle.clone(),
         batch().schema(),
@@ -828,9 +833,9 @@ async fn parquet_late_part_failure_cancels_the_entire_pipeline() {
     let _lock = controlled_upload_lock().await;
     let storage = controlled_upload_storage();
     let store = controlled_upload_store();
-    let handle = prepared_handle(&storage, "tracking://bucket/later-part-error.parquet").await;
+    let target = prepared_target(&storage, "tracking://bucket/later-part-error.parquet").await;
     let sink = open_registered_parquet_sink(
-        handle.clone(),
+        target.clone(),
         batch().schema(),
         &[
             "--parquet-row-group-size",
@@ -850,13 +855,13 @@ async fn parquet_late_part_failure_cancels_the_entire_pipeline() {
     .await;
     store.fail_part_after(4);
 
-    assert_controlled_write_failure(sink, &handle, "controlled part failure").await;
+    assert_controlled_write_failure(sink, &target, "controlled part failure").await;
     assert_eq!(store.active_parts(), 0);
 }
 
 async fn assert_sink_failure_cancels_every_datafusion_source_task(
     mut sink: Box<dyn DataSink>,
-    handle: &StorageHandle,
+    target: &PreparedOutputTarget,
     store: &Arc<TrackingStore>,
     expected_write_error: &str,
 ) {
@@ -909,7 +914,7 @@ async fn assert_sink_failure_cancels_every_datafusion_source_task(
         "{cleanup_error:#}"
     );
     assert!(matches!(
-        store.head(handle.object_path()).await,
+        store.head(target.object_path()).await,
         Err(object_store::Error::NotFound { .. })
     ));
 }
@@ -919,9 +924,9 @@ async fn arrow_sink_failure_cancels_every_datafusion_source_task() {
     let _lock = controlled_upload_lock().await;
     let storage = controlled_upload_storage();
     let store = controlled_upload_store();
-    let handle = prepared_handle(&storage, "tracking://bucket/source-cancellation.arrow").await;
+    let target = prepared_target(&storage, "tracking://bucket/source-cancellation.arrow").await;
     let sink = open_registered_arrow_sink(
-        handle.clone(),
+        target.clone(),
         batch().schema(),
         &[
             "--arrow-record-batch-size",
@@ -934,7 +939,7 @@ async fn arrow_sink_failure_cancels_every_datafusion_source_task() {
 
     assert_sink_failure_cancels_every_datafusion_source_task(
         sink,
-        &handle,
+        &target,
         &store,
         "writer task died",
     )
@@ -946,9 +951,9 @@ async fn parquet_sink_failure_cancels_every_datafusion_source_task() {
     let _lock = controlled_upload_lock().await;
     let storage = controlled_upload_storage();
     let store = controlled_upload_store();
-    let handle = prepared_handle(&storage, "tracking://bucket/source-cancellation.parquet").await;
+    let target = prepared_target(&storage, "tracking://bucket/source-cancellation.parquet").await;
     let sink = open_registered_parquet_sink(
-        handle.clone(),
+        target.clone(),
         batch().schema(),
         &[
             "--parquet-row-group-size",
@@ -971,7 +976,7 @@ async fn parquet_sink_failure_cancels_every_datafusion_source_task() {
 
     assert_sink_failure_cancels_every_datafusion_source_task(
         sink,
-        &handle,
+        &target,
         &store,
         "Parquet pipeline closed",
     )
@@ -981,7 +986,7 @@ async fn parquet_sink_failure_cancels_every_datafusion_source_task() {
 #[tokio::test(flavor = "multi_thread")]
 async fn source_failure_cancels_its_active_sibling() {
     let storage = storage();
-    let handle = prepared_handle(&storage, "memory://bucket/source-failure.arrow").await;
+    let target = prepared_target(&storage, "memory://bucket/source-failure.arrow").await;
     let batch = batch();
     let failing_state = Arc::new(SourceTaskState::new());
     let sibling_state = Arc::new(SourceTaskState::new());
@@ -1002,7 +1007,7 @@ async fn source_failure_cancels_its_active_sibling() {
     )
     .await;
     let mut sink = open_registered_arrow_sink(
-        handle.clone(),
+        target.clone(),
         batch.schema(),
         &[
             "--arrow-record-batch-size",
@@ -1036,7 +1041,7 @@ async fn source_failure_cancels_its_active_sibling() {
     assert!(sibling_state.cancelled.load(Ordering::SeqCst));
     sink.abort().await.unwrap();
     assert!(matches!(
-        handle.object_store().head(handle.object_path()).await,
+        target.object_store().head(target.object_path()).await,
         Err(object_store::Error::NotFound { .. })
     ));
 }
@@ -1108,7 +1113,7 @@ async fn arrow_abort_cancels_a_backpressured_multipart_upload() {
     let batch = batch();
     let _blocked = store.block_parts();
 
-    let arrow_handle = prepared_handle(&storage, "tracking://bucket/output.arrow").await;
+    let arrow_handle = prepared_target(&storage, "tracking://bucket/output.arrow").await;
     let arrow = open_registered_arrow_sink(
         arrow_handle.clone(),
         batch.schema(),
@@ -1126,7 +1131,7 @@ async fn parquet_abort_cancels_a_backpressured_multipart_upload() {
     let batch = batch();
     let _blocked = store.block_parts();
 
-    let parquet_handle = prepared_handle(&storage, "tracking://bucket/output.parquet").await;
+    let parquet_handle = prepared_target(&storage, "tracking://bucket/output.parquet").await;
     let parquet = open_registered_parquet_sink(
         parquet_handle.clone(),
         batch.schema(),
@@ -1151,7 +1156,7 @@ async fn vortex_abort_cancels_a_backpressured_multipart_upload() {
     let batch = batch();
     let _blocked = store.block_parts();
 
-    let vortex_handle = prepared_handle(&storage, "tracking://bucket/output.vortex").await;
+    let vortex_handle = prepared_target(&storage, "tracking://bucket/output.vortex").await;
     let vortex = open_registered_vortex_sink(
         vortex_handle.clone(),
         batch.schema(),
@@ -1169,7 +1174,7 @@ async fn arrow_drop_fallback_cancels_a_backpressured_upload() {
     let batch = batch();
     let _blocked = store.block_parts();
 
-    let arrow_handle = prepared_handle(&storage, "tracking://bucket/drop.arrow").await;
+    let arrow_handle = prepared_target(&storage, "tracking://bucket/drop.arrow").await;
     let arrow = open_registered_arrow_sink(
         arrow_handle.clone(),
         batch.schema(),
@@ -1186,7 +1191,7 @@ async fn parquet_drop_fallback_cancels_a_backpressured_upload() {
     let store = controlled_upload_store();
     let batch = batch();
     let _blocked = store.block_parts();
-    let parquet_handle = prepared_handle(&storage, "tracking://bucket/drop.parquet").await;
+    let parquet_handle = prepared_target(&storage, "tracking://bucket/drop.parquet").await;
     let parquet = open_registered_parquet_sink(
         parquet_handle.clone(),
         batch.schema(),
@@ -1210,7 +1215,7 @@ async fn vortex_drop_fallback_cancels_a_backpressured_upload() {
     let store = controlled_upload_store();
     let batch = batch();
     let _blocked = store.block_parts();
-    let vortex_handle = prepared_handle(&storage, "tracking://bucket/drop.vortex").await;
+    let vortex_handle = prepared_target(&storage, "tracking://bucket/drop.vortex").await;
     let vortex = open_registered_vortex_sink(
         vortex_handle.clone(),
         batch.schema(),
@@ -1228,16 +1233,16 @@ async fn arrow_cancelled_finish_cleans_a_backpressured_upload() {
     let schema = batch().schema();
     let schema_released = Arc::downgrade(&schema);
     let _blocked = store.block_parts();
-    let handle = prepared_handle(&storage, "tracking://bucket/cancel-finish.arrow").await;
+    let target = prepared_target(&storage, "tracking://bucket/cancel-finish.arrow").await;
     let sink = open_registered_arrow_sink(
-        handle.clone(),
+        target.clone(),
         Arc::clone(&schema),
         &["--arrow-record-batch-size", "1"],
     )
     .await;
     drop(schema);
 
-    assert_cancelled_finish_cleans_multipart(sink, &handle, &store).await;
+    assert_cancelled_finish_cleans_multipart(sink, &target, &store).await;
     wait_for_resource_release(&schema_released, "cancelled Arrow finish retained its task").await;
 }
 
@@ -1249,9 +1254,9 @@ async fn parquet_cancelled_finish_cleans_pipeline_and_upload() {
     let schema = batch().schema();
     let schema_released = Arc::downgrade(&schema);
     let _blocked = store.block_parts();
-    let handle = prepared_handle(&storage, "tracking://bucket/cancel-finish.parquet").await;
+    let target = prepared_target(&storage, "tracking://bucket/cancel-finish.parquet").await;
     let sink = open_registered_parquet_sink(
-        handle.clone(),
+        target.clone(),
         Arc::clone(&schema),
         &[
             "--parquet-row-group-size",
@@ -1271,7 +1276,7 @@ async fn parquet_cancelled_finish_cleans_pipeline_and_upload() {
     .await;
     drop(schema);
 
-    assert_cancelled_finish_cleans_multipart(sink, &handle, &store).await;
+    assert_cancelled_finish_cleans_multipart(sink, &target, &store).await;
     wait_for_resource_release(
         &schema_released,
         "cancelled Parquet finish retained its task tree",
@@ -1287,16 +1292,16 @@ async fn vortex_cancelled_finish_cleans_a_backpressured_upload() {
     let schema = batch().schema();
     let schema_released = Arc::downgrade(&schema);
     let _blocked = store.block_parts();
-    let handle = prepared_handle(&storage, "tracking://bucket/cancel-finish.vortex").await;
+    let target = prepared_target(&storage, "tracking://bucket/cancel-finish.vortex").await;
     let sink = open_registered_vortex_sink(
-        handle.clone(),
+        target.clone(),
         Arc::clone(&schema),
         &["--vortex-record-batch-size", "1"],
     )
     .await;
     drop(schema);
 
-    assert_cancelled_finish_cleans_multipart(sink, &handle, &store).await;
+    assert_cancelled_finish_cleans_multipart(sink, &target, &store).await;
     wait_for_resource_release(
         &schema_released,
         "cancelled Vortex finish retained its task",
@@ -1312,7 +1317,7 @@ async fn format_aborts_report_multipart_cleanup_failures() {
     let batch = batch();
     let _blocked = store.block_parts();
 
-    let arrow_handle = prepared_handle(&storage, "tracking://bucket/abort-error.arrow").await;
+    let arrow_handle = prepared_target(&storage, "tracking://bucket/abort-error.arrow").await;
     let arrow = open_registered_arrow_sink(
         arrow_handle.clone(),
         batch.schema(),
@@ -1321,7 +1326,7 @@ async fn format_aborts_report_multipart_cleanup_failures() {
     .await;
     assert_abort_reports_cleanup_failure(arrow, &arrow_handle, &store).await;
 
-    let parquet_handle = prepared_handle(&storage, "tracking://bucket/abort-error.parquet").await;
+    let parquet_handle = prepared_target(&storage, "tracking://bucket/abort-error.parquet").await;
     let parquet = open_registered_parquet_sink(
         parquet_handle.clone(),
         batch.schema(),
@@ -1335,7 +1340,7 @@ async fn format_aborts_report_multipart_cleanup_failures() {
     .await;
     assert_abort_reports_cleanup_failure(parquet, &parquet_handle, &store).await;
 
-    let vortex_handle = prepared_handle(&storage, "tracking://bucket/abort-error.vortex").await;
+    let vortex_handle = prepared_target(&storage, "tracking://bucket/abort-error.vortex").await;
     let vortex = open_registered_vortex_sink(
         vortex_handle.clone(),
         batch.schema(),
@@ -1350,9 +1355,9 @@ async fn parquet_upload_failure_cancels_all_pipeline_channels() {
     let _lock = controlled_upload_lock().await;
     let storage = controlled_upload_storage();
     let store = controlled_upload_store();
-    let handle = prepared_handle(&storage, "tracking://bucket/part-error.parquet").await;
+    let target = prepared_target(&storage, "tracking://bucket/part-error.parquet").await;
     let mut sink = open_registered_parquet_sink(
-        handle.clone(),
+        target.clone(),
         batch().schema(),
         &[
             "--parquet-row-group-size",
@@ -1398,7 +1403,7 @@ async fn parquet_upload_failure_cancels_all_pipeline_channels() {
     );
     assert_eq!(store.active_parts(), 0);
     assert!(matches!(
-        store.head(handle.object_path()).await,
+        store.head(target.object_path()).await,
         Err(object_store::Error::NotFound { .. })
     ));
 }
@@ -1410,7 +1415,7 @@ async fn format_finish_failures_abort_multipart_uploads() {
     let store = controlled_upload_store();
     let batch = batch();
     let failed_arrow_handle =
-        prepared_handle(&storage, "tracking://bucket/failed-output.arrow").await;
+        prepared_target(&storage, "tracking://bucket/failed-output.arrow").await;
     let failed_arrow = open_registered_arrow_sink(
         failed_arrow_handle.clone(),
         batch.schema(),
@@ -1420,7 +1425,7 @@ async fn format_finish_failures_abort_multipart_uploads() {
     assert_finish_failure_cleans_multipart(failed_arrow, &failed_arrow_handle, &store).await;
 
     let failed_parquet_handle =
-        prepared_handle(&storage, "tracking://bucket/failed-output.parquet").await;
+        prepared_target(&storage, "tracking://bucket/failed-output.parquet").await;
     let failed_parquet = open_registered_parquet_sink(
         failed_parquet_handle.clone(),
         batch.schema(),
@@ -1435,7 +1440,7 @@ async fn format_finish_failures_abort_multipart_uploads() {
     assert_finish_failure_cleans_multipart(failed_parquet, &failed_parquet_handle, &store).await;
 
     let failed_vortex_handle =
-        prepared_handle(&storage, "tracking://bucket/failed-output.vortex").await;
+        prepared_target(&storage, "tracking://bucket/failed-output.vortex").await;
     let failed_vortex = open_registered_vortex_sink(
         failed_vortex_handle.clone(),
         batch.schema(),

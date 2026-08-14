@@ -10,7 +10,7 @@ use std::{future::Future, sync::Arc};
 use anyhow::Result;
 use arrow::{array::RecordBatch, datatypes::SchemaRef};
 use parquet::file::properties::WriterProperties;
-use silk_chiffon_storage::{ObjectUpload, ObjectUploadTask, StorageHandle};
+use silk_chiffon_storage::{ObjectUpload, ObjectUploadTask, PreparedOutputTarget};
 use tokio::{runtime::Handle, sync::mpsc, task::JoinSet};
 use tokio_util::{
     sync::CancellationToken,
@@ -84,14 +84,14 @@ impl PipelineTaskScope {
 }
 
 pub(super) fn start_pipeline(
-    handle: StorageHandle,
+    target: PreparedOutputTarget,
     schema: &SchemaRef,
     base_properties: WriterProperties,
     runtimes: Arc<OutputRuntimes>,
     config: PipelineConfig,
 ) -> (mpsc::Sender<RecordBatch>, ObjectUploadTask<u64>) {
     let (ingestion_sender, ingestion_receiver) = mpsc::channel(config.ingestion_queue_size);
-    let mut upload = ObjectUpload::new(handle);
+    let mut upload = ObjectUpload::new(target);
     let writer = upload
         .blocking_writer()
         .expect("a new object upload accepts one byte writer");

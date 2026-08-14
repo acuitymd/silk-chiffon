@@ -57,15 +57,15 @@ pub fn truncate_for_display(value: &str) -> String {
 
 /// Returns the user-facing location for an exact input object.
 pub fn display_location(object: &InputObject) -> Result<String> {
-    if object.handle().url().scheme() == "file" {
+    if object.input_handle().url().scheme() == "file" {
         return object
-            .handle()
+            .input_handle()
             .local_path()?
             .into_os_string()
             .into_string()
             .map_err(|path| anyhow::anyhow!("local path is not valid UTF-8: {path:?}"));
     }
-    Ok(object.handle().url().to_string())
+    Ok(object.input_handle().url().to_string())
 }
 
 /// Applies the standard inspection theme to a table.

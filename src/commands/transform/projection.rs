@@ -23,17 +23,14 @@ use datafusion::{
     physical_plan::{RecordBatchStream, SendableRecordBatchStream},
 };
 
-pub struct ProjectedStream {
+struct ProjectedStream {
     input: SendableRecordBatchStream,
     indices: Vec<usize>,
     schema: SchemaRef,
 }
 
 impl ProjectedStream {
-    pub fn new(
-        input: SendableRecordBatchStream,
-        indices: Vec<usize>,
-    ) -> Result<Self, DataFusionError> {
+    fn new(input: SendableRecordBatchStream, indices: Vec<usize>) -> Result<Self, DataFusionError> {
         let input_schema = input.schema();
 
         for &idx in &indices {
@@ -84,29 +81,11 @@ impl RecordBatchStream for ProjectedStream {
     }
 }
 
-pub fn project_stream(
+pub(super) fn project_stream(
     stream: SendableRecordBatchStream,
     indices: Vec<usize>,
 ) -> Result<SendableRecordBatchStream, DataFusionError> {
     Ok(Box::pin(ProjectedStream::new(stream, indices)?))
-}
-
-pub fn project_stream_with_column_names(
-    stream: SendableRecordBatchStream,
-    column_names: &[&str],
-) -> Result<SendableRecordBatchStream, DataFusionError> {
-    let schema = stream.schema();
-
-    let indices: Result<Vec<usize>, ArrowError> = column_names
-        .iter()
-        .map(|name| {
-            schema
-                .index_of(name)
-                .map_err(|_| ArrowError::SchemaError(format!("Column '{}' not found", name)))
-        })
-        .collect();
-
-    project_stream(stream, indices?)
 }
 
 #[cfg(test)]
@@ -191,21 +170,6 @@ mod tests {
         assert_eq!(first_col.values(), &[10, 20, 30]);
     }
 
-    #[tokio::test]
-    async fn test_project_stream_with_column_names() {
-        let schema = test_schema();
-        let stream = test_stream(&schema);
-
-        let mut projected = project_stream_with_column_names(stream, &["name", "id"]).unwrap();
-
-        assert_eq!(projected.schema().fields().len(), 2);
-        assert_eq!(projected.schema().field(0).name(), "name");
-        assert_eq!(projected.schema().field(1).name(), "id");
-
-        let batch = projected.next().await.unwrap().unwrap();
-        assert_eq!(batch.num_columns(), 2);
-    }
-
     #[test]
     fn test_project_stream_index_out_of_bounds() {
         let schema = test_schema();
@@ -214,16 +178,6 @@ mod tests {
         let result = project_stream(stream, vec![0, 5]);
         let err = result.err().expect("should be an error");
         assert!(err.to_string().contains("out of bounds"));
-    }
-
-    #[test]
-    fn test_project_stream_column_not_found() {
-        let schema = test_schema();
-        let stream = test_stream(&schema);
-
-        let result = project_stream_with_column_names(stream, &["nonexistent"]);
-        let err = result.err().expect("should be an error");
-        assert!(err.to_string().contains("not found"));
     }
 
     #[tokio::test]

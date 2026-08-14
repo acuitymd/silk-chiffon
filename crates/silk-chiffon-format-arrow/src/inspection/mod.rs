@@ -8,7 +8,7 @@ use arrow::{
 };
 use datafusion::execution::memory_pool::GreedyMemoryPool;
 use serde_json::{Value, json};
-use silk_chiffon_core::{FormatFuture, InputDetection, InspectionMode, InspectionOutput};
+use silk_chiffon_core::{FormatFuture, InputDetection, InspectionOutput, PresentationMode};
 use silk_chiffon_inspection_output::{
     apply_theme, dim, display_location, format_bytes, format_number, header, render_schema_fields,
     schema_json, truncate_chars,
@@ -61,7 +61,7 @@ impl Inspector {
     }
 
     async fn open_file(object: &InputObject, location: String, count_rows: bool) -> Result<Self> {
-        let handle = object.handle();
+        let handle = object.input_handle();
         let store = handle.object_store();
         let layout_pool_capacity = usize::try_from(MAX_IPC_SAFETY_BYTES)
             .context("Arrow IPC safety bound exceeds the platform address space")?;
@@ -120,7 +120,7 @@ impl Inspector {
     }
 
     async fn open_stream(object: &InputObject, location: String, count_rows: bool) -> Result<Self> {
-        let handle = object.handle();
+        let handle = object.input_handle();
         let store = handle.object_store();
         let mut decoder = StreamDecoder::new();
         let mut offset = 0_u64;
@@ -303,14 +303,14 @@ fn ensure_block_is_bounded(block: &arrow::ipc::Block) -> Result<()> {
 
 pub(crate) fn inspect<'a>(
     object: &'a InputObject,
-    mode: InspectionMode,
+    mode: PresentationMode,
     args: &'a InspectionArgs,
 ) -> FormatFuture<'a, InspectionOutput> {
     Box::pin(async move {
         let inspector = Inspector::open(object, args.row_count || args.batches)
             .await
             .context("Failed to open Arrow input")?;
-        if mode == InspectionMode::Json {
+        if mode == PresentationMode::Json {
             return Ok(InspectionOutput::Json(inspector.to_json()));
         }
         let mut output = Vec::new();
@@ -337,7 +337,8 @@ mod tests {
         path::Path as ObjectPath,
     };
     use silk_chiffon_storage::{
-        LocationInput, StorageAccess, StorageBackend, StorageRegistry, StorageSession,
+        ExistingOutput, LocationInput, OutputPreparation, StorageAccess, StorageBackend,
+        StorageRegistry, StorageSession,
     };
     use silk_chiffon_test_support::{ReadProbeStore, TestBatch};
 
@@ -371,7 +372,7 @@ mod tests {
                 StorageBackend::without_args()
                     .name("memory")
                     .schemes(["memory"])
-                    .access(StorageAccess::ReadOnly)
+                    .access(StorageAccess::ReadWrite)
                     .allow_any_location()
                     .object_store_creator(create_store)
                     .build()
@@ -414,10 +415,16 @@ mod tests {
             "memory://bucket/inspection-{extension}.{extension}"
         ))
         .unwrap();
-        let handle = session.input_handle(&location).unwrap();
-        handle
+        let target = session
+            .prepare_output_target(
+                &location,
+                &OutputPreparation::new(ExistingOutput::Allow, false),
+            )
+            .await
+            .unwrap();
+        target
             .object_store()
-            .put(handle.object_path(), ipc_bytes(variant).into())
+            .put(target.object_path(), ipc_bytes(variant).into())
             .await
             .unwrap();
         session.lookup_input(&location).await.unwrap()
@@ -434,7 +441,7 @@ mod tests {
             assert_eq!(inspector.variant, variant);
             assert_eq!(inspector.num_rows, Some(3));
             assert_eq!(inspector.num_batches, Some(1));
-            assert_eq!(inspector.location, object.handle().url().to_string());
+            assert_eq!(inspector.location, object.input_handle().url().to_string());
         }
     }
 

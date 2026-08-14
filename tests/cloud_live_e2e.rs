@@ -7,8 +7,10 @@ use bytes::Bytes;
 use clap::Command as ClapCommand;
 use futures::TryStreamExt;
 use object_store::ObjectStoreExt;
-use silk_chiffon::{Cli, Command, commands, registration};
-use silk_chiffon_storage::{LocationInput, StorageSession};
+use silk_chiffon::{Cli, Command};
+use silk_chiffon_storage::{
+    ExistingOutput, LocationInput, OutputPreparation, StorageRegistry, StorageSession,
+};
 use silk_chiffon_test_support::{TestBatch, TestFile};
 
 struct LiveConfig {
@@ -112,7 +114,12 @@ fn live_location_validation_rejects_authority_and_prefix_escape_inputs() {
 }
 
 fn session() -> Result<StorageSession> {
-    let registry = registration::storage_registry();
+    let builder = StorageRegistry::builder();
+    #[cfg(feature = "gcs")]
+    let builder = builder.register(silk_chiffon_storage::gcs::backend()?);
+    #[cfg(feature = "s3")]
+    let builder = builder.register(silk_chiffon_storage::s3::backend()?);
+    let registry = builder.build()?;
     let command = registry.augment_args(ClapCommand::new("cloud-live-e2e"));
     let matches = command.try_get_matches_from(["cloud-live-e2e"])?;
     Ok(registry.create_session(&matches)?)
@@ -120,12 +127,10 @@ fn session() -> Result<StorageSession> {
 
 async fn run_cli(arguments: Vec<String>) -> Result<()> {
     let cli = Cli::try_parse_from(arguments)?;
-    match cli.command {
-        Command::Transform(command) => commands::transform::run(command).await,
-        Command::Detect(command) => commands::detect::run(command).await,
-        Command::Inspect(command) => commands::inspect::run(command).await,
-        Command::Completions { .. } => bail!("live E2E test did not request completions"),
+    if matches!(cli.command, Command::Completions { .. }) {
+        bail!("live E2E test did not request completions");
     }
+    cli.command.execute().await
 }
 
 async fn exercise_live_cli(config: &LiveConfig) -> Result<()> {
@@ -137,7 +142,12 @@ async fn exercise_live_cli(config: &LiveConfig) -> Result<()> {
         &TestBatch::simple_with(&[1, 2, 3], &["one", "two", "three"]),
     );
     let input_url = config.url("input.parquet");
-    let input = storage.input_handle(&LocationInput::parse(&input_url)?)?;
+    let input = storage
+        .prepare_output_target(
+            &LocationInput::parse(&input_url)?,
+            &OutputPreparation::new(ExistingOutput::Allow, false),
+        )
+        .await?;
     input
         .object_store()
         .put(
@@ -207,9 +217,9 @@ async fn exercise_live_cli(config: &LiveConfig) -> Result<()> {
         .await
         .context("resolve transformed cloud output")?;
     let output_bytes = output
-        .handle()
+        .input_handle()
         .object_store()
-        .get(output.handle().object_path())
+        .get(output.input_handle().object_path())
         .await?
         .bytes()
         .await?;
@@ -228,7 +238,12 @@ async fn exercise_live_cli(config: &LiveConfig) -> Result<()> {
 
 async fn cleanup_prefix(config: &LiveConfig) -> Result<Vec<String>> {
     let storage = session()?;
-    let root = storage.input_handle(&LocationInput::parse(config.url("cleanup-root"))?)?;
+    let root = storage
+        .prepare_output_target(
+            &LocationInput::parse(config.url("cleanup-root"))?,
+            &OutputPreparation::new(ExistingOutput::Allow, false),
+        )
+        .await?;
     let prefix = object_store::path::Path::parse(&config.run_prefix)?;
     let objects = root
         .object_store()

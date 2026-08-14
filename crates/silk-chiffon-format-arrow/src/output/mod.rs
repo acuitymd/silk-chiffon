@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use datafusion::execution::SendableRecordBatchStream;
 use futures::stream::StreamExt;
 use silk_chiffon_core::{DataSink, SinkBinding, SinkCompletion, validate_batch_schema};
-use silk_chiffon_storage::{ObjectUpload, ObjectUploadTask, StorageHandle};
+use silk_chiffon_storage::{ObjectUpload, ObjectUploadTask, PreparedOutputTarget};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -42,11 +42,11 @@ impl OutputBinding {
 impl SinkBinding for OutputBinding {
     async fn open_sink(
         &self,
-        handle: StorageHandle,
+        target: PreparedOutputTarget,
         schema: SchemaRef,
     ) -> Result<Box<dyn DataSink>> {
         Ok(Box::new(Sink::create(
-            handle,
+            target,
             &schema,
             self.variant,
             self.record_batch_size,
@@ -73,7 +73,7 @@ pub(crate) struct Sink {
 
 impl Sink {
     fn create(
-        handle: StorageHandle,
+        target: PreparedOutputTarget,
         schema: &SchemaRef,
         variant: IpcVariant,
         record_batch_size: usize,
@@ -81,7 +81,7 @@ impl Sink {
         queue_depth: usize,
     ) -> Result<Self> {
         let (tx, rx) = mpsc::channel::<RecordBatch>(queue_depth);
-        let mut upload = ObjectUpload::new(handle);
+        let mut upload = ObjectUpload::new(target);
         let writer = upload.blocking_writer()?;
 
         let sink_schema = Arc::clone(schema);
@@ -266,7 +266,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use silk_chiffon_test_support::{TestBatch, TestFile, prepared_local_output};
+    use silk_chiffon_test_support::{TestBatch, TestFile, prepared_local_output_target};
     use std::sync::{
         Mutex,
         atomic::{AtomicBool, Ordering},
@@ -300,7 +300,7 @@ mod tests {
         let path = directory.path().join("output.arrow");
         let batch = TestBatch::simple_with(&[1, 2, 3, 4, 5], &["a", "b", "c", "d", "e"]);
         let mut sink = Sink::create(
-            prepared_local_output(&path),
+            prepared_local_output_target(&path),
             &batch.schema(),
             variant,
             record_batch_size,
@@ -358,7 +358,7 @@ mod tests {
         let path = directory.path().join("aborted.arrow");
         let batch = TestBatch::simple();
         let mut sink = Sink::create(
-            prepared_local_output(&path),
+            prepared_local_output_target(&path),
             &batch.schema(),
             IpcVariant::File,
             122_880,

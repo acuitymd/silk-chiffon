@@ -14,7 +14,7 @@ use object_store::{ObjectStore, RetryConfig};
 use thiserror::Error;
 use url::Url;
 
-use crate::{Location, LocationPattern, OutputPreparation, StorageHandle};
+use crate::{Location, LocationPattern, OutputPreparation, OutputTarget};
 
 pub(crate) use binding::BackendBinding;
 use binding::{BackendDefinition, TypedBackendDefinition};
@@ -58,13 +58,13 @@ pub type ObjectStoreCreatorFn<T> = fn(
 /// Performs backend-specific work before a prepared output handle is opened by a format.
 pub type PrepareOutputTargetFn<T> =
     for<'a> fn(
-        &'a StorageHandle,
+        &'a OutputTarget,
         &'a OutputPreparation,
         &'a T,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>>;
 
 fn prepare_output_target_without_backend_work<'a, T>(
-    _handle: &'a StorageHandle,
+    _target: &'a OutputTarget,
     _preparation: &'a OutputPreparation,
     _settings: &'a T,
 ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>> {

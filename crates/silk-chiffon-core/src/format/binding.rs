@@ -22,10 +22,10 @@ use datafusion::{catalog::TableProvider, prelude::SessionContext};
 use silk_chiffon_storage::InputObject;
 
 use super::{
-    FormatOperation, FormatOperationError, InputProviderFn, InspectionMode, InspectorFn,
+    FormatOperation, FormatOperationError, InputProviderFn, InspectorFn, PresentationMode,
     SinkBinderFn, SinkBindingConfig,
 };
-use crate::{InputLeaf, InspectionOutput, SinkBinding};
+use crate::{FileInputGroup, InspectionOutput, SinkBinding};
 
 /// The two Clap operations that must stay paired for one concrete command-value type.
 #[derive(Clone, Copy)]
@@ -105,7 +105,7 @@ pub(super) trait ErasedTransformBinding: Send + Sync {
     fn create_input_provider<'a>(
         &'a self,
         format: &'static str,
-        leaf: &'a InputLeaf,
+        group: &'a FileInputGroup,
         session: &'a SessionContext,
     ) -> BindingFuture<'a, Arc<dyn TableProvider>>;
 
@@ -188,7 +188,7 @@ where
     fn create_input_provider<'a>(
         &'a self,
         format: &'static str,
-        leaf: &'a InputLeaf,
+        group: &'a FileInputGroup,
         session: &'a SessionContext,
     ) -> BindingFuture<'a, Arc<dyn TableProvider>> {
         let Some(input_provider) = self.input_provider else {
@@ -201,7 +201,7 @@ where
         };
 
         Box::pin(async move {
-            input_provider(leaf, session, &self.state)
+            input_provider(group, session, &self.state)
                 .await
                 .map_err(|source| FormatOperationError::Failed {
                     format,
@@ -250,7 +250,7 @@ pub(super) trait ErasedInspectionBinding: Send + Sync {
         &'a self,
         format: &'static str,
         object: &'a InputObject,
-        mode: InspectionMode,
+        mode: PresentationMode,
     ) -> BindingFuture<'a, InspectionOutput>;
 }
 
@@ -296,7 +296,7 @@ where
         &'a self,
         format: &'static str,
         object: &'a InputObject,
-        mode: InspectionMode,
+        mode: PresentationMode,
     ) -> BindingFuture<'a, InspectionOutput> {
         Box::pin(async move {
             (self.inspector)(object, mode, &self.settings)

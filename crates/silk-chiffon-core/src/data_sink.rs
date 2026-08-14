@@ -4,7 +4,7 @@ use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use datafusion::execution::SendableRecordBatchStream;
 use futures::StreamExt;
-use silk_chiffon_storage::StorageHandle;
+use silk_chiffon_storage::PreparedOutputTarget;
 use url::Url;
 
 /// Command-scoped format state that opens one or more output sinks.
@@ -14,10 +14,10 @@ use url::Url;
 /// [`DataSink`] values without rebuilding that state for each file.
 #[async_trait]
 pub trait SinkBinding: Send + Sync {
-    /// Opens a sink for one storage handle and its projected schema.
+    /// Opens a sink for one prepared output target and its projected schema.
     async fn open_sink(
         &self,
-        handle: StorageHandle,
+        target: PreparedOutputTarget,
         schema: SchemaRef,
     ) -> Result<Box<dyn DataSink>>;
 }

@@ -97,7 +97,7 @@ async fn local_mapper_expands_bare_path_patterns() {
 
     assert_eq!(matches.len(), 1);
     assert_eq!(
-        matches[0].handle().local_path().unwrap(),
+        matches[0].input_handle().local_path().unwrap(),
         directory.path().join("one.arrow")
     );
 }
@@ -370,12 +370,7 @@ async fn existing_output_is_rejected() {
     let path = working_directory.path().join("existing.parquet");
     let location = location(path.to_str().unwrap()).unwrap();
     let storage = silk_chiffon_storage::local::session().unwrap();
-    let handle = storage.input_handle(&location).unwrap();
-    handle
-        .object_store()
-        .put(handle.object_path(), Bytes::from_static(b"existing").into())
-        .await
-        .unwrap();
+    std::fs::write(&path, b"existing").unwrap();
 
     assert!(
         storage
@@ -386,6 +381,48 @@ async fn existing_output_is_rejected() {
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+#[cfg(feature = "local-bare-paths")]
+async fn input_handles_allow_reads_and_reject_every_mutation_path() {
+    let working_directory = TempDir::new().unwrap();
+    let path = working_directory.path().join("input.bin");
+    std::fs::write(&path, b"abcdef").unwrap();
+    let storage = silk_chiffon_storage::local::session().unwrap();
+    let handle = storage
+        .input_handle(&location(path.to_str().unwrap()).unwrap())
+        .unwrap();
+    let store = handle.object_store();
+
+    assert_eq!(
+        store.get_range(handle.object_path(), 1..4).await.unwrap(),
+        Bytes::from_static(b"bcd")
+    );
+    assert!(
+        store
+            .put(handle.object_path(), Bytes::from_static(b"changed").into())
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("put_opts")
+    );
+    assert!(
+        store
+            .put_multipart(handle.object_path())
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("put_multipart_opts")
+    );
+    assert!(store.delete(handle.object_path()).await.is_err());
+    assert!(
+        store
+            .copy(handle.object_path(), &"copy.bin".into())
+            .await
+            .is_err()
+    );
+    assert_eq!(std::fs::read(path).unwrap(), b"abcdef");
 }
 
 #[tokio::test]

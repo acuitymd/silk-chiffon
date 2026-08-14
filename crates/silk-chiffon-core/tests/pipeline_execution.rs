@@ -6,7 +6,7 @@ use arrow::{
 };
 use datafusion::{catalog::TableProvider, datasource::MemTable};
 use futures::TryStreamExt;
-use silk_chiffon_core::{InputSources, Pipeline};
+use silk_chiffon_core::{Pipeline, union_input_providers_by_name};
 
 #[test]
 fn pipeline_execution_boxes_the_complete_execution_lifetime() {
@@ -25,8 +25,8 @@ fn pipeline_execution_boxes_the_complete_execution_lifetime() {
             as Arc<dyn TableProvider>;
         let mut pipeline = Pipeline::new();
         let session = pipeline.create_session_context().unwrap();
-        let inputs = InputSources::try_new(&session, vec![provider]).unwrap();
-        let prepared = pipeline.with_inputs(inputs).prepare(session).await.unwrap();
+        let input = union_input_providers_by_name(&session, vec![provider]).unwrap();
+        let prepared = pipeline.prepare(input, session).await.unwrap();
 
         assert_eq!(prepared.output_schema(), schema);
         let batches = prepared

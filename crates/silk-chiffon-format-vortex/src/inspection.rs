@@ -9,7 +9,7 @@ use std::{io::Write, sync::Arc};
 use anyhow::{Context, Result};
 use arrow::datatypes::SchemaRef;
 use serde_json::{Value, json};
-use silk_chiffon_core::{FormatFuture, InspectionMode, InspectionOutput};
+use silk_chiffon_core::{FormatFuture, InspectionOutput, PresentationMode};
 use silk_chiffon_inspection_output::{
     dim, display_location, format_bytes, format_number, header, label, render_schema_fields,
     render_schema_fields_detailed, rounded_table, schema_json, value,
@@ -47,7 +47,7 @@ struct Inspector {
 
 impl Inspector {
     async fn open(object: &InputObject) -> Result<Self> {
-        let handle = object.handle();
+        let handle = object.input_handle();
         let store = handle.object_store();
         let session = VortexSession::default();
         let file = session
@@ -253,12 +253,12 @@ impl Inspector {
 
 pub(crate) fn inspect<'a>(
     object: &'a InputObject,
-    mode: InspectionMode,
+    mode: PresentationMode,
     args: &'a crate::args::InspectionArgs,
 ) -> FormatFuture<'a, InspectionOutput> {
     Box::pin(async move {
         let inspector = Inspector::open(object).await?;
-        if mode == InspectionMode::Json {
+        if mode == PresentationMode::Json {
             return Ok(InspectionOutput::Json(inspector.to_json()));
         }
         let mut output = Vec::new();
@@ -280,7 +280,7 @@ pub(crate) fn inspect<'a>(
 mod tests {
     use clap::Command;
     use object_store::GetRange;
-    use silk_chiffon_core::{InspectionMode, InspectionOutput};
+    use silk_chiffon_core::{InspectionOutput, PresentationMode};
 
     use super::*;
     use crate::test_support::{guard, object_with, store, vortex_bytes, vortex_object};
@@ -301,7 +301,7 @@ mod tests {
         store().reset_observation();
 
         let output = binding(&[])
-            .inspect(&object, InspectionMode::Json)
+            .inspect(&object, PresentationMode::Json)
             .await
             .unwrap();
         let InspectionOutput::Json(output) = output else {
@@ -311,7 +311,7 @@ mod tests {
         assert_eq!(output["format"], "vortex");
         assert_eq!(output["variant"], "file");
         assert_eq!(output["rows"], 3);
-        assert_eq!(output["file"], object.handle().url().as_str());
+        assert_eq!(output["file"], object.input_handle().url().as_str());
         assert_eq!(store().head_request_count(), 0);
         let ranges = store().ranges();
         assert!(!ranges.is_empty());
@@ -328,7 +328,7 @@ mod tests {
         let object = vortex_object().await;
 
         let output = binding(&["--schema", "--stats", "--layout"])
-            .inspect(&object, InspectionMode::Text)
+            .inspect(&object, PresentationMode::Text)
             .await
             .unwrap();
         let InspectionOutput::Text(output) = output else {
@@ -346,7 +346,7 @@ mod tests {
         }
 
         let output = binding(&[])
-            .inspect(&object, InspectionMode::Json)
+            .inspect(&object, PresentationMode::Json)
             .await
             .unwrap();
         let InspectionOutput::Json(output) = output else {
@@ -363,7 +363,7 @@ mod tests {
         let object = object_with(vortex_bytes(Vec::new()).await).await;
 
         let output = binding(&[])
-            .inspect(&object, InspectionMode::Json)
+            .inspect(&object, PresentationMode::Json)
             .await
             .unwrap();
         let InspectionOutput::Json(output) = output else {
@@ -371,7 +371,7 @@ mod tests {
         };
 
         assert_eq!(output["rows"], 0);
-        assert_eq!(output["file"], object.handle().url().as_str());
+        assert_eq!(output["file"], object.input_handle().url().as_str());
     }
 
     #[tokio::test]
@@ -397,12 +397,12 @@ mod tests {
         let _guard = guard().await;
         let malformed = object_with(b"VTXFbroken".as_slice()).await;
         let error = binding(&[])
-            .inspect(&malformed, InspectionMode::Text)
+            .inspect(&malformed, PresentationMode::Text)
             .await
             .unwrap_err();
         let message = format!("{error:#}");
         assert!(
-            message.contains(malformed.handle().url().as_str()),
+            message.contains(malformed.input_handle().url().as_str()),
             "{message}"
         );
 
@@ -410,12 +410,12 @@ mod tests {
         store().reset_observation();
         store().set_fail_reads(true);
         let error = binding(&[])
-            .inspect(&object, InspectionMode::Json)
+            .inspect(&object, PresentationMode::Json)
             .await
             .unwrap_err();
         let message = format!("{error:#}");
         assert!(
-            message.contains(object.handle().url().as_str()),
+            message.contains(object.input_handle().url().as_str()),
             "{message}"
         );
         store().reset_observation();

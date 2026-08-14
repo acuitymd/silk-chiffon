@@ -14,7 +14,7 @@ use futures::{Sink as FuturesSink, SinkExt, stream};
 use silk_chiffon_core::{
     DataSink, OpenSinkMode, SinkBinding, SinkBindingConfig, SinkCompletion, validate_batch_schema,
 };
-use silk_chiffon_storage::{ObjectUpload, ObjectUploadTask, StorageHandle};
+use silk_chiffon_storage::{ObjectUpload, ObjectUploadTask, PreparedOutputTarget};
 use tokio::sync::mpsc;
 use vortex::{
     array::{ArrayRef, stream::ArrayStreamAdapter},
@@ -62,11 +62,11 @@ struct OutputBinding {
 impl SinkBinding for OutputBinding {
     async fn open_sink(
         &self,
-        handle: StorageHandle,
+        target: PreparedOutputTarget,
         schema: SchemaRef,
     ) -> Result<Box<dyn DataSink>> {
         Ok(Box::new(Sink::create(
-            handle,
+            target,
             schema,
             self.record_batch_size,
             self.queue_depth,
@@ -85,7 +85,7 @@ struct Sink {
 
 impl Sink {
     fn create(
-        handle: StorageHandle,
+        target: PreparedOutputTarget,
         schema: SchemaRef,
         record_batch_size: usize,
         queue_depth: usize,
@@ -93,7 +93,7 @@ impl Sink {
     ) -> Result<Self> {
         let coalescer = BatchCoalescer::new(Arc::clone(&schema), record_batch_size);
         let (sender, receiver) = mpsc::channel(queue_depth);
-        let mut upload = ObjectUpload::new(handle);
+        let mut upload = ObjectUpload::new(target);
         let writer = UploadWriter::new(upload.writer()?, upload.part_size().get());
         let writer_schema = Arc::clone(&schema);
         let task = ObjectUploadTask::spawn("Vortex writer", upload, move |cancellation| {
@@ -304,7 +304,7 @@ mod tests {
     use clap::{Args, Command, FromArgMatches};
     use object_store::ObjectStoreExt;
     use silk_chiffon_storage::{ExistingOutput, LocationInput, OutputPreparation, StorageSession};
-    use silk_chiffon_test_support::{TestBatch, prepared_local_output};
+    use silk_chiffon_test_support::{TestBatch, prepared_local_output_target};
     use vortex::{
         file::OpenOptionsSessionExt,
         session::{SessionExt, SessionVar},
@@ -367,7 +367,7 @@ mod tests {
         let first = TestBatch::simple_with(&[1, 2], &["a", "b"]);
         let second = TestBatch::simple_with(&[3, 4, 5], &["c", "d", "e"]);
         let mut sink = binding
-            .open_sink(prepared_local_output(&path), first.schema())
+            .open_sink(prepared_local_output_target(&path), first.schema())
             .await
             .unwrap();
 
@@ -386,7 +386,7 @@ mod tests {
         assert_eq!(file.row_count(), 5);
     }
 
-    async fn controlled_handle(storage: &StorageSession, name: &str) -> StorageHandle {
+    async fn controlled_target(storage: &StorageSession, name: &str) -> PreparedOutputTarget {
         storage
             .prepare_output_target(
                 &LocationInput::parse(format!("tracking://bucket/{name}")).unwrap(),
@@ -398,7 +398,7 @@ mod tests {
 
     async fn drive_to_active_part(
         sink: &mut dyn DataSink,
-        handle: &StorageHandle,
+        target: &PreparedOutputTarget,
         store: &silk_chiffon_test_support::controlled_upload::ControlledUploadStore,
     ) {
         let active_before = store.active_parts();
@@ -419,7 +419,7 @@ mod tests {
                     result.unwrap_or_else(|_| {
                         panic!(
                             "Vortex did not start a multipart upload for {}",
-                            handle.url()
+                            target.url()
                         )
                     });
                     break;
@@ -434,7 +434,7 @@ mod tests {
         .unwrap_or_else(|_| {
             panic!(
                 "Vortex did not start a multipart upload for {}",
-                handle.url()
+                target.url()
             )
         });
     }
@@ -453,20 +453,20 @@ mod tests {
         let batch = TestBatch::simple();
         let state = state(&["--vortex-record-batch-size", "1"]);
         let binding = output_binding(&config(OpenSinkMode::Multiple), &state);
-        let handle = controlled_handle(&storage, "vortex-abort").await;
+        let target = controlled_target(&storage, "vortex-abort").await;
         let mut sink = binding
-            .open_sink(handle.clone(), batch.schema())
+            .open_sink(target.clone(), batch.schema())
             .await
             .unwrap();
 
-        drive_to_active_part(sink.as_mut(), &handle, &store).await;
+        drive_to_active_part(sink.as_mut(), &target, &store).await;
 
         sink.abort().await.unwrap();
 
         assert_eq!(store.active_parts(), 0);
         assert_eq!(store.aborts(), aborts + 1);
         assert!(matches!(
-            store.head(handle.object_path()).await,
+            store.head(target.object_path()).await,
             Err(object_store::Error::NotFound { .. })
         ));
     }

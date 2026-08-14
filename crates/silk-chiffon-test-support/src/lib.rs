@@ -19,7 +19,7 @@ pub use batch::{StructColumnBuilder, TestBatch, TestBatchBuilder};
 pub use extract::TestExtract;
 pub use fault_injecting_store::{FaultInjectingStore, ObjectStoreOperation};
 pub use file::TestFile;
-pub use output::prepared_local_output;
+pub use output::prepared_local_output_target;
 pub use read_probe_store::ReadProbeStore;
 
 #[cfg(test)]
