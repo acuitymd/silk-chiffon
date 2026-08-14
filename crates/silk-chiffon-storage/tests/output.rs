@@ -21,8 +21,8 @@ use object_store::{
     path::Path as ObjectPath,
 };
 use silk_chiffon_storage::{
-    ExistingOutput, LocationInput, ObjectUpload, OutputPreparation, StorageAccess, StorageBackend,
-    StorageHandle, StorageRegistry,
+    ExistingOutput, LocationInput, ObjectUpload, ObjectUploadTask, OutputPreparation,
+    StorageAccess, StorageBackend, StorageHandle, StorageRegistry,
 };
 
 static MEMORY_STORE: OnceLock<Arc<InMemory>> = OnceLock::new();
@@ -367,6 +367,149 @@ async fn controlled_upload(
     let store = controlled_store(handle.store_url());
     let path = handle.object_path().clone();
     (ObjectUpload::new(handle), store, path)
+}
+
+#[tokio::test]
+async fn upload_task_finishes_the_producer_before_completing_the_object() {
+    let storage = controlled_session(&["output-test"]);
+    let root = unique_controlled_root("upload-task-finish");
+    let (mut upload, store, path) = controlled_upload(&storage, &root, "output").await;
+    let mut writer = upload.writer().unwrap();
+    let task = ObjectUploadTask::spawn("test producer", upload, move |_| {
+        tokio::spawn(async move {
+            writer.send(Bytes::from_static(b"complete")).await.unwrap();
+            Ok(7_u64)
+        })
+    });
+
+    let (value, _) = task.finish().await.unwrap();
+
+    assert_eq!(value, 7);
+    assert_eq!(
+        store.inner.get(&path).await.unwrap().bytes().await.unwrap(),
+        Bytes::from_static(b"complete")
+    );
+}
+
+#[tokio::test]
+async fn upload_task_cancels_its_producer_and_aborts_the_upload() {
+    let storage = controlled_session(&["output-test", "--object-store-upload-part-size", "8"]);
+    let root = unique_controlled_root("upload-task-abort");
+    let (mut upload, store, path) = controlled_upload(&storage, &root, "output").await;
+    store.control.block_parts.store(true, Ordering::SeqCst);
+    let control = Arc::clone(&store.control);
+    let mut writer = upload.writer().unwrap();
+    let task = ObjectUploadTask::spawn("test producer", upload, move |cancellation| {
+        tokio::spawn(async move {
+            writer.send(Bytes::from_static(b"12345678")).await.unwrap();
+            cancellation.cancelled().await;
+            Err::<(), _>(anyhow::anyhow!("producer observed cancellation"))
+        })
+    });
+
+    wait_for_active_parts(&control, 1).await;
+    task.abort().await.unwrap();
+
+    assert!(store.inner.head(&path).await.is_err());
+    assert_eq!(store.control.aborts.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn upload_task_preserves_producer_and_cleanup_failures() {
+    let storage = controlled_session(&["output-test", "--object-store-upload-part-size", "8"]);
+    let root = unique_controlled_root("upload-task-producer-error");
+    let (mut upload, store, _path) = controlled_upload(&storage, &root, "output").await;
+    store.control.block_parts.store(true, Ordering::SeqCst);
+    let control = Arc::clone(&store.control);
+    let release = Arc::new(tokio::sync::Notify::new());
+    let producer_release = Arc::clone(&release);
+    let mut writer = upload.writer().unwrap();
+    let task = ObjectUploadTask::spawn("test producer", upload, move |_| {
+        tokio::spawn(async move {
+            writer.send(Bytes::from_static(b"12345678")).await.unwrap();
+            producer_release.notified().await;
+            Err::<(), _>(anyhow::anyhow!("controlled producer failure"))
+        })
+    });
+
+    wait_for_active_parts(&control, 1).await;
+    control.fail_next_abort.store(true, Ordering::SeqCst);
+    release.notify_one();
+    let error = task.finish().await.unwrap_err();
+    let message = format!("{error:#}");
+
+    assert!(message.contains("controlled producer failure"), "{message}");
+    assert!(message.contains("cleanup also failed"), "{message}");
+    assert!(message.contains("controlled abort failure"), "{message}");
+    assert_eq!(control.active_parts.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn upload_task_aborts_the_upload_when_its_producer_panics() {
+    let storage = controlled_session(&["output-test", "--object-store-upload-part-size", "8"]);
+    let root = unique_controlled_root("upload-task-panic");
+    let (mut upload, store, path) = controlled_upload(&storage, &root, "output").await;
+    store.control.block_parts.store(true, Ordering::SeqCst);
+    let control = Arc::clone(&store.control);
+    let release = Arc::new(tokio::sync::Notify::new());
+    let producer_release = Arc::clone(&release);
+    let mut writer = upload.writer().unwrap();
+    let task = ObjectUploadTask::spawn("test producer", upload, move |_| {
+        tokio::spawn(async move {
+            writer.send(Bytes::from_static(b"12345678")).await.unwrap();
+            producer_release.notified().await;
+            panic!("controlled producer panic");
+            #[allow(unreachable_code)]
+            Ok::<(), anyhow::Error>(())
+        })
+    });
+
+    wait_for_active_parts(&control, 1).await;
+    release.notify_one();
+    let error = task.finish().await.unwrap_err();
+
+    assert!(
+        format!("{error:#}").contains("test producer task panicked"),
+        "{error:#}"
+    );
+    assert_eq!(control.aborts.load(Ordering::SeqCst), 1);
+    assert_eq!(control.active_parts.load(Ordering::SeqCst), 0);
+    assert!(store.inner.head(&path).await.is_err());
+}
+
+#[tokio::test]
+async fn dropping_upload_task_requests_producer_and_upload_cleanup() {
+    let storage = controlled_session(&["output-test", "--object-store-upload-part-size", "8"]);
+    let root = unique_controlled_root("upload-task-drop");
+    let (mut upload, store, path) = controlled_upload(&storage, &root, "output").await;
+    store.control.block_parts.store(true, Ordering::SeqCst);
+    let control = Arc::clone(&store.control);
+    let producer_stopped = Arc::new(AtomicBool::new(false));
+    let producer_state = Arc::clone(&producer_stopped);
+    let mut writer = upload.writer().unwrap();
+    let task = ObjectUploadTask::spawn("test producer", upload, move |cancellation| {
+        tokio::spawn(async move {
+            writer.send(Bytes::from_static(b"12345678")).await.unwrap();
+            cancellation.cancelled().await;
+            producer_state.store(true, Ordering::SeqCst);
+            Ok(())
+        })
+    });
+
+    wait_for_active_parts(&control, 1).await;
+    drop(task);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !producer_stopped.load(Ordering::SeqCst)
+            || control.aborts.load(Ordering::SeqCst) == 0
+            || control.active_parts.load(Ordering::SeqCst) != 0
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("dropping the owner did not settle producer and upload cleanup");
+
+    assert!(store.inner.head(&path).await.is_err());
 }
 
 fn unique_controlled_root(label: &str) -> String {

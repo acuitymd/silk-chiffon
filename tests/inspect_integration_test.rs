@@ -6,10 +6,7 @@ use arrow::array::{Int32Array, RecordBatch, StringArray};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use assert_cmd::cargo::cargo_bin_cmd;
 use predicates::prelude::*;
-use silk_chiffon::utils::{
-    test_data::{TestBatch, TestFile},
-    test_helpers::prepared_local_output,
-};
+use silk_chiffon_test_support::{TestBatch, TestFile, prepared_local_output};
 use std::fs::File;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -434,16 +431,16 @@ fn test_detect_vortex_file() {
 #[test]
 fn test_detect_json_output() {
     let temp_dir = TempDir::new().unwrap();
-    let file = temp_dir.path().join("test.parquet");
+    let file = temp_dir.path().join("test.arrow");
 
     let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
-    TestFile::write_parquet_batch(&file, &batch);
+    TestFile::write_arrow_batch(&file, &batch);
 
     let mut cmd = cargo_bin_cmd!("silk-chiffon");
     cmd.args(["detect", file.to_str().unwrap(), "--format", "json"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("\"format\":"));
+        .stdout("{\"format\":\"arrow\",\"variant\":\"file\"}\n");
 }
 
 #[test]

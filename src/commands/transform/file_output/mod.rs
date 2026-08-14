@@ -740,7 +740,7 @@ mod tests {
     use futures::stream;
 
     use super::*;
-    use crate::utils::test_helpers::prepared_local_output;
+    use silk_chiffon_test_support::prepared_local_output;
 
     struct FailingSinkBinding {
         aborts: Arc<AtomicUsize>,

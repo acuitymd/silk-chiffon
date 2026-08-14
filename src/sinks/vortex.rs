@@ -5,7 +5,7 @@ use arrow::{array::RecordBatch, compute::BatchCoalescer, datatypes::SchemaRef};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{Sink, SinkExt, stream};
-use silk_chiffon_storage::{ObjectUpload, StorageHandle};
+use silk_chiffon_storage::{ObjectUpload, ObjectUploadTask, StorageHandle};
 use tokio::sync::mpsc;
 use vortex::{
     VortexSessionDefault,
@@ -19,7 +19,6 @@ use vortex::{
 
 use crate::sinks::{
     data_sink::{DataSink, SinkCompletion},
-    object_sink_task::ObjectSinkTask,
     with_cleanup_error,
 };
 
@@ -83,7 +82,7 @@ impl VortexSinkInner {
 
 pub struct VortexSink {
     inner: VortexSinkInner,
-    task: Option<ObjectSinkTask<()>>,
+    task: Option<ObjectUploadTask<()>>,
 }
 
 impl VortexSink {
@@ -97,7 +96,7 @@ impl VortexSink {
         let mut upload = ObjectUpload::new(handle);
         let writer = VortexUploadAdapter::new(upload.writer()?, upload.part_size().get());
         let schema = Arc::clone(schema);
-        let task = ObjectSinkTask::spawn("Vortex writer", upload, move |cancellation| {
+        let task = ObjectUploadTask::spawn("Vortex writer", upload, move |cancellation| {
             tokio::spawn(async move {
                 cancellation
                     .run_until_cancelled(Self::write_vortex_file(writer, schema, receiver))
@@ -141,11 +140,25 @@ impl VortexSink {
     }
 
     async fn abort_unfinished(&mut self) -> Vec<anyhow::Error> {
-        self.inner.drop_sender();
+        self.stop_writer_input();
         match self.task.take() {
             Some(task) => task.abort().await.err().into_iter().collect(),
             None => Vec::new(),
         }
+    }
+
+    fn stop_writer_input(&mut self) {
+        // Closing the channel looks like successful EOF, so publish cancellation first.
+        if let Some(task) = &self.task {
+            task.cancellation().cancel();
+        }
+        self.inner.drop_sender();
+    }
+}
+
+impl Drop for VortexSink {
+    fn drop(&mut self) {
+        self.stop_writer_input();
     }
 }
 

@@ -2,7 +2,7 @@ use assert_cmd::cargo;
 use camino::Utf8Path;
 use predicates::prelude::*;
 use silk_chiffon::inspection::parquet::ParquetInspector;
-use silk_chiffon::utils::test_data::{TestBatch, TestFile};
+use silk_chiffon_test_support::{TestBatch, TestFile};
 use tempfile::TempDir;
 
 fn inspect(path: &std::path::Path) -> ParquetInspector {

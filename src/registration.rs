@@ -5,7 +5,7 @@ use std::{
     sync::Arc,
 };
 
-use ::arrow::{buffer::Buffer, datatypes::SchemaRef, ipc::reader::StreamDecoder};
+use ::arrow::datatypes::SchemaRef;
 use anyhow::{Context, Result, anyhow};
 use apply_if::ApplyIf;
 use async_trait::async_trait;
@@ -29,26 +29,22 @@ use thiserror::Error;
 use silk_chiffon_storage::local;
 
 use crate::{
-    AllColumnsBloomFilterConfig, ArrowArgs, BloomFilterConfig, Cli, Command as RuntimeCommand,
-    DEFAULT_BLOOM_FILTER_FPP, DetectArgs, DetectCommand, InspectArrowArgs, InspectCommand,
-    InspectParquetArgs, InspectVortexArgs, InspectionArgs, OutputFormat, ParquetArgs, SortColumn,
-    SortSpec, TransformArgs, TransformCommand, VortexArgs,
-    inspection::{
-        arrow::ArrowInspector, inspectable::Inspectable, parquet::ParquetInspector,
-        vortex::VortexInspector,
-    },
+    AllColumnsBloomFilterConfig, BloomFilterConfig, Cli, Command as RuntimeCommand,
+    DEFAULT_BLOOM_FILTER_FPP, DetectArgs, DetectCommand, InspectCommand, InspectParquetArgs,
+    InspectVortexArgs, InspectionArgs, OutputFormat, ParquetArgs, SortColumn, SortSpec,
+    TransformArgs, TransformCommand, VortexArgs,
+    inspection::{inspectable::Inspectable, parquet::ParquetInspector, vortex::VortexInspector},
     sinks::{
-        arrow::{ArrowSink, ArrowSinkOptions},
         parquet::{ParquetRuntimes, ParquetSink, ParquetSinkOptions},
         vortex::{VortexSink, VortexSinkOptions},
     },
-    sources::{arrow as arrow_source, parquet as parquet_source, vortex as vortex_source},
+    sources::{parquet as parquet_source, vortex as vortex_source},
 };
 
 /// Builds the executable's set of available data formats.
 pub fn format_registry() -> FormatRegistry {
     FormatRegistry::builder()
-        .register(arrow_format())
+        .register(silk_chiffon_format_arrow::definition())
         .register(parquet_format())
         .register(vortex_format())
         .build()
@@ -675,25 +671,8 @@ fn clap_error(error: impl std::fmt::Display) -> clap::Error {
     clap::Error::raw(clap::error::ErrorKind::ValueValidation, error.to_string())
 }
 
-fn arrow_format() -> FormatDefinition {
-    FormatDefinition::builder("arrow")
-        .extensions(["arrow", "arrows"])
-        .detector(detect_arrow)
-        .detection_priority(1)
-        .transform(
-            TransformDefinition::with_args::<ArrowArgs>()
-                .input_provider(create_arrow_provider)
-                .sink(bind_arrow_sink)
-                .build(),
-        )
-        .inspection(InspectionDefinition::with_args::<InspectArrowArgs>(
-            inspect_arrow,
-        ))
-        .build()
-}
-
 fn parquet_format() -> FormatDefinition {
-    FormatDefinition::builder("parquet")
+    FormatDefinition::builder("parquet", "Parquet")
         .extensions(["parquet"])
         .detector(detect_parquet)
         .detection_priority(0)
@@ -710,7 +689,7 @@ fn parquet_format() -> FormatDefinition {
 }
 
 fn vortex_format() -> FormatDefinition {
-    FormatDefinition::builder("vortex")
+    FormatDefinition::builder("vortex", "Vortex")
         .extensions(["vortex"])
         .detector(detect_vortex)
         .detection_priority(2)
@@ -724,89 +703,6 @@ fn vortex_format() -> FormatDefinition {
             inspect_vortex,
         ))
         .build()
-}
-
-fn detect_arrow(object: &InputObject) -> FormatFuture<'_, InputDetection> {
-    Box::pin(async move {
-        const ARROW_MAGIC: &[u8] = b"ARROW1";
-        const MAX_DETECTION_READ: u64 = 1024 * 1024;
-
-        let handle = object.handle();
-        let size = object.metadata().size;
-        if size >= 12 {
-            let ranges = [0..6, size - 6..size];
-            let magic = handle
-                .object_store()
-                .get_ranges(handle.object_path(), &ranges)
-                .await?;
-            let starts = magic[0].as_ref() == ARROW_MAGIC;
-            let ends = magic[1].as_ref() == ARROW_MAGIC;
-            if starts && ends {
-                return Ok(InputDetection::Match(InputVariant::named("file")));
-            }
-            if starts || ends {
-                return Ok(InputDetection::Malformed(anyhow!(
-                    "Arrow IPC file has only one of its two magic markers"
-                )));
-            }
-        }
-
-        let prefix_len = size.min(8);
-        if prefix_len < 4 {
-            return Ok(InputDetection::Mismatch);
-        }
-        let prefix = handle
-            .object_store()
-            .get_range(handle.object_path(), 0..prefix_len)
-            .await?;
-        let first = u32::from_le_bytes(prefix[..4].try_into().expect("four bytes were read"));
-        let (header_len, message_len, recognized) = if first == u32::MAX {
-            if prefix.len() < 8 {
-                return Ok(InputDetection::Malformed(anyhow!(
-                    "Arrow IPC continuation marker is missing its message length"
-                )));
-            }
-            (
-                8_u64,
-                u64::from(u32::from_le_bytes(prefix[4..8].try_into().unwrap())),
-                true,
-            )
-        } else {
-            (4_u64, u64::from(first), false)
-        };
-        if message_len == 0 || header_len + message_len > size {
-            return Ok(if recognized {
-                InputDetection::Malformed(anyhow!("Arrow IPC schema message is truncated"))
-            } else {
-                InputDetection::Mismatch
-            });
-        }
-        if message_len > MAX_DETECTION_READ && recognized {
-            return Ok(InputDetection::Match(InputVariant::named("stream")));
-        }
-        if message_len > MAX_DETECTION_READ {
-            return Ok(InputDetection::Mismatch);
-        }
-        let bytes = handle
-            .object_store()
-            .get_range(
-                handle.object_path(),
-                0..(header_len + message_len + 1).min(size),
-            )
-            .await?;
-        let mut decoder = StreamDecoder::new();
-        let mut buffer = Buffer::from(bytes);
-        match decoder.decode(&mut buffer) {
-            Ok(_) if decoder.schema().is_some() => {
-                Ok(InputDetection::Match(InputVariant::named("stream")))
-            }
-            Ok(_) if recognized => Ok(InputDetection::Malformed(anyhow!(
-                "Arrow IPC stream did not begin with a schema message"
-            ))),
-            Err(error) if recognized => Ok(InputDetection::Malformed(error.into())),
-            Ok(_) | Err(_) => Ok(InputDetection::Mismatch),
-        }
-    })
 }
 
 fn detect_parquet(object: &InputObject) -> FormatFuture<'_, InputDetection> {
@@ -825,10 +721,10 @@ fn detect_parquet(object: &InputObject) -> FormatFuture<'_, InputDetection> {
         let ends = magic[1].as_ref() == MAGIC;
         Ok(match (starts, ends) {
             (true, true) => InputDetection::Match(InputVariant::new()),
-            (true, false) | (false, true) => InputDetection::Malformed(anyhow!(
-                "Parquet input has only one of its two magic markers"
+            (true, false) => InputDetection::Malformed(anyhow!(
+                "Parquet input is missing its trailing magic marker"
             )),
-            (false, false) => InputDetection::Mismatch,
+            (false, true) | (false, false) => InputDetection::Mismatch,
         })
     })
 }
@@ -844,19 +740,11 @@ fn detect_vortex(object: &InputObject) -> FormatFuture<'_, InputDetection> {
             .get_range(handle.object_path(), 0..4)
             .await?;
         Ok(if magic.as_ref() == b"VTXF" {
-            InputDetection::Match(InputVariant::named("file"))
+            InputDetection::Match(InputVariant::named("file", "file"))
         } else {
             InputDetection::Mismatch
         })
     })
-}
-
-fn create_arrow_provider<'a>(
-    leaf: &'a InputLeaf,
-    session: &'a SessionContext,
-    _args: &'a ArrowArgs,
-) -> FormatFuture<'a, Arc<dyn TableProvider>> {
-    Box::pin(arrow_source::create_provider(leaf, session))
 }
 
 fn create_parquet_provider<'a>(
@@ -873,18 +761,6 @@ fn create_vortex_provider<'a>(
     _args: &'a VortexArgs,
 ) -> FormatFuture<'a, Arc<dyn TableProvider>> {
     Box::pin(vortex_source::create_provider(leaf, session))
-}
-
-fn bind_arrow_sink<'a>(
-    _context: &'a SinkBindingConfig,
-    args: &'a ArrowArgs,
-) -> FormatFuture<'a, Box<dyn SinkBinding>> {
-    let options = ArrowSinkOptions::new()
-        .with_compression(args.arrow_compression)
-        .with_format(args.arrow_format)
-        .with_record_batch_size(args.arrow_record_batch_size)
-        .with_queue_depth(args.arrow_writing_queue_size);
-    Box::pin(async move { Ok(Box::new(ArrowSinkBinding { options }) as Box<dyn SinkBinding>) })
 }
 
 fn bind_parquet_sink<'a>(
@@ -1031,25 +907,6 @@ fn output_sort_column(column: &OutputOrderingColumn) -> SortColumn {
     }
 }
 
-struct ArrowSinkBinding {
-    options: ArrowSinkOptions,
-}
-
-#[async_trait]
-impl SinkBinding for ArrowSinkBinding {
-    async fn open_sink(
-        &self,
-        handle: StorageHandle,
-        schema: SchemaRef,
-    ) -> Result<Box<dyn DataSink>> {
-        Ok(Box::new(ArrowSink::create(
-            handle,
-            &schema,
-            self.options.clone(),
-        )?))
-    }
-}
-
 struct ParquetSinkBinding {
     options: ParquetSinkOptions,
     runtimes: Arc<ParquetRuntimes>,
@@ -1086,34 +943,13 @@ impl SinkBinding for VortexSinkBinding {
     }
 }
 
-fn inspect_arrow<'a>(
-    handle: &'a StorageHandle,
-    mode: InspectionMode,
-    args: &'a InspectArrowArgs,
-) -> FormatFuture<'a, InspectionOutput> {
-    Box::pin(async move {
-        let path = local_utf8_path(handle)?;
-        let inspector = ArrowInspector::open(&path, args.row_count || args.batches)
-            .context("Failed to open Arrow file")?;
-        if mode == InspectionMode::Json {
-            return Ok(InspectionOutput::Json(inspector.to_json()));
-        }
-        let mut output = Vec::new();
-        inspector.render_default(&mut output)?;
-        if args.batches {
-            inspector.render_batches(&mut output)?;
-        }
-        Ok(InspectionOutput::Text(String::from_utf8(output)?))
-    })
-}
-
 fn inspect_parquet<'a>(
-    handle: &'a StorageHandle,
+    object: &'a InputObject,
     mode: InspectionMode,
     args: &'a InspectParquetArgs,
 ) -> FormatFuture<'a, InspectionOutput> {
     Box::pin(async move {
-        let path = local_utf8_path(handle)?;
+        let path = local_utf8_path(object.handle())?;
         let inspector = ParquetInspector::open(&path).context("Failed to open Parquet file")?;
         let columns = args.pages.as_ref().and_then(|columns| {
             (!columns.is_empty()).then(|| columns.split(',').map(str::trim).collect::<Vec<_>>())
@@ -1136,12 +972,12 @@ fn inspect_parquet<'a>(
 }
 
 fn inspect_vortex<'a>(
-    handle: &'a StorageHandle,
+    object: &'a InputObject,
     mode: InspectionMode,
     args: &'a InspectVortexArgs,
 ) -> FormatFuture<'a, InspectionOutput> {
     Box::pin(async move {
-        let path = local_utf8_path(handle)?;
+        let path = local_utf8_path(object.handle())?;
         let inspector = VortexInspector::open_file(&path).context("Failed to open Vortex file")?;
         if mode == InspectionMode::Json {
             return Ok(InspectionOutput::Json(inspector.to_json()));
@@ -1204,16 +1040,10 @@ mod tests {
     use url::Url;
 
     use super::{
-        ApplicationAssemblyError, ApplicationDefinition, arrow_format, parquet_options,
-        storage_registry,
+        ApplicationAssemblyError, ApplicationDefinition, parquet_options, storage_registry,
     };
-    use crate::{
-        CliSchema, Command, ParquetArgs,
-        utils::{
-            test_data::{TestBatch, TestExtract, TestFile},
-            test_helpers::prepared_local_output,
-        },
-    };
+    use crate::{CliSchema, Command, ParquetArgs};
+    use silk_chiffon_test_support::{TestBatch, TestExtract, TestFile, prepared_local_output};
     static SINK_BINDINGS: AtomicUsize = AtomicUsize::new(0);
     static SERVICE_INPUT_REFERENCES: Mutex<Vec<String>> = Mutex::new(Vec::new());
     static SERVICE_OUTPUT_RESULT: Mutex<Option<(String, usize)>> = Mutex::new(None);
@@ -1583,7 +1413,7 @@ mod tests {
     }
 
     fn input_only_format() -> FormatDefinition {
-        FormatDefinition::builder("input-only-test")
+        FormatDefinition::builder("input-only-test", "Input only test")
             .extensions(["input-only-test"])
             .transform(
                 TransformDefinition::without_args()
@@ -1594,7 +1424,7 @@ mod tests {
     }
 
     fn large_leaf_format() -> FormatDefinition {
-        FormatDefinition::builder("large-leaf-test")
+        FormatDefinition::builder("large-leaf-test", "Large leaf test")
             .extensions(["large-leaf-test"])
             .transform(
                 TransformDefinition::without_args()
@@ -1609,15 +1439,24 @@ mod tests {
         _: &'a (),
     ) -> FormatFuture<'a, Box<dyn SinkBinding>> {
         SINK_BINDINGS.fetch_add(1, Ordering::SeqCst);
-        Box::pin(async {
-            Ok(Box::new(super::ArrowSinkBinding {
-                options: crate::sinks::arrow::ArrowSinkOptions::new(),
-            }) as Box<dyn SinkBinding>)
-        })
+        Box::pin(async { Ok(Box::new(UnavailableSinkBinding) as Box<dyn SinkBinding>) })
+    }
+
+    struct UnavailableSinkBinding;
+
+    #[async_trait::async_trait]
+    impl SinkBinding for UnavailableSinkBinding {
+        async fn open_sink(
+            &self,
+            _: StorageHandle,
+            _: arrow::datatypes::SchemaRef,
+        ) -> Result<Box<dyn DataSink>> {
+            anyhow::bail!("test sink is not opened")
+        }
     }
 
     fn counted_sink_format() -> FormatDefinition {
-        FormatDefinition::builder("counted-sink-test")
+        FormatDefinition::builder("counted-sink-test", "Counted sink test")
             .extensions(["counted-sink-test"])
             .transform(
                 TransformDefinition::without_args()
@@ -1657,7 +1496,7 @@ mod tests {
     fn remote_application_definition() -> ApplicationDefinition {
         ApplicationDefinition::from_parts(
             FormatRegistry::builder()
-                .register(arrow_format())
+                .register(silk_chiffon_format_arrow::definition())
                 .register(super::parquet_format())
                 .register(super::vortex_format())
                 .build()
@@ -1806,7 +1645,7 @@ mod tests {
         );
         let definition = application_definition_with_services(
             FormatRegistry::builder()
-                .register(arrow_format())
+                .register(silk_chiffon_format_arrow::definition())
                 .build()
                 .unwrap(),
             vec![test_service_input("test-input", "test-input")],
@@ -2098,9 +1937,74 @@ mod tests {
             "{message}"
         );
         assert!(
-            message.contains("only one of its two magic markers"),
+            message.contains("missing its trailing magic marker"),
             "{message}"
         );
+        assert!(!output.exists());
+    }
+
+    #[tokio::test]
+    async fn leading_parquet_magic_without_a_trailer_stops_format_fallback() {
+        let root = "test-remote://coverage-malformed-parquet/";
+        let mut bytes = b"PAR1".to_vec();
+        bytes.extend_from_slice(b"not a complete Parquet file");
+        put_remote_file(root, "input.parquet", bytes).await;
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("output.arrow");
+        let cli = test_cli(
+            remote_application_definition(),
+            &[
+                "silk-chiffon",
+                "transform",
+                "--from",
+                "test-remote://coverage-malformed-parquet/input.parquet",
+                "--to",
+                output.to_str().unwrap(),
+            ],
+        );
+        let Command::Transform(command) = cli.command else {
+            panic!("expected transform command");
+        };
+
+        let error = crate::commands::transform::run(command).await.unwrap_err();
+
+        let message = format!("{error:#}");
+        assert!(message.contains("malformed parquet input"), "{message}");
+        assert!(
+            message.contains("missing its trailing magic marker"),
+            "{message}"
+        );
+        assert!(!output.exists());
+    }
+
+    #[tokio::test]
+    async fn trailing_parquet_magic_does_not_claim_unknown_remote_input() {
+        let root = "test-remote://coverage-trailing-parquet/";
+        let mut bytes = b"not a known format".to_vec();
+        bytes.extend_from_slice(b"PAR1");
+        put_remote_file(root, "input.parquet", bytes).await;
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("output.arrow");
+        let cli = test_cli(
+            remote_application_definition(),
+            &[
+                "silk-chiffon",
+                "transform",
+                "--from",
+                "test-remote://coverage-trailing-parquet/input.parquet",
+                "--to",
+                output.to_str().unwrap(),
+            ],
+        );
+        let Command::Transform(command) = cli.command else {
+            panic!("expected transform command");
+        };
+
+        let error = crate::commands::transform::run(command).await.unwrap_err();
+
+        let message = format!("{error:#}");
+        assert!(message.contains("could not detect the format"), "{message}");
+        assert!(!message.contains("malformed parquet input"), "{message}");
         assert!(!output.exists());
     }
 
@@ -2376,7 +2280,7 @@ mod tests {
         let output = directory.path().join("output.arrow");
         let definition = application_definition_with_services(
             FormatRegistry::builder()
-                .register(arrow_format())
+                .register(silk_chiffon_format_arrow::definition())
                 .build()
                 .unwrap(),
             vec![test_service_input("test-input", "test-input")],
@@ -2451,7 +2355,7 @@ mod tests {
         );
         let definition = application_definition_with_services(
             FormatRegistry::builder()
-                .register(arrow_format())
+                .register(silk_chiffon_format_arrow::definition())
                 .build()
                 .unwrap(),
             Vec::new(),
@@ -2556,7 +2460,7 @@ mod tests {
         for (arguments, expected) in cases {
             let definition = application_definition_with_services(
                 FormatRegistry::builder()
-                    .register(arrow_format())
+                    .register(silk_chiffon_format_arrow::definition())
                     .build()
                     .unwrap(),
                 vec![test_service_input("test-input", "test-input")],

@@ -8,7 +8,6 @@ pub mod utils;
 
 use crate::utils::collections::{uniq, uniq_by};
 use anyhow::{Result, anyhow};
-use arrow::ipc::CompressionType;
 use camino::Utf8PathBuf;
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum, builder::ValueHint};
 use clap_complete::Shell;
@@ -823,25 +822,6 @@ impl FromStr for ColumnDictionaryConfig {
     }
 }
 
-#[derive(ValueEnum, Clone, Debug, Default, Copy)]
-#[value(rename_all = "lowercase")]
-pub enum ArrowCompression {
-    Zstd,
-    Lz4,
-    #[default]
-    None,
-}
-
-impl From<ArrowCompression> for Option<CompressionType> {
-    fn from(compression: ArrowCompression) -> Self {
-        match compression {
-            ArrowCompression::Zstd => Some(CompressionType::ZSTD),
-            ArrowCompression::Lz4 => Some(CompressionType::LZ4_FRAME),
-            ArrowCompression::None => None,
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct SortColumn {
     pub name: String,
@@ -1499,25 +1479,6 @@ struct TransformArgs {
 }
 
 #[derive(Args, Clone, Debug)]
-pub struct ArrowArgs {
-    /// Arrow IPC compression codec.
-    #[arg(long, value_enum, default_value_t = ArrowCompression::default(), help_heading = "Arrow Options")]
-    pub arrow_compression: ArrowCompression,
-
-    /// Arrow IPC format (file or stream).
-    #[arg(long, value_enum, default_value_t = ArrowIPCFormat::default(), help_heading = "Arrow Options")]
-    pub arrow_format: ArrowIPCFormat,
-
-    /// Arrow record batch size.
-    #[arg(long, default_value_t = 122_880, help_heading = "Arrow Options")]
-    pub arrow_record_batch_size: usize,
-
-    /// Arrow writer queue size (number of batches buffered before backpressure).
-    #[arg(long, default_value = "16", value_parser = parse_at_least_one, help_heading = "Arrow Options")]
-    pub arrow_writing_queue_size: usize,
-}
-
-#[derive(Args, Clone, Debug)]
 pub struct ParquetArgs {
     /// Enable bloom filters for columns (default behavior).
     ///
@@ -2171,16 +2132,6 @@ pub struct InspectParquetArgs {
 }
 
 #[derive(Args, Clone, Debug)]
-pub struct InspectArrowArgs {
-    /// Show per-record-batch details
-    #[arg(long)]
-    pub batches: bool,
-    /// Count total rows (requires reading entire file)
-    #[arg(long)]
-    pub row_count: bool,
-}
-
-#[derive(Args, Clone, Debug)]
 pub struct InspectVortexArgs {
     /// Show full schema details
     #[arg(long)]
@@ -2220,40 +2171,6 @@ impl OutputFormat {
             OutputFormat::Auto => io::stdout().is_terminal(),
             OutputFormat::Text => true,
             OutputFormat::Json => false,
-        }
-    }
-}
-
-#[derive(ValueEnum, PartialEq, Clone, Copy, Debug, Default)]
-pub enum ArrowIPCFormat {
-    #[default]
-    #[value(name = "file")]
-    File,
-    #[value(name = "stream")]
-    Stream,
-}
-
-impl fmt::Display for ArrowIPCFormat {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
-            Self::File => "file",
-            Self::Stream => "stream",
-        };
-        write!(f, "{s}")
-    }
-}
-
-impl FromStr for ArrowIPCFormat {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "file" => Ok(ArrowIPCFormat::File),
-            "stream" => Ok(ArrowIPCFormat::Stream),
-            _ => Err(anyhow!(
-                "Invalid Arrow IPC format: {}. Valid options: file, stream",
-                s
-            )),
         }
     }
 }

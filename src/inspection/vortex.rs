@@ -299,7 +299,7 @@ mod tests {
 
     use crate::sinks::data_sink::DataSink;
     use crate::sinks::vortex::{VortexSink, VortexSinkOptions};
-    use crate::utils::test_helpers::prepared_local_output;
+    use silk_chiffon_test_support::prepared_local_output;
 
     fn simple_schema() -> SchemaRef {
         Arc::new(Schema::new(vec![

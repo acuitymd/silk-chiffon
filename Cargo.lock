@@ -4360,6 +4360,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "silk-chiffon-format-arrow"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arrow",
+ "async-stream",
+ "async-trait",
+ "bytes",
+ "chrono",
+ "clap",
+ "datafusion",
+ "datafusion-datasource",
+ "futures",
+ "humansize",
+ "num-format",
+ "object_store",
+ "owo-colors",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "silk-chiffon-core",
+ "silk-chiffon-storage",
+ "silk-chiffon-test-support",
+ "tabled",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "url",
+]
+
+[[package]]
 name = "silk-chiffon-storage"
 version = "0.1.0"
 dependencies = [
@@ -4377,6 +4408,20 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-util",
+ "url",
+]
+
+[[package]]
+name = "silk-chiffon-test-support"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arrow",
+ "futures",
+ "parquet",
+ "silk-chiffon-storage",
+ "tempfile",
+ "tokio",
  "url",
 ]
 
@@ -4417,7 +4462,9 @@ dependencies = [
  "serde",
  "serde_json",
  "silk-chiffon-core",
+ "silk-chiffon-format-arrow",
  "silk-chiffon-storage",
+ "silk-chiffon-test-support",
  "strum_macros",
  "sysinfo",
  "tabled",

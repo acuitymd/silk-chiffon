@@ -1,5 +1,9 @@
 //! Bounded one-object upload lifecycle shared by file formats.
 
+mod task;
+
+pub use task::ObjectUploadTask;
+
 use std::{
     fmt,
     io::{self, Write},
