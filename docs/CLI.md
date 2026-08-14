@@ -162,6 +162,32 @@ Examples:
 - `--object-store-max-in-flight-parts <MAX_IN_FLIGHT_PARTS>` — Maximum multipart part requests in flight across the command
 
   Default value: `8`
+- `--storage-max-retries <MAX_RETRIES>` — Maximum retries for one backend request
+
+  Default value: `10`
+- `--storage-retry-timeout <RETRY_TIMEOUT>` — Elapsed-time limit checked after each failed attempt, measured from the initial request
+
+  Default value: `3m`
+- `--storage-initial-backoff <INITIAL_BACKOFF>` — First delay before a retry
+
+  Default value: `100ms`
+- `--storage-max-backoff <MAX_BACKOFF>` — Maximum delay between retries
+
+  Default value: `15s`
+- `--storage-backoff-base <BACKOFF_BASE>` — Multiplier used by the backend retry policy
+
+  Default value: `2`
+- `--gcs-endpoint <URL>` — Override the Google Cloud Storage API endpoint
+- `--gcs-anonymous` — Send unsigned requests without discovering credentials
+- `--gcs-request-timeout <DURATION>` — Limit each Google Cloud Storage HTTP request
+- `--s3-region <REGION>` — Override the region discovered from the AWS environment
+- `--s3-endpoint <URL>` — Override the S3 API endpoint for an S3-compatible service
+- `--s3-addressing-style <STYLE>` — Select path-style or virtual-hosted-style S3 requests
+
+  Possible values: `path`, `virtual`
+
+- `--s3-anonymous` — Send unsigned requests without discovering credentials
+- `--s3-request-timeout <DURATION>` — Limit each S3 HTTP request
 - `--arrow-compression <ARROW_COMPRESSION>` — Arrow IPC compression codec
 
   Default value: `none`
@@ -488,6 +514,32 @@ Detect the format of an input
 - `--object-store-max-in-flight-parts <MAX_IN_FLIGHT_PARTS>` — Maximum multipart part requests in flight across the command
 
   Default value: `8`
+- `--storage-max-retries <MAX_RETRIES>` — Maximum retries for one backend request
+
+  Default value: `10`
+- `--storage-retry-timeout <RETRY_TIMEOUT>` — Elapsed-time limit checked after each failed attempt, measured from the initial request
+
+  Default value: `3m`
+- `--storage-initial-backoff <INITIAL_BACKOFF>` — First delay before a retry
+
+  Default value: `100ms`
+- `--storage-max-backoff <MAX_BACKOFF>` — Maximum delay between retries
+
+  Default value: `15s`
+- `--storage-backoff-base <BACKOFF_BASE>` — Multiplier used by the backend retry policy
+
+  Default value: `2`
+- `--gcs-endpoint <URL>` — Override the Google Cloud Storage API endpoint
+- `--gcs-anonymous` — Send unsigned requests without discovering credentials
+- `--gcs-request-timeout <DURATION>` — Limit each Google Cloud Storage HTTP request
+- `--s3-region <REGION>` — Override the region discovered from the AWS environment
+- `--s3-endpoint <URL>` — Override the S3 API endpoint for an S3-compatible service
+- `--s3-addressing-style <STYLE>` — Select path-style or virtual-hosted-style S3 requests
+
+  Possible values: `path`, `virtual`
+
+- `--s3-anonymous` — Send unsigned requests without discovering credentials
+- `--s3-request-timeout <DURATION>` — Limit each S3 HTTP request
 
 ## `silk-chiffon inspect`
 
@@ -541,6 +593,32 @@ Inspect arrow file metadata and structure
 - `--object-store-max-in-flight-parts <MAX_IN_FLIGHT_PARTS>` — Maximum multipart part requests in flight across the command
 
   Default value: `8`
+- `--storage-max-retries <MAX_RETRIES>` — Maximum retries for one backend request
+
+  Default value: `10`
+- `--storage-retry-timeout <RETRY_TIMEOUT>` — Elapsed-time limit checked after each failed attempt, measured from the initial request
+
+  Default value: `3m`
+- `--storage-initial-backoff <INITIAL_BACKOFF>` — First delay before a retry
+
+  Default value: `100ms`
+- `--storage-max-backoff <MAX_BACKOFF>` — Maximum delay between retries
+
+  Default value: `15s`
+- `--storage-backoff-base <BACKOFF_BASE>` — Multiplier used by the backend retry policy
+
+  Default value: `2`
+- `--gcs-endpoint <URL>` — Override the Google Cloud Storage API endpoint
+- `--gcs-anonymous` — Send unsigned requests without discovering credentials
+- `--gcs-request-timeout <DURATION>` — Limit each Google Cloud Storage HTTP request
+- `--s3-region <REGION>` — Override the region discovered from the AWS environment
+- `--s3-endpoint <URL>` — Override the S3 API endpoint for an S3-compatible service
+- `--s3-addressing-style <STYLE>` — Select path-style or virtual-hosted-style S3 requests
+
+  Possible values: `path`, `virtual`
+
+- `--s3-anonymous` — Send unsigned requests without discovering credentials
+- `--s3-request-timeout <DURATION>` — Limit each S3 HTTP request
 
 ## `silk-chiffon inspect parquet`
 
@@ -576,6 +654,32 @@ Inspect parquet file metadata and structure
 - `--object-store-max-in-flight-parts <MAX_IN_FLIGHT_PARTS>` — Maximum multipart part requests in flight across the command
 
   Default value: `8`
+- `--storage-max-retries <MAX_RETRIES>` — Maximum retries for one backend request
+
+  Default value: `10`
+- `--storage-retry-timeout <RETRY_TIMEOUT>` — Elapsed-time limit checked after each failed attempt, measured from the initial request
+
+  Default value: `3m`
+- `--storage-initial-backoff <INITIAL_BACKOFF>` — First delay before a retry
+
+  Default value: `100ms`
+- `--storage-max-backoff <MAX_BACKOFF>` — Maximum delay between retries
+
+  Default value: `15s`
+- `--storage-backoff-base <BACKOFF_BASE>` — Multiplier used by the backend retry policy
+
+  Default value: `2`
+- `--gcs-endpoint <URL>` — Override the Google Cloud Storage API endpoint
+- `--gcs-anonymous` — Send unsigned requests without discovering credentials
+- `--gcs-request-timeout <DURATION>` — Limit each Google Cloud Storage HTTP request
+- `--s3-region <REGION>` — Override the region discovered from the AWS environment
+- `--s3-endpoint <URL>` — Override the S3 API endpoint for an S3-compatible service
+- `--s3-addressing-style <STYLE>` — Select path-style or virtual-hosted-style S3 requests
+
+  Possible values: `path`, `virtual`
+
+- `--s3-anonymous` — Send unsigned requests without discovering credentials
+- `--s3-request-timeout <DURATION>` — Limit each S3 HTTP request
 
 ## `silk-chiffon inspect vortex`
 
@@ -610,6 +714,32 @@ Inspect vortex file metadata and structure
 - `--object-store-max-in-flight-parts <MAX_IN_FLIGHT_PARTS>` — Maximum multipart part requests in flight across the command
 
   Default value: `8`
+- `--storage-max-retries <MAX_RETRIES>` — Maximum retries for one backend request
+
+  Default value: `10`
+- `--storage-retry-timeout <RETRY_TIMEOUT>` — Elapsed-time limit checked after each failed attempt, measured from the initial request
+
+  Default value: `3m`
+- `--storage-initial-backoff <INITIAL_BACKOFF>` — First delay before a retry
+
+  Default value: `100ms`
+- `--storage-max-backoff <MAX_BACKOFF>` — Maximum delay between retries
+
+  Default value: `15s`
+- `--storage-backoff-base <BACKOFF_BASE>` — Multiplier used by the backend retry policy
+
+  Default value: `2`
+- `--gcs-endpoint <URL>` — Override the Google Cloud Storage API endpoint
+- `--gcs-anonymous` — Send unsigned requests without discovering credentials
+- `--gcs-request-timeout <DURATION>` — Limit each Google Cloud Storage HTTP request
+- `--s3-region <REGION>` — Override the region discovered from the AWS environment
+- `--s3-endpoint <URL>` — Override the S3 API endpoint for an S3-compatible service
+- `--s3-addressing-style <STYLE>` — Select path-style or virtual-hosted-style S3 requests
+
+  Possible values: `path`, `virtual`
+
+- `--s3-anonymous` — Send unsigned requests without discovering credentials
+- `--s3-request-timeout <DURATION>` — Limit each S3 HTTP request
 
 ## `silk-chiffon completions`
 

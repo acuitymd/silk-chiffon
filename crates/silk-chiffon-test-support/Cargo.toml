@@ -14,6 +14,7 @@ description = "Development-only fixtures for Silk Chiffon"
 anyhow.workspace = true
 arrow = { workspace = true, features = ["ipc_compression"] }
 async-trait.workspace = true
+bytes = "^1.12.1"
 clap.workspace = true
 futures.workspace = true
 object_store.workspace = true
@@ -24,7 +25,6 @@ url.workspace = true
 vortex = { version = "^0.83.0", features = ["files", "tokio"] }
 
 [dev-dependencies]
-bytes = "^1.12.1"
 tempfile = "^3.27.0"
 
 [lints]
