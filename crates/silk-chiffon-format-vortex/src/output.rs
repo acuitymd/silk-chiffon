@@ -101,7 +101,7 @@ impl Sink {
                 cancellation
                     .run_until_cancelled(write_file(writer, writer_schema, receiver, session))
                     .await
-                    .unwrap_or(Ok(()))
+                    .ok_or_else(|| anyhow!("Vortex writer was cancelled"))?
             })
         });
 
