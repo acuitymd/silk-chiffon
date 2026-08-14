@@ -78,12 +78,12 @@ struct FaultState {
 }
 
 impl FaultState {
-    fn fail_after(&self, operation: ObjectStoreOperation, successful_calls: usize) {
+    fn fail_after(&self, operation: ObjectStoreOperation, calls_before_failure: usize) {
         let mut operations = self.operations.lock().expect("fault state poisoned");
         let state = operations.entry(operation).or_default();
         let mut failing_call = state
             .calls
-            .checked_add(successful_calls)
+            .checked_add(calls_before_failure)
             .and_then(|call| call.checked_add(1))
             .expect("fault call number overflowed");
         while !state.failing_calls.insert(failing_call) {
@@ -148,9 +148,9 @@ impl FaultInjectingStore {
         self.fail_after(operation, 0);
     }
 
-    /// Fails once after `successful_calls` more calls to `operation`.
-    pub fn fail_after(&self, operation: ObjectStoreOperation, successful_calls: usize) {
-        self.faults.fail_after(operation, successful_calls);
+    /// Fails once after `calls_before_failure` more calls reach the inner store.
+    pub fn fail_after(&self, operation: ObjectStoreOperation, calls_before_failure: usize) {
+        self.faults.fail_after(operation, calls_before_failure);
     }
 
     /// Returns calls that reached the wrapper for `operation`.
