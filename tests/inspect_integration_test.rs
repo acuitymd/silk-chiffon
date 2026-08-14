@@ -101,6 +101,31 @@ fn test_inspect_parquet_json() {
     .stdout(predicate::str::contains("\"rows\":"));
 }
 
+#[test]
+fn test_inspect_empty_parquet_file() {
+    let temp_dir = TempDir::new().unwrap();
+    let file = temp_dir.path().join("empty.parquet");
+    TestFile::write_parquet_empty(&file, &TestBatch::simple().schema());
+
+    let mut text = cargo_bin_cmd!("silk-chiffon");
+    text.args(["inspect", "parquet", file.to_str().unwrap(), "-f", "text"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Schema"))
+        .stdout(predicate::str::contains("does not exist").not());
+
+    let mut json = cargo_bin_cmd!("silk-chiffon");
+    let output = json
+        .args(["inspect", "parquet", file.to_str().unwrap(), "-f", "json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let output: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(output["rows"], 0);
+    assert_eq!(output["num_row_groups"], 0);
+    assert!(output["row_groups"].as_array().unwrap().is_empty());
+}
+
 // =============================================================================
 // Arrow IPC file inspection tests
 // =============================================================================

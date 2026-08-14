@@ -20,7 +20,6 @@ use camino::Utf8Path;
 use chrono::{DateTime, NaiveDate, Utc};
 use num_format::{Locale, ToFormattedString};
 use object_store::ObjectStoreExt;
-use owo_colors::OwoColorize;
 #[cfg(test)]
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use parquet::{
@@ -404,6 +403,14 @@ impl Inspector {
         Ok(())
     }
 
+    fn selected_row_group(&self, requested: Option<usize>) -> Result<Option<usize>> {
+        if let Some(row_group) = requested {
+            self.validate_row_group(row_group)?;
+            return Ok(Some(row_group));
+        }
+        Ok((!self.row_groups.is_empty()).then_some(0))
+    }
+
     #[cfg(test)]
     fn is_format(path: &Utf8Path) -> Result<bool> {
         use std::io::{Read, Seek, SeekFrom};
@@ -693,7 +700,11 @@ impl Inspector {
         }
     }
 
-    pub fn render_with_row_group(&self, out: &mut dyn Write, row_group_idx: usize) -> Result<()> {
+    pub fn render_with_row_group(
+        &self,
+        out: &mut dyn Write,
+        row_group_idx: Option<usize>,
+    ) -> Result<()> {
         fn format_encodings(col: &ColumnInfo) -> String {
             if let Some(ref pe) = col.page_encodings {
                 let mut parts = Vec::new();
@@ -837,7 +848,8 @@ impl Inspector {
             .to_string();
         writeln!(out, "{rg_table}")?;
 
-        if let Some(rg) = self.row_groups.get(row_group_idx) {
+        if let Some(row_group_idx) = row_group_idx {
+            let rg = &self.row_groups[row_group_idx];
             writeln!(out)?;
             writeln!(
                 out,
@@ -950,25 +962,6 @@ impl Inspector {
                     .to_string();
                 writeln!(out, "{stats_table}")?;
             }
-        } else {
-            writeln!(out)?;
-            let msg = format!(
-                "Row group {} does not exist (file has {} row group{})",
-                row_group_idx,
-                self.row_groups.len(),
-                if self.row_groups.len() == 1 { "" } else { "s" }
-            );
-            #[derive(Tabled)]
-            struct MsgRow {
-                #[tabled(rename = "")]
-                msg: String,
-            }
-            let styled_msg = msg.style(owo_colors::Style::new().red()).to_string();
-            let mut msg_table = Table::new([MsgRow { msg: styled_msg }]);
-            msg_table
-                .with(Remove::row(Rows::first()))
-                .with(tabled::settings::Style::rounded().remove_horizontals());
-            writeln!(out, "{msg_table}")?;
         }
 
         if !self.custom_metadata.is_empty() {
@@ -1333,14 +1326,18 @@ pub(crate) fn inspect<'a>(
 ) -> FormatFuture<'a, InspectionOutput> {
     Box::pin(async move {
         let inspector = Inspector::load(object).await?;
-        inspector.validate_row_group(args.row_group)?;
+        let selected_row_group = inspector.selected_row_group(args.row_group)?;
+        let page_row_group = selected_row_group.unwrap_or(0);
+        if args.pages.is_some() {
+            inspector.validate_row_group(page_row_group)?;
+        }
         let columns = args.pages.as_ref().and_then(|columns| {
             (!columns.is_empty()).then(|| columns.split(',').map(str::trim).collect::<Vec<_>>())
         });
         if mode == InspectionMode::Json {
             let value = if args.pages.is_some() {
                 inspector
-                    .to_json_with_pages(args.row_group, columns.as_deref())
+                    .to_json_with_pages(page_row_group, columns.as_deref())
                     .await?
             } else {
                 inspector.to_json()
@@ -1348,10 +1345,10 @@ pub(crate) fn inspect<'a>(
             return Ok(InspectionOutput::Json(value));
         }
         let mut output = Vec::new();
-        inspector.render_with_row_group(&mut output, args.row_group)?;
+        inspector.render_with_row_group(&mut output, selected_row_group)?;
         if args.pages.is_some() {
             inspector
-                .render_pages(&mut output, args.row_group, columns.as_deref())
+                .render_pages(&mut output, page_row_group, columns.as_deref())
                 .await?;
         }
         Ok(InspectionOutput::Text(String::from_utf8(output)?))
@@ -1469,6 +1466,13 @@ mod tests {
 
     fn parquet_bytes() -> Bytes {
         parquet_bytes_with_row_group_size(1024)
+    }
+
+    fn empty_parquet_bytes() -> Bytes {
+        let mut bytes = Cursor::new(Vec::new());
+        let writer = ArrowWriter::try_new(&mut bytes, simple_schema(), None).unwrap();
+        writer.close().unwrap();
+        Bytes::from(bytes.into_inner())
     }
 
     async fn remote_object_with(bytes: Bytes) -> InputObject {
@@ -1613,6 +1617,49 @@ mod tests {
                 .iter()
                 .all(|range| matches!(range, GetRange::Bounded(_)))
         );
+    }
+
+    #[tokio::test]
+    async fn empty_file_summary_does_not_require_a_row_group() {
+        let _guard = test_guard().await;
+        let object = remote_object_with(empty_parquet_bytes()).await;
+
+        let output = inspection_binding(&[])
+            .inspect(&object, InspectionMode::Text)
+            .await
+            .unwrap();
+        let InspectionOutput::Text(output) = output else {
+            panic!("expected text output");
+        };
+        assert!(output.contains("Row groups"));
+        assert!(output.contains("Schema"));
+        assert!(!output.contains("does not exist"));
+
+        let output = inspection_binding(&[])
+            .inspect(&object, InspectionMode::Json)
+            .await
+            .unwrap();
+        let InspectionOutput::Json(output) = output else {
+            panic!("expected JSON output");
+        };
+        assert_eq!(output["num_row_groups"], 0);
+        assert!(output["row_groups"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn empty_file_rejects_requested_row_group_details() {
+        let _guard = test_guard().await;
+        let object = remote_object_with(empty_parquet_bytes()).await;
+
+        for mode in [InspectionMode::Text, InspectionMode::Json] {
+            for arguments in [["--row-group=0"].as_slice(), ["--pages"].as_slice()] {
+                let error = inspection_binding(arguments)
+                    .inspect(&object, mode)
+                    .await
+                    .unwrap_err();
+                assert!(error.to_string().contains("row group 0 does not exist"));
+            }
+        }
     }
 
     #[tokio::test]

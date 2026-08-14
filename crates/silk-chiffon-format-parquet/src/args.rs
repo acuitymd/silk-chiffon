@@ -1056,9 +1056,11 @@ pub(crate) struct TransformArgs {
 #[derive(Args, Clone, Debug)]
 #[group(id = "parquet_inspection")]
 pub(crate) struct InspectionArgs {
-    /// Row group to display details for (default: 0)
-    #[arg(long, short = 'g', default_value = "0")]
-    pub(crate) row_group: usize,
+    /// Row group to display details for.
+    ///
+    /// Defaults to the first group when present.
+    #[arg(long, short = 'g')]
+    pub(crate) row_group: Option<usize>,
     /// Show page details for columns (comma-separated, or omit value for all columns)
     #[arg(long, short = 'p', num_args = 0..=1, default_missing_value = "")]
     pub(crate) pages: Option<String>,

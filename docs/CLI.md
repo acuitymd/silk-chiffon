@@ -566,9 +566,9 @@ Inspect parquet file metadata and structure
   - `json`:
     JSON output
 
-- `-g`, `--row-group <ROW_GROUP>` — Row group to display details for (default: 0)
+- `-g`, `--row-group <ROW_GROUP>` — Row group to display details for.
 
-  Default value: `0`
+  Defaults to the first group when present.
 - `-p`, `--pages <PAGES>` — Show page details for columns (comma-separated, or omit value for all columns)
 - `--object-store-upload-part-size <PART_SIZE>` — Adaptive single-put threshold and multipart part size
 
