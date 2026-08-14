@@ -24,10 +24,7 @@ use datafusion::{
 };
 use futures::StreamExt;
 use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory};
-use silk_chiffon::sinks::{
-    data_sink::DataSink,
-    vortex::{VortexSink, VortexSinkOptions},
-};
+use silk_chiffon::sinks::data_sink::DataSink;
 use silk_chiffon_core::{FormatRegistry, InputSources, OpenSinkMode, Pipeline, SinkBindingConfig};
 use silk_chiffon_storage::{
     ExistingOutput, LocationInput, OutputPreparation, StorageAccess, StorageBackend, StorageHandle,
@@ -87,6 +84,33 @@ async fn registered_parquet_sink(
         .unwrap()
         .bind_sink(&SinkBindingConfig::new(
             NonZeroUsize::new(2).unwrap(),
+            OpenSinkMode::OneAtATime,
+            Vec::new(),
+        ))
+        .await
+        .unwrap();
+    sink_binding.open_sink(handle, schema).await.unwrap()
+}
+
+async fn registered_vortex_sink(
+    handle: StorageHandle,
+    schema: arrow::datatypes::SchemaRef,
+    arguments: &[&str],
+) -> Box<dyn DataSink> {
+    let registry = FormatRegistry::builder()
+        .register(silk_chiffon_format_vortex::definition())
+        .build()
+        .unwrap();
+    let matches = registry
+        .augment_transform_args(Command::new("test"))
+        .try_get_matches_from(std::iter::once("test").chain(arguments.iter().copied()))
+        .unwrap();
+    let bindings = registry.bind_transform(&matches).unwrap();
+    let sink_binding = bindings
+        .get("vortex")
+        .unwrap()
+        .bind_sink(&SinkBindingConfig::new(
+            NonZeroUsize::new(1).unwrap(),
             OpenSinkMode::OneAtATime,
             Vec::new(),
         ))
@@ -666,9 +690,8 @@ async fn every_format_rejects_schema_mismatch_before_encoding() {
     assert_schema_mismatch_is_rejected_before_encoding(parquet, &parquet_handle).await;
 
     let vortex_handle = prepared_handle(&storage, "memory://bucket/schema-mismatch.vortex").await;
-    let vortex =
-        VortexSink::create(vortex_handle.clone(), &schema, VortexSinkOptions::new()).unwrap();
-    assert_schema_mismatch_is_rejected_before_encoding(Box::new(vortex), &vortex_handle).await;
+    let vortex = registered_vortex_sink(vortex_handle.clone(), schema, &[]).await;
+    assert_schema_mismatch_is_rejected_before_encoding(vortex, &vortex_handle).await;
 }
 
 #[tokio::test]
@@ -707,14 +730,9 @@ async fn every_format_accepts_metadata_only_schema_differences() {
     assert_durable(parquet.finish().await.unwrap(), &parquet_handle).await;
 
     let vortex_handle = prepared_handle(&storage, "memory://bucket/metadata.vortex").await;
-    let mut vortex = VortexSink::create(
-        vortex_handle.clone(),
-        &expected_schema,
-        VortexSinkOptions::new(),
-    )
-    .unwrap();
+    let mut vortex = registered_vortex_sink(vortex_handle.clone(), expected_schema, &[]).await;
     vortex.write_batch(metadata_batch).await.unwrap();
-    assert_durable(Box::new(vortex).finish().await.unwrap(), &vortex_handle).await;
+    assert_durable(vortex.finish().await.unwrap(), &vortex_handle).await;
 }
 
 #[tokio::test]
@@ -722,11 +740,10 @@ async fn vortex_sink_writes_a_memory_object() {
     let storage = storage();
     let handle = prepared_handle(&storage, "memory://bucket/output.vortex").await;
     let batch = batch();
-    let mut sink =
-        VortexSink::create(handle.clone(), &batch.schema(), VortexSinkOptions::new()).unwrap();
+    let mut sink = registered_vortex_sink(handle.clone(), batch.schema(), &[]).await;
 
     sink.write_batch(batch).await.unwrap();
-    let completion = Box::new(sink).finish().await.unwrap();
+    let completion = sink.finish().await.unwrap();
     assert_durable(completion, &handle).await;
 }
 
@@ -748,15 +765,9 @@ async fn every_format_reports_single_put_failures_without_durable_outputs() {
     assert_controlled_write_failure(parquet, &parquet_handle, "controlled put failure").await;
 
     let vortex_handle = prepared_handle(&storage, "tracking://bucket/put-error.vortex").await;
-    let vortex = VortexSink::create(
-        vortex_handle.clone(),
-        &batch().schema(),
-        VortexSinkOptions::new(),
-    )
-    .unwrap();
+    let vortex = registered_vortex_sink(vortex_handle.clone(), batch().schema(), &[]).await;
     store.fail_next_put();
-    assert_controlled_write_failure(Box::new(vortex), &vortex_handle, "controlled put failure")
-        .await;
+    assert_controlled_write_failure(vortex, &vortex_handle, "controlled put failure").await;
 
     assert_eq!(store.multipart_starts(), multipart_starts);
 }
@@ -799,19 +810,15 @@ async fn every_format_reports_multipart_start_failures_without_durable_outputs()
     .await;
 
     let vortex_handle = prepared_handle(&storage, "tracking://bucket/start-error.vortex").await;
-    let vortex = VortexSink::create(
+    let vortex = registered_vortex_sink(
         vortex_handle.clone(),
-        &batch().schema(),
-        VortexSinkOptions::new().with_record_batch_size(1),
-    )
-    .unwrap();
-    store.fail_next_multipart_start();
-    assert_controlled_write_failure(
-        Box::new(vortex),
-        &vortex_handle,
-        "controlled multipart-start failure",
+        batch().schema(),
+        &["--vortex-record-batch-size", "1"],
     )
     .await;
+    store.fail_next_multipart_start();
+    assert_controlled_write_failure(vortex, &vortex_handle, "controlled multipart-start failure")
+        .await;
 }
 
 #[tokio::test]
@@ -1143,13 +1150,13 @@ async fn vortex_abort_cancels_a_backpressured_multipart_upload() {
     let _blocked = store.block_parts();
 
     let vortex_handle = prepared_handle(&storage, "tracking://bucket/output.vortex").await;
-    let vortex = VortexSink::create(
+    let vortex = registered_vortex_sink(
         vortex_handle.clone(),
-        &batch.schema(),
-        VortexSinkOptions::new().with_record_batch_size(1),
+        batch.schema(),
+        &["--vortex-record-batch-size", "1"],
     )
-    .unwrap();
-    assert_abort_cleans_multipart(Box::new(vortex), &vortex_handle, &store).await;
+    .await;
+    assert_abort_cleans_multipart(vortex, &vortex_handle, &store).await;
 }
 
 #[tokio::test]
@@ -1202,13 +1209,13 @@ async fn vortex_drop_fallback_cancels_a_backpressured_upload() {
     let batch = batch();
     let _blocked = store.block_parts();
     let vortex_handle = prepared_handle(&storage, "tracking://bucket/drop.vortex").await;
-    let vortex = VortexSink::create(
+    let vortex = registered_vortex_sink(
         vortex_handle.clone(),
-        &batch.schema(),
-        VortexSinkOptions::new().with_record_batch_size(1),
+        batch.schema(),
+        &["--vortex-record-batch-size", "1"],
     )
-    .unwrap();
-    assert_drop_cleans_multipart(Box::new(vortex), &vortex_handle, &store).await;
+    .await;
+    assert_drop_cleans_multipart(vortex, &vortex_handle, &store).await;
 }
 
 #[tokio::test]
@@ -1279,15 +1286,15 @@ async fn vortex_cancelled_finish_cleans_a_backpressured_upload() {
     let schema_released = Arc::downgrade(&schema);
     let _blocked = store.block_parts();
     let handle = prepared_handle(&storage, "tracking://bucket/cancel-finish.vortex").await;
-    let sink = VortexSink::create(
+    let sink = registered_vortex_sink(
         handle.clone(),
-        &schema,
-        VortexSinkOptions::new().with_record_batch_size(1),
+        Arc::clone(&schema),
+        &["--vortex-record-batch-size", "1"],
     )
-    .unwrap();
+    .await;
     drop(schema);
 
-    assert_cancelled_finish_cleans_multipart(Box::new(sink), &handle, &store).await;
+    assert_cancelled_finish_cleans_multipart(sink, &handle, &store).await;
     wait_for_resource_release(
         &schema_released,
         "cancelled Vortex finish retained its task",
@@ -1327,13 +1334,13 @@ async fn format_aborts_report_multipart_cleanup_failures() {
     assert_abort_reports_cleanup_failure(parquet, &parquet_handle, &store).await;
 
     let vortex_handle = prepared_handle(&storage, "tracking://bucket/abort-error.vortex").await;
-    let vortex = VortexSink::create(
+    let vortex = registered_vortex_sink(
         vortex_handle.clone(),
-        &batch.schema(),
-        VortexSinkOptions::new().with_record_batch_size(1),
+        batch.schema(),
+        &["--vortex-record-batch-size", "1"],
     )
-    .unwrap();
-    assert_abort_reports_cleanup_failure(Box::new(vortex), &vortex_handle, &store).await;
+    .await;
+    assert_abort_reports_cleanup_failure(vortex, &vortex_handle, &store).await;
 }
 
 #[tokio::test]
@@ -1427,12 +1434,11 @@ async fn format_finish_failures_abort_multipart_uploads() {
 
     let failed_vortex_handle =
         prepared_handle(&storage, "tracking://bucket/failed-output.vortex").await;
-    let failed_vortex = VortexSink::create(
+    let failed_vortex = registered_vortex_sink(
         failed_vortex_handle.clone(),
-        &batch.schema(),
-        VortexSinkOptions::new().with_record_batch_size(1),
+        batch.schema(),
+        &["--vortex-record-batch-size", "1"],
     )
-    .unwrap();
-    assert_finish_failure_cleans_multipart(Box::new(failed_vortex), &failed_vortex_handle, &store)
-        .await;
+    .await;
+    assert_finish_failure_cleans_multipart(failed_vortex, &failed_vortex_handle, &store).await;
 }

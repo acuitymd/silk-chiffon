@@ -1,0 +1,38 @@
+[package]
+name = "silk-chiffon-format-vortex"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+publish = false
+repository.workspace = true
+rust-version.workspace = true
+description = "Vortex format support for Silk Chiffon"
+
+[dependencies]
+anyhow.workspace = true
+arrow.workspace = true
+async-trait.workspace = true
+bytes = "^1.12.1"
+clap.workspace = true
+datafusion = { workspace = true, features = ["array_expressions", "default"] }
+futures.workspace = true
+object_store.workspace = true
+serde_json.workspace = true
+silk-chiffon-core = { path = "../silk-chiffon-core" }
+silk-chiffon-inspection-output = { path = "../silk-chiffon-inspection-output" }
+silk-chiffon-storage = { path = "../silk-chiffon-storage", default-features = false }
+tabled = { version = "^0.21.0", features = ["ansi"] }
+tokio = { version = "^1.53.1", features = ["rt", "sync"] }
+vortex = { version = "^0.83.0", features = ["files", "object_store", "tokio"] }
+vortex-datafusion = "^0.83.0"
+
+[dev-dependencies]
+silk-chiffon-storage = { path = "../silk-chiffon-storage", default-features = false, features = ["local"] }
+silk-chiffon-test-support = { path = "../silk-chiffon-test-support" }
+tempfile = "^3.27.0"
+url.workspace = true
+
+[lints]
+workspace = true

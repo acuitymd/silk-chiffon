@@ -1,5 +1,4 @@
 pub mod data_sink;
-pub mod vortex;
 
 use std::fmt;
 
