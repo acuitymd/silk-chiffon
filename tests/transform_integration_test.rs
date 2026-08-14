@@ -162,9 +162,8 @@ async fn run_transform(command: TestTransformCommand) -> anyhow::Result<()> {
 }
 
 mod test_helpers {
-    use camino::Utf8Path;
     use parquet::file::reader::FileReader;
-    use silk_chiffon::inspection::parquet::ParquetInspector;
+    use silk_chiffon_test_support::parquet::{ParquetContents, read_entire_file};
     use std::path::Path;
 
     pub fn get_parquet_row_group_metadata(
@@ -176,13 +175,13 @@ mod test_helpers {
         reader.metadata().row_group(idx).clone()
     }
 
-    pub fn inspect(path: &Path) -> ParquetInspector {
-        ParquetInspector::open(Utf8Path::from_path(path).unwrap()).unwrap()
+    pub fn inspect(path: &Path) -> ParquetContents {
+        read_entire_file(path).unwrap()
     }
 
-    pub fn assert_has_dictionary(inspector: &ParquetInspector, col_name: &str) {
+    pub fn assert_has_dictionary(inspector: &ParquetContents, col_name: &str) {
         let col = inspector.column(col_name).unwrap_or_else(|| {
-            let available: Vec<_> = inspector.row_groups()[0]
+            let available: Vec<_> = inspector.row_groups[0]
                 .columns
                 .iter()
                 .map(|c| &c.name)
@@ -199,9 +198,9 @@ mod test_helpers {
         );
     }
 
-    pub fn assert_no_dictionary(inspector: &ParquetInspector, col_name: &str) {
+    pub fn assert_no_dictionary(inspector: &ParquetContents, col_name: &str) {
         let col = inspector.column(col_name).unwrap_or_else(|| {
-            let available: Vec<_> = inspector.row_groups()[0]
+            let available: Vec<_> = inspector.row_groups[0]
                 .columns
                 .iter()
                 .map(|c| &c.name)
@@ -218,9 +217,9 @@ mod test_helpers {
         );
     }
 
-    pub fn assert_has_bloom_filter(inspector: &ParquetInspector, col_name: &str) {
+    pub fn assert_has_bloom_filter(inspector: &ParquetContents, col_name: &str) {
         let col = inspector.column(col_name).unwrap_or_else(|| {
-            let available: Vec<_> = inspector.row_groups()[0]
+            let available: Vec<_> = inspector.row_groups[0]
                 .columns
                 .iter()
                 .map(|c| &c.name)
@@ -237,9 +236,9 @@ mod test_helpers {
         );
     }
 
-    pub fn assert_no_bloom_filter(inspector: &ParquetInspector, col_name: &str) {
+    pub fn assert_no_bloom_filter(inspector: &ParquetContents, col_name: &str) {
         let col = inspector.column(col_name).unwrap_or_else(|| {
-            let available: Vec<_> = inspector.row_groups()[0]
+            let available: Vec<_> = inspector.row_groups[0]
                 .columns
                 .iter()
                 .map(|c| &c.name)
@@ -1544,7 +1543,7 @@ async fn arrow_stream_checks_each_file_schema_before_yielding_its_first_batch() 
     let error = run_transform(TestTransformCommand {
         patterns: vec![format!("{}/*.arrow", temp_dir.path().display())],
         to: Some(output.to_string_lossy().to_string()),
-        query: Some("SELECT * FROM data LIMIT 1".to_owned()),
+        query: Some("SELECT * FROM data".to_owned()),
         ..transform_defaults()
     })
     .await

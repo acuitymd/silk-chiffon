@@ -334,7 +334,7 @@ fn rejecting_registry() -> StorageRegistry {
 
 fn unique_location(label: &str) -> LocationInput {
     let ordinal = NEXT_TARGET.fetch_add(1, Ordering::Relaxed);
-    LocationInput::parse(&format!("memory://bucket/{label}-{ordinal}.bin")).unwrap()
+    LocationInput::parse(format!("memory://bucket/{label}-{ordinal}.bin")).unwrap()
 }
 
 fn session(arguments: &[&str]) -> silk_chiffon_storage::StorageSession {
@@ -356,7 +356,7 @@ async fn controlled_upload(
     root: &str,
     label: &str,
 ) -> (ObjectUpload, Arc<ControlledStore>, ObjectPath) {
-    let location = LocationInput::parse(&format!("controlled://{root}/{label}.bin")).unwrap();
+    let location = LocationInput::parse(format!("controlled://{root}/{label}.bin")).unwrap();
     let handle = storage
         .prepare_output_target(
             &location,
@@ -1053,7 +1053,7 @@ async fn shared_part_limit_gates_payload_creation_across_many_uploads() {
     let root = unique_controlled_root("bounded-payloads");
     let mut uploads = Vec::new();
     let mut control = None;
-    for ordinal in 0..8 {
+    for ordinal in 0_u8..8 {
         let (upload, store, _) =
             controlled_upload(&storage, &root, &format!("output-{ordinal}")).await;
         control.get_or_insert_with(|| Arc::clone(&store.control));
@@ -1065,7 +1065,7 @@ async fn shared_part_limit_gates_payload_creation_across_many_uploads() {
     for (ordinal, upload) in uploads {
         writes.push(tokio::spawn(async move {
             let mut upload = upload;
-            upload.write(Bytes::from(vec![ordinal as u8; 32])).await?;
+            upload.write(Bytes::from(vec![ordinal; 32])).await?;
             Ok::<_, silk_chiffon_storage::ObjectUploadError>(upload)
         }));
     }

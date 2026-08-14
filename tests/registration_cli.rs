@@ -189,6 +189,8 @@ fn registered_arguments_are_present_in_help_and_completions() {
         .to_string();
     assert!(help.contains("--arrow-record-batch-size"));
     assert!(help.contains("--parquet-row-group-size"));
+    assert!(help.contains("--parquet-writing-threads"));
+    assert!(!help.contains("--parquet-io-threads"));
     assert!(help.contains("--vortex-record-batch-size"));
     assert!(help.contains("possible values: arrow, parquet, vortex"));
 
@@ -202,6 +204,8 @@ fn registered_arguments_are_present_in_help_and_completions() {
     let completions = String::from_utf8(completions).unwrap();
     assert!(completions.contains("--arrow-record-batch-size"));
     assert!(completions.contains("--parquet-row-group-size"));
+    assert!(completions.contains("--parquet-writing-threads"));
+    assert!(!completions.contains("--parquet-io-threads"));
     assert!(completions.contains("--vortex-record-batch-size"));
 }
 

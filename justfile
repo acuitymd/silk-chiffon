@@ -25,17 +25,17 @@ build-profiling:
     cargo build --profile profiling
 
 test *args:
-    RUST_BACKTRACE=1 cargo nextest run --all-features --locked {{args}}
+    RUST_BACKTRACE=1 cargo nextest run --workspace --all-features --locked {{args}}
 
 type-check:
-    cargo check --all-features
+    cargo check --workspace --all-features
 
 _check-zigbuild:
     @which cargo-zigbuild > /dev/null || (echo "error: cargo-zigbuild not installed. Run: cargo install cargo-zigbuild && brew install zig" && exit 1)
     @rustup target list --installed | grep -q x86_64-unknown-linux-gnu || (echo "error: Linux target not installed. Run: rustup target add x86_64-unknown-linux-gnu" && exit 1)
 
 type-check-linux: _check-zigbuild
-    cargo zigbuild --all-features --target x86_64-unknown-linux-gnu
+    cargo zigbuild --workspace --all-features --target x86_64-unknown-linux-gnu
 
 alias type := type-check
 alias check := type-check
@@ -51,16 +51,16 @@ fmt-fix:
 alias fmt := fmt-fix
 
 lint-check:
-    cargo clippy --all-targets --all-features -- -D warnings
+    cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 lint-check-linux: _check-zigbuild
-    cargo zigbuild clippy --target x86_64-unknown-linux-gnu --all-targets --all-features -- -D warnings
+    cargo zigbuild clippy --workspace --target x86_64-unknown-linux-gnu --all-targets --all-features -- -D warnings
 
 lint-fix:
-    cargo clippy --all-targets --all-features --fix --allow-dirty -- -D warnings
+    cargo clippy --workspace --all-targets --all-features --fix --allow-dirty -- -D warnings
 
 lint-fix-linux: _check-zigbuild
-    cargo zigbuild clippy --target x86_64-unknown-linux-gnu --all-targets --all-features --fix --allow-dirty -- -D warnings
+    cargo zigbuild clippy --workspace --target x86_64-unknown-linux-gnu --all-targets --all-features --fix --allow-dirty -- -D warnings
 
 alias lint := lint-fix
 

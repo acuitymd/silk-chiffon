@@ -60,6 +60,8 @@ fn workspace_contains_foundation_packages() {
     assert!(packages.contains_key("silk-chiffon-core"));
     assert!(packages.contains_key("silk-chiffon-storage"));
     assert!(packages.contains_key("silk-chiffon-format-arrow"));
+    assert!(packages.contains_key("silk-chiffon-format-parquet"));
+    assert!(packages.contains_key("silk-chiffon-inspection-output"));
     assert!(packages.contains_key("silk-chiffon-test-support"));
 }
 
@@ -128,6 +130,36 @@ fn arrow_and_test_support_dependencies_have_one_direction() {
 }
 
 #[test]
+fn parquet_and_inspection_output_dependencies_have_one_direction() {
+    let packages = workspace_packages();
+    let root = packages.get("silk_chiffon").unwrap();
+    let parquet = packages.get("silk-chiffon-format-parquet").unwrap();
+    let inspection = packages.get("silk-chiffon-inspection-output").unwrap();
+
+    assert!(root.contains(&Dependency {
+        name: "silk-chiffon-format-parquet".to_owned(),
+        kind: None,
+    }));
+    assert!(parquet.contains(&Dependency {
+        name: "silk-chiffon-core".to_owned(),
+        kind: None,
+    }));
+    assert!(parquet.contains(&Dependency {
+        name: "silk-chiffon-storage".to_owned(),
+        kind: None,
+    }));
+    assert!(parquet.contains(&Dependency {
+        name: "silk-chiffon-inspection-output".to_owned(),
+        kind: None,
+    }));
+    assert!(inspection.iter().all(|dependency| {
+        dependency.name != "silk_chiffon"
+            && dependency.name != "silk-chiffon-core"
+            && !dependency.name.starts_with("silk-chiffon-format-")
+    }));
+}
+
+#[test]
 fn root_no_longer_owns_arrow_ipc_or_shared_fixtures() {
     let root = env!("CARGO_MANIFEST_DIR");
     for relative in [
@@ -137,6 +169,25 @@ fn root_no_longer_owns_arrow_ipc_or_shared_fixtures() {
         "src/sinks/object_sink_task.rs",
         "src/utils/test_data.rs",
         "src/utils/test_helpers.rs",
+    ] {
+        assert!(
+            !std::path::Path::new(root).join(relative).exists(),
+            "obsolete root path remains: {relative}"
+        );
+    }
+}
+
+#[test]
+fn root_no_longer_owns_parquet_or_shared_inspection_output() {
+    let root = env!("CARGO_MANIFEST_DIR");
+    for relative in [
+        "src/sources/parquet.rs",
+        "src/sinks/parquet",
+        "src/inspection/parquet.rs",
+        "src/inspection/inspectable.rs",
+        "src/inspection/style.rs",
+        "src/utils/blocking.rs",
+        "src/utils/parquet_inspection.rs",
     ] {
         assert!(
             !std::path::Path::new(root).join(relative).exists(),

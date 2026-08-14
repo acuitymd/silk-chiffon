@@ -1,6 +1,6 @@
 //! Arrow and Parquet file fixtures.
 
-use std::{fs::File, path::Path};
+use std::{fs::File, path::Path, sync::Arc};
 
 use arrow::{
     array::RecordBatch,
@@ -62,6 +62,14 @@ impl TestFile {
 
     pub fn write_parquet_batch(path: &Path, batch: &RecordBatch) {
         Self::write_parquet(path, std::slice::from_ref(batch));
+    }
+
+    /// Writes a schema-only file with no row groups.
+    pub fn write_parquet_empty(path: &Path, schema: &SchemaRef) {
+        let file = File::create(path).expect("failed to create file");
+        let writer =
+            ArrowWriter::try_new(file, Arc::clone(schema), None).expect("failed to create writer");
+        writer.close().expect("failed to close writer");
     }
 
     pub fn read_arrow(path: &Path) -> Vec<RecordBatch> {

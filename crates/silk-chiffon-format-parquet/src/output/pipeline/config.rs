@@ -1,12 +1,38 @@
-//! Configuration types for the adaptive Parquet writer.
+//! Configuration for the Parquet output pipeline.
 
 use std::collections::HashMap;
 
 use arrow::datatypes::{DataType, SchemaRef};
 
 use super::encoding::{is_analyzable, is_bloom_filter_eligible, is_dictionary_eligible};
-use crate::BloomFilterConfig;
-use crate::sinks::parquet::{DEFAULT_BUFFER_SIZE, DEFAULT_MAX_ROW_GROUP_SIZE};
+use crate::BloomFilterPolicy;
+use crate::output::{DEFAULT_BUFFER_SIZE, DEFAULT_MAX_ROW_GROUP_SIZE};
+
+#[allow(clippy::cast_sign_loss)]
+pub(crate) fn estimate_fixed_type_bytes(data_type: &DataType) -> Option<usize> {
+    match data_type {
+        DataType::Boolean | DataType::Int8 | DataType::UInt8 => Some(1),
+        DataType::Int16 | DataType::UInt16 | DataType::Float16 => Some(2),
+        DataType::Int32 | DataType::UInt32 | DataType::Float32 | DataType::Date32 => Some(4),
+        DataType::Int64
+        | DataType::UInt64
+        | DataType::Float64
+        | DataType::Date64
+        | DataType::Time64(_)
+        | DataType::Timestamp(_, _)
+        | DataType::Duration(_) => Some(8),
+        DataType::Interval(arrow::datatypes::IntervalUnit::YearMonth) => Some(4),
+        DataType::Interval(arrow::datatypes::IntervalUnit::DayTime) => Some(8),
+        DataType::Interval(arrow::datatypes::IntervalUnit::MonthDayNano) => Some(16),
+        DataType::Time32(_) => Some(4),
+        DataType::Decimal128(_, _) => Some(16),
+        DataType::Decimal256(_, _) => Some(32),
+        DataType::FixedSizeBinary(size) => Some((*size).max(0) as usize),
+        DataType::FixedSizeList(field, length) => estimate_fixed_type_bytes(field.data_type())
+            .map(|size| size * (*length).max(0) as usize),
+        _ => None,
+    }
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct LeafColumn {
@@ -46,14 +72,15 @@ impl LeafColumn {
 /// Parquet schemas are flat -- only leaf columns exist, identified by dot-separated paths:
 ///
 /// ```text
-/// "tags.list.element"   => col is named "tags", "list" and "element" are always literally those two strings
+/// "tags.list.element"   => "list" and "element" are literal path segments
 /// "user.name"           => col is named "user", "name" is the field name on the struct
 /// "user.age"            => col is named "user", "age" is the field name on the struct
 /// ```
 ///
 /// Parquet reconstructs nesting using repetition and definition levels -- integers stored
 /// alongside each value that encode list boundaries and nullability. This is the Dremel
-/// algorithm from Google's paper. See: <https://parquet.apache.org/docs/file-format/nestedencoding/>
+/// algorithm from Google's paper. See:
+/// <https://parquet.apache.org/docs/file-format/nestedencoding/>
 ///
 /// All per-column config (`WriterProperties::set_column_*`) uses these flat string paths,
 /// so we need to enumerate them from the Arrow schema.
@@ -62,16 +89,21 @@ impl LeafColumn {
 ///
 /// Parquet uses hardcoded strings from the format spec for nested type path segments:
 ///
-/// - **Lists**: The Parquet spec defines list structure as `<name>.list.element`, where "list"
-///   and "element" are literal strings, not placeholders. Arrow's inner field name is ignored.
+/// - **Lists**: The Parquet spec defines list structure as
+///   `<name>.list.element`, where "list" and "element" are literal strings,
+///   not placeholders. Arrow's inner field name is ignored.
 ///
 ///   ```text
-///   Arrow: Field("tags", List(Field("item", Utf8)))     => Parquet path: "tags.list.element"
-///   Arrow: Field("tags", List(Field("values", Utf8)))   => Parquet path: "tags.list.element"
-///   Arrow: Field("tags", List(Field("whatever", Utf8))) => Parquet path: "tags.list.element"
+///   Arrow: Field("tags", List(Field("item", Utf8)))
+///       => Parquet path: "tags.list.element"
+///   Arrow: Field("tags", List(Field("values", Utf8)))
+///       => Parquet path: "tags.list.element"
+///   Arrow: Field("tags", List(Field("whatever", Utf8)))
+///       => Parquet path: "tags.list.element"
 ///   ```
 ///
-/// - **Maps**: literal `.key_value.key` and `.key_value.value` (also literal strings in the spec, not placeholders)
+/// - **Maps**: literal `.key_value.key` and `.key_value.value` segments from the
+///   format specification.
 ///
 /// - **Structs**: actual field names preserved (e.g., `"user.name"`, `"user.age"`)
 ///
@@ -150,12 +182,12 @@ fn enumerate_field(
     }
 }
 
-/// Configuration for the adaptive Parquet writer pipeline.
+/// Configuration for the Parquet output pipeline.
 ///
-/// The adaptive writer uses a three-task pipeline (ingestion -> encoding -> writing) with
+/// The writer uses a three-task pipeline (ingestion -> encoding -> writing) with
 /// optional per-row-group cardinality analysis to make dictionary encoding decisions.
 #[derive(Debug, Clone)]
-pub struct AdaptiveWriterConfig {
+pub struct PipelineConfig {
     /// Rows per row group (last row group may be smaller).
     pub max_row_group_size: usize,
     /// Bytes buffered between Parquet encoding and the object upload.
@@ -174,15 +206,21 @@ pub struct AdaptiveWriterConfig {
     pub dictionary_page_size_limit: usize,
     /// Global default for dictionary encoding (can be overridden per-column).
     pub dictionary_enabled_default: bool,
-    /// Columns to disable dictionary encoding for (column names or dot-separated paths for nested, prefix matching).
+    /// Columns to disable dictionary encoding for.
+    ///
+    /// Nested columns use dot-separated paths and prefix matching.
     pub user_disabled_dictionary: Vec<String>,
-    /// Columns to always attempt dictionary encoding (column names or dot-separated paths for nested, prefix matching).
+    /// Columns that should always attempt dictionary encoding.
+    ///
+    /// Nested columns use dot-separated paths and prefix matching.
     pub user_enabled_dictionary_always: Vec<String>,
-    /// Columns to analyze for dictionary encoding (column names or dot-separated paths for nested, prefix matching).
+    /// Columns to analyze before choosing dictionary encoding.
+    ///
+    /// Nested columns use dot-separated paths and prefix matching.
     /// Analysis runs per-row-group; dictionary disabled if NDV exceeds 20% of row count.
     pub user_enabled_dictionary_analyze: Vec<String>,
     /// Bloom filter configuration (which columns, FPP, NDV).
-    pub bloom_filter_config: Option<BloomFilterConfig>,
+    pub bloom_filter_config: Option<BloomFilterPolicy>,
     /// Pre-computed NDV (number of distinct values) per column.
     /// Used for bloom filter sizing when not specified in bloom_filter_config.
     /// Populated by cardinality analysis when using `:analyze` mode.
@@ -190,7 +228,7 @@ pub struct AdaptiveWriterConfig {
     pub ndv_map: HashMap<String, u64>,
 }
 
-impl Default for AdaptiveWriterConfig {
+impl Default for PipelineConfig {
     fn default() -> Self {
         Self {
             max_row_group_size: DEFAULT_MAX_ROW_GROUP_SIZE,
@@ -231,22 +269,22 @@ pub enum ResolvedBloomFilterMode {
 }
 
 #[derive(Debug, Clone)]
-pub struct ResolvedLeafConfig {
+pub struct ColumnPolicy {
     pub dictionary: ResolvedDictionaryMode,
     pub bloom_filter: ResolvedBloomFilterMode,
 }
 
 #[derive(Debug, Clone)]
-pub struct ResolvedColumnConfigs {
-    leaves: HashMap<String, ResolvedLeafConfig>,
+pub struct ColumnPolicies {
+    leaves: HashMap<String, ColumnPolicy>,
 }
 
 fn parse_cli_path(s: &str) -> Vec<String> {
     s.split('.').map(String::from).collect()
 }
 
-impl ResolvedColumnConfigs {
-    pub fn resolve(schema: &SchemaRef, config: &AdaptiveWriterConfig) -> Self {
+impl ColumnPolicies {
+    pub fn resolve(schema: &SchemaRef, config: &PipelineConfig) -> Self {
         let leaves = enumerate_leaf_columns(schema)
             .into_iter()
             .map(|leaf| {
@@ -258,8 +296,8 @@ impl ResolvedColumnConfigs {
         Self { leaves }
     }
 
-    fn resolve_leaf(leaf: &LeafColumn, config: &AdaptiveWriterConfig) -> ResolvedLeafConfig {
-        ResolvedLeafConfig {
+    fn resolve_leaf(leaf: &LeafColumn, config: &PipelineConfig) -> ColumnPolicy {
+        ColumnPolicy {
             dictionary: Self::resolve_dictionary_for_leaf(leaf, config),
             bloom_filter: Self::resolve_bloom_for_leaf(leaf, config),
         }
@@ -277,10 +315,10 @@ impl ResolvedColumnConfigs {
     ///    - true: nested/non-analyzable columns use Always, top-level analyzable uses Analyze
     ///    - false: Disabled
     ///
-    /// Non-analyzable types include nested types (List, Struct, Map) and floats (high cardinality).
+    /// Non-analyzable types include nested types and high-cardinality floats.
     fn resolve_dictionary_for_leaf(
         leaf: &LeafColumn,
-        config: &AdaptiveWriterConfig,
+        config: &PipelineConfig,
     ) -> ResolvedDictionaryMode {
         if !is_dictionary_eligible(&leaf.data_type) {
             return ResolvedDictionaryMode::NotEligible;
@@ -338,15 +376,17 @@ impl ResolvedColumnConfigs {
     /// 1. Disabled - type doesn't support bloom filters
     /// 2. Disabled - no `bloom_filter_config` provided
     /// 3. Disabled - column matches `column_disabled` prefix
-    /// 4. Enabled - column matches `column_enabled` prefix (uses per-column FPP/NDV, falls back to ndv_map)
+    /// 4. Enabled - column matches `column_enabled` prefix. Use its FPP and NDV,
+    ///    falling back to `ndv_map`.
     ///    (disabled if no NDV and type is non-analyzable)
-    /// 5. Enabled - `all_enabled` is set (disabled if no NDV and type is nested or non-analyzable)
+    /// 5. Enabled - `all_enabled` is set. Disable when NDV is absent and the
+    ///    type is nested or non-analyzable.
     /// 6. Disabled - no matching config
     ///
     /// Non-analyzable types include nested types (List, Struct, Map) and floats.
     fn resolve_bloom_for_leaf(
         leaf: &LeafColumn,
-        config: &AdaptiveWriterConfig,
+        config: &PipelineConfig,
     ) -> ResolvedBloomFilterMode {
         if !is_bloom_filter_eligible(&leaf.data_type) {
             return ResolvedBloomFilterMode::Disabled;
@@ -409,8 +449,10 @@ impl ResolvedColumnConfigs {
 
     /// Returns top-level column names that need cardinality analysis.
     ///
-    /// A column needs analysis if any of its leaves require runtime NDV (number of distinct values):
-    /// - Dictionary mode is `Analyze` (need NDV to decide if dictionary encoding is worthwhile)
+    /// A column needs analysis if any leaf requires a runtime count of distinct
+    /// values:
+    /// - Dictionary mode is `Analyze`, which needs the count to decide whether
+    ///   dictionary encoding is worthwhile.
     /// - Bloom filter is enabled but NDV wasn't provided (need NDV to size the filter)
     ///
     /// Analysis only works on analyzable types. Non-analyzable types (nested types like List,
@@ -438,7 +480,7 @@ impl ResolvedColumnConfigs {
         top_level_names
     }
 
-    pub fn get(&self, leaf_path: &str) -> Option<&ResolvedLeafConfig> {
+    pub fn get(&self, leaf_path: &str) -> Option<&ColumnPolicy> {
         self.leaves.get(leaf_path)
     }
 }

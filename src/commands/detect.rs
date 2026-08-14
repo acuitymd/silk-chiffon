@@ -4,10 +4,8 @@ use anyhow::Result;
 use silk_chiffon_core::DetectedFormat;
 use silk_chiffon_storage::LocationInput;
 
-use crate::{
-    DetectCommand,
-    inspection::style::{dim, value},
-};
+use crate::DetectCommand;
+use silk_chiffon_inspection_output::{dim, value};
 
 pub async fn run(command: DetectCommand) -> Result<()> {
     let (args, storage, formats) = command.into_parts();
