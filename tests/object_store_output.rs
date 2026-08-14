@@ -39,7 +39,7 @@ type TrackingStore = ControlledUploadStore;
 
 const SOURCE_BATCH_LIMIT: usize = 1_000_000;
 
-async fn registered_arrow_sink(
+async fn open_registered_arrow_sink(
     handle: StorageHandle,
     schema: arrow::datatypes::SchemaRef,
     arguments: &[&str],
@@ -65,7 +65,7 @@ async fn registered_arrow_sink(
     sink_binding.open_sink(handle, schema).await.unwrap()
 }
 
-async fn registered_parquet_sink(
+async fn open_registered_parquet_sink(
     handle: StorageHandle,
     schema: arrow::datatypes::SchemaRef,
     arguments: &[&str],
@@ -92,7 +92,7 @@ async fn registered_parquet_sink(
     sink_binding.open_sink(handle, schema).await.unwrap()
 }
 
-async fn registered_vortex_sink(
+async fn open_registered_vortex_sink(
     handle: StorageHandle,
     schema: arrow::datatypes::SchemaRef,
     arguments: &[&str],
@@ -590,7 +590,7 @@ async fn arrow_sink_writes_a_memory_object() {
     let storage = storage();
     let handle = prepared_handle(&storage, "memory://bucket/output.arrow").await;
     let batch = batch();
-    let mut sink = registered_arrow_sink(handle.clone(), batch.schema(), &[]).await;
+    let mut sink = open_registered_arrow_sink(handle.clone(), batch.schema(), &[]).await;
 
     sink.write_batch(batch).await.unwrap();
     let completion = sink.finish().await.unwrap();
@@ -603,7 +603,7 @@ async fn arrow_stream_sink_writes_a_readable_memory_object() {
     let handle = prepared_handle(&storage, "memory://bucket/output.arrows").await;
     let batch = batch();
     let expected_rows = batch.num_rows();
-    let mut sink = registered_arrow_sink(
+    let mut sink = open_registered_arrow_sink(
         handle.clone(),
         batch.schema(),
         &["--arrow-format", "stream"],
@@ -639,7 +639,7 @@ async fn parquet_sink_writes_a_memory_object() {
     let storage = storage();
     let handle = prepared_handle(&storage, "memory://bucket/output.parquet").await;
     let batch = batch();
-    let mut sink = registered_parquet_sink(handle.clone(), batch.schema(), &[]).await;
+    let mut sink = open_registered_parquet_sink(handle.clone(), batch.schema(), &[]).await;
 
     sink.write_batch(batch).await.unwrap();
     let completion = sink.finish().await.unwrap();
@@ -682,15 +682,16 @@ async fn every_format_rejects_schema_mismatch_before_encoding() {
     let schema = batch().schema();
 
     let arrow_handle = prepared_handle(&storage, "memory://bucket/schema-mismatch.arrow").await;
-    let arrow = registered_arrow_sink(arrow_handle.clone(), Arc::clone(&schema), &[]).await;
+    let arrow = open_registered_arrow_sink(arrow_handle.clone(), Arc::clone(&schema), &[]).await;
     assert_schema_mismatch_is_rejected_before_encoding(arrow, &arrow_handle).await;
 
     let parquet_handle = prepared_handle(&storage, "memory://bucket/schema-mismatch.parquet").await;
-    let parquet = registered_parquet_sink(parquet_handle.clone(), Arc::clone(&schema), &[]).await;
+    let parquet =
+        open_registered_parquet_sink(parquet_handle.clone(), Arc::clone(&schema), &[]).await;
     assert_schema_mismatch_is_rejected_before_encoding(parquet, &parquet_handle).await;
 
     let vortex_handle = prepared_handle(&storage, "memory://bucket/schema-mismatch.vortex").await;
-    let vortex = registered_vortex_sink(vortex_handle.clone(), schema, &[]).await;
+    let vortex = open_registered_vortex_sink(vortex_handle.clone(), schema, &[]).await;
     assert_schema_mismatch_is_rejected_before_encoding(vortex, &vortex_handle).await;
 }
 
@@ -719,18 +720,19 @@ async fn every_format_accepts_metadata_only_schema_differences() {
 
     let arrow_handle = prepared_handle(&storage, "memory://bucket/metadata.arrow").await;
     let mut arrow =
-        registered_arrow_sink(arrow_handle.clone(), Arc::clone(&expected_schema), &[]).await;
+        open_registered_arrow_sink(arrow_handle.clone(), Arc::clone(&expected_schema), &[]).await;
     arrow.write_batch(metadata_batch.clone()).await.unwrap();
     assert_durable(arrow.finish().await.unwrap(), &arrow_handle).await;
 
     let parquet_handle = prepared_handle(&storage, "memory://bucket/metadata.parquet").await;
     let mut parquet =
-        registered_parquet_sink(parquet_handle.clone(), Arc::clone(&expected_schema), &[]).await;
+        open_registered_parquet_sink(parquet_handle.clone(), Arc::clone(&expected_schema), &[])
+            .await;
     parquet.write_batch(metadata_batch.clone()).await.unwrap();
     assert_durable(parquet.finish().await.unwrap(), &parquet_handle).await;
 
     let vortex_handle = prepared_handle(&storage, "memory://bucket/metadata.vortex").await;
-    let mut vortex = registered_vortex_sink(vortex_handle.clone(), expected_schema, &[]).await;
+    let mut vortex = open_registered_vortex_sink(vortex_handle.clone(), expected_schema, &[]).await;
     vortex.write_batch(metadata_batch).await.unwrap();
     assert_durable(vortex.finish().await.unwrap(), &vortex_handle).await;
 }
@@ -740,7 +742,7 @@ async fn vortex_sink_writes_a_memory_object() {
     let storage = storage();
     let handle = prepared_handle(&storage, "memory://bucket/output.vortex").await;
     let batch = batch();
-    let mut sink = registered_vortex_sink(handle.clone(), batch.schema(), &[]).await;
+    let mut sink = open_registered_vortex_sink(handle.clone(), batch.schema(), &[]).await;
 
     sink.write_batch(batch).await.unwrap();
     let completion = sink.finish().await.unwrap();
@@ -755,17 +757,17 @@ async fn every_format_reports_single_put_failures_without_durable_outputs() {
     let multipart_starts = store.multipart_starts();
 
     let arrow_handle = prepared_handle(&storage, "tracking://bucket/put-error.arrow").await;
-    let arrow = registered_arrow_sink(arrow_handle.clone(), batch().schema(), &[]).await;
+    let arrow = open_registered_arrow_sink(arrow_handle.clone(), batch().schema(), &[]).await;
     store.fail_next_put();
     assert_controlled_write_failure(arrow, &arrow_handle, "controlled put failure").await;
 
     let parquet_handle = prepared_handle(&storage, "tracking://bucket/put-error.parquet").await;
-    let parquet = registered_parquet_sink(parquet_handle.clone(), batch().schema(), &[]).await;
+    let parquet = open_registered_parquet_sink(parquet_handle.clone(), batch().schema(), &[]).await;
     store.fail_next_put();
     assert_controlled_write_failure(parquet, &parquet_handle, "controlled put failure").await;
 
     let vortex_handle = prepared_handle(&storage, "tracking://bucket/put-error.vortex").await;
-    let vortex = registered_vortex_sink(vortex_handle.clone(), batch().schema(), &[]).await;
+    let vortex = open_registered_vortex_sink(vortex_handle.clone(), batch().schema(), &[]).await;
     store.fail_next_put();
     assert_controlled_write_failure(vortex, &vortex_handle, "controlled put failure").await;
 
@@ -779,7 +781,7 @@ async fn every_format_reports_multipart_start_failures_without_durable_outputs()
     let store = controlled_upload_store();
 
     let arrow_handle = prepared_handle(&storage, "tracking://bucket/start-error.arrow").await;
-    let arrow = registered_arrow_sink(
+    let arrow = open_registered_arrow_sink(
         arrow_handle.clone(),
         batch().schema(),
         &["--arrow-record-batch-size", "1"],
@@ -790,7 +792,7 @@ async fn every_format_reports_multipart_start_failures_without_durable_outputs()
         .await;
 
     let parquet_handle = prepared_handle(&storage, "tracking://bucket/start-error.parquet").await;
-    let parquet = registered_parquet_sink(
+    let parquet = open_registered_parquet_sink(
         parquet_handle.clone(),
         batch().schema(),
         &[
@@ -810,7 +812,7 @@ async fn every_format_reports_multipart_start_failures_without_durable_outputs()
     .await;
 
     let vortex_handle = prepared_handle(&storage, "tracking://bucket/start-error.vortex").await;
-    let vortex = registered_vortex_sink(
+    let vortex = open_registered_vortex_sink(
         vortex_handle.clone(),
         batch().schema(),
         &["--vortex-record-batch-size", "1"],
@@ -827,7 +829,7 @@ async fn parquet_late_part_failure_cancels_the_entire_pipeline() {
     let storage = controlled_upload_storage();
     let store = controlled_upload_store();
     let handle = prepared_handle(&storage, "tracking://bucket/later-part-error.parquet").await;
-    let sink = registered_parquet_sink(
+    let sink = open_registered_parquet_sink(
         handle.clone(),
         batch().schema(),
         &[
@@ -918,7 +920,7 @@ async fn arrow_sink_failure_cancels_every_datafusion_source_task() {
     let storage = controlled_upload_storage();
     let store = controlled_upload_store();
     let handle = prepared_handle(&storage, "tracking://bucket/source-cancellation.arrow").await;
-    let sink = registered_arrow_sink(
+    let sink = open_registered_arrow_sink(
         handle.clone(),
         batch().schema(),
         &[
@@ -945,7 +947,7 @@ async fn parquet_sink_failure_cancels_every_datafusion_source_task() {
     let storage = controlled_upload_storage();
     let store = controlled_upload_store();
     let handle = prepared_handle(&storage, "tracking://bucket/source-cancellation.parquet").await;
-    let sink = registered_parquet_sink(
+    let sink = open_registered_parquet_sink(
         handle.clone(),
         batch().schema(),
         &[
@@ -999,7 +1001,7 @@ async fn source_failure_cancels_its_active_sibling() {
         ],
     )
     .await;
-    let mut sink = registered_arrow_sink(
+    let mut sink = open_registered_arrow_sink(
         handle.clone(),
         batch.schema(),
         &[
@@ -1107,7 +1109,7 @@ async fn arrow_abort_cancels_a_backpressured_multipart_upload() {
     let _blocked = store.block_parts();
 
     let arrow_handle = prepared_handle(&storage, "tracking://bucket/output.arrow").await;
-    let arrow = registered_arrow_sink(
+    let arrow = open_registered_arrow_sink(
         arrow_handle.clone(),
         batch.schema(),
         &["--arrow-record-batch-size", "1"],
@@ -1125,7 +1127,7 @@ async fn parquet_abort_cancels_a_backpressured_multipart_upload() {
     let _blocked = store.block_parts();
 
     let parquet_handle = prepared_handle(&storage, "tracking://bucket/output.parquet").await;
-    let parquet = registered_parquet_sink(
+    let parquet = open_registered_parquet_sink(
         parquet_handle.clone(),
         batch.schema(),
         &[
@@ -1150,7 +1152,7 @@ async fn vortex_abort_cancels_a_backpressured_multipart_upload() {
     let _blocked = store.block_parts();
 
     let vortex_handle = prepared_handle(&storage, "tracking://bucket/output.vortex").await;
-    let vortex = registered_vortex_sink(
+    let vortex = open_registered_vortex_sink(
         vortex_handle.clone(),
         batch.schema(),
         &["--vortex-record-batch-size", "1"],
@@ -1168,7 +1170,7 @@ async fn arrow_drop_fallback_cancels_a_backpressured_upload() {
     let _blocked = store.block_parts();
 
     let arrow_handle = prepared_handle(&storage, "tracking://bucket/drop.arrow").await;
-    let arrow = registered_arrow_sink(
+    let arrow = open_registered_arrow_sink(
         arrow_handle.clone(),
         batch.schema(),
         &["--arrow-record-batch-size", "1"],
@@ -1185,7 +1187,7 @@ async fn parquet_drop_fallback_cancels_a_backpressured_upload() {
     let batch = batch();
     let _blocked = store.block_parts();
     let parquet_handle = prepared_handle(&storage, "tracking://bucket/drop.parquet").await;
-    let parquet = registered_parquet_sink(
+    let parquet = open_registered_parquet_sink(
         parquet_handle.clone(),
         batch.schema(),
         &[
@@ -1209,7 +1211,7 @@ async fn vortex_drop_fallback_cancels_a_backpressured_upload() {
     let batch = batch();
     let _blocked = store.block_parts();
     let vortex_handle = prepared_handle(&storage, "tracking://bucket/drop.vortex").await;
-    let vortex = registered_vortex_sink(
+    let vortex = open_registered_vortex_sink(
         vortex_handle.clone(),
         batch.schema(),
         &["--vortex-record-batch-size", "1"],
@@ -1227,7 +1229,7 @@ async fn arrow_cancelled_finish_cleans_a_backpressured_upload() {
     let schema_released = Arc::downgrade(&schema);
     let _blocked = store.block_parts();
     let handle = prepared_handle(&storage, "tracking://bucket/cancel-finish.arrow").await;
-    let sink = registered_arrow_sink(
+    let sink = open_registered_arrow_sink(
         handle.clone(),
         Arc::clone(&schema),
         &["--arrow-record-batch-size", "1"],
@@ -1248,7 +1250,7 @@ async fn parquet_cancelled_finish_cleans_pipeline_and_upload() {
     let schema_released = Arc::downgrade(&schema);
     let _blocked = store.block_parts();
     let handle = prepared_handle(&storage, "tracking://bucket/cancel-finish.parquet").await;
-    let sink = registered_parquet_sink(
+    let sink = open_registered_parquet_sink(
         handle.clone(),
         Arc::clone(&schema),
         &[
@@ -1286,7 +1288,7 @@ async fn vortex_cancelled_finish_cleans_a_backpressured_upload() {
     let schema_released = Arc::downgrade(&schema);
     let _blocked = store.block_parts();
     let handle = prepared_handle(&storage, "tracking://bucket/cancel-finish.vortex").await;
-    let sink = registered_vortex_sink(
+    let sink = open_registered_vortex_sink(
         handle.clone(),
         Arc::clone(&schema),
         &["--vortex-record-batch-size", "1"],
@@ -1311,7 +1313,7 @@ async fn format_aborts_report_multipart_cleanup_failures() {
     let _blocked = store.block_parts();
 
     let arrow_handle = prepared_handle(&storage, "tracking://bucket/abort-error.arrow").await;
-    let arrow = registered_arrow_sink(
+    let arrow = open_registered_arrow_sink(
         arrow_handle.clone(),
         batch.schema(),
         &["--arrow-record-batch-size", "1"],
@@ -1320,7 +1322,7 @@ async fn format_aborts_report_multipart_cleanup_failures() {
     assert_abort_reports_cleanup_failure(arrow, &arrow_handle, &store).await;
 
     let parquet_handle = prepared_handle(&storage, "tracking://bucket/abort-error.parquet").await;
-    let parquet = registered_parquet_sink(
+    let parquet = open_registered_parquet_sink(
         parquet_handle.clone(),
         batch.schema(),
         &[
@@ -1334,7 +1336,7 @@ async fn format_aborts_report_multipart_cleanup_failures() {
     assert_abort_reports_cleanup_failure(parquet, &parquet_handle, &store).await;
 
     let vortex_handle = prepared_handle(&storage, "tracking://bucket/abort-error.vortex").await;
-    let vortex = registered_vortex_sink(
+    let vortex = open_registered_vortex_sink(
         vortex_handle.clone(),
         batch.schema(),
         &["--vortex-record-batch-size", "1"],
@@ -1349,7 +1351,7 @@ async fn parquet_upload_failure_cancels_all_pipeline_channels() {
     let storage = controlled_upload_storage();
     let store = controlled_upload_store();
     let handle = prepared_handle(&storage, "tracking://bucket/part-error.parquet").await;
-    let mut sink = registered_parquet_sink(
+    let mut sink = open_registered_parquet_sink(
         handle.clone(),
         batch().schema(),
         &[
@@ -1409,7 +1411,7 @@ async fn format_finish_failures_abort_multipart_uploads() {
     let batch = batch();
     let failed_arrow_handle =
         prepared_handle(&storage, "tracking://bucket/failed-output.arrow").await;
-    let failed_arrow = registered_arrow_sink(
+    let failed_arrow = open_registered_arrow_sink(
         failed_arrow_handle.clone(),
         batch.schema(),
         &["--arrow-record-batch-size", "1"],
@@ -1419,7 +1421,7 @@ async fn format_finish_failures_abort_multipart_uploads() {
 
     let failed_parquet_handle =
         prepared_handle(&storage, "tracking://bucket/failed-output.parquet").await;
-    let failed_parquet = registered_parquet_sink(
+    let failed_parquet = open_registered_parquet_sink(
         failed_parquet_handle.clone(),
         batch.schema(),
         &[
@@ -1434,7 +1436,7 @@ async fn format_finish_failures_abort_multipart_uploads() {
 
     let failed_vortex_handle =
         prepared_handle(&storage, "tracking://bucket/failed-output.vortex").await;
-    let failed_vortex = registered_vortex_sink(
+    let failed_vortex = open_registered_vortex_sink(
         failed_vortex_handle.clone(),
         batch.schema(),
         &["--vortex-record-batch-size", "1"],

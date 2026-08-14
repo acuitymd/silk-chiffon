@@ -5,7 +5,7 @@ use datafusion::{catalog::TableProvider, prelude::SessionContext};
 use silk_chiffon_core::{InputLeaf, InputVariant, TransformBinding, TransformBindings};
 use silk_chiffon_storage::{InputObject, LocationInput, LocationPattern, StorageSession};
 
-/// Command-scoped file input behavior over bound storage and format settings.
+/// Command-scoped file input behavior over bound storage and format state.
 pub(super) struct FileInputRoute<'a> {
     storage: &'a StorageSession,
     formats: &'a TransformBindings,

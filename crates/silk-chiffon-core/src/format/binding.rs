@@ -1,9 +1,10 @@
 //! Private type-erasure boundary for format definitions and command bindings.
 //!
 //! A host must store formats contributed by unrelated crates in one registry, even though each
-//! format may define a different Clap settings type. Erasing only the settings as [`std::any::Any`]
-//! would make the relationship between a settings value and the functions that accept it a runtime
-//! convention. A mistaken downcast or index could pair the wrong values.
+//! format may define a different command-state type constructed from Clap matches. Erasing only
+//! that state as [`std::any::Any`] would make the relationship between a state value and the
+//! functions that accept it a runtime convention. A mistaken downcast or index could pair the
+//! wrong values.
 //!
 //! This module erases a complete typed definition instead. [`TypedTransformDefinition<T>`] retains
 //! the parser and functions that use `T`. Binding parses `T` and produces a
@@ -26,7 +27,7 @@ use super::{
 };
 use crate::{InputLeaf, InspectionOutput, SinkBinding};
 
-/// The two Clap operations that must stay paired for one concrete settings type.
+/// The two Clap operations that must stay paired for one concrete command-value type.
 #[derive(Clone, Copy)]
 pub(super) struct ArgsParser<T> {
     augment: fn(Command) -> Command,
@@ -95,7 +96,7 @@ pub(super) trait ErasedTransformDefinition: Send + Sync {
     fn bind(&self, matches: &ArgMatches) -> Result<Arc<dyn ErasedTransformBinding>, clap::Error>;
 }
 
-/// Invocation-time transform behavior after one settings value has been parsed.
+/// Invocation-time transform behavior after one command-state value has been constructed.
 pub(super) trait ErasedTransformBinding: Send + Sync {
     fn has_input_provider(&self) -> bool;
 
@@ -115,7 +116,7 @@ pub(super) trait ErasedTransformBinding: Send + Sync {
     ) -> BindingFuture<'a, Box<dyn SinkBinding>>;
 }
 
-/// A definition whose parser and input-provider or sink functions share settings type `T`.
+/// A definition whose parser and input-provider or sink functions share state type `T`.
 pub(super) struct TypedTransformDefinition<T> {
     args: ArgsParser<T>,
     input_provider: Option<InputProviderFn<T>>,
@@ -158,16 +159,16 @@ where
 
     fn bind(&self, matches: &ArgMatches) -> Result<Arc<dyn ErasedTransformBinding>, clap::Error> {
         Ok(Arc::new(TypedTransformBinding {
-            settings: self.args.parse(matches)?,
+            state: self.args.parse(matches)?,
             input_provider: self.input_provider,
             sink: self.sink,
         }))
     }
 }
 
-/// One parsed `T` retained with the input-provider and sink functions that accept it.
+/// One command-state `T` retained with the input-provider and sink functions that accept it.
 struct TypedTransformBinding<T> {
-    settings: T,
+    state: T,
     input_provider: Option<InputProviderFn<T>>,
     sink: Option<SinkBinderFn<T>>,
 }
@@ -200,7 +201,7 @@ where
         };
 
         Box::pin(async move {
-            input_provider(leaf, session, &self.settings)
+            input_provider(leaf, session, &self.state)
                 .await
                 .map_err(|source| FormatOperationError::Failed {
                     format,
@@ -225,7 +226,7 @@ where
         };
 
         Box::pin(async move {
-            sink(context, &self.settings)
+            sink(context, &self.state)
                 .await
                 .map_err(|source| FormatOperationError::Failed {
                     format,

@@ -94,7 +94,7 @@ pub(crate) fn simple_batch() -> RecordBatch {
 
 pub(crate) async fn vortex_bytes(batches: Vec<RecordBatch>) -> Bytes {
     Bytes::from(
-        silk_chiffon_test_support::vortex::write_batches(&simple_schema(), batches)
+        silk_chiffon_test_support::vortex::encode_batches(&simple_schema(), batches)
             .await
             .unwrap(),
     )

@@ -107,7 +107,7 @@ impl Sink {
         })
     }
 
-    fn stop_writer_input(&mut self) {
+    fn cancel_writer(&mut self) {
         // Closing the channel looks like successful EOF, so publish cancellation first.
         if let Some(task) = &self.task {
             task.cancellation().cancel();
@@ -225,7 +225,7 @@ impl DataSink for Sink {
     }
 
     async fn abort(mut self: Box<Self>) -> Result<()> {
-        self.stop_writer_input();
+        self.cancel_writer();
         match self.task.take() {
             Some(task) => task.abort().await,
             None => Ok(()),
@@ -235,7 +235,7 @@ impl DataSink for Sink {
 
 impl Drop for Sink {
     fn drop(&mut self) {
-        self.stop_writer_input();
+        self.cancel_writer();
     }
 }
 

@@ -312,7 +312,7 @@ mod tests {
         assert_eq!(output["variant"], "file");
         assert_eq!(output["rows"], 3);
         assert_eq!(output["file"], object.handle().url().as_str());
-        assert_eq!(store().head_requests(), 0);
+        assert_eq!(store().head_request_count(), 0);
         let ranges = store().ranges();
         assert!(!ranges.is_empty());
         assert!(
@@ -389,7 +389,7 @@ mod tests {
         let _ = inspector.to_json();
 
         assert!(store().ranges().is_empty());
-        assert_eq!(store().head_requests(), 0);
+        assert_eq!(store().head_request_count(), 0);
     }
 
     #[tokio::test]

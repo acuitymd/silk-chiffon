@@ -32,7 +32,7 @@ pub type FormatFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + '
 /// The registry supplies the canonical format name, so detector functions do not repeat it.
 pub type InputDetectorFn = for<'a> fn(&'a InputObject) -> FormatFuture<'a, InputDetection>;
 
-/// Creates one provider from a host-validated input leaf and typed settings.
+/// Creates one provider from a host-validated input leaf and typed transform state.
 ///
 /// The leaf already owns the exact file descriptors, scoped store, deterministic
 /// representative, and format variant. Formats do not rediscover those choices
@@ -43,7 +43,7 @@ pub type InputProviderFn<T> = for<'a> fn(
     &'a T,
 ) -> FormatFuture<'a, Arc<dyn TableProvider>>;
 
-/// Creates command-scoped sink state from typed transform settings.
+/// Creates command-scoped sink state from typed transform state.
 ///
 /// The returned [`SinkBinding`] can retain resources shared by every output sink opened during the
 /// command.
@@ -294,17 +294,18 @@ pub enum FormatOperationError {
     },
 }
 
-/// A format's transform CLI settings and optional input and output capabilities.
+/// A format's transform-state parser and optional input and output capabilities.
 ///
-/// Input-provider creation and sink binding share the same parsed argument type so a format can
-/// expose one coherent transform configuration. Either capability may be omitted.
+/// Input-provider creation and sink binding share one value constructed from the format's Clap
+/// arguments. That value may also retain format-owned resources for the command. Either capability
+/// may be omitted.
 #[derive(Clone)]
 pub struct TransformDefinition {
     pub(super) definition: Arc<dyn binding::ErasedTransformDefinition>,
 }
 
 impl TransformDefinition {
-    /// Starts a transform definition whose functions receive parsed `T` settings.
+    /// Starts a transform definition whose functions receive command state `T`.
     pub fn with_args<T>() -> TransformDefinitionBuilder<T>
     where
         T: Args + FromArgMatches + Send + Sync + 'static,
@@ -313,7 +314,7 @@ impl TransformDefinition {
             args: binding::ArgsParser::for_args(),
             input_provider: None,
             sink: None,
-            settings: PhantomData,
+            state: PhantomData,
         }
     }
 
@@ -323,12 +324,12 @@ impl TransformDefinition {
             args: binding::ArgsParser::unit(),
             input_provider: None,
             sink: None,
-            settings: PhantomData,
+            state: PhantomData,
         }
     }
 }
 
-/// Builds transform capabilities that share one concrete argument type.
+/// Builds transform capabilities that share one concrete command-state type.
 ///
 /// Calling [`Self::build`] preserves whichever capabilities were supplied; transform definitions
 /// may be input-only, sink-only, both, or neither.
@@ -336,7 +337,7 @@ pub struct TransformDefinitionBuilder<T> {
     args: binding::ArgsParser<T>,
     input_provider: Option<InputProviderFn<T>>,
     sink: Option<SinkBinderFn<T>>,
-    settings: PhantomData<fn() -> T>,
+    state: PhantomData<fn() -> T>,
 }
 
 impl<T> TransformDefinitionBuilder<T>
@@ -355,7 +356,7 @@ where
         self
     }
 
-    /// Completes the transform definition and erases its settings type as one typed unit.
+    /// Completes the transform definition and erases its state type as one typed unit.
     pub fn build(self) -> TransformDefinition {
         TransformDefinition {
             definition: Arc::new(binding::TypedTransformDefinition::new(
@@ -401,7 +402,7 @@ impl InspectionDefinition {
 /// Immutable metadata and independently optional capabilities for one data format.
 ///
 /// A format crate constructs this value and a host adds it to a [`super::FormatRegistry`]. The
-/// definition exists before any command is parsed and contains no invocation-specific settings.
+/// definition exists before any command is parsed and contains no invocation-specific state.
 #[derive(Clone)]
 pub struct FormatDefinition {
     pub(super) name: &'static str,
@@ -588,7 +589,7 @@ impl FormatDefinitionBuilder {
         self
     }
 
-    /// Adds transform CLI settings and input-provider or sink capabilities.
+    /// Adds a transform-state parser and input-provider or sink capabilities.
     pub fn transform(mut self, transform: TransformDefinition) -> Self {
         self.definition.transform = Some(transform);
         self
@@ -637,7 +638,7 @@ impl TransformBinding {
         self.binding.has_sink()
     }
 
-    /// Runs this binding's detector and retains the already-bound transform settings.
+    /// Runs this binding's detector and retains the already-bound transform state.
     pub async fn detect(
         &self,
         object: &InputObject,
@@ -663,7 +664,7 @@ impl TransformBinding {
         }
     }
 
-    /// Creates one homogeneous input provider using this binding's parsed settings.
+    /// Creates one homogeneous input provider using this binding's command state.
     pub async fn create_input_provider(
         &self,
         leaf: &crate::InputLeaf,
@@ -674,7 +675,7 @@ impl TransformBinding {
             .await
     }
 
-    /// Creates command-scoped sink state using this binding's parsed settings.
+    /// Creates command-scoped sink state using this binding's transform state.
     pub async fn bind_sink(
         &self,
         context: &SinkBindingConfig,
@@ -686,7 +687,7 @@ impl TransformBinding {
 /// Transform bindings and lookup indexes for one command invocation.
 ///
 /// A [`super::FormatRegistry`] creates this collection after the host has parsed its composed Clap
-/// command. Every entry retains its own concrete settings internally.
+/// command. Every entry retains its own concrete state internally.
 pub struct TransformBindings {
     pub(super) bindings: Vec<TransformBinding>,
     pub(super) names: HashMap<String, usize>,
@@ -695,7 +696,7 @@ pub struct TransformBindings {
 }
 
 impl TransformBindings {
-    /// Iterates over formats that contributed transform settings or capabilities.
+    /// Iterates over formats that contributed transform state or capabilities.
     pub fn formats(&self) -> impl Iterator<Item = &TransformBinding> {
         self.bindings.iter()
     }

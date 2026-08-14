@@ -6,13 +6,13 @@
 //! detection order without depending on concrete formats.
 //!
 //! Format crates may contribute ordinary [`clap::Args`] types to transform and inspection
-//! commands. The private binding layer keeps each parsed argument type paired with the functions
-//! that accept it. This lets one registry hold formats with unrelated settings types while each
-//! format retains a strongly typed contract. Callers never store settings as [`std::any::Any`] or
-//! downcast them.
+//! commands. The private binding layer keeps each parsed command value paired with the functions
+//! that accept it. This lets one registry hold formats with unrelated state types while each
+//! format retains a strongly typed contract. Callers never store command values as
+//! [`std::any::Any`] or downcast them.
 //!
-//! Binding happens once per command invocation. A [`TransformBinding`] couples one format's parsed
-//! transform settings to its input-provider and sink functions. A [`SinkBinding`] may then retain
+//! Binding happens once per command invocation. A [`TransformBinding`] couples one format's
+//! transform state to its input-provider and sink functions. A [`SinkBinding`] may then retain
 //! shared resources while opening multiple output sinks.
 
 mod binding;

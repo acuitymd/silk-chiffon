@@ -1566,12 +1566,12 @@ async fn empty_vortex_files_still_participate_in_leaf_schema_validation() {
         DataType::Int32,
         false,
     )]));
-    let bytes = silk_chiffon_test_support::vortex::write_batches(&mismatched_schema, Vec::new())
+    let bytes = silk_chiffon_test_support::vortex::encode_batches(&mismatched_schema, Vec::new())
         .await
         .unwrap();
     std::fs::write(&mismatched, bytes).unwrap();
     let representative_batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
-    let bytes = silk_chiffon_test_support::vortex::write_batches(
+    let bytes = silk_chiffon_test_support::vortex::encode_batches(
         &representative_batch.schema(),
         vec![representative_batch],
     )

@@ -294,7 +294,8 @@ struct CliSchema {
     command: CommandSchema,
 }
 
-/// A parsed command whose registered format, storage, and service settings are bound.
+/// A parsed command with its format, storage, and service configuration prepared
+/// for this invocation.
 pub struct Cli {
     pub command: Command,
 }

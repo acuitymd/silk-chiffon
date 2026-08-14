@@ -192,7 +192,7 @@ mod tests {
     #[tokio::test]
     async fn test_vortex_fixture_uses_the_upstream_writer() {
         let batch = TestBatch::simple();
-        let bytes = vortex::write_batches(&batch.schema(), vec![batch])
+        let bytes = vortex::encode_batches(&batch.schema(), vec![batch])
             .await
             .unwrap();
 

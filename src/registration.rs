@@ -868,7 +868,7 @@ mod tests {
     }
 
     async fn vortex_bytes(batch: RecordBatch) -> Vec<u8> {
-        silk_chiffon_test_support::vortex::write_batches(&batch.schema(), vec![batch])
+        silk_chiffon_test_support::vortex::encode_batches(&batch.schema(), vec![batch])
             .await
             .unwrap()
     }

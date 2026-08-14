@@ -142,7 +142,7 @@ impl Sink {
         Ok(())
     }
 
-    fn stop_writer_input(&mut self) {
+    fn cancel_writer(&mut self) {
         // Closing the channel is valid end-of-file to the codec, so cancellation
         // must become observable first when the sink did not finish normally.
         if let Some(task) = &self.task {
@@ -151,18 +151,18 @@ impl Sink {
         self.sender.take();
     }
 
-    async fn abort_unfinished(&mut self) -> Vec<Error> {
-        self.stop_writer_input();
+    async fn abort_unfinished(&mut self) -> Result<()> {
+        self.cancel_writer();
         match self.task.take() {
-            Some(task) => task.abort().await.err().into_iter().collect(),
-            None => Vec::new(),
+            Some(task) => task.abort().await,
+            None => Ok(()),
         }
     }
 }
 
 impl Drop for Sink {
     fn drop(&mut self) {
-        self.stop_writer_input();
+        self.cancel_writer();
     }
 }
 
@@ -250,10 +250,10 @@ impl DataSink for Sink {
         let rows_written = match result {
             Ok(rows_written) => rows_written,
             Err(primary) => {
-                let cleanup = self.abort_unfinished().await;
-                return Err(cleanup.into_iter().fold(primary, |primary, cleanup| {
-                    with_cleanup_error(primary, cleanup)
-                }));
+                return match self.abort_unfinished().await {
+                    Ok(()) => Err(primary),
+                    Err(cleanup) => Err(with_cleanup_error(primary, cleanup)),
+                };
             }
         };
 
@@ -267,11 +267,7 @@ impl DataSink for Sink {
     }
 
     async fn abort(mut self: Box<Self>) -> Result<()> {
-        let mut errors = self.abort_unfinished().await.into_iter();
-        match errors.next() {
-            Some(primary) => Err(errors.fold(primary, with_cleanup_error)),
-            None => Ok(()),
-        }
+        self.abort_unfinished().await
     }
 }
 

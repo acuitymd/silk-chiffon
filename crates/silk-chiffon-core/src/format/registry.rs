@@ -57,7 +57,7 @@ impl FormatRegistryBuilder {
 
 /// A validated and indexed collection of immutable format definitions.
 ///
-/// The registry exists at application-definition time. It owns no parsed command settings.
+/// The registry exists at application-definition time. It owns no invocation-specific state.
 /// Hosts use it to compose Clap commands, detect inputs, find definitions, and create
 /// command-scoped [`TransformBindings`].
 pub struct FormatRegistry {

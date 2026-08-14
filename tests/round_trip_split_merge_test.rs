@@ -27,7 +27,7 @@ use tempfile::TempDir;
 const NUM_ROWS: usize = 10_000_000;
 const BATCH_SIZE: usize = 500_000;
 
-async fn registered_arrow_sink(path: &Path, schema: &SchemaRef) -> Box<dyn DataSink> {
+async fn open_registered_arrow_sink(path: &Path, schema: &SchemaRef) -> Box<dyn DataSink> {
     let registry = FormatRegistry::builder()
         .register(silk_chiffon_format_arrow::definition())
         .build()
@@ -53,7 +53,7 @@ async fn registered_arrow_sink(path: &Path, schema: &SchemaRef) -> Box<dyn DataS
         .unwrap()
 }
 
-async fn registered_parquet_sink(path: &Path, schema: &SchemaRef) -> Box<dyn DataSink> {
+async fn open_registered_parquet_sink(path: &Path, schema: &SchemaRef) -> Box<dyn DataSink> {
     let registry = FormatRegistry::builder()
         .register(silk_chiffon_format_parquet::definition())
         .build()
@@ -79,7 +79,7 @@ async fn registered_parquet_sink(path: &Path, schema: &SchemaRef) -> Box<dyn Dat
         .unwrap()
 }
 
-async fn registered_vortex_sink(path: &Path, schema: &SchemaRef) -> Box<dyn DataSink> {
+async fn open_registered_vortex_sink(path: &Path, schema: &SchemaRef) -> Box<dyn DataSink> {
     let registry = FormatRegistry::builder()
         .register(silk_chiffon_format_vortex::definition())
         .build()
@@ -276,9 +276,9 @@ async fn write_test_data(path: &Path, schema: &SchemaRef, ext: &str) {
     // SmallRng is like 5x faster(!!) than the default RNG (ChaChaRng)
     let mut rng = SmallRng::from_rng(&mut rand::rng());
     let mut sink: Box<dyn DataSink> = match ext {
-        "arrow" => registered_arrow_sink(path, schema).await,
-        "parquet" => registered_parquet_sink(path, schema).await,
-        "vortex" => registered_vortex_sink(path, schema).await,
+        "arrow" => open_registered_arrow_sink(path, schema).await,
+        "parquet" => open_registered_parquet_sink(path, schema).await,
+        "vortex" => open_registered_vortex_sink(path, schema).await,
         _ => panic!("unsupported format: {ext}"),
     };
     let num_batches = NUM_ROWS.div_ceil(BATCH_SIZE);
