@@ -318,6 +318,58 @@ fn test_partition_to_parquet() {
 }
 
 #[test]
+fn test_nosort_multi_partition_to_vortex_round_trips_every_output() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let output_template = temp_dir.path().join("{{name}}.vortex");
+    let batch = TestBatch::simple_with(
+        &[1, 2, 3, 4, 5, 6],
+        &["alpha", "beta", "alpha", "beta", "gamma", "alpha"],
+    );
+    TestFile::write_arrow_batch(&input, &batch);
+
+    cargo::cargo_bin_cmd!("silk-chiffon")
+        .args([
+            "transform",
+            "--from",
+            input.to_str().unwrap(),
+            "--to-many",
+            output_template.to_str().unwrap(),
+            "--by",
+            "name",
+            "--partition-strategy",
+            "nosort-multi",
+            "--vortex-record-batch-size",
+            "2",
+        ])
+        .assert()
+        .success();
+
+    for (name, expected_ids) in [
+        ("alpha", vec![1, 3, 6]),
+        ("beta", vec![2, 4]),
+        ("gamma", vec![5]),
+    ] {
+        let vortex = temp_dir.path().join(format!("{name}.vortex"));
+        let arrow = temp_dir.path().join(format!("{name}.arrow"));
+        cargo::cargo_bin_cmd!("silk-chiffon")
+            .args([
+                "transform",
+                "--from",
+                vortex.to_str().unwrap(),
+                "--to",
+                arrow.to_str().unwrap(),
+            ])
+            .assert()
+            .success();
+        assert_eq!(
+            TestExtract::i32_all(&TestFile::read_arrow(&arrow), "id"),
+            expected_ids
+        );
+    }
+}
+
+#[test]
 fn test_merge_and_partition() {
     let temp_dir = TempDir::new().unwrap();
     let input1 = temp_dir.path().join("input1.arrow");

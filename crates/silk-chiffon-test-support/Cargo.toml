@@ -21,6 +21,7 @@ parquet = { version = "^58.4.0", features = ["default", "async", "json", "arrow_
 silk-chiffon-storage = { path = "../silk-chiffon-storage", default-features = false, features = ["local"] }
 tokio = { version = "^1.53.1", features = ["rt", "sync"] }
 url.workspace = true
+vortex = { version = "^0.83.0", features = ["files", "tokio"] }
 
 [dev-dependencies]
 bytes = "^1.12.1"

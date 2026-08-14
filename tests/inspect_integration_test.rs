@@ -6,10 +6,20 @@ use arrow::array::{Int32Array, RecordBatch, StringArray};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use assert_cmd::cargo::cargo_bin_cmd;
 use predicates::prelude::*;
-use silk_chiffon_test_support::{TestBatch, TestFile, prepared_local_output};
+use silk_chiffon_test_support::{TestBatch, TestFile};
 use std::fs::File;
 use std::sync::Arc;
 use tempfile::TempDir;
+
+fn write_vortex_file(path: &std::path::Path, schema: &SchemaRef, batches: Vec<RecordBatch>) {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let bytes = runtime
+        .block_on(silk_chiffon_test_support::vortex::write_batches(
+            schema, batches,
+        ))
+        .unwrap();
+    std::fs::write(path, bytes).unwrap();
+}
 
 // =============================================================================
 // Parquet inspection tests
@@ -275,24 +285,6 @@ fn test_inspect_arrow_stream_json() {
 
 mod vortex_tests {
     use super::*;
-    use silk_chiffon::sinks::data_sink::DataSink;
-    use silk_chiffon::sinks::vortex::{VortexSink, VortexSinkOptions};
-
-    fn write_vortex_file(path: &std::path::Path, schema: &SchemaRef, batches: Vec<RecordBatch>) {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let mut sink = VortexSink::create(
-                prepared_local_output(path),
-                schema,
-                VortexSinkOptions::new(),
-            )
-            .unwrap();
-            for batch in batches {
-                sink.write_batch(batch).await.unwrap();
-            }
-            Box::new(sink).finish().await.unwrap();
-        });
-    }
 
     // =========================================================================
     // Vortex file tests
@@ -430,20 +422,7 @@ fn test_detect_vortex_file() {
     let schema = TestBatch::simple_schema();
     let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
 
-    use silk_chiffon::sinks::data_sink::DataSink;
-    use silk_chiffon::sinks::vortex::{VortexSink, VortexSinkOptions};
-
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(async {
-        let mut sink = VortexSink::create(
-            prepared_local_output(&file),
-            &schema,
-            VortexSinkOptions::new(),
-        )
-        .unwrap();
-        sink.write_batch(batch).await.unwrap();
-        Box::new(sink).finish().await.unwrap();
-    });
+    write_vortex_file(&file, &schema, vec![batch]);
 
     let mut cmd = cargo_bin_cmd!("silk-chiffon");
     cmd.args(["detect", file.to_str().unwrap(), "--format", "text"])
@@ -683,26 +662,13 @@ mod parity_tests {
 
     #[test]
     fn test_vortex_parity() {
-        use silk_chiffon::sinks::data_sink::DataSink;
-        use silk_chiffon::sinks::vortex::{VortexSink, VortexSinkOptions};
-
         let temp_dir = TempDir::new().unwrap();
         let file = temp_dir.path().join("test.vortex");
 
         let schema = TestBatch::simple_schema();
         let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
 
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let mut sink = VortexSink::create(
-                prepared_local_output(&file),
-                &schema,
-                VortexSinkOptions::new(),
-            )
-            .unwrap();
-            sink.write_batch(batch).await.unwrap();
-            Box::new(sink).finish().await.unwrap();
-        });
+        write_vortex_file(&file, &schema, vec![batch]);
 
         let json = get_json_output(&[
             "inspect",
@@ -956,26 +922,13 @@ mod parity_tests {
 
     #[test]
     fn test_vortex_stats_parity() {
-        use silk_chiffon::sinks::data_sink::DataSink;
-        use silk_chiffon::sinks::vortex::{VortexSink, VortexSinkOptions};
-
         let temp_dir = TempDir::new().unwrap();
         let file = temp_dir.path().join("test.vortex");
 
         let schema = TestBatch::simple_schema();
         let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
 
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let mut sink = VortexSink::create(
-                prepared_local_output(&file),
-                &schema,
-                VortexSinkOptions::new(),
-            )
-            .unwrap();
-            sink.write_batch(batch).await.unwrap();
-            Box::new(sink).finish().await.unwrap();
-        });
+        write_vortex_file(&file, &schema, vec![batch]);
 
         let json = get_json_output(&[
             "inspect",
@@ -997,26 +950,13 @@ mod parity_tests {
 
     #[test]
     fn test_vortex_layout_parity() {
-        use silk_chiffon::sinks::data_sink::DataSink;
-        use silk_chiffon::sinks::vortex::{VortexSink, VortexSinkOptions};
-
         let temp_dir = TempDir::new().unwrap();
         let file = temp_dir.path().join("test.vortex");
 
         let schema = TestBatch::simple_schema();
         let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
 
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let mut sink = VortexSink::create(
-                prepared_local_output(&file),
-                &schema,
-                VortexSinkOptions::new(),
-            )
-            .unwrap();
-            sink.write_batch(batch).await.unwrap();
-            Box::new(sink).finish().await.unwrap();
-        });
+        write_vortex_file(&file, &schema, vec![batch]);
 
         let json = get_json_output(&[
             "inspect",
@@ -1100,26 +1040,13 @@ mod parity_tests {
 
     #[test]
     fn test_vortex_all_flags_combined() {
-        use silk_chiffon::sinks::data_sink::DataSink;
-        use silk_chiffon::sinks::vortex::{VortexSink, VortexSinkOptions};
-
         let temp_dir = TempDir::new().unwrap();
         let file = temp_dir.path().join("test.vortex");
 
         let schema = TestBatch::simple_schema();
         let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
 
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let mut sink = VortexSink::create(
-                prepared_local_output(&file),
-                &schema,
-                VortexSinkOptions::new(),
-            )
-            .unwrap();
-            sink.write_batch(batch).await.unwrap();
-            Box::new(sink).finish().await.unwrap();
-        });
+        write_vortex_file(&file, &schema, vec![batch]);
 
         let json = get_json_output(&[
             "inspect",
