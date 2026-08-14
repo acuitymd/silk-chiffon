@@ -5,6 +5,7 @@ use arrow::{array::RecordBatch, compute::BatchCoalescer, datatypes::SchemaRef};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{Sink, SinkExt, stream};
+use silk_chiffon_core::validate_batch_schema;
 use silk_chiffon_storage::{ObjectUpload, ObjectUploadTask, StorageHandle};
 use tokio::sync::mpsc;
 use vortex::{
@@ -81,6 +82,7 @@ impl VortexSinkInner {
 }
 
 pub struct VortexSink {
+    schema: SchemaRef,
     inner: VortexSinkInner,
     task: Option<ObjectUploadTask<()>>,
 }
@@ -95,6 +97,7 @@ impl VortexSink {
         let (sender, receiver) = mpsc::channel(16);
         let mut upload = ObjectUpload::new(handle);
         let writer = VortexUploadAdapter::new(upload.writer()?, upload.part_size().get());
+        let sink_schema = Arc::clone(schema);
         let schema = Arc::clone(schema);
         let task = ObjectUploadTask::spawn("Vortex writer", upload, move |cancellation| {
             tokio::spawn(async move {
@@ -106,6 +109,7 @@ impl VortexSink {
         });
 
         Ok(Self {
+            schema: sink_schema,
             inner: VortexSinkInner {
                 rows_written: 0,
                 coalescer,
@@ -206,6 +210,7 @@ where
 #[async_trait]
 impl DataSink for VortexSink {
     async fn write_batch(&mut self, batch: RecordBatch) -> Result<()> {
+        validate_batch_schema(&self.schema, batch.schema_ref())?;
         self.inner.coalescer.push_batch(batch)?;
         self.inner.flush_completed_batches().await
     }

@@ -2,6 +2,7 @@ mod data_operation;
 mod data_sink;
 mod file_table_provider;
 mod format;
+mod input_leaf_provider;
 mod input_store;
 mod inspection;
 mod pipeline;
@@ -26,7 +27,7 @@ pub use pipeline::{
     InputSources, Pipeline, PipelineExecution, PipelineExecutionStartError,
     PipelinePreparationError, PreparedPipeline, QueryDialect, SpillCompression,
 };
-pub use schema::schemas_match_ignoring_metadata;
+pub use schema::{schemas_match_ignoring_metadata, validate_batch_schema};
 pub use service_input::{
     ServiceInputBinding, ServiceInputDefinition, ServiceInputDefinitionBuildError,
     ServiceInputDefinitionBuilder, ServiceInputProviderError, ServiceInputProviderFn,

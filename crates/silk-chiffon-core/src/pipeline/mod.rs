@@ -332,48 +332,6 @@ impl RecordBatchStream for PipelineExecution {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use arrow::datatypes::Schema;
-    use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
-
-    use super::*;
-
-    #[test]
-    fn new_and_default_sessions_use_the_same_memory_diagnostics() {
-        fn memory_pool_description(mut pipeline: Pipeline) -> String {
-            let session = pipeline.create_session_context().unwrap();
-            session.runtime_env().memory_pool.to_string()
-        }
-
-        let from_new = memory_pool_description(Pipeline::new());
-        let from_default = memory_pool_description(Pipeline::default());
-
-        assert_eq!(from_new, from_default);
-        assert!(from_default.contains("num_of_top_consumers: 10"));
-    }
-
-    #[test]
-    fn boxed_execution_retains_and_releases_its_spill_directory() {
-        let spill_path = tempfile::tempdir().unwrap();
-        let directory = spill_path.path().to_path_buf();
-        let inner = Box::pin(RecordBatchStreamAdapter::new(
-            Arc::new(Schema::empty()),
-            futures::stream::empty(),
-        ));
-        let execution = PipelineExecution {
-            inner,
-            _session: SessionContext::new(),
-            _spill_path: Some(spill_path),
-        };
-
-        let stream = execution.into_sendable_stream();
-        assert!(directory.exists());
-        drop(stream);
-        assert!(!directory.exists());
-    }
-}
-
 impl fmt::Debug for PipelineExecution {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -424,4 +382,46 @@ fn parse_cgroup_v1_limit(content: &str) -> Option<u64> {
         .parse()
         .ok()
         .filter(|limit| *limit < ONE_PETABYTE)
+}
+
+#[cfg(test)]
+mod tests {
+    use arrow::datatypes::Schema;
+    use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+
+    use super::*;
+
+    #[test]
+    fn new_and_default_sessions_use_the_same_memory_diagnostics() {
+        fn memory_pool_description(mut pipeline: Pipeline) -> String {
+            let session = pipeline.create_session_context().unwrap();
+            session.runtime_env().memory_pool.to_string()
+        }
+
+        let from_new = memory_pool_description(Pipeline::new());
+        let from_default = memory_pool_description(Pipeline::default());
+
+        assert_eq!(from_new, from_default);
+        assert!(from_default.contains("num_of_top_consumers: 10"));
+    }
+
+    #[test]
+    fn boxed_execution_retains_and_releases_its_spill_directory() {
+        let spill_path = tempfile::tempdir().unwrap();
+        let directory = spill_path.path().to_path_buf();
+        let inner = Box::pin(RecordBatchStreamAdapter::new(
+            Arc::new(Schema::empty()),
+            futures::stream::empty(),
+        ));
+        let execution = PipelineExecution {
+            inner,
+            _session: SessionContext::new(),
+            _spill_path: Some(spill_path),
+        };
+
+        let stream = execution.into_sendable_stream();
+        assert!(directory.exists());
+        drop(stream);
+        assert!(!directory.exists());
+    }
 }

@@ -1,5 +1,3 @@
-mod render;
-
 use std::{collections::HashMap, io::Write, sync::Arc};
 
 use anyhow::{Context, Result, bail};
@@ -11,6 +9,10 @@ use arrow::{
 use datafusion::execution::memory_pool::GreedyMemoryPool;
 use serde_json::{Value, json};
 use silk_chiffon_core::{FormatFuture, InputDetection, InspectionMode, InspectionOutput};
+use silk_chiffon_inspection_output::{
+    apply_theme, dim, display_location, format_bytes, format_number, header, render_schema_fields,
+    schema_json, truncate_chars,
+};
 use silk_chiffon_storage::InputObject;
 use tabled::{
     Table, Tabled,
@@ -25,10 +27,6 @@ use crate::{
         read_stream_message,
     },
     variant::IpcVariant,
-};
-use render::{
-    apply_theme, dim, format_bytes, format_number, header, render_schema_fields, schema_json,
-    truncate_chars,
 };
 
 #[derive(Debug)]
@@ -303,18 +301,6 @@ fn ensure_block_is_bounded(block: &arrow::ipc::Block) -> Result<()> {
     Ok(())
 }
 
-fn display_location(object: &InputObject) -> Result<String> {
-    if object.handle().url().scheme() == "file" {
-        return object
-            .handle()
-            .local_path()?
-            .into_os_string()
-            .into_string()
-            .map_err(|path| anyhow::anyhow!("Local path is not valid UTF-8: {path:?}"));
-    }
-    Ok(object.handle().url().to_string())
-}
-
 pub(crate) fn inspect<'a>(
     object: &'a InputObject,
     mode: InspectionMode,
@@ -339,140 +325,29 @@ pub(crate) fn inspect<'a>(
 #[cfg(test)]
 mod tests {
     use std::{
-        fmt,
-        io::{self, Cursor},
-        sync::{
-            Arc, Mutex, OnceLock,
-            atomic::{AtomicBool, Ordering},
-        },
+        io::Cursor,
+        sync::{Arc, OnceLock},
     };
 
     use arrow::ipc::writer::{FileWriter, StreamWriter};
-    use async_trait::async_trait;
     use bytes::Bytes;
     use clap::Command;
-    use futures::stream::BoxStream;
     use object_store::{
-        CopyOptions, GetOptions, GetRange, GetResult, ListResult, MultipartUpload, ObjectMeta,
-        ObjectStore, ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload, PutResult,
-        memory::InMemory, path::Path as ObjectPath,
+        GetRange, ObjectMeta, ObjectStore, ObjectStoreExt, memory::InMemory,
+        path::Path as ObjectPath,
     };
     use silk_chiffon_storage::{
         LocationInput, StorageAccess, StorageBackend, StorageRegistry, StorageSession,
     };
-    use silk_chiffon_test_support::TestBatch;
+    use silk_chiffon_test_support::{ReadProbeStore, TestBatch};
 
     use super::*;
 
-    static STORE: OnceLock<Arc<InspectionStore>> = OnceLock::new();
+    static STORE: OnceLock<Arc<ReadProbeStore>> = OnceLock::new();
     static TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
-    #[derive(Debug)]
-    struct InspectionStore {
-        inner: InMemory,
-        ranges: Mutex<Vec<GetRange>>,
-        fail_reads: AtomicBool,
-    }
-
-    impl InspectionStore {
-        fn new() -> Self {
-            Self {
-                inner: InMemory::new(),
-                ranges: Mutex::new(Vec::new()),
-                fail_reads: AtomicBool::new(false),
-            }
-        }
-
-        fn reset_observation(&self) {
-            self.ranges.lock().unwrap().clear();
-            self.fail_reads.store(false, Ordering::SeqCst);
-        }
-    }
-
-    impl fmt::Display for InspectionStore {
-        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            formatter.write_str("InspectionStore")
-        }
-    }
-
-    #[async_trait]
-    impl ObjectStore for InspectionStore {
-        async fn put_opts(
-            &self,
-            location: &ObjectPath,
-            payload: PutPayload,
-            options: PutOptions,
-        ) -> object_store::Result<PutResult> {
-            self.inner.put_opts(location, payload, options).await
-        }
-
-        async fn put_multipart_opts(
-            &self,
-            location: &ObjectPath,
-            options: PutMultipartOptions,
-        ) -> object_store::Result<Box<dyn MultipartUpload>> {
-            self.inner.put_multipart_opts(location, options).await
-        }
-
-        async fn get_opts(
-            &self,
-            location: &ObjectPath,
-            options: GetOptions,
-        ) -> object_store::Result<GetResult> {
-            if !options.head {
-                if self.fail_reads.load(Ordering::SeqCst) {
-                    return Err(inspection_store_error(
-                        "controlled object-store read failure",
-                    ));
-                }
-                let range = options.range.clone().ok_or_else(|| {
-                    inspection_store_error("inspection attempted an unbounded object read")
-                })?;
-                self.ranges.lock().unwrap().push(range);
-            }
-            self.inner.get_opts(location, options).await
-        }
-
-        fn delete_stream(
-            &self,
-            locations: BoxStream<'static, object_store::Result<ObjectPath>>,
-        ) -> BoxStream<'static, object_store::Result<ObjectPath>> {
-            self.inner.delete_stream(locations)
-        }
-
-        fn list(
-            &self,
-            prefix: Option<&ObjectPath>,
-        ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
-            self.inner.list(prefix)
-        }
-
-        async fn list_with_delimiter(
-            &self,
-            prefix: Option<&ObjectPath>,
-        ) -> object_store::Result<ListResult> {
-            self.inner.list_with_delimiter(prefix).await
-        }
-
-        async fn copy_opts(
-            &self,
-            from: &ObjectPath,
-            to: &ObjectPath,
-            options: CopyOptions,
-        ) -> object_store::Result<()> {
-            self.inner.copy_opts(from, to, options).await
-        }
-    }
-
-    fn inspection_store_error(message: &'static str) -> object_store::Error {
-        object_store::Error::Generic {
-            store: "inspection-test",
-            source: Box::new(io::Error::other(message)),
-        }
-    }
-
-    fn store() -> Arc<InspectionStore> {
-        Arc::clone(STORE.get_or_init(|| Arc::new(InspectionStore::new())))
+    fn store() -> Arc<ReadProbeStore> {
+        Arc::clone(STORE.get_or_init(|| Arc::new(ReadProbeStore::new())))
     }
 
     async fn test_guard() -> tokio::sync::MutexGuard<'static, ()> {
@@ -585,7 +460,7 @@ mod tests {
 
             store.reset_observation();
             Inspector::open(&object, false).await.unwrap();
-            let summary_ranges = store.ranges.lock().unwrap().clone();
+            let summary_ranges = store.ranges();
             let summary_reads = summary_ranges.len();
             assert!(summary_reads > 0);
             assert!(
@@ -596,7 +471,7 @@ mod tests {
 
             store.reset_observation();
             Inspector::open(&object, true).await.unwrap();
-            let counted_reads = store.ranges.lock().unwrap().len();
+            let counted_reads = store.ranges().len();
             assert!(
                 counted_reads > summary_reads,
                 "{variant:?} summary used {summary_reads} reads and counting used {counted_reads}"
@@ -610,7 +485,7 @@ mod tests {
         let store = store();
         store.reset_observation();
         let object = remote_object(IpcVariant::File).await;
-        store.fail_reads.store(true, Ordering::SeqCst);
+        store.set_fail_reads(true);
 
         let error = match Inspector::open(&object, false).await {
             Ok(_) => panic!("inspection should surface the object-store failure"),

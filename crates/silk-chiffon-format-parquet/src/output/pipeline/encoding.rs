@@ -1,4 +1,4 @@
-//! Encoding decision logic for adaptive Parquet writing.
+//! Encoding decisions for Parquet output.
 //!
 //! Contains functions to determine dictionary and bloom filter settings per column
 //! based on cardinality analysis and data type eligibility.
@@ -10,12 +10,10 @@ use arrow::datatypes::{DataType, SchemaRef};
 use parquet::file::properties::{WriterProperties, WriterPropertiesBuilder, WriterPropertiesPtr};
 use parquet::schema::types::ColumnPath;
 
-use crate::utils::memory::estimate_fixed_type_bytes;
-
 use super::analysis::ColumnAnalysis;
 use super::config::{
-    AdaptiveWriterConfig, ResolvedBloomFilterMode, ResolvedColumnConfigs, ResolvedDictionaryMode,
-    enumerate_leaf_columns,
+    ColumnPolicies, PipelineConfig, ResolvedBloomFilterMode, ResolvedDictionaryMode,
+    enumerate_leaf_columns, estimate_fixed_type_bytes,
 };
 
 /// Cardinality threshold for dictionary encoding: if distinct values exceed
@@ -27,8 +25,8 @@ pub(crate) const DICTIONARY_CARDINALITY_THRESHOLD_DIVISOR: usize = 5;
 pub fn build_row_group_properties(
     schema: &SchemaRef,
     base_props: &WriterPropertiesPtr,
-    config: &AdaptiveWriterConfig,
-    resolved: &ResolvedColumnConfigs,
+    config: &PipelineConfig,
+    resolved: &ColumnPolicies,
     analysis: &HashMap<String, ColumnAnalysis>,
     row_count: usize,
 ) -> Result<WriterProperties> {
@@ -77,8 +75,8 @@ fn configure_leaf_encoding(
     data_type: &DataType,
     analysis: &HashMap<String, ColumnAnalysis>,
     row_count: usize,
-    config: &AdaptiveWriterConfig,
-    resolved: &ResolvedColumnConfigs,
+    config: &PipelineConfig,
+    resolved: &ColumnPolicies,
     base_props: &WriterPropertiesPtr,
 ) -> Result<WriterPropertiesBuilder> {
     let resolved_cfg = resolved.get(leaf_path);
@@ -418,7 +416,7 @@ mod tests {
                 .build(),
         );
 
-        let config = AdaptiveWriterConfig {
+        let config = PipelineConfig {
             max_row_group_size: 100_000,
             max_row_group_concurrency: 4,
             buffer_size: 32 * 1024 * 1024,
@@ -435,7 +433,7 @@ mod tests {
             ndv_map: HashMap::new(),
         };
 
-        let resolved = ResolvedColumnConfigs::resolve(&schema, &config);
+        let resolved = ColumnPolicies::resolve(&schema, &config);
         let analysis = HashMap::new();
 
         let row_group_props =

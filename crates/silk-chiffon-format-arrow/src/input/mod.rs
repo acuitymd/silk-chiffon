@@ -1720,7 +1720,7 @@ mod tests {
             trailer: Bytes::from(trailer),
             ranges: StdMutex::new(Vec::new()),
         });
-        let object_store: Arc<dyn ObjectStore> = store.clone();
+        let object_store: Arc<dyn ObjectStore> = Arc::<TrailerOnlyStore>::clone(&store);
         let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(usize::MAX));
 
         let error =
@@ -1733,10 +1733,9 @@ mod tests {
             error.to_string().contains("512 MiB safety bound"),
             "{error}"
         );
-        assert_eq!(
-            *store.ranges.lock().unwrap(),
-            [object.size - 10..object.size]
-        );
+        let ranges = store.ranges.lock().unwrap();
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0], object.size - 10..object.size);
     }
 
     #[tokio::test]
