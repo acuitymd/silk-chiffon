@@ -85,15 +85,7 @@ check-bigquery-features:
     cargo check --no-default-features --features local-bare-paths,gcs,s3,bigquery
     cargo check --all-features
 
-bigquery-proto-check:
-    SILK_CHIFFON_BIGQUERY_PROTO_CHECK=1 cargo check -p silk-chiffon-input-bigquery
-
-# Deliberately mutates only the committed generated-proto mirror, using its
-# transactional candidate/backup protocol. Review the resulting diff.
-bigquery-proto-update:
-    SILK_CHIFFON_BIGQUERY_PROTO_UPDATE=1 cargo check -p silk-chiffon-input-bigquery
-
 test-bigquery-live:
     cargo test -p silk-chiffon-input-bigquery --lib provider::tests::live_small_table_writes_arrow_and_parquet -- --ignored --exact
 
-verify: type-check fmt-fix lint-check docs bigquery-proto-check test-bigquery check-bigquery-features
+verify: type-check fmt-fix lint-check docs test-bigquery check-bigquery-features

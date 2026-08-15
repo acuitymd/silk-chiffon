@@ -1,4 +1,4 @@
-#![cfg(all(feature = "bigquery", feature = "local-bare-paths"))]
+#![cfg(feature = "bigquery-integration-tests")]
 
 use std::{
     collections::HashMap,
@@ -24,49 +24,18 @@ use axum::{
     routing::{get, post},
 };
 use futures::{Stream, stream};
+use silk_chiffon_input_bigquery::integration_test_support::{
+    ArrowRecordBatch, ArrowSchema, CreateReadSessionRequest, ReadRowsRequest, ReadRowsResponse,
+    ReadSession, ReadStream, SplitReadStreamRequest, SplitReadStreamResponse,
+    big_query_read_server::{BigQueryRead, BigQueryReadServer},
+    read_rows_response, read_session,
+};
 use silk_chiffon_test_support::{
     TestFile,
     bigquery_arrow::{encode_batch, encode_schema},
 };
 use tempfile::TempDir;
 use tonic::{Request, Response, Status, service::Routes};
-
-mod google {
-    #[allow(clippy::all, dead_code, deprecated, missing_docs)]
-    pub mod rpc {
-        include!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/crates/silk-chiffon-input-bigquery/src/proto/generated/google.rpc.rs"
-        ));
-    }
-
-    pub mod cloud {
-        pub mod bigquery {
-            pub mod storage {
-                #[allow(
-                    clippy::all,
-                    clippy::clone_on_ref_ptr,
-                    dead_code,
-                    deprecated,
-                    missing_docs
-                )]
-                pub mod v1 {
-                    include!(concat!(
-                        env!("CARGO_MANIFEST_DIR"),
-                        "/crates/silk-chiffon-input-bigquery/src/proto/generated/google.cloud.bigquery.storage.v1.rs"
-                    ));
-                }
-            }
-        }
-    }
-}
-
-use google::cloud::bigquery::storage::v1::{
-    ArrowRecordBatch, ArrowSchema, CreateReadSessionRequest, ReadRowsRequest, ReadRowsResponse,
-    ReadSession, ReadStream, SplitReadStreamRequest, SplitReadStreamResponse,
-    big_query_read_server::{BigQueryRead, BigQueryReadServer},
-    read_rows_response, read_session,
-};
 
 #[derive(Clone)]
 struct StreamFixture {

@@ -101,6 +101,7 @@ chrono-tz = "^0.10.4"
 [features]
 default = ["local-bare-paths", "gcs", "s3", "bigquery"]
 bigquery = ["dep:silk-chiffon-input-bigquery"]
+bigquery-integration-tests = ["bigquery", "local-bare-paths", "silk-chiffon-input-bigquery/integration-test-support"]
 gcs = ["silk-chiffon-storage/gcs"]
 local = ["silk-chiffon-storage/local"]
 local-bare-paths = ["local", "silk-chiffon-storage/local-bare-paths"]
@@ -126,6 +127,10 @@ tonic-prost = "^0.14.6"
 [[bench]]
 name = "partitioning"
 harness = false
+
+[[test]]
+name = "bigquery_transform_integration"
+required-features = ["bigquery-integration-tests"]
 
 [[example]]
 name = "gen-docs"

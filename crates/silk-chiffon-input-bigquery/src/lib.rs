@@ -30,6 +30,20 @@ use silk_chiffon_core::ServiceInputDefinition;
 
 use args::BigQueryInputArgs;
 
+/// Protocol types used by Silk Chiffon's end-to-end fake service.
+///
+/// This module is available only through the non-default integration-test
+/// feature. Applications compose the connector through [`definition`].
+#[cfg(feature = "integration-test-support")]
+#[doc(hidden)]
+pub mod integration_test_support {
+    pub use crate::proto::bigquery_storage::{
+        ArrowRecordBatch, ArrowSchema, CreateReadSessionRequest, ReadRowsRequest, ReadRowsResponse,
+        ReadSession, ReadStream, SplitReadStreamRequest, SplitReadStreamResponse,
+        big_query_read_server, read_rows_response, read_session,
+    };
+}
+
 /// Returns the BigQuery Storage Read service-input definition registered by a host application.
 pub fn definition() -> ServiceInputDefinition {
     ServiceInputDefinition::with_args::<BigQueryInputArgs>(create_provider)

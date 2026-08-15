@@ -30,7 +30,7 @@ mod google {
 }
 
 pub mod bigquery_storage {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "integration-test-support"))]
     pub use super::google::cloud::bigquery::storage::v1::{
         ArrowRecordBatch, ArrowSchema, ReadStream, SplitReadStreamRequest, SplitReadStreamResponse,
         big_query_read_server,
