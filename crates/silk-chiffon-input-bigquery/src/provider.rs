@@ -122,13 +122,13 @@ impl BigQueryTableProvider {
         let batch_projection =
             batch_projection(lease.schema().as_arrow(), &projection.output_schema)?;
 
-        BigQueryReadExec::new(
+        Ok(BigQueryReadExec::new(
             lease,
             projection.output_schema,
             batch_projection,
             Arc::clone(&self.resources),
             &self.args,
-        )
+        ))
     }
 }
 

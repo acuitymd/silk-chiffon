@@ -8,7 +8,8 @@ use datafusion::{
     execution::{SendableRecordBatchStream, TaskContext},
     physical_expr::EquivalenceProperties,
     physical_plan::{
-        DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
+        DisplayAs, DisplayFormatType, EmptyRecordBatchStream, ExecutionPlan, Partitioning,
+        PlanProperties,
         execution_plan::{Boundedness, EmissionType},
         metrics::{ExecutionPlanMetricsSet, MetricsSet},
     },
@@ -35,14 +36,12 @@ impl BigQueryReadExec {
         batch_projection: Vec<usize>,
         resources: Arc<CommandResources>,
         args: &BigQueryInputArgs,
-    ) -> datafusion::common::Result<Self> {
-        if lease.streams().is_empty() {
-            return Err(DataFusionError::Execution(
-                "BigQuery execution session returned no streams".to_owned(),
-            ));
-        }
-        let properties = plan_properties(Arc::clone(&output_schema), lease.streams().len());
-        Ok(Self {
+    ) -> Self {
+        let properties = plan_properties(
+            Arc::clone(&output_schema),
+            partition_count(lease.streams().len()),
+        );
+        Self {
             lease,
             output_schema,
             batch_projection: batch_projection.into(),
@@ -50,13 +49,17 @@ impl BigQueryReadExec {
             args: args.clone(),
             properties: Arc::new(properties),
             metrics: ExecutionPlanMetricsSet::new(),
-        })
+        }
     }
 
     #[cfg(test)]
     pub(crate) const fn estimated_total_bytes_scanned(&self) -> u64 {
         self.lease.estimated_total_bytes_scanned()
     }
+}
+
+fn partition_count(stream_count: usize) -> usize {
+    stream_count.max(1)
 }
 
 fn plan_properties(schema: SchemaRef, partition_count: usize) -> PlanProperties {
@@ -103,6 +106,16 @@ impl ExecutionPlan for BigQueryReadExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> datafusion::common::Result<SendableRecordBatchStream> {
+        if self.lease.streams().is_empty() {
+            if partition == 0 {
+                return Ok(Box::pin(EmptyRecordBatchStream::new(Arc::clone(
+                    &self.output_schema,
+                ))));
+            }
+            return Err(DataFusionError::Execution(format!(
+                "BigQuery partition {partition} is out of bounds"
+            )));
+        }
         let stream_name = self.lease.streams().get(partition).ok_or_else(|| {
             DataFusionError::Execution(format!("BigQuery partition {partition} is out of bounds"))
         })?;
@@ -139,17 +152,20 @@ impl ExecutionPlan for BigQueryReadExec {
 
 fn execution_statistics(
     schema: &arrow::datatypes::Schema,
-    partition_count: usize,
+    stream_count: usize,
     estimated_rows: Option<usize>,
     partition: Option<usize>,
 ) -> datafusion::common::Result<Arc<Statistics>> {
-    if partition.is_some_and(|index| index >= partition_count) {
+    if partition.is_some_and(|index| index >= partition_count(stream_count)) {
         return Err(DataFusionError::Internal(
             "BigQuery statistics partition is out of bounds".to_owned(),
         ));
     }
     let mut statistics = Statistics::new_unknown(schema);
-    if partition.is_none()
+    if stream_count == 0 {
+        statistics.num_rows = Precision::Exact(0);
+        statistics.total_byte_size = Precision::Exact(0);
+    } else if partition.is_none()
         && let Some(rows) = estimated_rows
     {
         statistics.num_rows = Precision::Inexact(rows);
@@ -165,7 +181,7 @@ impl DisplayAs for BigQueryReadExec {
     ) -> fmt::Result {
         write!(
             formatter,
-            "BigQueryReadExec: partitions={}, fields={}",
+            "BigQueryReadExec: streams={}, fields={}",
             self.lease.streams().len(),
             self.output_schema.fields().len()
         )
@@ -177,7 +193,11 @@ impl fmt::Debug for BigQueryReadExec {
         formatter
             .debug_struct("BigQueryReadExec")
             .field("source_identity", self.lease.source_identity())
-            .field("partition_count", &self.lease.streams().len())
+            .field("stream_count", &self.lease.streams().len())
+            .field(
+                "partition_count",
+                &partition_count(self.lease.streams().len()),
+            )
             .field("field_count", &self.output_schema.fields().len())
             .finish_non_exhaustive()
     }
@@ -219,5 +239,20 @@ mod tests {
         assert_eq!(properties.emission_type, EmissionType::Incremental);
         assert_eq!(properties.boundedness, Boundedness::Bounded);
         assert!(properties.eq_properties.output_ordering().is_none());
+    }
+
+    #[test]
+    fn empty_results_have_one_partition_and_exact_zero_statistics() {
+        let schema = Schema::new(vec![Field::new("value", DataType::Int64, true)]);
+        let properties = plan_properties(Arc::new(schema.clone()), partition_count(0));
+        let statistics = execution_statistics(&schema, 0, None, Some(0)).unwrap();
+
+        assert!(matches!(
+            properties.partitioning,
+            Partitioning::UnknownPartitioning(1)
+        ));
+        assert_eq!(statistics.num_rows, Precision::Exact(0));
+        assert_eq!(statistics.total_byte_size, Precision::Exact(0));
+        assert!(execution_statistics(&schema, 0, None, Some(1)).is_err());
     }
 }

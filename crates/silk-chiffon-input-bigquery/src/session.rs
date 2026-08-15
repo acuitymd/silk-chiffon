@@ -614,9 +614,8 @@ fn validate_response(
         &spec.owner_project,
         spec.expected_location.as_deref(),
     )?;
-    if session.streams.is_empty()
-        || session.streams.len()
-            > usize::try_from(spec.max_stream_count).expect("positive i32 stream counts fit usize")
+    if session.streams.len()
+        > usize::try_from(spec.max_stream_count).expect("positive i32 stream counts fit usize")
     {
         return Err(ReadSessionError::new(ReadSessionErrorKind::InvalidStreams));
     }
@@ -935,6 +934,27 @@ mod tests {
         );
         assert_eq!(lease.source_identity(), spec.source_identity());
         assert!(!format!("{lease:?}").contains("session-project"));
+    }
+
+    #[test]
+    fn session_validation_accepts_an_empty_result() {
+        let spec = ReadSessionSpec::discovery(&reference(), snapshot(), "session-project").unwrap();
+        let mut session = response(&spec);
+        session.streams.clear();
+        session.estimated_row_count = 0;
+        session.estimated_total_bytes_scanned = 0;
+        session.estimated_total_physical_file_size = 0;
+
+        let lease = validate_response(
+            &spec,
+            session,
+            Duration::ZERO,
+            DecodeLimit::new(256 * 1024 * 1024).unwrap(),
+        )
+        .unwrap();
+
+        assert!(lease.streams().is_empty());
+        assert_eq!(lease.estimated_row_count(), None);
     }
 
     #[test]

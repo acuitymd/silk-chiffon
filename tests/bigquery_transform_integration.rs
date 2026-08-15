@@ -3,6 +3,7 @@
 use std::{
     collections::HashMap,
     fmt,
+    fs::File,
     io::Read,
     pin::Pin,
     process::{Command, Output, Stdio},
@@ -17,6 +18,7 @@ use std::{
 use arrow::{
     array::{Int64Array, StringArray},
     datatypes::{DataType, Field, Schema},
+    ipc::reader::FileReader as ArrowFileReader,
     record_batch::RecordBatch,
 };
 use axum::{
@@ -74,9 +76,12 @@ impl LifecycleFake {
         if selected.is_empty() {
             return self.full_batch.clone();
         }
-        let indices = selected
+        let schema = self.full_batch.schema();
+        let indices = schema
+            .fields()
             .iter()
-            .map(|field| self.full_batch.schema().index_of(field).unwrap())
+            .enumerate()
+            .filter_map(|(index, field)| selected.contains(field.name()).then_some(index))
             .collect::<Vec<_>>();
         self.full_batch.project(&indices).unwrap()
     }
@@ -157,15 +162,21 @@ impl BigQueryRead for LifecycleFake {
             self.execution_batch(&requested)
         };
         let session_name = format!("projects/p/locations/us/sessions/{table_id}-{table_ordinal}");
-        let stream_name = format!("{session_name}/streams/0");
-        self.streams.lock().unwrap().insert(
-            stream_name.clone(),
-            StreamFixture {
-                batch: encode_batch(&batch, None),
-                rows: batch.num_rows(),
-                pending_after_batch: table_id == "pending",
-            },
-        );
+        let empty = table_id == "empty";
+        let streams = if empty {
+            Vec::new()
+        } else {
+            let stream_name = format!("{session_name}/streams/0");
+            self.streams.lock().unwrap().insert(
+                stream_name.clone(),
+                StreamFixture {
+                    batch: encode_batch(&batch, None),
+                    rows: batch.num_rows(),
+                    pending_after_batch: table_id == "pending",
+                },
+            );
+            vec![ReadStream { name: stream_name }]
+        };
         self.creates.lock().unwrap().push(request);
 
         Ok(Response::new(ReadSession {
@@ -174,13 +185,17 @@ impl BigQueryRead for LifecycleFake {
                 seconds: 2_000_000_000,
                 nanos: 0,
             }),
-            streams: vec![ReadStream { name: stream_name }],
+            streams,
             schema: Some(read_session::Schema::ArrowSchema(ArrowSchema {
                 serialized_schema: encode_schema(batch.schema().as_ref()),
             })),
-            estimated_row_count: i64::try_from(batch.num_rows()).unwrap(),
-            estimated_total_bytes_scanned: 128,
-            estimated_total_physical_file_size: 256,
+            estimated_row_count: if empty {
+                0
+            } else {
+                i64::try_from(batch.num_rows()).unwrap()
+            },
+            estimated_total_bytes_scanned: if empty { 0 } else { 128 },
+            estimated_total_physical_file_size: if empty { 0 } else { 256 },
             ..requested
         }))
     }
@@ -403,7 +418,7 @@ async fn registered_bqs_transforms_to_arrow_parquet_and_mixes_with_file_input() 
         "--output-format".to_owned(),
         "arrow".to_owned(),
         "--query".to_owned(),
-        "SELECT name FROM data WHERE id > 0".to_owned(),
+        "SELECT name, id FROM data WHERE id > 0".to_owned(),
         "--bqs-row-restriction".to_owned(),
         "name IS NOT NULL".to_owned(),
     ]);
@@ -418,6 +433,7 @@ async fn registered_bqs_transforms_to_arrow_parquet_and_mixes_with_file_input() 
         2
     );
     assert_eq!(arrow_batches[0].schema().field(0).name(), "name");
+    assert_eq!(arrow_batches[0].schema().field(1).name(), "id");
 
     let parquet_output = output_dir.path().join("full.parquet");
     let mut arguments = fixture.common_arguments("table");
@@ -475,12 +491,42 @@ async fn registered_bqs_transforms_to_arrow_parquet_and_mixes_with_file_input() 
         .read_options
         .as_ref()
         .unwrap();
-    assert_eq!(first_execution.selected_fields, ["name"]);
+    assert_eq!(first_execution.selected_fields, ["id", "name"]);
     assert_eq!(
         first_execution.row_restriction,
         "(`id` > 0) AND (name IS NOT NULL)"
     );
     assert_eq!(fixture.service.reads.lock().unwrap().len(), 3);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn empty_bqs_result_writes_a_schema_only_arrow_file_without_reading_rows() {
+    let fixture = RootFixture::start().await;
+    let output_dir = tempfile::tempdir().unwrap();
+    let arrow_output = output_dir.path().join("empty.arrow");
+    let mut arguments = fixture.common_arguments("empty");
+    arguments.extend([
+        "--to".to_owned(),
+        arrow_output.to_string_lossy().into_owned(),
+        "--output-format".to_owned(),
+        "arrow".to_owned(),
+    ]);
+
+    let output = fixture.run(&argument_refs(&arguments)).await;
+    assert_success(&output);
+
+    let reader = ArrowFileReader::try_new(File::open(&arrow_output).unwrap(), None).unwrap();
+    assert_eq!(reader.schema().fields().len(), 2);
+    assert_eq!(reader.count(), 0);
+    let creates = fixture.service.creates.lock().unwrap();
+    assert_eq!(creates.len(), 2);
+    assert!(creates.iter().all(|request| {
+        request
+            .read_session
+            .as_ref()
+            .is_some_and(|session| session.table.ends_with("/empty"))
+    }));
+    assert!(fixture.service.reads.lock().unwrap().is_empty());
 }
 
 #[cfg(target_os = "linux")]
