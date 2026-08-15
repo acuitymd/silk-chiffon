@@ -30,7 +30,7 @@ use datafusion::{
 use datafusion_datasource::projection::SplitProjection;
 use object_store::{ObjectMeta, ObjectStore, memory::InMemory};
 use parking_lot::Mutex;
-use silk_chiffon_core::file_table_provider;
+use silk_chiffon_core::ExactFileTableProviderBuilder;
 
 struct CapturedScan {
     target_partitions: usize,
@@ -246,19 +246,19 @@ fn provider_passes_retained_file_primitives_to_the_format_unchanged() {
         filter_pushdown_calls: Arc::clone(&filter_pushdown_calls),
     });
     let store_url = ObjectStoreUrl::parse("memory://root").unwrap();
-    let provider = file_table_provider(
-        store_url.clone(),
-        Arc::clone(&schema),
-        vec![
+    let provider = ExactFileTableProviderBuilder::new()
+        .object_store_url(store_url.clone())
+        .schema(Arc::clone(&schema))
+        .files(vec![
             PartitionedFile::new_from_meta(metadata.clone())
                 .with_statistics(Arc::new(file_statistics.clone())),
-        ],
-        statistics.clone(),
-        vec![ordering],
-        format,
-        Some(Arc::new(DefaultPhysicalExprAdapterFactory)),
-    )
-    .unwrap();
+        ])
+        .statistics(statistics.clone())
+        .output_ordering(vec![ordering])
+        .format(format)
+        .expression_adapter_factory(Arc::new(DefaultPhysicalExprAdapterFactory))
+        .build()
+        .unwrap();
     let session = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(7));
     session
         .runtime_env()
@@ -284,9 +284,9 @@ fn provider_passes_retained_file_primitives_to_the_format_unchanged() {
         [TableProviderFilterPushDown::Inexact]
     );
     let debug = format!("{provider:?}");
-    assert!(debug.contains("FileTableProvider"));
+    assert!(debug.contains("ExactFileTableProvider"));
     assert!(debug.contains("files: 1"));
-    assert!(debug.contains("has_expr_adapter_factory: true"));
+    assert!(debug.contains("has_expression_adapter_factory: true"));
     assert_eq!(provider.schema(), schema);
     assert_eq!(provider.statistics(), Some(statistics));
     assert_eq!(plan.schema().fields().len(), 1);
@@ -329,16 +329,15 @@ fn provider_rejects_an_empty_exact_file_set() {
         filter_pushdown_calls: Arc::new(Mutex::new(Vec::new())),
     });
 
-    let error = file_table_provider(
-        ObjectStoreUrl::local_filesystem(),
-        Arc::clone(&schema),
-        Vec::new(),
-        Statistics::new_unknown(&schema),
-        Vec::new(),
-        format,
-        None,
-    )
-    .expect_err("an empty exact-file provider must be rejected");
+    let error = ExactFileTableProviderBuilder::new()
+        .object_store_url(ObjectStoreUrl::local_filesystem())
+        .schema(Arc::clone(&schema))
+        .files(Vec::new())
+        .statistics(Statistics::new_unknown(&schema))
+        .output_ordering(Vec::new())
+        .format(format)
+        .build()
+        .expect_err("an empty exact-file provider must be rejected");
 
     assert!(error.to_string().contains("requires at least one file"));
 }

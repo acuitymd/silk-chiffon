@@ -6,7 +6,7 @@
 //!
 //! Binding a definition parses one command invocation's private settings.
 //! Input creation delegates shared exact-file metadata work to
-//! `InputLeaf`, while output binding creates the command-scoped encoding and
+//! `FileInputGroup`, while output binding creates the command-scoped encoding and
 //! writing runtimes shared by its sinks. Inspection reads the resolved input
 //! object directly, so local and remote backends follow the same path.
 
@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use datafusion::{catalog::TableProvider, prelude::SessionContext};
 use silk_chiffon_core::{
-    FormatDefinition, FormatFuture, InputLeaf, InspectionDefinition, SinkBinding,
+    FileInputGroup, FormatDefinition, FormatFuture, InspectionDefinition, SinkBinding,
     SinkBindingConfig, TransformDefinition,
 };
 
@@ -52,11 +52,11 @@ pub fn definition() -> FormatDefinition {
 }
 
 fn create_provider<'a>(
-    leaf: &'a InputLeaf,
+    group: &'a FileInputGroup,
     session: &'a SessionContext,
     _args: &'a TransformArgs,
 ) -> FormatFuture<'a, Arc<dyn TableProvider>> {
-    Box::pin(input::create_provider(leaf, session))
+    Box::pin(input::create_provider(group, session))
 }
 
 fn bind_output<'a>(

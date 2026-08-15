@@ -1,6 +1,6 @@
 use anyhow::Result;
 use mimalloc::MiMalloc;
-use silk_chiffon::{Cli, Command, commands};
+use silk_chiffon::{Cli, Command};
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
@@ -20,13 +20,5 @@ fn main() -> Result<()> {
     builder.worker_threads(thread_budget);
     let runtime = builder.build()?;
 
-    runtime.block_on(async {
-        match cli.command {
-            Command::Transform(args) => commands::transform::run(args).await?,
-            Command::Detect(args) => commands::detect::run(args).await?,
-            Command::Inspect(args) => commands::inspect::run(args).await?,
-            Command::Completions { .. } => unreachable!(),
-        };
-        Ok(())
-    })
+    runtime.block_on(cli.command.execute())
 }

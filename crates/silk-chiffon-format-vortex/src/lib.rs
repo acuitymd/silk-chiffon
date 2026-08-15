@@ -5,7 +5,7 @@
 //! behavior through [`definition`] rather than depending on codec internals.
 //!
 //! One bound transform retains a Vortex session shared by every Vortex input
-//! leaf and output sink in that command. DataFusion's command session remains
+//! group and output sink in that command. DataFusion's command session remains
 //! independently responsible for stores, planning, and execution.
 
 mod args;
@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use datafusion::{catalog::TableProvider, prelude::SessionContext};
 use silk_chiffon_core::{
-    FormatDefinition, FormatFuture, InputLeaf, InspectionDefinition, SinkBinding,
+    FileInputGroup, FormatDefinition, FormatFuture, InspectionDefinition, SinkBinding,
     SinkBindingConfig, TransformDefinition,
 };
 
@@ -45,11 +45,11 @@ pub fn definition() -> FormatDefinition {
 }
 
 fn create_provider<'a>(
-    leaf: &'a InputLeaf,
+    group: &'a FileInputGroup,
     session: &'a SessionContext,
     state: &'a TransformState,
 ) -> FormatFuture<'a, Arc<dyn TableProvider>> {
-    Box::pin(input::create_provider(leaf, session, state.session()))
+    Box::pin(input::create_provider(group, session, state.session()))
 }
 
 fn bind_output<'a>(

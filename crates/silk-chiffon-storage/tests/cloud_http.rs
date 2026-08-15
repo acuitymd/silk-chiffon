@@ -17,7 +17,9 @@ use http_body_util::Full;
 use hyper::{Request, Response, body::Incoming, server::conn::http1, service::service_fn};
 use hyper_util::rt::TokioIo;
 use object_store::ObjectStoreExt;
-use silk_chiffon_storage::{LocationInput, StorageRegistry, StorageSession};
+use silk_chiffon_storage::{
+    ExistingOutput, LocationInput, OutputPreparation, StorageRegistry, StorageSession,
+};
 use tokio::{
     net::TcpListener,
     sync::{Notify, oneshot},
@@ -339,12 +341,16 @@ async fn assert_put_retry(
 ) {
     server.push(ResponsePlan::new(StatusCode::SERVICE_UNAVAILABLE));
     server.push(successful_put());
-    let handle = storage
-        .input_handle(&LocationInput::parse(url).unwrap())
+    let target = storage
+        .prepare_output_target(
+            &LocationInput::parse(url).unwrap(),
+            &OutputPreparation::new(ExistingOutput::Allow, false),
+        )
+        .await
         .unwrap();
-    handle
+    target
         .object_store()
-        .put(handle.object_path(), Bytes::from_static(b"data").into())
+        .put(target.object_path(), Bytes::from_static(b"data").into())
         .await
         .unwrap();
     let requests = server.requests();
@@ -405,16 +411,20 @@ async fn assert_multipart_part_retry_and_abort(
     server: &MockServer,
     allow_empty_bearer: bool,
 ) {
-    let handle = storage
-        .input_handle(&LocationInput::parse(url).unwrap())
+    let target = storage
+        .prepare_output_target(
+            &LocationInput::parse(url).unwrap(),
+            &OutputPreparation::new(ExistingOutput::Allow, false),
+        )
+        .await
         .unwrap();
     server.push(multipart_start());
     server.push(ResponsePlan::new(StatusCode::SERVICE_UNAVAILABLE));
     server.push(successful_put());
     server.push(multipart_complete());
-    let mut upload = handle
+    let mut upload = target
         .object_store()
-        .put_multipart(handle.object_path())
+        .put_multipart(target.object_path())
         .await
         .unwrap();
     upload
@@ -434,9 +444,9 @@ async fn assert_multipart_part_retry_and_abort(
 
     server.push(multipart_start());
     server.push(ResponsePlan::new(StatusCode::NO_CONTENT));
-    let mut abandoned = handle
+    let mut abandoned = target
         .object_store()
-        .put_multipart(handle.object_path())
+        .put_multipart(target.object_path())
         .await
         .unwrap();
     abandoned.abort().await.unwrap();

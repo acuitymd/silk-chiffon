@@ -23,7 +23,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use crate::StorageHandle;
+use crate::{PreparedOutputTarget, handle::StorageHandle};
 
 const DEFAULT_PART_SIZE: usize = 10 * 1024 * 1024;
 const DEFAULT_MAX_IN_FLIGHT_PARTS: usize = 8;
@@ -220,8 +220,9 @@ impl fmt::Debug for ObjectUpload {
 }
 
 impl ObjectUpload {
-    /// Creates an upload for one prepared output handle.
-    pub fn new(handle: StorageHandle) -> Self {
+    /// Creates an upload for one prepared output target.
+    pub fn new(target: PreparedOutputTarget) -> Self {
+        let handle = target.into_handle();
         let target = handle.url().clone();
         let settings = handle.object_upload_context.settings;
         Self {

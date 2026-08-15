@@ -5,7 +5,7 @@
 //! later format detector to claim it.
 
 use anyhow::anyhow;
-use silk_chiffon_core::{FormatFuture, InputDetection, InputVariant};
+use silk_chiffon_core::{FormatFuture, FormatInputVariant, InputDetection};
 use silk_chiffon_storage::InputObject;
 
 pub(crate) fn detect(object: &InputObject) -> FormatFuture<'_, InputDetection> {
@@ -14,7 +14,7 @@ pub(crate) fn detect(object: &InputObject) -> FormatFuture<'_, InputDetection> {
         if object.metadata().size < 8 {
             return Ok(InputDetection::Mismatch);
         }
-        let handle = object.handle();
+        let handle = object.input_handle();
         let size = object.metadata().size;
         let magic = handle
             .object_store()
@@ -23,7 +23,7 @@ pub(crate) fn detect(object: &InputObject) -> FormatFuture<'_, InputDetection> {
         let starts = magic[0].as_ref() == MAGIC;
         let ends = magic[1].as_ref() == MAGIC;
         Ok(match (starts, ends) {
-            (true, true) => InputDetection::Match(InputVariant::new()),
+            (true, true) => InputDetection::Match(FormatInputVariant::new()),
             (true, false) => InputDetection::Malformed(anyhow!(
                 "Parquet input is missing its trailing magic marker"
             )),

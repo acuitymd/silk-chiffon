@@ -6,7 +6,7 @@
 
 use anyhow::anyhow;
 use object_store::ObjectStoreExt;
-use silk_chiffon_core::{FormatFuture, InputDetection, InputVariant};
+use silk_chiffon_core::{FormatFuture, FormatInputVariant, InputDetection};
 use silk_chiffon_storage::InputObject;
 use vortex::file::MAGIC_BYTES;
 
@@ -17,7 +17,7 @@ pub(crate) fn detect(object: &InputObject) -> FormatFuture<'_, InputDetection> {
             return Ok(InputDetection::Mismatch);
         }
 
-        let handle = object.handle();
+        let handle = object.input_handle();
         let leading = handle
             .object_store()
             .get_range(handle.object_path(), 0..MAGIC_BYTES.len() as u64)
@@ -36,7 +36,7 @@ pub(crate) fn detect(object: &InputObject) -> FormatFuture<'_, InputDetection> {
             .get_range(handle.object_path(), size - MAGIC_BYTES.len() as u64..size)
             .await?;
         Ok(if trailing.as_ref() == MAGIC_BYTES {
-            InputDetection::Match(InputVariant::named("file", "file"))
+            InputDetection::Match(FormatInputVariant::named("file", "file"))
         } else {
             InputDetection::Malformed(anyhow!("Vortex input is missing its trailing magic marker"))
         })

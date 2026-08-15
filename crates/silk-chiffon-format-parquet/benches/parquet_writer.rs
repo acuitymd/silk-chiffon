@@ -127,7 +127,7 @@ async fn registered_sink(
         .unwrap();
     binding
         .open_sink(
-            silk_chiffon_test_support::prepared_local_output(path),
+            silk_chiffon_test_support::prepared_local_output_target(path),
             schema,
         )
         .await

@@ -1,10 +1,15 @@
-/// Prepares one local output handle for tests that exercise a storage-backed sink directly.
-pub fn prepared_local_output(
+/// Prepares one local output target for tests that exercise a storage-backed sink directly.
+pub fn prepared_local_output_target(
     path: impl AsRef<std::path::Path>,
-) -> silk_chiffon_storage::StorageHandle {
+) -> silk_chiffon_storage::PreparedOutputTarget {
     use silk_chiffon_storage::{ExistingOutput, LocationInput, OutputPreparation};
 
     let path = path.as_ref().to_path_buf();
+    let path = if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir().unwrap().join(path)
+    };
     std::thread::spawn(move || {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()

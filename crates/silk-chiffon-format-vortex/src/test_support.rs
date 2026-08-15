@@ -12,7 +12,8 @@ use bytes::Bytes;
 use clap::Command;
 use object_store::{ObjectStore, ObjectStoreExt};
 use silk_chiffon_storage::{
-    InputObject, LocationInput, StorageAccess, StorageBackend, StorageRegistry, StorageSession,
+    ExistingOutput, InputObject, LocationInput, OutputPreparation, StorageAccess, StorageBackend,
+    StorageRegistry, StorageSession,
 };
 use silk_chiffon_test_support::ReadProbeStore;
 
@@ -45,7 +46,7 @@ fn session() -> StorageSession {
             StorageBackend::without_args()
                 .name("memory")
                 .schemes(["memory"])
-                .access(StorageAccess::ReadOnly)
+                .access(StorageAccess::ReadWrite)
                 .allow_any_location()
                 .object_store_creator(create_store)
                 .build()
@@ -65,10 +66,16 @@ pub(crate) async fn object_with(bytes: impl Into<Bytes>) -> InputObject {
     let sequence = OBJECT_SEQUENCE.fetch_add(1, Ordering::SeqCst);
     let location =
         LocationInput::parse(format!("memory://bucket/vortex-{sequence}.vortex")).unwrap();
-    let handle = session.input_handle(&location).unwrap();
-    handle
+    let target = session
+        .prepare_output_target(
+            &location,
+            &OutputPreparation::new(ExistingOutput::Allow, false),
+        )
+        .await
+        .unwrap();
+    target
         .object_store()
-        .put(handle.object_path(), bytes.into().into())
+        .put(target.object_path(), bytes.into().into())
         .await
         .unwrap();
     session.lookup_input(&location).await.unwrap()
@@ -94,7 +101,7 @@ pub(crate) fn simple_batch() -> RecordBatch {
 
 pub(crate) async fn vortex_bytes(batches: Vec<RecordBatch>) -> Bytes {
     Bytes::from(
-        silk_chiffon_test_support::vortex::write_batches(&simple_schema(), batches)
+        silk_chiffon_test_support::vortex::encode_batches(&simple_schema(), batches)
             .await
             .unwrap(),
     )

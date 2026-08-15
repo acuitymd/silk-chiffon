@@ -13,8 +13,9 @@ use object_store::{
     memory::InMemory, path::Path as ObjectPath,
 };
 use silk_chiffon_storage::{
-    Location, LocationInput, LocationPattern, ObjectStoreCreatorFn, StorageAccess, StorageBackend,
-    StorageError, StorageRegistry, StorageSession,
+    ExistingOutput, Location, LocationInput, LocationPattern, ObjectStoreCreatorFn,
+    OutputPreparation, StorageAccess, StorageBackend, StorageError, StorageRegistry,
+    StorageSession,
 };
 use url::Url;
 
@@ -183,10 +184,16 @@ fn storage_with_creator(creator: ObjectStoreCreatorFn<()>) -> StorageSession {
 
 async fn put(storage: &StorageSession, url: &str) {
     let input = LocationInput::parse(url).unwrap();
-    let handle = storage.input_handle(&input).unwrap();
-    handle
+    let target = storage
+        .prepare_output_target(
+            &input,
+            &OutputPreparation::new(ExistingOutput::Allow, false),
+        )
+        .await
+        .unwrap();
+    target
         .object_store()
-        .put(handle.object_path(), Bytes::from_static(b"test").into())
+        .put(target.object_path(), Bytes::from_static(b"test").into())
         .await
         .unwrap();
 }
@@ -200,8 +207,14 @@ async fn exact_lookup_and_listing_retain_observed_metadata() {
 
     let input = LocationInput::parse("mem://bucket/data/one.arrow").unwrap();
     let exact = storage.lookup_input(&input).await.unwrap();
-    assert_eq!(exact.handle().url().as_str(), "mem://bucket/data/one.arrow");
-    assert_eq!(exact.metadata().location, *exact.handle().object_path());
+    assert_eq!(
+        exact.input_handle().url().as_str(),
+        "mem://bucket/data/one.arrow"
+    );
+    assert_eq!(
+        exact.metadata().location,
+        *exact.input_handle().object_path()
+    );
     assert_eq!(exact.metadata().size, 4);
 
     let pattern = LocationPattern::parse("mem://bucket/data/*.arrow").unwrap();
@@ -209,7 +222,7 @@ async fn exact_lookup_and_listing_retain_observed_metadata() {
     assert_eq!(listed.len(), 1);
     assert_eq!(
         listed[0].metadata().location,
-        *listed[0].handle().object_path()
+        *listed[0].input_handle().object_path()
     );
     assert_eq!(listed[0].metadata().size, 4);
 
@@ -230,22 +243,22 @@ async fn expands_complete_object_paths_and_preserves_query_syntax() {
 
     assert_eq!(matches.len(), 1);
     assert_eq!(
-        matches[0].handle().url().as_str(),
+        matches[0].input_handle().url().as_str(),
         "mem://bucket/data/part-a.parquet?versionId=one"
     );
     assert_eq!(
-        matches[0].handle().object_path().as_ref(),
+        matches[0].input_handle().object_path().as_ref(),
         "data/part-a.parquet"
     );
 
-    let exact = LocationInput::parse(matches[0].handle().url().as_str()).unwrap();
+    let exact = LocationInput::parse(matches[0].input_handle().url().as_str()).unwrap();
     assert_eq!(
         storage.input_handle(&exact).unwrap().object_path(),
-        matches[0].handle().object_path()
+        matches[0].input_handle().object_path()
     );
     let reusable_pattern = LocationPattern::parse(
         matches[0]
-            .handle()
+            .input_handle()
             .url()
             .as_str()
             .replace("?versionId", "??versionId"),
@@ -271,7 +284,7 @@ async fn encoded_metacharacters_are_literal_and_matched_urls_are_pattern_safe() 
     let literal_matches = storage.expand_input_pattern(&literal).await.unwrap();
     assert_eq!(literal_matches.len(), 1);
     assert_eq!(
-        literal_matches[0].handle().object_path().as_ref(),
+        literal_matches[0].input_handle().object_path().as_ref(),
         "data/literal*.parquet"
     );
 
@@ -280,14 +293,14 @@ async fn encoded_metacharacters_are_literal_and_matched_urls_are_pattern_safe() 
     assert_eq!(active_matches.len(), 2);
     let metachar_match = active_matches
         .iter()
-        .find(|object| object.handle().object_path().as_ref().contains('?'))
+        .find(|object| object.input_handle().object_path().as_ref().contains('?'))
         .unwrap();
     assert_eq!(
-        metachar_match.handle().url().as_str(),
+        metachar_match.input_handle().url().as_str(),
         "mem://bucket/data/literal%2A%3F%5Bx%5D.parquet"
     );
 
-    let reparsed = LocationPattern::parse(metachar_match.handle().url().as_str()).unwrap();
+    let reparsed = LocationPattern::parse(metachar_match.input_handle().url().as_str()).unwrap();
     assert_eq!(
         storage.expand_input_pattern(&reparsed).await.unwrap().len(),
         1
@@ -310,11 +323,11 @@ async fn encoded_unicode_and_percent_signs_preserve_object_path_identity() {
 
     assert_eq!(matches.len(), 1);
     assert_eq!(
-        matches[0].handle().url().as_str(),
+        matches[0].input_handle().url().as_str(),
         "mem://bucket/data/donn%C3%A9es/cent%25.arrow"
     );
     assert_eq!(
-        matches[0].handle().object_path().as_ref(),
+        matches[0].input_handle().object_path().as_ref(),
         "data/données/cent%.arrow"
     );
 }
@@ -334,11 +347,11 @@ async fn adversarial_object_names_round_trip_as_exact_locations() {
 
     assert_eq!(matches.len(), 2);
     for object in matches {
-        assert_eq!(object.handle().url().query(), Some("token=a?b"));
-        let exact = LocationInput::parse(object.handle().url().as_str()).unwrap();
+        assert_eq!(object.input_handle().url().query(), Some("token=a?b"));
+        let exact = LocationInput::parse(object.input_handle().url().as_str()).unwrap();
         assert_eq!(
             storage.input_handle(&exact).unwrap().object_path(),
-            object.handle().object_path()
+            object.input_handle().object_path()
         );
     }
 }
@@ -371,7 +384,7 @@ async fn matched_urls_preserve_ipv6_authorities() {
 
     assert_eq!(matches.len(), 1);
     assert_eq!(
-        matches[0].handle().url().as_str(),
+        matches[0].input_handle().url().as_str(),
         "mem://[::1]/data/one.arrow"
     );
 }
@@ -394,7 +407,7 @@ async fn exact_and_bare_patterns_may_expand_to_zero_or_more_objects() {
     let matches = storage.expand_input_pattern(&bare).await.unwrap();
     assert_eq!(matches.len(), 1);
     assert_eq!(
-        matches[0].handle().url().as_str(),
+        matches[0].input_handle().url().as_str(),
         "mem://bucket/nested/one.arrow"
     );
 }
@@ -431,7 +444,7 @@ async fn bare_exact_and_pattern_mapping_share_typed_backend_settings() {
     let matches = storage.expand_input_pattern(&pattern).await.unwrap();
     assert_eq!(matches.len(), 1);
     assert_eq!(
-        matches[0].handle().object_path().as_ref(),
+        matches[0].input_handle().object_path().as_ref(),
         "configured/one.arrow"
     );
 }
@@ -461,7 +474,10 @@ async fn matches_classes_recursive_segments_case_and_leading_dots() {
     let negative_class_matches = storage.expand_input_pattern(&negative_class).await.unwrap();
     assert_eq!(negative_class_matches.len(), 1);
     assert_eq!(
-        negative_class_matches[0].handle().object_path().as_ref(),
+        negative_class_matches[0]
+            .input_handle()
+            .object_path()
+            .as_ref(),
         "data/b/.hidden.arrow"
     );
 
@@ -469,7 +485,7 @@ async fn matches_classes_recursive_segments_case_and_leading_dots() {
     let one_segment_matches = storage.expand_input_pattern(&one_segment).await.unwrap();
     assert_eq!(one_segment_matches.len(), 1);
     assert_eq!(
-        one_segment_matches[0].handle().object_path().as_ref(),
+        one_segment_matches[0].input_handle().object_path().as_ref(),
         "data/root.arrow"
     );
 

@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use datafusion::{catalog::TableProvider, prelude::SessionContext};
 use silk_chiffon_core::{
-    FormatDefinition, FormatFuture, InputLeaf, InspectionDefinition, SinkBinding,
+    FileInputGroup, FormatDefinition, FormatFuture, InspectionDefinition, SinkBinding,
     SinkBindingConfig, TransformDefinition,
 };
 
@@ -43,11 +43,11 @@ pub fn definition() -> FormatDefinition {
 }
 
 fn create_provider<'a>(
-    leaf: &'a InputLeaf,
+    group: &'a FileInputGroup,
     session: &'a SessionContext,
     _args: &'a TransformArgs,
 ) -> FormatFuture<'a, Arc<dyn TableProvider>> {
-    Box::pin(input::create_provider(leaf, session))
+    Box::pin(input::create_provider(group, session))
 }
 
 fn bind_output<'a>(

@@ -19,15 +19,14 @@ use clap::Command;
 use datafusion::{datasource::file_format::options::ArrowReadOptions, prelude::SessionContext};
 use rand::rngs::SmallRng;
 use rand::{Rng, RngExt, SeedableRng};
-use silk_chiffon::sinks::data_sink::DataSink;
-use silk_chiffon_core::{FormatRegistry, OpenSinkMode, SinkBindingConfig};
-use silk_chiffon_test_support::prepared_local_output;
+use silk_chiffon_core::{DataSink, FormatRegistry, OpenSinkMode, SinkBindingConfig};
+use silk_chiffon_test_support::prepared_local_output_target;
 use tempfile::TempDir;
 
 const NUM_ROWS: usize = 10_000_000;
 const BATCH_SIZE: usize = 500_000;
 
-async fn registered_arrow_sink(path: &Path, schema: &SchemaRef) -> Box<dyn DataSink> {
+async fn open_registered_arrow_sink(path: &Path, schema: &SchemaRef) -> Box<dyn DataSink> {
     let registry = FormatRegistry::builder()
         .register(silk_chiffon_format_arrow::definition())
         .build()
@@ -48,12 +47,12 @@ async fn registered_arrow_sink(path: &Path, schema: &SchemaRef) -> Box<dyn DataS
         .await
         .unwrap();
     sink_binding
-        .open_sink(prepared_local_output(path), Arc::clone(schema))
+        .open_sink(prepared_local_output_target(path), Arc::clone(schema))
         .await
         .unwrap()
 }
 
-async fn registered_parquet_sink(path: &Path, schema: &SchemaRef) -> Box<dyn DataSink> {
+async fn open_registered_parquet_sink(path: &Path, schema: &SchemaRef) -> Box<dyn DataSink> {
     let registry = FormatRegistry::builder()
         .register(silk_chiffon_format_parquet::definition())
         .build()
@@ -74,12 +73,12 @@ async fn registered_parquet_sink(path: &Path, schema: &SchemaRef) -> Box<dyn Dat
         .await
         .unwrap();
     sink_binding
-        .open_sink(prepared_local_output(path), Arc::clone(schema))
+        .open_sink(prepared_local_output_target(path), Arc::clone(schema))
         .await
         .unwrap()
 }
 
-async fn registered_vortex_sink(path: &Path, schema: &SchemaRef) -> Box<dyn DataSink> {
+async fn open_registered_vortex_sink(path: &Path, schema: &SchemaRef) -> Box<dyn DataSink> {
     let registry = FormatRegistry::builder()
         .register(silk_chiffon_format_vortex::definition())
         .build()
@@ -100,7 +99,7 @@ async fn registered_vortex_sink(path: &Path, schema: &SchemaRef) -> Box<dyn Data
         .await
         .unwrap();
     sink_binding
-        .open_sink(prepared_local_output(path), Arc::clone(schema))
+        .open_sink(prepared_local_output_target(path), Arc::clone(schema))
         .await
         .unwrap()
 }
@@ -258,7 +257,8 @@ async fn register_table(ctx: &mut SessionContext, name: &str, path: &Path, ext: 
         else {
             unreachable!()
         };
-        silk_chiffon::commands::transform::run(command)
+        silk_chiffon::Command::Transform(command)
+            .execute()
             .await
             .unwrap();
         arrow_path
@@ -276,9 +276,9 @@ async fn write_test_data(path: &Path, schema: &SchemaRef, ext: &str) {
     // SmallRng is like 5x faster(!!) than the default RNG (ChaChaRng)
     let mut rng = SmallRng::from_rng(&mut rand::rng());
     let mut sink: Box<dyn DataSink> = match ext {
-        "arrow" => registered_arrow_sink(path, schema).await,
-        "parquet" => registered_parquet_sink(path, schema).await,
-        "vortex" => registered_vortex_sink(path, schema).await,
+        "arrow" => open_registered_arrow_sink(path, schema).await,
+        "parquet" => open_registered_parquet_sink(path, schema).await,
+        "vortex" => open_registered_vortex_sink(path, schema).await,
         _ => panic!("unsupported format: {ext}"),
     };
     let num_batches = NUM_ROWS.div_ceil(BATCH_SIZE);
@@ -319,7 +319,8 @@ async fn round_trip_split_merge(ext: &str) {
     else {
         unreachable!()
     };
-    silk_chiffon::commands::transform::run(command)
+    silk_chiffon::Command::Transform(command)
+        .execute()
         .await
         .unwrap();
 
@@ -340,7 +341,8 @@ async fn round_trip_split_merge(ext: &str) {
     else {
         unreachable!()
     };
-    silk_chiffon::commands::transform::run(command)
+    silk_chiffon::Command::Transform(command)
+        .execute()
         .await
         .unwrap();
 

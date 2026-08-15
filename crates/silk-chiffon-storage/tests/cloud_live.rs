@@ -135,8 +135,12 @@ async fn exercise_live_backend(
     let storage = session(backend()?)?;
     let exact_url = config.url("exact.bin");
     let exact = storage
-        .input_handle(&LocationInput::parse(&exact_url)?)
-        .context("resolve exact live object")?;
+        .prepare_output_target(
+            &LocationInput::parse(&exact_url)?,
+            &OutputPreparation::new(ExistingOutput::Allow, false),
+        )
+        .await
+        .context("prepare exact live object")?;
     exact
         .object_store()
         .put(
@@ -155,9 +159,9 @@ async fn exercise_live_backend(
         "unexpected exact object size"
     );
     let range = observed
-        .handle()
+        .input_handle()
         .object_store()
-        .get_range(observed.handle().object_path(), 2..6)
+        .get_range(observed.input_handle().object_path(), 2..6)
         .await
         .context("read exact live range")?;
     ensure!(
@@ -166,10 +170,15 @@ async fn exercise_live_backend(
     );
 
     for name in ["set/one.bin", "set/two.bin"] {
-        let handle = storage.input_handle(&LocationInput::parse(config.url(name))?)?;
-        handle
+        let target = storage
+            .prepare_output_target(
+                &LocationInput::parse(config.url(name))?,
+                &OutputPreparation::new(ExistingOutput::Allow, false),
+            )
+            .await?;
+        target
             .object_store()
-            .put(handle.object_path(), Bytes::from_static(b"set").into())
+            .put(target.object_path(), Bytes::from_static(b"set").into())
             .await?;
     }
     let pattern = LocationPattern::parse(config.pattern("set/*.bin"))?;
@@ -201,7 +210,12 @@ async fn exercise_live_backend(
     multipart_upload.complete().await?;
 
     let unfinished_url = config.url("unfinished-multipart.bin");
-    let unfinished = storage.input_handle(&LocationInput::parse(&unfinished_url)?)?;
+    let unfinished = storage
+        .prepare_output_target(
+            &LocationInput::parse(&unfinished_url)?,
+            &OutputPreparation::new(ExistingOutput::Allow, false),
+        )
+        .await?;
     let mut unfinished_upload = unfinished
         .object_store()
         .put_multipart(unfinished.object_path())
@@ -266,7 +280,12 @@ async fn cleanup_prefix(
     backend: fn() -> Result<StorageBackend, silk_chiffon_storage::StorageBackendBuildError>,
 ) -> Result<Vec<String>> {
     let storage = session(backend()?)?;
-    let root = storage.input_handle(&LocationInput::parse(config.url("cleanup-root"))?)?;
+    let root = storage
+        .prepare_output_target(
+            &LocationInput::parse(config.url("cleanup-root"))?,
+            &OutputPreparation::new(ExistingOutput::Allow, false),
+        )
+        .await?;
     let prefix = object_store::path::Path::parse(&config.run_prefix)?;
     let objects = root
         .object_store()

@@ -19,7 +19,7 @@ pub use batch::{StructColumnBuilder, TestBatch, TestBatchBuilder};
 pub use extract::TestExtract;
 pub use fault_injecting_store::{FaultInjectingStore, ObjectStoreOperation};
 pub use file::TestFile;
-pub use output::prepared_local_output;
+pub use output::prepared_local_output_target;
 pub use read_probe_store::ReadProbeStore;
 
 #[cfg(test)]
@@ -192,7 +192,7 @@ mod tests {
     #[tokio::test]
     async fn test_vortex_fixture_uses_the_upstream_writer() {
         let batch = TestBatch::simple();
-        let bytes = vortex::write_batches(&batch.schema(), vec![batch])
+        let bytes = vortex::encode_batches(&batch.schema(), vec![batch])
             .await
             .unwrap();
 
