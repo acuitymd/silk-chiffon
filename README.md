@@ -36,15 +36,19 @@ silk-chiffon reads the format from each file's extension (`.arrow`, `.parquet`, 
 silk-chiffon inspect parquet data.parquet
 ```
 
-## Cloud storage
+## Cloud inputs and storage
 
-Google Cloud Storage and Amazon S3 are optional build features. Enable `gcs`, `s3`, or both when installing from source. Release binaries built with the default features accept local paths only.
+Default builds include local paths, Google Cloud Storage, Amazon S3, and BigQuery Storage Read. Source builds can use `--no-default-features` with only the provider features they need: `local-bare-paths`, `gcs`, `s3`, and `bigquery` are independently composable.
 
 ```bash
-cargo install --git https://github.com/acuitymd/silk-chiffon --features gcs,s3
+cargo install --git https://github.com/acuitymd/silk-chiffon
+
+# a smaller BigQuery-only build
+cargo install --git https://github.com/acuitymd/silk-chiffon \
+  --no-default-features --features bigquery
 ```
 
-Cloud URLs work for exact input, pattern input, inspection, and output arguments:
+Object-storage URLs work for exact input, pattern input, inspection, and output arguments:
 
 ```bash
 silk-chiffon transform \
@@ -69,6 +73,31 @@ silk-chiffon detect s3://example-bucket/data.parquet \
 ```
 
 Only canonical `gs://` and `s3://` URLs are registered. `s3a://` is intentionally unsupported because treating it as a second spelling for the same S3 object would split cache and output-claim identity.
+
+### BigQuery Storage Read
+
+Use a canonical `bqs` table reference anywhere `transform --from` accepts an exact service input:
+
+```bash
+silk-chiffon transform \
+  --from 'bqs:///projects/table-project/datasets/analytics/tables/events?location=us' \
+  --to events.parquet \
+  --query "SELECT event_id, occurred_at FROM data WHERE occurred_at >= TIMESTAMP '2026-08-01'"
+```
+
+The only URL query parameters are `snapshot=RFC3339` and `location=REGION`. `snapshot` requests BigQuery time travel at that exact instant. When it is absent, Silk pins the Google server's current time before schema discovery and reuses that exact snapshot for execution. `location` asserts the location returned by BigQuery; it does not choose an endpoint. Duplicate or unknown parameters, credentials, fragments, and noncanonical path forms are rejected.
+
+BigQuery authentication uses Application Default Credentials only. The caller needs `roles/bigquery.readSessionUser` on the project that owns read sessions and `roles/bigquery.dataViewer` on the source table. `--bqs-session-project` changes the session-owning project, which otherwise defaults to the table project, and `--bqs-quota-project` changes the quota project. A distinct quota project may also require `serviceusage.services.use`. No token, key, or credential document is accepted in a URL or command argument.
+
+Provider creation performs a control-plane CreateReadSession call to obtain the authoritative Arrow schema. Planning a scan performs another CreateReadSession call with the projected fields and any exactly translatable DataFusion filters. Discovery calls no ReadRows RPC and has no billed read bytes, but both session calls consume API quota and latency. The source is bounded, but BigQuery's row and byte values are estimates; a DataFusion `LIMIT` is local and is not a billing guarantee.
+
+Each BigQuery stream is one demand-driven DataFusion partition. `--bqs-max-stream-count` overrides the target-partition request, although BigQuery may return fewer streams. Responses are decoded one at a time with DataFusion memory-pool accounting and a command-shared decode limit. `--bqs-max-response-bytes` changes the 256 MiB response safety limit. Native Arrow `lz4` or `zstd` and whole-response `lz4` modes are available but mutually exclusive; `--bqs-picos-timestamp-precision` controls Pico timestamp representation.
+
+ReadRows reconnects only to the same stream at the last batch offset accepted after strict decoding and memory admission. Lost or expired sessions, exhausted retries, schema drift, and invalid responses are terminal; Silk never replaces an execution session after output may have escaped. The defaults are a 60-second active-network idle timeout, a 24-hour stream retry window, 100-millisecond initial backoff, and 60-second maximum backoff. Downstream backpressure does not count as network idleness. See the generated [command reference](docs/CLI.md) for every `--bqs-*` setting.
+
+`--bqs-endpoint` is intended for controlled testing and drives both the REST server-clock probe and the Storage Read gRPC client. Plaintext overrides must be loopback addresses. Production defaults use Google's distinct REST and gRPC endpoints; `--bqs-universe-domain` derives both defaults for another Google Cloud universe and conflicts with an explicit endpoint.
+
+The normal test suite is offline and credential-free. Maintainers can run the ignored read-only live proof with `just test-bigquery-live` only after setting `SILK_CHIFFON_BQS_LIVE_ACKNOWLEDGE_COST=1`, `SILK_CHIFFON_BQS_LIVE_SESSION_PROJECT`, `SILK_CHIFFON_BQS_LIVE_TABLE_PROJECT`, `SILK_CHIFFON_BQS_LIVE_DATASET`, `SILK_CHIFFON_BQS_LIVE_TABLE`, `SILK_CHIFFON_BQS_LIVE_EXPECTED_LOCATION`, and a positive `SILK_CHIFFON_BQS_LIVE_MAX_ESTIMATED_BYTES`; `SILK_CHIFFON_BQS_LIVE_QUOTA_PROJECT` is optional. The fixture must be a pre-existing immutable, non-sensitive, small table. The test creates no dataset, table, job, or cloud object, requests one stream with one projected field and an exact non-null filter, applies a local `LIMIT 100`, refuses an absent, nonpositive, or excessive scanned-byte estimate before ReadRows, writes Arrow and Parquet only in a local temporary directory, and enforces a 120-second bound. The estimate, filter, and local limit are safety guards, not billing guarantees.
 
 ## Recipes
 

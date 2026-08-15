@@ -487,6 +487,45 @@ Examples:
 
   Stores the original Arrow schema in the Parquet file's key-value metadata. This enables exact schema round-tripping but adds overhead. Default: disabled (not needed for most use cases).
 - `--vortex-record-batch-size <VORTEX_RECORD_BATCH_SIZE>` — Vortex record batch size
+- `--bqs-session-project <PROJECT>` — Override the project that owns Storage Read sessions
+- `--bqs-quota-project <PROJECT>` — Override the project charged for API quota
+- `--bqs-endpoint <URL>` — Override the BigQuery Storage Read API endpoint
+- `--bqs-universe-domain <DOMAIN>` — Override the Google Cloud universe domain
+- `--bqs-row-restriction <GOOGLESQL>` — AND this GoogleSQL predicate with every pushed DataFusion predicate
+- `--bqs-max-stream-count <COUNT>` — Override the number of Storage Read streams requested from BigQuery
+- `--bqs-max-response-bytes <BYTES>` — Reject a serialized Storage Read response larger than this many bytes
+
+  Default value: `268435456`
+- `--bqs-arrow-wire-compression <bqs-arrow-wire-compression>` — Select native Arrow buffer compression on the wire
+
+  Default value: `none`
+
+  Possible values: `lz4`, `zstd`, `none`
+
+- `--bqs-response-compression <bqs-response-compression>` — Select whole-response compression on the wire
+
+  Default value: `none`
+
+  Possible values: `lz4`, `none`
+
+- `--bqs-picos-timestamp-precision <bqs-picos-timestamp-precision>` — Select how picosecond timestamps are represented in Arrow
+
+  Default value: `micros`
+
+  Possible values: `micros`, `nanos`, `picos`
+
+- `--bqs-read-idle-timeout <DURATION>` — Reconnect when an active ReadRows network wait remains idle this long
+
+  Default value: `60s`
+- `--bqs-read-retry-window <DURATION>` — Limit cumulative retry time for one ReadRows stream
+
+  Default value: `24h`
+- `--bqs-read-retry-initial-backoff <DURATION>` — Set the first ReadRows retry backoff
+
+  Default value: `100ms`
+- `--bqs-read-retry-max-backoff <DURATION>` — Cap ReadRows retry backoff
+
+  Default value: `60s`
 
 ## `silk-chiffon detect`
 

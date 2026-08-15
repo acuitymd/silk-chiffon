@@ -13,9 +13,11 @@ description = "Development-only fixtures for Silk Chiffon"
 [dependencies]
 anyhow.workspace = true
 arrow = { workspace = true, features = ["ipc_compression"] }
+arrow-buffer = "^58.4.0"
 async-trait.workspace = true
 bytes = "^1.12.1"
 clap.workspace = true
+flatbuffers = "^25.12.19"
 futures.workspace = true
 object_store.workspace = true
 parquet = { version = "^58.4.0", features = ["default", "async", "json", "arrow_canonical_extension_types"] }
