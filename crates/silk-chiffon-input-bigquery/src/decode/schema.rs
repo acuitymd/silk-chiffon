@@ -8,6 +8,9 @@ use arrow::{
 
 use super::{DecodeError, DecodeErrorKind, DecodeLimit, validation::parse_encapsulated};
 
+// Arrow conversion remains recursive after this validation.
+pub(super) const MAX_SCHEMA_NESTING_DEPTH: usize = 16;
+
 #[derive(Clone)]
 pub(crate) struct SessionSchema {
     pub(crate) schema: Arc<Schema>,
@@ -59,13 +62,24 @@ fn validate_schema(schema: ipc::Schema<'_>) -> Result<(), DecodeError> {
     let fields = schema
         .fields()
         .ok_or_else(|| DecodeError::new(DecodeErrorKind::InvalidArrowSchema))?;
-    for field in fields {
-        validate_field(field)?;
+    let mut pending = fields
+        .into_iter()
+        .map(|field| (field, 1))
+        .collect::<Vec<_>>();
+    while let Some((field, depth)) = pending.pop() {
+        validate_field(field, depth, &mut pending)?;
     }
     Ok(())
 }
 
-fn validate_field(field: ipc::Field<'_>) -> Result<(), DecodeError> {
+fn validate_field<'a>(
+    field: ipc::Field<'a>,
+    depth: usize,
+    pending: &mut Vec<(ipc::Field<'a>, usize)>,
+) -> Result<(), DecodeError> {
+    if depth > MAX_SCHEMA_NESTING_DEPTH {
+        return Err(DecodeError::new(DecodeErrorKind::InvalidArrowSchema));
+    }
     if field.dictionary().is_some() {
         return Err(DecodeError::new(
             DecodeErrorKind::DictionaryBatchUnsupported,
@@ -103,16 +117,25 @@ fn validate_field(field: ipc::Field<'_>) -> Result<(), DecodeError> {
             }) && scale <= precision
         }),
         Type::List => {
-            field.type_as_list().is_some()
-                && field.children().is_some_and(|children| {
-                    children.len() == 1 && validate_field(children.get(0)).is_ok()
-                })
+            let Some(children) = field.children() else {
+                return Err(DecodeError::new(DecodeErrorKind::InvalidArrowSchema));
+            };
+            if field.type_as_list().is_none() || children.len() != 1 {
+                false
+            } else {
+                pending.push((children.get(0), depth + 1));
+                true
+            }
         }
         Type::Struct_ => {
-            field.type_as_struct_().is_some()
-                && field.children().is_none_or(|children| {
-                    children.iter().all(|child| validate_field(child).is_ok())
-                })
+            if field.type_as_struct_().is_none() {
+                false
+            } else {
+                if let Some(children) = field.children() {
+                    pending.extend(children.iter().map(|child| (child, depth + 1)));
+                }
+                true
+            }
         }
         _ => false,
     };

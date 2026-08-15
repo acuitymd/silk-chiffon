@@ -8,7 +8,7 @@ use crate::{
 };
 use arrow::{
     array::{Int64Array, RecordBatch, RecordBatchOptions, StringArray},
-    datatypes::{DataType, Field, Schema, TimeUnit},
+    datatypes::{DataType, Field, Fields, Schema, TimeUnit},
     ipc::CompressionType,
 };
 use silk_chiffon_test_support::bigquery_arrow::{
@@ -681,4 +681,31 @@ fn decode_debug_and_errors_redact_schema_and_payload_content() {
         .decode(&session, DecodeLimit::new(LIMIT).unwrap())
         .unwrap_err();
     assert!(!format!("{error:?} {error}").contains(secret));
+}
+
+#[test]
+fn schema_nesting_is_bounded_before_arrow_conversion() {
+    fn nested_schema(depth: usize) -> Schema {
+        let mut field = Field::new("leaf", DataType::Int64, true);
+        for level in 1..depth {
+            field = Field::new(
+                format!("level-{level}"),
+                DataType::Struct(Fields::from(vec![field])),
+                true,
+            );
+        }
+        Schema::new(vec![field])
+    }
+
+    let limit = DecodeLimit::new(LIMIT).unwrap();
+    let maximum = nested_schema(super::schema::MAX_SCHEMA_NESTING_DEPTH);
+    SessionSchema::from_serialized(&encode_schema(&maximum), limit).unwrap();
+
+    let too_deep = nested_schema(super::schema::MAX_SCHEMA_NESTING_DEPTH + 1);
+    assert_eq!(
+        SessionSchema::from_serialized(&encode_schema(&too_deep), limit)
+            .unwrap_err()
+            .kind(),
+        DecodeErrorKind::InvalidArrowSchema
+    );
 }

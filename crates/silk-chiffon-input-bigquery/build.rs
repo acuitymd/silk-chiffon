@@ -28,12 +28,15 @@ const WELL_KNOWN_TYPES: &[&str] = &[
 ];
 
 fn watch_proto_tree(path: &Path) -> Result<(), Box<dyn Error>> {
-    for entry in fs::read_dir(path)? {
-        let path = entry?.path();
-        if path.is_dir() {
-            watch_proto_tree(&path)?;
-        } else {
-            println!("cargo:rerun-if-changed={}", path.display());
+    let mut pending = vec![path.to_owned()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(directory)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                println!("cargo:rerun-if-changed={}", path.display());
+            }
         }
     }
     Ok(())

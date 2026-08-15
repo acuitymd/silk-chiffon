@@ -31,22 +31,49 @@ pub(crate) fn row_restriction(
     (!restrictions.is_empty()).then(|| restrictions.join(" AND "))
 }
 
+enum Translation<'a> {
+    Expression(&'a Expr),
+    Text(&'static str),
+}
+
 fn translate(schema: &Schema, expression: &Expr) -> Option<String> {
-    match expression {
-        Expr::BinaryExpr(binary) if matches!(binary.op, Operator::And | Operator::Or) => {
-            let left = translate(schema, &binary.left)?;
-            let right = translate(schema, &binary.right)?;
-            let operator = if binary.op == Operator::And {
-                "AND"
-            } else {
-                "OR"
-            };
-            Some(format!("({left} {operator} {right})"))
+    let mut sql = String::new();
+    let mut pending = vec![Translation::Expression(expression)];
+
+    while let Some(translation) = pending.pop() {
+        match translation {
+            Translation::Text(text) => sql.push_str(text),
+            Translation::Expression(expression) => match expression {
+                Expr::BinaryExpr(binary) if matches!(binary.op, Operator::And | Operator::Or) => {
+                    let operator = if binary.op == Operator::And {
+                        " AND "
+                    } else {
+                        " OR "
+                    };
+                    sql.push('(');
+                    pending.push(Translation::Text(")"));
+                    pending.push(Translation::Expression(&binary.right));
+                    pending.push(Translation::Text(operator));
+                    pending.push(Translation::Expression(&binary.left));
+                }
+                Expr::Not(child) => {
+                    sql.push_str("(NOT ");
+                    pending.push(Translation::Text(")"));
+                    pending.push(Translation::Expression(child));
+                }
+                _ => sql.push_str(&translate_leaf(schema, expression)?),
+            },
         }
+    }
+
+    Some(sql)
+}
+
+fn translate_leaf(schema: &Schema, expression: &Expr) -> Option<String> {
+    match expression {
         Expr::BinaryExpr(binary) => {
             translate_comparison(schema, &binary.left, binary.op, &binary.right)
         }
-        Expr::Not(child) => Some(format!("(NOT {})", translate(schema, child)?)),
         Expr::IsNull(child) => {
             let column = resolve_column(schema, child)?;
             Some(format!("{} IS NULL", column.sql))
@@ -579,5 +606,19 @@ mod tests {
             row_restriction(&schema(), &[], Some("tenant_id = 7")).unwrap(),
             "(tenant_id = 7)"
         );
+    }
+
+    #[test]
+    fn deeply_nested_boolean_filters_do_not_consume_the_call_stack() {
+        let mut filter = col("id").eq(lit(0_i64));
+        for value in 1..10_000_i64 {
+            filter = filter.and(col("id").eq(lit(value)));
+        }
+
+        let translated = translate(&schema(), &filter).unwrap();
+        assert_eq!(translated.matches(" AND ").count(), 9_999);
+
+        // DataFusion expressions recurse when dropped as well.
+        std::mem::forget(filter);
     }
 }
