@@ -5,6 +5,7 @@
 //! behavior.
 
 pub mod batch;
+pub mod bigquery_arrow;
 pub mod controlled_upload;
 pub mod extract;
 pub mod fault_injecting_store;

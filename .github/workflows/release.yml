@@ -45,9 +45,6 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-latest
             os: linux
-          - target: aarch64-unknown-linux-gnu
-            runner: ubuntu-latest
-            os: linux
           - target: aarch64-apple-darwin
             runner: macos-latest
             os: macos
@@ -90,20 +87,10 @@ jobs:
         run: cargo zigbuild --locked --release --target ${{ matrix.target }}
 
       - name: Test native binary
-        if: matrix.target != 'aarch64-unknown-linux-gnu'
         run: |
           ACTUAL="$(./target/${{ matrix.target }}/release/silk-chiffon --version)"
           EXPECTED="silk-chiffon ${{ needs.version.outputs.binary_version }}"
           test "${ACTUAL}" = "${EXPECTED}"
-
-      - name: Inspect cross-compiled binary
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          BINARY="target/${{ matrix.target }}/release/silk-chiffon"
-          file "${BINARY}"
-          readelf --file-header "${BINARY}" | grep -Eq 'Class:.*ELF64'
-          readelf --file-header "${BINARY}" | grep -Eq 'Data:.*little endian'
-          readelf --file-header "${BINARY}" | grep -Eq 'Machine:.*AArch64'
 
       - name: Rename binary
         run: |
