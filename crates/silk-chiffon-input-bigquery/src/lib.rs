@@ -46,11 +46,16 @@ pub mod integration_test_support {
 
 /// Returns the BigQuery Storage Read service-input definition registered by a host application.
 pub fn definition() -> ServiceInputDefinition {
+    install_crypto_provider();
     ServiceInputDefinition::with_args::<BigQueryInputArgs>(create_provider)
         .name("bigquery-storage-read")
         .schemes(["bqs"])
         .build()
         .expect("the built-in BigQuery Storage Read definition must be valid")
+}
+
+fn install_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
 fn create_provider<'a>(
@@ -70,6 +75,7 @@ mod tests {
     #[test]
     fn definition_exposes_only_the_canonical_registration() {
         let definition = definition();
+        assert!(rustls::crypto::CryptoProvider::get_default().is_some());
         assert_eq!(definition.name(), "bigquery-storage-read");
         assert_eq!(definition.schemes(), ["bqs"]);
 

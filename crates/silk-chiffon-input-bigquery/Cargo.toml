@@ -22,7 +22,7 @@ chrono = "^0.4.45"
 clap.workspace = true
 datafusion = { workspace = true, features = ["default"] }
 futures.workspace = true
-google-cloud-auth = "=1.14.0"
+google-cloud-auth = { version = "=1.14.0", default-features = false }
 http = "^1.4.2"
 humantime.workspace = true
 hyper = { version = "^1.9.0", default-features = false, features = ["client", "http1", "http2"] }
@@ -32,6 +32,7 @@ prost = "^0.14.4"
 prost-types = "^0.14.4"
 rand = "^0.10.2"
 reqwest = { version = "^0.12.28", default-features = false, features = ["http2", "rustls-tls-native-roots"] }
+rustls = { version = "^0.23.42", default-features = false, features = ["ring"] }
 sha2 = { version = "^0.11.0", default-features = false }
 silk-chiffon-core = { path = "../silk-chiffon-core" }
 thiserror.workspace = true

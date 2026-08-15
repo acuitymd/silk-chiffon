@@ -223,11 +223,11 @@ Normal storage and command tests use in-memory stores or loopback HTTP servers. 
 Each run appends a unique child to the configured prefix. The test rejects a bucket value that could alter URL authority or path structure, cleans only that child prefix, and reports any leftover objects. Run a provider target only after reviewing the bucket and prefix:
 
 ```bash
-cargo test -p silk-chiffon-storage --test cloud_live --features gcs -- --ignored
-cargo test --test cloud_live_e2e --features gcs -- --ignored
+cargo test -p silk-chiffon-storage --test cloud_live --features gcs live_gcs_exact_patterns_ranges_outputs_multipart_claims_and_cleanup -- --ignored --exact
+cargo test --test cloud_live_e2e live_gcs_composed_cli_detects_inspects_transforms_verifies_and_cleans_up -- --ignored --exact
 
-cargo test -p silk-chiffon-storage --test cloud_live --features s3 -- --ignored
-cargo test --test cloud_live_e2e --features s3 -- --ignored
+cargo test -p silk-chiffon-storage --test cloud_live --features s3 live_s3_exact_patterns_ranges_outputs_multipart_claims_and_cleanup -- --ignored --exact
+cargo test --test cloud_live_e2e live_s3_composed_cli_detects_inspects_transforms_verifies_and_cleans_up -- --ignored --exact
 ```
 
 The storage target covers exact and pattern inputs, metadata, ranges, uploads, overwrite observation, session claims, multipart behavior, and cleanup. The root target seeds a formatted object and exercises the composed `detect`, `inspect`, and `transform` paths. It verifies the output and cleans its run prefix.

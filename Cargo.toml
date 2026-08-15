@@ -115,6 +115,7 @@ assert_cmd = "^2.2.2"
 axum = "^0.8.9"
 criterion = { version = "^0.8.2", features = ["html_reports"] }
 http = "^1.4.2"
+humantime.workspace = true
 parquet = { version = "^58.4.0", features = ["default", "async", "json", "arrow_canonical_extension_types"] }
 predicates = "^3.1.4"
 prost = "^0.14.4"
@@ -131,6 +132,10 @@ harness = false
 [[test]]
 name = "bigquery_transform_integration"
 required-features = ["bigquery-integration-tests"]
+
+[[test]]
+name = "cloud_live_soak"
+required-features = ["bigquery", "gcs", "s3"]
 
 [[example]]
 name = "gen-docs"

@@ -188,6 +188,7 @@ impl AdcCredentials {
         quota_project_override: Option<&str>,
         universe_domain_override: Option<&str>,
     ) -> Result<Self, CredentialError> {
+        crate::install_crypto_provider();
         let mut builder = Builder::default().with_scopes([CLOUD_PLATFORM_SCOPE]);
         if let Some(project) = quota_project_override {
             builder = builder.with_quota_project_id(project);

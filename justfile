@@ -88,4 +88,7 @@ check-bigquery-features:
 test-bigquery-live:
     cargo test -p silk-chiffon-input-bigquery --lib provider::tests::live_small_table_writes_arrow_and_parquet -- --ignored --exact
 
+test-cloud-live-soak:
+    cargo test --test cloud_live_soak live_seeded_mixed_input_cross_provider_soak -- --ignored --exact --nocapture
+
 verify: type-check fmt-fix lint-check docs test-bigquery check-bigquery-features
