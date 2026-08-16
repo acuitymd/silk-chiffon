@@ -599,7 +599,8 @@ SELECT
 FROM benchmark_output
 """
         ).fetchone()
-    assert row is not None
+    if row is None:
+        raise RuntimeError("output validation returned no aggregate row")
     result = ValidationResult(
         rows=int(row[0]),
         distinct_ids=int(row[1]),
