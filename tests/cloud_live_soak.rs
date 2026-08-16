@@ -39,7 +39,8 @@ const LAYOUTS: [OutputLayout; 4] = [
     OutputLayout::NosortEvict,
 ];
 const TARGETS: [OutputTarget; 3] = [OutputTarget::Local, OutputTarget::Gcs, OutputTarget::S3];
-const INPUT_OBJECT_STORES: [OutputTarget; 1] = [OutputTarget::Local];
+const INPUT_OBJECT_STORES: [OutputTarget; 3] =
+    [OutputTarget::Local, OutputTarget::Gcs, OutputTarget::S3];
 const PARTITIONED_LAYOUTS: [OutputLayout; 3] = [
     OutputLayout::SortSingle,
     OutputLayout::NosortMulti,
@@ -219,7 +220,8 @@ impl Scenario {
                 PARTITIONED_LAYOUTS[index / (output_object_stores.len() * output_formats.len())];
             return Self {
                 input_format: input_formats[(index + 1) % input_formats.len()],
-                input_object_store: input_object_stores[index % input_object_stores.len()],
+                input_object_store: input_object_stores
+                    [(index / output_object_stores.len()) % input_object_stores.len()],
                 output_format: output_formats
                     [(index / output_object_stores.len()) % output_formats.len()],
                 output_layout,
@@ -716,7 +718,7 @@ async fn run_scenario(config: &SoakConfig, scenario: &Scenario, case_index: u64)
         .await
         .with_context(|| format!("transform failed for {scenario:?}"))?;
 
-    assert_outputs(config, scenario, &case_prefix, &output_root).await?;
+    assert_outputs(config, scenario, case_index, &case_prefix, &output_root).await?;
     let oracle_path = temp.path().join("oracle.arrow");
     let mut verification = vec!["silk-chiffon".into(), "transform".into()];
     match selection.verification_input {
@@ -774,8 +776,7 @@ fn scenario_query(
         input_services.contains(&InputService::BigQuery),
         input_services.contains(&InputService::Local),
     ) {
-        (true, true) => scenario.predicate_expression(total_bqs_rows),
-        (true, false) => scenario.bqs_predicate.expression(total_bqs_rows),
+        (true, _) => scenario.predicate_expression(total_bqs_rows),
         (false, true) => "id < 0".to_owned(),
         (false, false) => unreachable!("the soak requires one input"),
     };
@@ -888,6 +889,7 @@ fn string_value(array: &dyn Array, row: usize) -> Result<&str> {
 async fn assert_outputs(
     config: &SoakConfig,
     scenario: &Scenario,
+    case_index: u64,
     case_prefix: &str,
     output_root: &str,
 ) -> Result<()> {
@@ -901,23 +903,20 @@ async fn assert_outputs(
     } else {
         let partitions = paths
             .iter()
-            .filter_map(|path| {
-                path.split('/').find_map(|segment| {
-                    segment
-                        .strip_prefix("part-")
-                        .and_then(|value| value.parse::<i64>().ok())
-                })
-            })
-            .collect::<HashSet<_>>();
+            .map(|path| partition_id(path))
+            .collect::<Result<HashSet<_>>>()?;
+        let expected = expected_partition_ids(
+            scenario,
+            case_index,
+            &config.input_services,
+            config
+                .bigquery
+                .as_ref()
+                .map(|bigquery| bigquery.expected_rows),
+        )?;
         ensure!(
-            !partitions.is_empty(),
-            "partitioned output has no partition paths"
-        );
-        ensure!(
-            partitions
-                .iter()
-                .all(|partition| (0..scenario.partition_modulus).contains(partition)),
-            "partitioned output has an invalid partition: {paths:?}"
+            partitions == expected,
+            "expected partition set {expected:?}, observed {partitions:?}: {paths:?}"
         );
     }
     let extension = format!(".{}", scenario.output_format.extension());
@@ -926,6 +925,52 @@ async fn assert_outputs(
         "output extension mismatch: {paths:?}"
     );
     Ok(())
+}
+
+fn partition_id(path: &str) -> Result<usize> {
+    let value = path
+        .split('/')
+        .rev()
+        .find_map(|segment| segment.strip_prefix("part-"))
+        .with_context(|| format!("partitioned output has no partition path: {path}"))?;
+    value
+        .parse()
+        .with_context(|| format!("partitioned output has an invalid partition path: {path}"))
+}
+
+fn expected_partition_ids(
+    scenario: &Scenario,
+    case_index: u64,
+    input_services: &[InputService],
+    total_bqs_rows: Option<usize>,
+) -> Result<HashSet<usize>> {
+    let modulus =
+        usize::try_from(scenario.partition_modulus).context("partition modulus must fit usize")?;
+    ensure!(modulus > 0, "partition modulus must be positive");
+    let mut expected = HashSet::new();
+    if input_services.contains(&InputService::BigQuery) {
+        let total_bqs_rows = total_bqs_rows.context("BQS row count was not configured")?;
+        let (lower, upper) = scenario.selected_bqs_range(total_bqs_rows);
+        if scenario.output_layout == OutputLayout::NosortEvict {
+            expected.insert(0);
+        } else if upper.saturating_sub(lower).saturating_add(1) >= modulus {
+            expected.extend(0..modulus);
+        } else {
+            for id in lower..=upper {
+                expected.insert(id % modulus);
+            }
+        }
+    }
+    if input_services.contains(&InputService::Local) {
+        let first_id = first_local_id(case_index)?;
+        for offset in 0..scenario.local_rows {
+            let id = first_id
+                .checked_sub(i64::try_from(offset)?)
+                .context("local fixture ID range overflow")?;
+            expected.insert(usize::try_from(id.unsigned_abs())? % modulus);
+        }
+    }
+    Ok(expected)
 }
 
 fn local_files(root: &Path) -> Result<Vec<String>> {
@@ -1391,6 +1436,14 @@ fn mandatory_prelude_partitions_every_format_to_both_object_stores() {
     assert_eq!(
         scenarios
             .iter()
+            .map(|scenario| (scenario.input_object_store, scenario.output_object_store,))
+            .collect::<HashSet<_>>()
+            .len(),
+        INPUT_OBJECT_STORES.len() * CLOUD_TARGETS.len()
+    );
+    assert_eq!(
+        scenarios
+            .iter()
             .map(|scenario| scenario.bqs_predicate)
             .collect::<HashSet<_>>(),
         HashSet::from(BQS_PREDICATES)
@@ -1421,6 +1474,77 @@ fn mandatory_prelude_partitions_every_format_to_both_object_stores() {
                 .contains("CASE WHEN id > 0 THEN 0")
         );
     }
+}
+
+#[test]
+fn bqs_only_eviction_keeps_the_sql_row_bound() {
+    let scenario = (0..24)
+        .map(|index| {
+            Scenario::for_case(
+                1,
+                index,
+                8,
+                &FORMATS,
+                &FORMATS,
+                &INPUT_OBJECT_STORES,
+                &CLOUD_TARGETS,
+            )
+        })
+        .find(|scenario| scenario.output_layout == OutputLayout::NosortEvict)
+        .expect("mandatory prelude includes eviction");
+    let (lower, upper) = scenario.selected_bqs_range(5_000_000);
+    let query = scenario_query(&scenario, 5_000_000, &[InputService::BigQuery]);
+    assert!(query.contains(&format!("id BETWEEN {lower} AND {upper}")));
+}
+
+#[test]
+fn expected_partitions_follow_the_selected_sources() {
+    let mut scenario = Scenario::for_case(
+        1,
+        0,
+        8,
+        &FORMATS,
+        &FORMATS,
+        &INPUT_OBJECT_STORES,
+        &CLOUD_TARGETS,
+    );
+    scenario.output_layout = OutputLayout::NosortMulti;
+    scenario.partition_modulus = 7;
+    scenario.local_rows = 1;
+    scenario.bqs_predicate = BqsPredicate::Prefix;
+
+    assert_eq!(
+        expected_partition_ids(&scenario, 0, &[InputService::BigQuery], Some(6)).unwrap(),
+        HashSet::from([1, 2, 3])
+    );
+    assert_eq!(
+        expected_partition_ids(&scenario, 3, &[InputService::Local], None).unwrap(),
+        HashSet::from([4])
+    );
+    assert_eq!(
+        expected_partition_ids(
+            &scenario,
+            3,
+            &[InputService::BigQuery, InputService::Local],
+            Some(6),
+        )
+        .unwrap(),
+        HashSet::from([1, 2, 3, 4])
+    );
+    assert!(expected_partition_ids(&scenario, 0, &[InputService::BigQuery], None).is_err());
+
+    scenario.output_layout = OutputLayout::NosortEvict;
+    assert_eq!(
+        expected_partition_ids(&scenario, 0, &[InputService::BigQuery], Some(6)).unwrap(),
+        HashSet::from([0])
+    );
+
+    assert_eq!(
+        partition_id("gs://part-9/root/part-2/data.parquet").unwrap(),
+        2
+    );
+    assert!(partition_id("gs://bucket/root/data.parquet").is_err());
+    assert!(partition_id("gs://bucket/root/part-invalid/data.parquet").is_err());
 }
 
 #[test]
