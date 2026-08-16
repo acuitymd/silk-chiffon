@@ -14,6 +14,7 @@ use arrow::{
     datatypes::{DataType, Field, Schema},
     ipc::reader::StreamReader as ArrowStreamReader,
 };
+use bytes::Bytes;
 use clap::Command as ClapCommand;
 use datafusion::{datasource::MemTable, prelude::SessionContext};
 use futures::TryStreamExt;
@@ -38,6 +39,7 @@ const LAYOUTS: [OutputLayout; 4] = [
     OutputLayout::NosortEvict,
 ];
 const TARGETS: [OutputTarget; 3] = [OutputTarget::Local, OutputTarget::Gcs, OutputTarget::S3];
+const INPUT_OBJECT_STORES: [OutputTarget; 1] = [OutputTarget::Local];
 const PARTITIONED_LAYOUTS: [OutputLayout; 3] = [
     OutputLayout::SortSingle,
     OutputLayout::NosortMulti,
@@ -50,6 +52,8 @@ const LOCAL_ROW_COUNTS: [usize; 3] = [1, 17, 257];
 const MAX_EVICT_BQS_ROWS: usize = 1_000;
 const EVICT_LOCAL_ROWS: usize = 17;
 
+const DEFAULT_INPUT_SERVICES: [InputService; 2] = [InputService::BigQuery, InputService::Local];
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum SoakFormat {
     ArrowFile,
@@ -59,6 +63,18 @@ enum SoakFormat {
 }
 
 impl SoakFormat {
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "arrow-file" => Ok(Self::ArrowFile),
+            "arrow-stream" => Ok(Self::ArrowStream),
+            "parquet" => Ok(Self::Parquet),
+            "vortex" => Ok(Self::Vortex),
+            _ => bail!(
+                "unknown soak format {value:?}; choose arrow-file, arrow-stream, parquet, or vortex"
+            ),
+        }
+    }
+
     fn name(self) -> &'static str {
         match self {
             Self::ArrowFile | Self::ArrowStream => "arrow",
@@ -105,6 +121,33 @@ enum OutputTarget {
     S3,
 }
 
+impl OutputTarget {
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "local" => Ok(Self::Local),
+            "gcs" => Ok(Self::Gcs),
+            "s3" => Ok(Self::S3),
+            _ => bail!("unknown soak object store {value:?}; choose local, gcs, or s3"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum InputService {
+    BigQuery,
+    Local,
+}
+
+impl InputService {
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "bqs" => Ok(Self::BigQuery),
+            "local" => Ok(Self::Local),
+            _ => bail!("unknown soak input service {value:?}; choose bqs or local"),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum BqsPredicate {
     NonNull,
@@ -143,10 +186,11 @@ const BQS_PREDICATES: [BqsPredicate; 3] = [
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Scenario {
-    local_format: SoakFormat,
+    input_format: SoakFormat,
+    input_object_store: OutputTarget,
     output_format: SoakFormat,
     output_layout: OutputLayout,
-    output_target: OutputTarget,
+    output_object_store: OutputTarget,
     target_partitions: usize,
     bqs_stream_count: usize,
     partition_modulus: i64,
@@ -157,17 +201,29 @@ struct Scenario {
 }
 
 impl Scenario {
-    fn for_case(seed: u64, index: u64, max_stream_count: usize) -> Self {
-        let mandatory_cases = CLOUD_TARGETS.len() * FORMATS.len() * PARTITIONED_LAYOUTS.len();
+    fn for_case(
+        seed: u64,
+        index: u64,
+        max_stream_count: usize,
+        input_formats: &[SoakFormat],
+        output_formats: &[SoakFormat],
+        input_object_stores: &[OutputTarget],
+        output_object_stores: &[OutputTarget],
+    ) -> Self {
+        let mandatory_cases =
+            output_object_stores.len() * output_formats.len() * PARTITIONED_LAYOUTS.len();
         if let Ok(index) = usize::try_from(index)
             && index < mandatory_cases
         {
-            let output_layout = PARTITIONED_LAYOUTS[index / (CLOUD_TARGETS.len() * FORMATS.len())];
+            let output_layout =
+                PARTITIONED_LAYOUTS[index / (output_object_stores.len() * output_formats.len())];
             return Self {
-                local_format: FORMATS[(index + 1) % FORMATS.len()],
-                output_format: FORMATS[(index / CLOUD_TARGETS.len()) % FORMATS.len()],
+                input_format: input_formats[(index + 1) % input_formats.len()],
+                input_object_store: input_object_stores[index % input_object_stores.len()],
+                output_format: output_formats
+                    [(index / output_object_stores.len()) % output_formats.len()],
                 output_layout,
-                output_target: CLOUD_TARGETS[index % CLOUD_TARGETS.len()],
+                output_object_store: output_object_stores[index % output_object_stores.len()],
                 target_partitions: PARTITION_COUNTS[index % PARTITION_COUNTS.len()],
                 bqs_stream_count: 1 + index % max_stream_count,
                 partition_modulus: PARTITION_MODULI[index % PARTITION_MODULI.len()],
@@ -181,17 +237,35 @@ impl Scenario {
                 sort_direct_output: false,
             };
         }
-        Self::generate(seed, index, max_stream_count)
+        Self::generate(
+            seed,
+            index,
+            max_stream_count,
+            input_formats,
+            output_formats,
+            input_object_stores,
+            output_object_stores,
+        )
     }
 
-    fn generate(seed: u64, index: u64, max_stream_count: usize) -> Self {
+    fn generate(
+        seed: u64,
+        index: u64,
+        max_stream_count: usize,
+        input_formats: &[SoakFormat],
+        output_formats: &[SoakFormat],
+        input_object_stores: &[OutputTarget],
+        output_object_stores: &[OutputTarget],
+    ) -> Self {
         let mut rng = SmallRng::seed_from_u64(seed ^ index.wrapping_mul(0x9e37_79b9_7f4a_7c15));
         let output_layout = LAYOUTS[rng.random_range(0..LAYOUTS.len())];
         Self {
-            local_format: FORMATS[rng.random_range(0..FORMATS.len())],
-            output_format: FORMATS[rng.random_range(0..FORMATS.len())],
+            input_format: input_formats[rng.random_range(0..input_formats.len())],
+            input_object_store: input_object_stores[rng.random_range(0..input_object_stores.len())],
+            output_format: output_formats[rng.random_range(0..output_formats.len())],
             output_layout,
-            output_target: TARGETS[rng.random_range(0..TARGETS.len())],
+            output_object_store: output_object_stores
+                [rng.random_range(0..output_object_stores.len())],
             target_partitions: PARTITION_COUNTS[rng.random_range(0..PARTITION_COUNTS.len())],
             bqs_stream_count: rng.random_range(1..=max_stream_count),
             partition_modulus: PARTITION_MODULI[rng.random_range(0..PARTITION_MODULI.len())],
@@ -327,9 +401,14 @@ struct SoakConfig {
     duration: Duration,
     max_cases: Option<u64>,
     replay_case: Option<u64>,
-    gcs: CloudConfig,
-    s3: CloudConfig,
-    bigquery: BigQueryConfig,
+    input_formats: Vec<SoakFormat>,
+    output_formats: Vec<SoakFormat>,
+    input_object_stores: Vec<OutputTarget>,
+    output_object_stores: Vec<OutputTarget>,
+    input_services: Vec<InputService>,
+    gcs: Option<CloudConfig>,
+    s3: Option<CloudConfig>,
+    bigquery: Option<BigQueryConfig>,
 }
 
 impl SoakConfig {
@@ -352,25 +431,83 @@ impl SoakConfig {
             .ok()
             .map(|value| parse_u64("SILK_CHIFFON_LIVE_SOAK_CASE", &value))
             .transpose()?;
+        let input_formats = parse_selection(
+            "SILK_CHIFFON_LIVE_SOAK_INPUT_FORMATS",
+            FORMATS,
+            SoakFormat::parse,
+        )?;
+        let output_formats = parse_selection(
+            "SILK_CHIFFON_LIVE_SOAK_OUTPUT_FORMATS",
+            FORMATS,
+            SoakFormat::parse,
+        )?;
+        let input_object_stores = parse_selection(
+            "SILK_CHIFFON_LIVE_SOAK_INPUT_OBJECT_STORES",
+            INPUT_OBJECT_STORES,
+            OutputTarget::parse,
+        )?;
+        let output_object_stores = parse_selection(
+            "SILK_CHIFFON_LIVE_SOAK_OUTPUT_OBJECT_STORES",
+            TARGETS,
+            OutputTarget::parse,
+        )?;
+        let input_services = parse_selection(
+            "SILK_CHIFFON_LIVE_SOAK_INPUT_SERVICES",
+            DEFAULT_INPUT_SERVICES,
+            InputService::parse,
+        )?;
+        let local_input_selected = input_services.contains(&InputService::Local);
         Ok(Self {
             seed,
             duration,
             max_cases,
             replay_case,
-            gcs: CloudConfig::from_env(
-                "gs",
-                "SILK_CHIFFON_LIVE_GCS_BUCKET",
-                "SILK_CHIFFON_LIVE_GCS_PREFIX",
-                nonce,
-            )?,
-            s3: CloudConfig::from_env(
-                "s3",
-                "SILK_CHIFFON_LIVE_S3_BUCKET",
-                "SILK_CHIFFON_LIVE_S3_PREFIX",
-                nonce,
-            )?,
-            bigquery: BigQueryConfig::from_env()?,
+            input_formats,
+            output_formats,
+            input_object_stores: input_object_stores.clone(),
+            output_object_stores: output_object_stores.clone(),
+            input_services: input_services.clone(),
+            gcs: (output_object_stores.contains(&OutputTarget::Gcs)
+                || (local_input_selected && input_object_stores.contains(&OutputTarget::Gcs)))
+            .then(|| {
+                CloudConfig::from_env(
+                    "gs",
+                    "SILK_CHIFFON_LIVE_GCS_BUCKET",
+                    "SILK_CHIFFON_LIVE_GCS_PREFIX",
+                    nonce,
+                )
+            })
+            .transpose()?,
+            s3: (output_object_stores.contains(&OutputTarget::S3)
+                || (local_input_selected && input_object_stores.contains(&OutputTarget::S3)))
+            .then(|| {
+                CloudConfig::from_env(
+                    "s3",
+                    "SILK_CHIFFON_LIVE_S3_BUCKET",
+                    "SILK_CHIFFON_LIVE_S3_PREFIX",
+                    nonce,
+                )
+            })
+            .transpose()?,
+            bigquery: input_services
+                .contains(&InputService::BigQuery)
+                .then(BigQueryConfig::from_env)
+                .transpose()?,
         })
+    }
+
+    fn cloud_config(&self, target: OutputTarget) -> Result<&CloudConfig> {
+        match target {
+            OutputTarget::Local => bail!("local output has no cloud configuration"),
+            OutputTarget::Gcs => self
+                .gcs
+                .as_ref()
+                .context("GCS was not selected for this soak"),
+            OutputTarget::S3 => self
+                .s3
+                .as_ref()
+                .context("S3 was not selected for this soak"),
+        }
     }
 }
 
@@ -485,44 +622,92 @@ async fn run_cli(arguments: Vec<String>) -> Result<()> {
     cli.command.execute().await
 }
 
+async fn upload_input(
+    config: &SoakConfig,
+    target: OutputTarget,
+    path: &Path,
+    case_prefix: &str,
+) -> Result<String> {
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .context("input fixture has no UTF-8 extension")?;
+    let url = config
+        .cloud_config(target)?
+        .url(&format!("{case_prefix}/input.{extension}"));
+    let storage = storage_session(config)?;
+    let output = storage
+        .prepare_output_target(
+            &LocationInput::parse(&url)?,
+            &OutputPreparation::new(ExistingOutput::Allow, false),
+        )
+        .await?;
+    let bytes = Bytes::from(fs::read(path)?);
+    output
+        .object_store()
+        .put(output.object_path(), bytes.into())
+        .await?;
+    Ok(url)
+}
+
 async fn run_scenario(config: &SoakConfig, scenario: &Scenario, case_index: u64) -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let input_path = temp
-        .path()
-        .join(format!("local.{}", scenario.local_format.extension()));
-    write_local_input(
-        &input_path,
-        scenario.local_format,
-        case_index,
-        scenario.local_rows,
-    )
-    .await?;
+    let local_input = if config.input_services.contains(&InputService::Local) {
+        let input_path = temp
+            .path()
+            .join(format!("local.{}", scenario.input_format.extension()));
+        write_local_input(
+            &input_path,
+            scenario.input_format,
+            case_index,
+            scenario.local_rows,
+        )
+        .await?;
+        Some(input_path)
+    } else {
+        None
+    };
     let case_prefix = format!("seed-{:016x}/case-{case_index:08}", config.seed);
-    let output_root = match scenario.output_target {
+    let output_root = match scenario.output_object_store {
         OutputTarget::Local => temp.path().join("output").to_string_lossy().into_owned(),
-        OutputTarget::Gcs => config.gcs.url(&format!("{case_prefix}/output")),
-        OutputTarget::S3 => config.s3.url(&format!("{case_prefix}/output")),
+        target => config
+            .cloud_config(target)?
+            .url(&format!("{case_prefix}/output")),
     };
     let selection = output_selection(&output_root, scenario.output_format, scenario.output_layout);
-    let mut arguments = vec![
-        "silk-chiffon".into(),
-        "transform".into(),
-        "--from".into(),
-        config.bigquery.reference.clone(),
-        "--from".into(),
-        input_path.to_string_lossy().into_owned(),
+    let mut arguments = vec!["silk-chiffon".into(), "transform".into()];
+    if config.input_services.contains(&InputService::BigQuery) {
+        let bigquery = config.bigquery.as_ref().context("BQS was not selected")?;
+        arguments.extend(["--from".into(), bigquery.reference.clone()]);
+    }
+    if let Some(input_path) = local_input {
+        let input_reference = match scenario.input_object_store {
+            OutputTarget::Local => input_path.to_string_lossy().into_owned(),
+            target => upload_input(config, target, &input_path, &case_prefix).await?,
+        };
+        arguments.extend(["--from".into(), input_reference]);
+    }
+    ensure!(
+        arguments.len() > 2,
+        "at least one soak input must be selected"
+    );
+    let total_bqs_rows = config
+        .bigquery
+        .as_ref()
+        .map_or(0, |bigquery| bigquery.expected_rows);
+    arguments.extend([
         "--query".into(),
-        scenario_query(scenario, config.bigquery.expected_rows),
+        scenario_query(scenario, total_bqs_rows, &config.input_services),
         "--target-partitions".into(),
         scenario.target_partitions.to_string(),
-    ];
+    ]);
     arguments.extend(selection.arguments);
     scenario.output_format.append_output_args(&mut arguments);
-    config
-        .bigquery
-        .append_args(&mut arguments, scenario.bqs_stream_count);
-    if let Some(restriction) = scenario.explicit_bqs_restriction(config.bigquery.expected_rows) {
-        arguments.extend(["--bqs-row-restriction".into(), restriction]);
+    if let Some(bigquery) = &config.bigquery {
+        bigquery.append_args(&mut arguments, scenario.bqs_stream_count);
+        if let Some(restriction) = scenario.explicit_bqs_restriction(bigquery.expected_rows) {
+            arguments.extend(["--bqs-row-restriction".into(), restriction]);
+        }
     }
     if scenario.output_layout == OutputLayout::Direct && scenario.sort_direct_output {
         arguments.extend(["--sort-by".into(), "id:desc".into()]);
@@ -558,30 +743,52 @@ async fn run_scenario(config: &SoakConfig, scenario: &Scenario, case_index: u64)
         .await
         .with_context(|| format!("read-back verification failed for {scenario:?}"))?;
 
-    let expected_bqs_range = scenario.selected_bqs_range(config.bigquery.expected_rows);
+    let expected_bqs_range = config
+        .bigquery
+        .as_ref()
+        .map(|bigquery| scenario.selected_bqs_range(bigquery.expected_rows));
     verify_oracle(
         &oracle_path,
         expected_bqs_range,
         case_index,
-        scenario.local_rows,
+        if config.input_services.contains(&InputService::Local) {
+            scenario.local_rows
+        } else {
+            0
+        },
     )
     .with_context(|| format!("content oracle failed for {scenario:?}"))
 }
 
-fn scenario_query(scenario: &Scenario, total_bqs_rows: usize) -> String {
+fn scenario_query(
+    scenario: &Scenario,
+    total_bqs_rows: usize,
+    input_services: &[InputService],
+) -> String {
     let projected_columns = if scenario.project_name_first {
         "name, id"
     } else {
         "id, name"
     };
-    let predicate = scenario.predicate_expression(total_bqs_rows);
+    let predicate = match (
+        input_services.contains(&InputService::BigQuery),
+        input_services.contains(&InputService::Local),
+    ) {
+        (true, true) => scenario.predicate_expression(total_bqs_rows),
+        (true, false) => scenario.bqs_predicate.expression(total_bqs_rows),
+        (false, true) => "id < 0".to_owned(),
+        (false, false) => unreachable!("the soak requires one input"),
+    };
     let partition_key = if scenario.output_layout == OutputLayout::NosortEvict {
         format!(
             "CASE WHEN id > 0 THEN 0 ELSE ABS(id) % {} END",
             scenario.partition_modulus
         )
     } else {
-        format!("id % {}", scenario.partition_modulus)
+        format!(
+            "CASE WHEN id > 0 THEN id % {0} ELSE ABS(id) % {0} END",
+            scenario.partition_modulus
+        )
     };
     format!(
         "SELECT {projected_columns}, {partition_key} AS partition_key FROM data WHERE {predicate}",
@@ -590,16 +797,20 @@ fn scenario_query(scenario: &Scenario, total_bqs_rows: usize) -> String {
 
 fn verify_oracle(
     path: &Path,
-    expected_bqs_range: (usize, usize),
+    expected_bqs_range: Option<(usize, usize)>,
     case_index: u64,
     expected_local_rows: usize,
 ) -> Result<()> {
-    let (first_bqs_id, last_bqs_id) = expected_bqs_range;
-    ensure!(
-        first_bqs_id > 0 && first_bqs_id <= last_bqs_id,
-        "invalid expected BQS ID range {first_bqs_id}..={last_bqs_id}"
-    );
-    let expected_bqs_rows = last_bqs_id - first_bqs_id + 1;
+    let (first_bqs_id, last_bqs_id, expected_bqs_rows) = expected_bqs_range
+        .map_or((0, 0, 0), |(first, last)| {
+            (first, last, last.saturating_sub(first).saturating_add(1))
+        });
+    if expected_bqs_range.is_some() {
+        ensure!(
+            first_bqs_id > 0 && first_bqs_id <= last_bqs_id,
+            "invalid expected BQS ID range {first_bqs_id}..={last_bqs_id}"
+        );
+    }
     let mut bqs_seen = vec![0_u64; expected_bqs_rows.div_ceil(64)];
     let mut local_seen = vec![false; expected_local_rows];
     let mut bqs_count = 0_usize;
@@ -680,22 +891,34 @@ async fn assert_outputs(
     case_prefix: &str,
     output_root: &str,
 ) -> Result<()> {
-    let paths = match scenario.output_target {
+    let paths = match scenario.output_object_store {
         OutputTarget::Local => local_files(Path::new(output_root))?,
-        OutputTarget::Gcs => cloud_files(&config.gcs, case_prefix).await?,
-        OutputTarget::S3 => cloud_files(&config.s3, case_prefix).await?,
+        target => cloud_files(config, config.cloud_config(target)?, case_prefix).await?,
     };
     ensure!(!paths.is_empty(), "scenario produced no output files");
     if scenario.output_layout == OutputLayout::Direct {
         ensure!(paths.len() == 1, "direct output produced multiple files");
     } else {
-        for partition in 0..scenario.partition_modulus {
-            let marker = format!("part-{partition}/");
-            ensure!(
-                paths.iter().any(|path| path.contains(&marker)),
-                "partition {partition} produced no output: {paths:?}"
-            );
-        }
+        let partitions = paths
+            .iter()
+            .filter_map(|path| {
+                path.split('/').find_map(|segment| {
+                    segment
+                        .strip_prefix("part-")
+                        .and_then(|value| value.parse::<i64>().ok())
+                })
+            })
+            .collect::<HashSet<_>>();
+        ensure!(
+            !partitions.is_empty(),
+            "partitioned output has no partition paths"
+        );
+        ensure!(
+            partitions
+                .iter()
+                .all(|partition| (0..scenario.partition_modulus).contains(partition)),
+            "partitioned output has an invalid partition: {paths:?}"
+        );
     }
     let extension = format!(".{}", scenario.output_format.extension());
     ensure!(
@@ -722,8 +945,12 @@ fn local_files(root: &Path) -> Result<Vec<String>> {
     Ok(files)
 }
 
-async fn cloud_files(config: &CloudConfig, case_prefix: &str) -> Result<Vec<String>> {
-    let storage = storage_session()?;
+async fn cloud_files(
+    soak_config: &SoakConfig,
+    config: &CloudConfig,
+    case_prefix: &str,
+) -> Result<Vec<String>> {
+    let storage = storage_session(soak_config)?;
     let root = storage
         .prepare_output_target(
             &LocationInput::parse(config.url(&format!("{case_prefix}/list-root")))?,
@@ -746,8 +973,12 @@ async fn cloud_files(config: &CloudConfig, case_prefix: &str) -> Result<Vec<Stri
         .collect())
 }
 
-async fn cleanup_under(config: &CloudConfig, suffix: Option<&str>) -> Result<Vec<String>> {
-    let storage = storage_session()?;
+async fn cleanup_under(
+    soak_config: &SoakConfig,
+    config: &CloudConfig,
+    suffix: Option<&str>,
+) -> Result<Vec<String>> {
+    let storage = storage_session(soak_config)?;
     let target_suffix = suffix.unwrap_or("cleanup-root");
     let root = storage
         .prepare_output_target(
@@ -784,34 +1015,28 @@ async fn cleanup_under(config: &CloudConfig, suffix: Option<&str>) -> Result<Vec
     Ok(leftovers)
 }
 
-fn storage_session() -> Result<StorageSession> {
-    let registry = StorageRegistry::builder()
-        .register(silk_chiffon_storage::gcs::backend()?)
-        .register(silk_chiffon_storage::s3::backend()?)
-        .build()?;
+fn storage_session(config: &SoakConfig) -> Result<StorageSession> {
+    let mut registry = StorageRegistry::builder();
+    let needs_gcs = config.output_object_stores.contains(&OutputTarget::Gcs)
+        || (config.input_services.contains(&InputService::Local)
+            && config.input_object_stores.contains(&OutputTarget::Gcs));
+    let needs_s3 = config.output_object_stores.contains(&OutputTarget::S3)
+        || (config.input_services.contains(&InputService::Local)
+            && config.input_object_stores.contains(&OutputTarget::S3));
+    if needs_gcs {
+        registry = registry.register(silk_chiffon_storage::gcs::backend()?);
+    }
+    if needs_s3 {
+        registry = registry.register(silk_chiffon_storage::s3::backend()?);
+    }
+    let registry = registry.build()?;
     let command = registry.augment_args(ClapCommand::new("cloud-live-soak"));
     let matches = command.try_get_matches_from(["cloud-live-soak"])?;
     Ok(registry.create_session(&matches)?)
 }
 
-async fn run_case_with_cleanup(
-    config: &SoakConfig,
-    scenario: &Scenario,
-    case_index: u64,
-) -> Result<()> {
-    let case_prefix = format!("seed-{:016x}/case-{case_index:08}", config.seed);
-    let exercise = run_scenario(config, scenario, case_index).await;
-    let cleanup = match scenario.output_target {
-        OutputTarget::Local => Ok(Vec::new()),
-        OutputTarget::Gcs => cleanup_under(&config.gcs, Some(&case_prefix)).await,
-        OutputTarget::S3 => cleanup_under(&config.s3, Some(&case_prefix)).await,
-    };
-    match (exercise, cleanup) {
-        (Ok(()), Ok(leftovers)) if leftovers.is_empty() => Ok(()),
-        (exercise, cleanup) => bail!(
-            "case failed and/or leaked cloud objects: exercise={exercise:?}; cleanup={cleanup:?}"
-        ),
-    }
+async fn run_case(config: &SoakConfig, scenario: &Scenario, case_index: u64) -> Result<()> {
+    run_scenario(config, scenario, case_index).await
 }
 
 async fn run_soak(config: &SoakConfig) -> Result<()> {
@@ -835,13 +1060,20 @@ async fn run_soak(config: &SoakConfig) -> Result<()> {
             let scenario = Scenario::for_case(
                 config.seed,
                 case_index,
-                config.bigquery.max_stream_count,
+                config
+                    .bigquery
+                    .as_ref()
+                    .map_or(1, |bigquery| bigquery.max_stream_count),
+                &config.input_formats,
+                &config.output_formats,
+                &config.input_object_stores,
+                &config.output_object_stores,
             );
             eprintln!(
                 "cloud soak case={case_index} seed={} scenario={scenario:?}",
                 config.seed
             );
-            run_case_with_cleanup(config, &scenario, case_index)
+            run_case(config, &scenario, case_index)
                 .await
                 .with_context(|| {
                     format!(
@@ -858,24 +1090,79 @@ async fn run_soak(config: &SoakConfig) -> Result<()> {
         Ok(())
     }
     .await;
-    let gcs_cleanup = cleanup_under(&config.gcs, None).await;
-    let s3_cleanup = cleanup_under(&config.s3, None).await;
-    match (exercise, gcs_cleanup, s3_cleanup) {
-        (Ok(()), Ok(gcs), Ok(s3)) if gcs.is_empty() && s3.is_empty() => {
-            eprintln!(
-                "cloud soak completed {completed} cases in {:?} with no leaked objects",
-                started.elapsed()
-            );
-            Ok(())
+    let mut leftovers = Vec::new();
+    let mut cleanup_errors = Vec::new();
+    for target in [OutputTarget::Gcs, OutputTarget::S3] {
+        if config.output_object_stores.contains(&target)
+            || (config.input_services.contains(&InputService::Local)
+                && config.input_object_stores.contains(&target))
+        {
+            match config.cloud_config(target) {
+                Ok(cloud) => match cleanup_under(config, cloud, None).await {
+                    Ok(target_leftovers) => leftovers.extend(target_leftovers),
+                    Err(error) => cleanup_errors.push(format!("{target:?}: {error}")),
+                },
+                Err(error) => cleanup_errors.push(format!("{target:?}: {error}")),
+            }
         }
-        (exercise, gcs, s3) => bail!(
-            "cloud soak failed or leaked objects: exercise={exercise:?}; gcs_cleanup={gcs:?}; s3_cleanup={s3:?}"
-        ),
+    }
+    if exercise.is_ok() && leftovers.is_empty() && cleanup_errors.is_empty() {
+        eprintln!(
+            "cloud soak completed {completed} cases in {:?} with no leaked objects",
+            started.elapsed()
+        );
+        Ok(())
+    } else {
+        bail!(
+            "cloud soak failed or leaked objects: exercise={exercise:?}; leftovers={leftovers:?}; cleanup_errors={cleanup_errors:?}"
+        )
     }
 }
 
 fn required(name: &str) -> Result<String> {
     std::env::var(name).with_context(|| format!("set {name} for the live cloud soak"))
+}
+
+fn parse_selection<T, const N: usize>(
+    name: &str,
+    defaults: [T; N],
+    parse: impl Fn(&str) -> Result<T>,
+) -> Result<Vec<T>>
+where
+    T: Copy + Eq,
+{
+    let Some(value) = std::env::var_os(name) else {
+        return Ok(defaults.into());
+    };
+    let value = value
+        .into_string()
+        .map_err(|_| anyhow::anyhow!("{name} must be valid UTF-8"))?;
+    parse_selection_value(name, &value, parse)
+}
+
+fn parse_selection_value<T>(
+    name: &str,
+    value: &str,
+    parse: impl Fn(&str) -> Result<T>,
+) -> Result<Vec<T>>
+where
+    T: Copy + Eq,
+{
+    let mut selected = Vec::new();
+    for item in value.split(',').map(str::trim) {
+        ensure!(!item.is_empty(), "{name} must not contain empty values");
+        let parsed = parse(item).with_context(|| format!("invalid value in {name}"))?;
+        ensure!(
+            !selected.contains(&parsed),
+            "{name} contains duplicate value {item:?}"
+        );
+        selected.push(parsed);
+    }
+    ensure!(
+        !selected.is_empty(),
+        "{name} must select at least one value"
+    );
+    Ok(selected)
 }
 
 fn parse_positive<T>(name: &str, value: &str) -> Result<T>
@@ -951,6 +1238,7 @@ fn generated_scenarios_are_replayable_and_cover_every_dimension() {
     let mut local_formats = HashSet::new();
     let mut output_formats = HashSet::new();
     let mut layouts = HashSet::new();
+    let mut input_object_stores = HashSet::new();
     let mut targets = HashSet::new();
     let mut partitions = HashSet::new();
     let mut moduli = HashSet::new();
@@ -962,23 +1250,44 @@ fn generated_scenarios_are_replayable_and_cover_every_dimension() {
     let mut saw_sorted = false;
     let mut saw_unsorted = false;
     for index in 0..4_096 {
-        let scenario = Scenario::generate(seed, index, 8);
-        assert_eq!(scenario, Scenario::generate(seed, index, 8));
-        local_formats.insert(scenario.local_format);
+        let scenario = Scenario::generate(
+            seed,
+            index,
+            8,
+            &FORMATS,
+            &FORMATS,
+            &INPUT_OBJECT_STORES,
+            &TARGETS,
+        );
+        assert_eq!(
+            scenario,
+            Scenario::generate(
+                seed,
+                index,
+                8,
+                &FORMATS,
+                &FORMATS,
+                &INPUT_OBJECT_STORES,
+                &TARGETS,
+            )
+        );
+        local_formats.insert(scenario.input_format);
+        input_object_stores.insert(scenario.input_object_store);
         output_formats.insert(scenario.output_format);
         layouts.insert(scenario.output_layout);
-        targets.insert(scenario.output_target);
+        targets.insert(scenario.output_object_store);
         partitions.insert(scenario.target_partitions);
         moduli.insert(scenario.partition_modulus);
         local_rows.insert(scenario.local_rows);
         predicates.insert(scenario.bqs_predicate);
-        local_output_pairs.insert((scenario.local_format, scenario.output_format));
+        local_output_pairs.insert((scenario.input_format, scenario.output_format));
         output_layout_pairs.insert((scenario.output_format, scenario.output_layout));
-        layout_target_pairs.insert((scenario.output_layout, scenario.output_target));
+        layout_target_pairs.insert((scenario.output_layout, scenario.output_object_store));
         saw_sorted |= scenario.sort_direct_output;
         saw_unsorted |= !scenario.sort_direct_output;
     }
     assert_eq!(local_formats, HashSet::from(FORMATS));
+    assert_eq!(input_object_stores, HashSet::from(INPUT_OBJECT_STORES));
     assert_eq!(output_formats, HashSet::from(FORMATS));
     assert_eq!(layouts, HashSet::from(LAYOUTS));
     assert_eq!(targets, HashSet::from(TARGETS));
@@ -993,14 +1302,74 @@ fn generated_scenarios_are_replayable_and_cover_every_dimension() {
 }
 
 #[test]
+fn soak_selection_parses_independent_format_store_and_input_sets() {
+    assert_eq!(
+        parse_selection_value("formats", "parquet, arrow-stream", SoakFormat::parse).unwrap(),
+        vec![SoakFormat::Parquet, SoakFormat::ArrowStream]
+    );
+    assert_eq!(
+        parse_selection_value("stores", "gcs", OutputTarget::parse).unwrap(),
+        vec![OutputTarget::Gcs]
+    );
+    assert_eq!(
+        parse_selection_value("input services", "local", InputService::parse).unwrap(),
+        vec![InputService::Local]
+    );
+    assert!(parse_selection_value("stores", "gcs,gcs", OutputTarget::parse).is_err());
+    assert!(parse_selection_value("input services", "", InputService::parse).is_err());
+}
+
+#[test]
+fn selected_dimensions_shape_the_deterministic_prelude() {
+    let formats = [SoakFormat::Parquet];
+    let targets = [OutputTarget::Gcs];
+    let scenarios = (0..3)
+        .map(|index| {
+            Scenario::for_case(
+                1,
+                index,
+                8,
+                &formats,
+                &formats,
+                &[OutputTarget::Gcs],
+                &targets,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(scenarios.iter().all(|scenario| {
+        scenario.input_format == SoakFormat::Parquet
+            && scenario.output_format == SoakFormat::Parquet
+            && scenario.input_object_store == OutputTarget::Gcs
+            && scenario.output_object_store == OutputTarget::Gcs
+    }));
+    assert_eq!(
+        scenarios
+            .iter()
+            .map(|scenario| scenario.output_layout)
+            .collect::<HashSet<_>>(),
+        HashSet::from(PARTITIONED_LAYOUTS)
+    );
+}
+
+#[test]
 fn mandatory_prelude_partitions_every_format_to_both_object_stores() {
     let scenarios = (0..24)
-        .map(|index| Scenario::for_case(1, index, 8))
+        .map(|index| {
+            Scenario::for_case(
+                1,
+                index,
+                8,
+                &FORMATS,
+                &FORMATS,
+                &INPUT_OBJECT_STORES,
+                &CLOUD_TARGETS,
+            )
+        })
         .collect::<Vec<_>>();
     assert!(
         scenarios
             .iter()
-            .all(|scenario| scenario.output_target != OutputTarget::Local)
+            .all(|scenario| scenario.output_object_store != OutputTarget::Local)
     );
     assert!(
         scenarios
@@ -1011,7 +1380,7 @@ fn mandatory_prelude_partitions_every_format_to_both_object_stores() {
         scenarios
             .iter()
             .map(|scenario| (
-                scenario.output_target,
+                scenario.output_object_store,
                 scenario.output_format,
                 scenario.output_layout,
             ))
@@ -1047,7 +1416,10 @@ fn mandatory_prelude_partitions_every_format_to_both_object_stores() {
             scenario.explicit_bqs_restriction(5_000_000),
             Some(format!("`id` BETWEEN {lower} AND {upper}"))
         );
-        assert!(scenario_query(scenario, 5_000_000).contains("CASE WHEN id > 0 THEN 0"));
+        assert!(
+            scenario_query(scenario, 5_000_000, &DEFAULT_INPUT_SERVICES)
+                .contains("CASE WHEN id > 0 THEN 0")
+        );
     }
 }
 
@@ -1115,12 +1487,12 @@ fn content_oracle_checks_every_unordered_row_and_rejects_corruption() {
             (2, "row-2"),
         ],
     );
-    verify_oracle(&valid, (1, 3), 0, 2).unwrap();
+    verify_oracle(&valid, Some((1, 3)), 0, 2).unwrap();
 
     let duplicate = temp.path().join("duplicate.arrow");
     write_oracle_rows(&duplicate, &[(1, "row-1"), (1, "row-1")]);
     assert!(
-        verify_oracle(&duplicate, (1, 2), 0, 0)
+        verify_oracle(&duplicate, Some((1, 2)), 0, 0)
             .unwrap_err()
             .to_string()
             .contains("duplicate BQS id 1")
@@ -1129,7 +1501,7 @@ fn content_oracle_checks_every_unordered_row_and_rejects_corruption() {
     let corrupted = temp.path().join("corrupted.arrow");
     write_oracle_rows(&corrupted, &[(1, "wrong")]);
     assert!(
-        verify_oracle(&corrupted, (1, 1), 0, 0)
+        verify_oracle(&corrupted, Some((1, 1)), 0, 0)
             .unwrap_err()
             .to_string()
             .contains("wrong name for BQS id 1")
@@ -1151,9 +1523,21 @@ async fn every_generated_pushdown_query_plans_against_the_fixture_schema() {
     let session = SessionContext::new();
     session.register_table("data", Arc::new(provider)).unwrap();
     for index in 0..24 {
-        let scenario = Scenario::for_case(0x0071_7565_7279, index, 8);
+        let scenario = Scenario::for_case(
+            0x0071_7565_7279,
+            index,
+            8,
+            &FORMATS,
+            &FORMATS,
+            &INPUT_OBJECT_STORES,
+            &CLOUD_TARGETS,
+        );
         let frame = session
-            .sql(&scenario_query(&scenario, 5_000_000))
+            .sql(&scenario_query(
+                &scenario,
+                5_000_000,
+                &DEFAULT_INPUT_SERVICES,
+            ))
             .await
             .unwrap();
         assert_eq!(frame.schema().field_names().len(), 3);
