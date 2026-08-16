@@ -625,7 +625,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn stage_failure_cancels_siblings_and_awaits_nested_tasks() {
         let scope = PipelineTaskScope::new(CancellationToken::new());
-        let ready = Arc::new(Barrier::new(2));
+        let ready = Arc::new(Barrier::new(3));
         let sibling_dropped = Arc::new(AtomicBool::new(false));
         let nested_dropped = Arc::new(AtomicBool::new(false));
         let mut tasks = JoinSet::new();
@@ -653,6 +653,8 @@ mod tests {
             }
         });
 
+        ready.wait().await;
+
         let error = tokio::time::timeout(
             std::time::Duration::from_secs(5),
             settle_pipeline_tasks(&scope, &mut tasks),
@@ -669,7 +671,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn stage_panic_cancels_and_awaits_its_sibling() {
         let scope = PipelineTaskScope::new(CancellationToken::new());
-        let ready = Arc::new(Barrier::new(2));
+        let ready = Arc::new(Barrier::new(3));
         let sibling_dropped = Arc::new(AtomicBool::new(false));
         let mut tasks = JoinSet::new();
 
@@ -689,6 +691,8 @@ mod tests {
                 pending::<Result<()>>().await
             }
         });
+
+        ready.wait().await;
 
         let error = tokio::time::timeout(
             std::time::Duration::from_secs(5),
