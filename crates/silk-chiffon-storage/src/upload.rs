@@ -31,7 +31,7 @@ const DEFAULT_MAX_IN_FLIGHT_PARTS: usize = 8;
 /// Parsed command-line settings for storage-owned object uploads.
 #[derive(Args, Clone, Debug)]
 #[command(about = None, long_about = None)]
-pub struct ObjectUploadArgs {
+pub(crate) struct ObjectUploadArgs {
     /// Adaptive single-put threshold and multipart part size.
     #[arg(
         long = "object-store-upload-part-size",
@@ -55,28 +55,18 @@ impl ObjectUploadArgs {
 
 /// Immutable upload limits shared by every output handle in one storage session.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ObjectUploadSettings {
+pub(crate) struct ObjectUploadSettings {
     part_size: NonZeroUsize,
     max_in_flight_parts: NonZeroUsize,
 }
 
 impl ObjectUploadSettings {
     /// Creates upload settings from validated positive limits.
-    pub const fn new(part_size: NonZeroUsize, max_in_flight_parts: NonZeroUsize) -> Self {
+    pub(crate) const fn new(part_size: NonZeroUsize, max_in_flight_parts: NonZeroUsize) -> Self {
         Self {
             part_size,
             max_in_flight_parts,
         }
-    }
-
-    /// Returns the adaptive threshold and multipart part size.
-    pub const fn part_size(self) -> NonZeroUsize {
-        self.part_size
-    }
-
-    /// Returns the command-wide multipart request limit.
-    pub const fn max_in_flight_parts(self) -> NonZeroUsize {
-        self.max_in_flight_parts
     }
 }
 

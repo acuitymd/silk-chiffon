@@ -792,19 +792,77 @@ impl SinkBinding for OutputBinding {
 mod tests {
     use super::*;
 
-    use crate::{
-        BloomFilterSettings, ColumnBloomFilterPolicy, DefaultBloomFilterPolicy,
-        inspection::Inspector,
-    };
+    use crate::{BloomFilterSettings, ColumnBloomFilterPolicy, DefaultBloomFilterPolicy};
     use silk_chiffon_core::{NullPlacement, SortColumn, SortDirection};
     use silk_chiffon_test_support::{
-        TestExtract, TestFile, batch as test_data,
-        parquet::read_entire_file as read_entire_parquet_file, prepared_local_output_target,
-        verify,
+        TestExtract, TestFile,
+        parquet::{ParquetContents, read_entire_file as read_entire_parquet_file},
+        prepared_local_output_target,
     };
 
-    use camino::Utf8Path;
     use tempfile::tempdir;
+
+    mod test_data {
+        use std::sync::Arc;
+
+        use arrow::{
+            array::{Int32Array, RecordBatch, StringArray},
+            datatypes::SchemaRef,
+        };
+        use silk_chiffon_test_support::TestBatch;
+
+        pub(super) fn simple_schema() -> SchemaRef {
+            TestBatch::simple_schema()
+        }
+
+        pub(super) fn create_batch_with_ids_and_names(
+            schema: &SchemaRef,
+            ids: &[i32],
+            names: &[&str],
+        ) -> RecordBatch {
+            RecordBatch::try_new(
+                Arc::clone(schema),
+                vec![
+                    Arc::new(Int32Array::from(ids.to_vec())),
+                    Arc::new(StringArray::from(names.to_vec())),
+                ],
+            )
+            .unwrap()
+        }
+    }
+
+    mod verify {
+        use arrow::array::{Array, Int32Array, RecordBatch, StringArray};
+
+        pub(super) fn assert_id_name_batch_data_matches(
+            batch: &RecordBatch,
+            expected_ids: &[i32],
+            expected_names: &[&str],
+        ) {
+            assert_eq!(batch.schema(), super::test_data::simple_schema());
+            let ids = batch
+                .column_by_name("id")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap();
+            let names = batch
+                .column_by_name("name")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+
+            assert_eq!(ids.len(), expected_ids.len());
+            assert_eq!(names.len(), expected_names.len());
+            for (index, expected) in expected_ids.iter().enumerate() {
+                assert_eq!(ids.value(index), *expected);
+            }
+            for (index, expected) in expected_names.iter().enumerate() {
+                assert_eq!(names.value(index), *expected);
+            }
+        }
+    }
 
     fn test_runtimes() -> Arc<OutputRuntimes> {
         Arc::new(OutputRuntimes::try_new(2, 1).unwrap())
@@ -839,13 +897,13 @@ mod tests {
         .unwrap()
     }
 
-    fn inspect(path: &std::path::Path) -> Inspector {
-        Inspector::open(Utf8Path::from_path(path).unwrap()).unwrap()
+    fn inspect(path: &std::path::Path) -> ParquetContents {
+        read_entire_parquet_file(path).unwrap()
     }
 
-    fn assert_has_dictionary(inspector: &Inspector, col_name: &str) {
+    fn assert_has_dictionary(inspector: &ParquetContents, col_name: &str) {
         let col = inspector.column(col_name).unwrap_or_else(|| {
-            let available: Vec<_> = inspector.row_groups()[0]
+            let available: Vec<_> = inspector.row_groups[0]
                 .columns
                 .iter()
                 .map(|c| &c.name)
@@ -862,9 +920,9 @@ mod tests {
         );
     }
 
-    fn assert_no_dictionary(inspector: &Inspector, col_name: &str) {
+    fn assert_no_dictionary(inspector: &ParquetContents, col_name: &str) {
         let col = inspector.column(col_name).unwrap_or_else(|| {
-            let available: Vec<_> = inspector.row_groups()[0]
+            let available: Vec<_> = inspector.row_groups[0]
                 .columns
                 .iter()
                 .map(|c| &c.name)
@@ -881,9 +939,9 @@ mod tests {
         );
     }
 
-    fn assert_has_bloom_filter(inspector: &Inspector, col_name: &str) {
+    fn assert_has_bloom_filter(inspector: &ParquetContents, col_name: &str) {
         let col = inspector.column(col_name).unwrap_or_else(|| {
-            let available: Vec<_> = inspector.row_groups()[0]
+            let available: Vec<_> = inspector.row_groups[0]
                 .columns
                 .iter()
                 .map(|c| &c.name)
@@ -897,70 +955,6 @@ mod tests {
             col.has_bloom_filter,
             "column '{}' should have bloom filter",
             col_name
-        );
-    }
-
-    #[allow(dead_code)]
-    fn assert_no_bloom_filter(inspector: &Inspector, col_name: &str) {
-        let col = inspector.column(col_name).unwrap_or_else(|| {
-            let available: Vec<_> = inspector.row_groups()[0]
-                .columns
-                .iter()
-                .map(|c| &c.name)
-                .collect();
-            panic!(
-                "column '{}' not found. available: {:?}",
-                col_name, available
-            )
-        });
-        assert!(
-            !col.has_bloom_filter,
-            "column '{}' should NOT have bloom filter",
-            col_name
-        );
-    }
-
-    #[allow(dead_code)]
-    fn assert_has_encoding(inspector: &Inspector, col_name: &str, encoding: &str) {
-        let col = inspector.column(col_name).unwrap_or_else(|| {
-            let available: Vec<_> = inspector.row_groups()[0]
-                .columns
-                .iter()
-                .map(|c| &c.name)
-                .collect();
-            panic!(
-                "column '{}' not found. available: {:?}",
-                col_name, available
-            )
-        });
-        assert!(
-            col.encodings.iter().any(|e| e.contains(encoding)),
-            "column '{}' should have {} encoding, got: {:?}",
-            col_name,
-            encoding,
-            col.encodings
-        );
-    }
-
-    #[allow(dead_code)]
-    fn assert_no_encoding(inspector: &Inspector, col_name: &str, encoding: &str) {
-        let col = inspector.column(col_name).unwrap_or_else(|| {
-            let available: Vec<_> = inspector.row_groups()[0]
-                .columns
-                .iter()
-                .map(|c| &c.name)
-                .collect();
-            panic!(
-                "column '{}' not found. available: {:?}",
-                col_name, available
-            )
-        });
-        assert!(
-            !col.encodings.iter().any(|e| e.contains(encoding)),
-            "column '{}' should NOT have {} encoding, got: {:?}",
-            col_name,
-            encoding,
-            col.encodings
         );
     }
 

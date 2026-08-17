@@ -9,10 +9,7 @@ use clap::{
     Args, Command as ClapCommand, CommandFactory, FromArgMatches,
     builder::{PossibleValue, PossibleValuesParser},
 };
-use silk_chiffon_core::{
-    FormatRegistry, ServiceInputBinding, ServiceInputDefinition, ServiceOutputBinding,
-    ServiceOutputDefinition,
-};
+use silk_chiffon_core::{FormatRegistry, ServiceInputDefinition, ServiceOutputDefinition};
 use silk_chiffon_storage::{StorageDirection, StorageRegistry};
 use thiserror::Error;
 
@@ -191,22 +188,6 @@ impl OutputSchemeIndex {
 
     pub(crate) fn owner(&self, scheme: &str) -> Option<&OutputSchemeOwner> {
         self.0.get(scheme)
-    }
-}
-
-pub(crate) struct ServiceInputBindings(Box<[ServiceInputBinding]>);
-
-impl ServiceInputBindings {
-    pub(crate) fn get(&self, index: usize) -> &ServiceInputBinding {
-        &self.0[index]
-    }
-}
-
-pub(crate) struct ServiceOutputBindings(Box<[ServiceOutputBinding]>);
-
-impl ServiceOutputBindings {
-    pub(crate) fn get(&self, index: usize) -> &ServiceOutputBinding {
-        &self.0[index]
     }
 }
 
@@ -572,20 +553,18 @@ impl ApplicationDefinition {
                 let args = TransformArgs::from_arg_matches(matches)?;
                 let formats = self.formats.bind_transform(matches)?;
                 let storage = self.storage.create_session(matches).map_err(clap_error)?;
-                let service_inputs = ServiceInputBindings(
-                    self.service_inputs
-                        .iter()
-                        .map(|definition| definition.bind(matches))
-                        .collect::<Result<Vec<_>, _>>()?
-                        .into_boxed_slice(),
-                );
-                let service_outputs = ServiceOutputBindings(
-                    self.service_outputs
-                        .iter()
-                        .map(|definition| definition.bind(matches))
-                        .collect::<Result<Vec<_>, _>>()?
-                        .into_boxed_slice(),
-                );
+                let service_inputs = self
+                    .service_inputs
+                    .iter()
+                    .map(|definition| definition.bind(matches))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_boxed_slice();
+                let service_outputs = self
+                    .service_outputs
+                    .iter()
+                    .map(|definition| definition.bind(matches))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_boxed_slice();
                 RuntimeCommand::Transform(TransformCommand::from_parsed(
                     args,
                     formats,
@@ -598,8 +577,15 @@ impl ApplicationDefinition {
             }
             "detect" => {
                 let args = DetectArgs::from_arg_matches(matches)?;
+                let input =
+                    silk_chiffon_storage::LocationInput::parse(&args.input).map_err(clap_error)?;
                 let storage = self.storage.create_session(matches).map_err(clap_error)?;
-                RuntimeCommand::Detect(DetectCommand::from_parsed(args, storage, self.formats))
+                RuntimeCommand::Detect(DetectCommand::from_parsed(
+                    input,
+                    args.presentation,
+                    storage,
+                    self.formats,
+                ))
             }
             "inspect" => {
                 RuntimeCommand::Inspect(parse_inspect(matches, &self.formats, &self.storage)?)
@@ -642,9 +628,10 @@ fn parse_inspect(
         .create_session(matches)
         .map_err(clap_error)?;
     let args = InspectionArgs::from_arg_matches(matches)?;
+    let input = silk_chiffon_storage::LocationInput::parse(&args.input).map_err(clap_error)?;
     let inspection = bind_inspection(formats, name, matches)?;
     Ok(InspectCommand::from_parsed(
-        args.file,
+        input,
         args.presentation.resolve(),
         inspection,
         storage,

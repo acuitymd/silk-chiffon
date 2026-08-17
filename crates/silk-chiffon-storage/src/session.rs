@@ -19,10 +19,13 @@ use url::{Position, Url};
 
 use crate::{
     ExistingOutput, InputHandle, InputObject, Location, LocationInput, LocationPattern,
-    ObjectUploadSettings, OutputPreparation, OutputTarget, PreparedOutputTarget,
-    RetryConfigurationError, StorageBackendBuildError, StorageDirection, StorageError,
-    StorageRegistryError, backend::BackendBinding, handle::StorageHandle, pattern::PatternInput,
-    registry::RoutingIndex, upload::ObjectUploadContext,
+    OutputPreparation, OutputTarget, PreparedOutputTarget, RetryConfigurationError,
+    StorageBackendBuildError, StorageDirection, StorageError, StorageRegistryError,
+    backend::BackendBinding,
+    handle::StorageHandle,
+    pattern::PatternInput,
+    registry::RoutingIndex,
+    upload::{ObjectUploadContext, ObjectUploadSettings},
 };
 
 /// Storage state bound to one command invocation.
@@ -93,18 +96,6 @@ impl StorageSession {
                 claimed_output_targets: Mutex::new(HashSet::new()),
             }),
         }
-    }
-
-    /// Returns the validated shared retry configuration for this command invocation.
-    ///
-    /// This is `None` when no registered backend requested shared retries.
-    pub fn retry_configuration(&self) -> Option<&RetryConfig> {
-        self.state.retry.as_ref()
-    }
-
-    /// Returns the immutable object-upload settings for this command.
-    pub fn object_upload_settings(&self) -> &ObjectUploadSettings {
-        &self.state.object_upload_context.settings
     }
 
     /// Creates a handle for reading without checking whether the object exists.

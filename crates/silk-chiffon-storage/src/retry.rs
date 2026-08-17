@@ -16,7 +16,7 @@ use thiserror::Error;
 /// validation. When retries are enabled, [`Self::into_retry_config`] enforces this crate's shared
 /// retry policy.
 #[derive(Args, Clone, Debug)]
-pub struct RetryArgs {
+pub(crate) struct RetryArgs {
     /// Maximum retries for one backend request.
     #[arg(long = "storage-max-retries", default_value_t = 10)]
     max_retries: usize,
@@ -53,7 +53,7 @@ impl RetryArgs {
     ///
     /// Returns [`RetryConfigurationError`] when retries are enabled and a duration is zero, the
     /// initial delay exceeds the maximum, or the multiplier cannot produce a valid backoff range.
-    pub fn into_retry_config(self) -> Result<RetryConfig, RetryConfigurationError> {
+    pub(crate) fn into_retry_config(self) -> Result<RetryConfig, RetryConfigurationError> {
         if self.max_retries == 0 {
             return Ok(RetryConfig {
                 max_retries: self.max_retries,

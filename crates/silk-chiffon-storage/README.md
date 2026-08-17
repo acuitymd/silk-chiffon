@@ -7,11 +7,18 @@
 `LocationInput` preserves the distinction between an explicit URL and a bare string, meaning input with no URL scheme. With the default feature set, the built-in local backend claims bare strings and interprets them as filesystem paths.
 
 ```rust
-use silk_chiffon_storage::{LocationInput, local};
+use clap::Command;
+use silk_chiffon_storage::{LocationInput, StorageRegistry, local};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let registry = StorageRegistry::builder()
+        .register(local::backend()?)
+        .build()?;
+    let command = registry.augment_args(Command::new("storage-example"));
+    let matches = command.try_get_matches_from(["storage-example"])?;
+    let storage = registry.create_session(&matches)?;
+
     let location = LocationInput::parse("data/input.parquet")?;
-    let storage = local::session()?;
     let handle = storage.input_handle(&location)?;
 
     assert_eq!(handle.url().scheme(), "file");
@@ -186,13 +193,13 @@ Input lookup and output policy remain explicit:
 
 The observed input or output metadata is neither a snapshot nor an external reservation. Callers require selected inputs to remain stable for the command lifetime, and another process may race an advisory output check.
 
-Every session uses a 10 MiB adaptive single-put threshold and multipart part size by default, with at most eight part requests in flight across all of its uploads. Host applications may expose the contributed `--object-store-upload-part-size` and `--object-store-max-in-flight-parts` arguments or construct smaller settings in embedding and test code.
+Every session uses a 10 MiB adaptive single-put threshold and multipart part size by default, with at most eight part requests in flight across all of its uploads. The registry contributes `--object-store-upload-part-size` and `--object-store-max-in-flight-parts` to the host command so each command invocation can override those defaults.
 
 Pattern expansion is the exception: an exact `LocationPattern` calls `head` once so absence can contribute zero matches without listing.
 
 ## Cargo features
 
-The `local` feature enables `object_store/fs` and exposes `local::backend` and `local::session` for explicit `file:///` locations. `local-bare-paths` depends on `local` and also makes that backend claim bare input. It is the default feature.
+The `local` feature enables `object_store/fs` and exposes `local::backend` for explicit `file:///` locations. `local-bare-paths` depends on `local` and also makes that backend claim bare input. It is the default feature.
 
 Use `default-features = false, features = ["local"]` to keep explicit local URLs while leaving the bare route available for another backend. With neither feature, the crate exposes no built-in local backend functions. A host may still define and register other backends.
 

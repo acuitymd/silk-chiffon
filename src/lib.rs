@@ -4,7 +4,7 @@ mod system_memory;
 
 use anyhow::{Result, anyhow};
 use camino::Utf8PathBuf;
-use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum, builder::ValueHint};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use silk_chiffon_core::{
     NullPlacement, PresentationMode, QueryDialect, SortColumn, SortDirection, SpillCompression,
@@ -31,7 +31,7 @@ fn unique_by<'a, T: Clone, U: Eq + std::hash::Hash>(
 }
 
 /// Parse a usize that must be at least 1.
-pub fn parse_at_least_one(s: &str) -> Result<usize> {
+fn parse_at_least_one(s: &str) -> Result<usize> {
     let n: usize = s.parse().map_err(anyhow::Error::new)?;
 
     if n == 0 {
@@ -42,7 +42,7 @@ pub fn parse_at_least_one(s: &str) -> Result<usize> {
 
 /// Parse a human-readable byte size (e.g., "512MB", "2GB") that must be greater than 0.
 #[allow(clippy::cast_possible_truncation)]
-pub fn parse_nonzero_byte_size(s: &str) -> Result<usize> {
+fn parse_nonzero_byte_size(s: &str) -> Result<usize> {
     let bytes = s
         .parse::<bytesize::ByteSize>()
         .map_err(|_| {
@@ -56,7 +56,7 @@ pub fn parse_nonzero_byte_size(s: &str) -> Result<usize> {
 }
 
 /// Default thread budget: all available CPUs.
-pub fn default_thread_budget() -> usize {
+fn default_thread_budget() -> usize {
     std::thread::available_parallelism()
         .map(|p| p.get())
         .unwrap_or(4)
@@ -64,7 +64,7 @@ pub fn default_thread_budget() -> usize {
 
 /// Specifies how to determine the thread budget.
 #[derive(Debug, Clone)]
-pub enum ThreadBudgetSpec {
+enum ThreadBudgetSpec {
     /// Use a fixed thread count.
     Fixed(usize),
     /// Use all CPUs minus a reserved count, with an optional minimum.
@@ -72,7 +72,7 @@ pub enum ThreadBudgetSpec {
 }
 
 impl ThreadBudgetSpec {
-    pub fn resolve(&self) -> usize {
+    fn resolve(&self) -> usize {
         match self {
             ThreadBudgetSpec::Fixed(n) => *n,
             ThreadBudgetSpec::Reserve { reserve, min } => {
@@ -123,7 +123,7 @@ impl FromStr for ThreadBudgetSpec {
 
 /// Specifies how to determine the memory budget.
 #[derive(Debug, Clone)]
-pub enum MemoryBudgetSpec {
+enum MemoryBudgetSpec {
     /// Use a percentage of total system memory, with optional minimum bytes.
     Total { pct: u8, min: Option<usize> },
     /// Use a percentage of currently available (free) memory, with optional minimum bytes.
@@ -135,7 +135,7 @@ pub enum MemoryBudgetSpec {
 }
 
 impl MemoryBudgetSpec {
-    pub fn resolve(&self) -> usize {
+    fn resolve(&self) -> usize {
         match self {
             MemoryBudgetSpec::Total { pct, min } => {
                 let budget = system_memory::total_memory() * usize::from(*pct) / 100;
@@ -229,7 +229,7 @@ fn parse_percent(s: Option<&str>, default: u8) -> Result<u8> {
 /// - `"10"` or `"10%"` - percentage of pool
 /// - `"200MB"` or `"1GiB"` - fixed byte size (unit required)
 #[derive(Debug, Clone, Copy)]
-pub enum PoolReserveSpec {
+enum PoolReserveSpec {
     /// Percentage of pool size (1-99).
     Percent(u8),
     /// Fixed byte amount.
@@ -240,7 +240,7 @@ impl PoolReserveSpec {
     /// Resolve the reserve against the given pool size.
     ///
     /// Returns an error if pool_size is 0 or if the reserve exceeds `pool_size - 1`.
-    pub fn resolve(&self, pool_size: usize) -> Result<usize> {
+    fn resolve(&self, pool_size: usize) -> Result<usize> {
         if pool_size == 0 {
             anyhow::bail!("cannot resolve non-spillable reserve against a zero-byte pool");
         }
@@ -466,7 +466,7 @@ impl Command {
 #[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Display)]
 #[value(rename_all = "kebab-case")]
 #[strum(serialize_all = "kebab-case")]
-pub enum PartitionStrategy {
+pub(crate) enum PartitionStrategy {
     /// Sort by partition columns first, then write one file at a time.
     /// Keeps at most one output sink open but requires sorting the entire dataset.
     /// Best for high-cardinality partition columns, or when partition columns
@@ -488,7 +488,7 @@ pub enum PartitionStrategy {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct SortSpec {
+pub(crate) struct SortSpec {
     pub(crate) columns: Vec<SortColumn>,
 }
 
@@ -512,28 +512,11 @@ impl From<Vec<String>> for SortSpec {
 }
 
 impl SortSpec {
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.columns.is_empty()
     }
 
-    pub fn is_configured(&self) -> bool {
-        !self.is_empty()
-    }
-
-    pub fn contains(&self, column_name: &str) -> bool {
-        self.columns
-            .iter()
-            .any(|column| column.name() == column_name)
-    }
-
-    pub fn column_names(&self) -> Vec<String> {
-        self.columns
-            .iter()
-            .map(|column| column.name().to_owned())
-            .collect()
-    }
-
-    pub fn without_columns_named(&self, column_names: &[String]) -> Self {
+    pub(crate) fn without_columns_named(&self, column_names: &[String]) -> Self {
         Self {
             columns: self
                 .columns
@@ -544,7 +527,7 @@ impl SortSpec {
         }
     }
 
-    pub fn extend(&mut self, other: &Self) {
+    pub(crate) fn extend(&mut self, other: &Self) {
         self.columns.extend(other.columns.iter().cloned());
         self.columns = unique_by(&self.columns, |column| column.name());
     }
@@ -853,8 +836,8 @@ pub struct TransformCommand {
     overwrite: bool,
     formats: silk_chiffon_core::TransformBindings,
     storage: silk_chiffon_storage::StorageSession,
-    service_inputs: crate::registration::ServiceInputBindings,
-    service_outputs: crate::registration::ServiceOutputBindings,
+    service_inputs: Box<[silk_chiffon_core::ServiceInputBinding]>,
+    service_outputs: Box<[silk_chiffon_core::ServiceOutputBinding]>,
     input_schemes: crate::registration::InputSchemeIndex,
     output_schemes: crate::registration::OutputSchemeIndex,
 }
@@ -869,8 +852,8 @@ impl TransformCommand {
         args: TransformArgs,
         formats: silk_chiffon_core::TransformBindings,
         storage: silk_chiffon_storage::StorageSession,
-        service_inputs: crate::registration::ServiceInputBindings,
-        service_outputs: crate::registration::ServiceOutputBindings,
+        service_inputs: Box<[silk_chiffon_core::ServiceInputBinding]>,
+        service_outputs: Box<[silk_chiffon_core::ServiceOutputBinding]>,
         input_schemes: crate::registration::InputSchemeIndex,
         output_schemes: crate::registration::OutputSchemeIndex,
     ) -> Self {
@@ -949,7 +932,7 @@ struct InspectSchema {}
 
 /// One format-specific inspection with its bound arguments and storage session.
 pub struct InspectCommand {
-    file: Utf8PathBuf,
+    input: silk_chiffon_storage::LocationInput,
     mode: PresentationMode,
     inspection: silk_chiffon_core::InspectionBinding,
     storage: silk_chiffon_storage::StorageSession,
@@ -957,46 +940,35 @@ pub struct InspectCommand {
 
 impl InspectCommand {
     fn from_parsed(
-        file: Utf8PathBuf,
+        input: silk_chiffon_storage::LocationInput,
         mode: PresentationMode,
         inspection: silk_chiffon_core::InspectionBinding,
         storage: silk_chiffon_storage::StorageSession,
     ) -> Self {
         Self {
-            file,
+            input,
             mode,
             inspection,
             storage,
         }
     }
 
-    /// Returns the storage session created for this command invocation.
-    pub fn storage(&self) -> &silk_chiffon_storage::StorageSession {
-        &self.storage
-    }
-
-    /// Returns the selected format's inspection function and parsed settings.
-    pub fn inspection(&self) -> &silk_chiffon_core::InspectionBinding {
-        &self.inspection
-    }
-
     pub(crate) fn into_parts(
         self,
     ) -> (
-        Utf8PathBuf,
+        silk_chiffon_storage::LocationInput,
         PresentationMode,
         silk_chiffon_core::InspectionBinding,
         silk_chiffon_storage::StorageSession,
     ) {
-        (self.file, self.mode, self.inspection, self.storage)
+        (self.input, self.mode, self.inspection, self.storage)
     }
 }
 
 #[derive(Args, Clone, Debug)]
 struct InspectionArgs {
-    /// Path to the file to inspect
-    #[arg(value_hint = ValueHint::FilePath)]
-    file: Utf8PathBuf,
+    /// Local path or object-storage URL to inspect
+    input: String,
     /// Output format (auto-detects based on TTY if not specified)
     #[arg(long = "format", short = 'f', value_enum, default_value = "auto")]
     presentation: PresentationPreference,
@@ -1005,9 +977,8 @@ struct InspectionArgs {
 #[derive(Args, Clone, Debug)]
 /// Arguments for content-based format detection.
 struct DetectArgs {
-    /// Path to the input whose format should be detected
-    #[arg(value_hint = ValueHint::FilePath)]
-    file: Utf8PathBuf,
+    /// Local path or object-storage URL to detect
+    input: String,
     /// Output format (auto-detects based on TTY if not specified)
     #[arg(long = "format", short = 'f', value_enum, default_value = "auto")]
     presentation: PresentationPreference,
@@ -1015,19 +986,22 @@ struct DetectArgs {
 
 /// A detection request with the immutable format registry and command storage session.
 pub struct DetectCommand {
-    args: DetectArgs,
+    input: silk_chiffon_storage::LocationInput,
+    presentation: PresentationPreference,
     storage: silk_chiffon_storage::StorageSession,
     formats: silk_chiffon_core::FormatRegistry,
 }
 
 impl DetectCommand {
     fn from_parsed(
-        args: DetectArgs,
+        input: silk_chiffon_storage::LocationInput,
+        presentation: PresentationPreference,
         storage: silk_chiffon_storage::StorageSession,
         formats: silk_chiffon_core::FormatRegistry,
     ) -> Self {
         Self {
-            args,
+            input,
+            presentation,
             storage,
             formats,
         }
@@ -1036,18 +1010,19 @@ impl DetectCommand {
     pub(crate) fn into_parts(
         self,
     ) -> (
-        DetectArgs,
+        silk_chiffon_storage::LocationInput,
+        PresentationPreference,
         silk_chiffon_storage::StorageSession,
         silk_chiffon_core::FormatRegistry,
     ) {
-        (self.args, self.storage, self.formats)
+        (self.input, self.presentation, self.storage, self.formats)
     }
 }
 
 /// The requested output representation before TTY resolution.
 #[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[value(rename_all = "lowercase")]
-pub enum PresentationPreference {
+pub(crate) enum PresentationPreference {
     /// Auto-detect: JSON if stdout is not a TTY, otherwise text
     #[default]
     Auto,
@@ -1058,7 +1033,7 @@ pub enum PresentationPreference {
 }
 
 impl PresentationPreference {
-    pub fn resolve(self) -> PresentationMode {
+    pub(crate) fn resolve(self) -> PresentationMode {
         match self {
             Self::Auto if io::stdout().is_terminal() => PresentationMode::Text,
             Self::Auto => PresentationMode::Json,

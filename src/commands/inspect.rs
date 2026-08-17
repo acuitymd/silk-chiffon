@@ -2,16 +2,13 @@
 
 use std::io::{self, Write};
 
+use crate::InspectCommand;
 use anyhow::Result;
 use silk_chiffon_core::InspectionOutput;
-use silk_chiffon_storage::LocationInput;
-
-use crate::InspectCommand;
 
 pub(crate) async fn run(command: InspectCommand) -> Result<()> {
-    let (file, mode, inspection, storage) = command.into_parts();
-    let location = LocationInput::parse(file.as_str())?;
-    let object = storage.lookup_input(&location).await?;
+    let (input, mode, inspection, storage) = command.into_parts();
+    let object = storage.lookup_input(&input).await?;
     let output = inspection.inspect(&object, mode).await?;
     let mut stdout = io::stdout().lock();
     match output {

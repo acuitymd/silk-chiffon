@@ -20,7 +20,7 @@ use silk_chiffon_core::{
     InspectionDefinition, InspectionOutput, NullPlacement, OpenSinkMode, PresentationMode,
     SinkBinding, SinkBindingConfig, SinkCompletion, SortColumn, SortDirection, TransformDefinition,
 };
-use silk_chiffon_storage::{InputObject, LocationInput, PreparedOutputTarget, local};
+use silk_chiffon_storage::{InputObject, LocationInput, PreparedOutputTarget};
 use silk_chiffon_test_support::prepared_local_output_target;
 
 #[derive(Args)]
@@ -214,7 +214,10 @@ fn local_object(extension: &str) -> InputObject {
         .tempfile()
         .unwrap();
     let location = LocationInput::parse(file.path().to_str().unwrap()).unwrap();
-    futures::executor::block_on(local::session().unwrap().lookup_input(&location)).unwrap()
+    futures::executor::block_on(
+        silk_chiffon_test_support::local_storage_session().lookup_input(&location),
+    )
+    .unwrap()
 }
 
 fn local_output_target(path: &str) -> PreparedOutputTarget {

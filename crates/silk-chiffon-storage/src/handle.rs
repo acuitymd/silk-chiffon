@@ -88,7 +88,13 @@ macro_rules! directional_accessors {
             pub fn store_url(&self) -> &Url {
                 self.handle.store_url()
             }
+        }
+    };
+}
 
+macro_rules! local_path_accessor {
+    ($type:ty) => {
+        impl $type {
             /// Converts a `file:` URL into a filesystem path.
             ///
             /// # Errors
@@ -137,6 +143,7 @@ pub(crate) fn read_only_store(inner: Arc<dyn ObjectStore>) -> Arc<dyn ObjectStor
 }
 
 directional_accessors!(InputHandle);
+local_path_accessor!(InputHandle);
 
 impl fmt::Debug for InputHandle {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -169,6 +176,7 @@ impl OutputTarget {
 }
 
 directional_accessors!(OutputTarget);
+local_path_accessor!(OutputTarget);
 
 impl fmt::Debug for OutputTarget {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
