@@ -1,6 +1,6 @@
 //! Private type erasure for service-input definitions and command bindings.
 //!
-//! `TypedServiceInputDefinition<T>` keeps one connector's Clap command state as `T` until command
+//! `TypedServiceInputDefinition<T>` keeps one connector's Clap settings as `T` until command
 //! binding. It then parses `T` once and stores it beside that connector's provider function. Only
 //! the complete definition and binding become trait objects, so independently typed connectors
 //! can share one application collection without `Any` values or downcasts.
@@ -55,7 +55,7 @@ impl<T> ArgsParser<T> {
 pub(super) struct TypedServiceInputDefinition<T> {
     args: ArgsParser<T>,
     provider: ServiceInputProviderFn<T>,
-    state: PhantomData<fn() -> T>,
+    settings: PhantomData<fn() -> T>,
 }
 
 impl<T> TypedServiceInputDefinition<T> {
@@ -63,7 +63,7 @@ impl<T> TypedServiceInputDefinition<T> {
         Self {
             args,
             provider,
-            state: PhantomData,
+            settings: PhantomData,
         }
     }
 }
@@ -81,14 +81,14 @@ where
         matches: &ArgMatches,
     ) -> Result<Box<dyn ErasedServiceInputBinding>, clap::Error> {
         Ok(Box::new(TypedServiceInputBinding {
-            state: Arc::new((self.args.parse)(matches)?),
+            settings: Arc::new((self.args.parse)(matches)?),
             provider: self.provider,
         }))
     }
 }
 
 struct TypedServiceInputBinding<T> {
-    state: Arc<T>,
+    settings: Arc<T>,
     provider: ServiceInputProviderFn<T>,
 }
 
@@ -101,6 +101,6 @@ where
         reference: &'a str,
         session: &'a SessionContext,
     ) -> BoxFuture<'a, Result<Arc<dyn TableProvider>>> {
-        (self.provider)(reference, session, &self.state)
+        (self.provider)(reference, session, &self.settings)
     }
 }

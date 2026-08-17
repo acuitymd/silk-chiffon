@@ -10,7 +10,7 @@
 //! configuration, routing indexes, and object-store cache. Calling
 //! [`StorageSession::input_handle`] produces an unobserved read handle, while
 //! [`StorageSession::prepare_output_target`] claims a write target and applies its preparation
-//! policy before returning a [`PreparedOutputTarget`].
+//! policy before returning a [`StorageHandle`].
 //!
 //! # First handle
 //!
@@ -41,24 +41,24 @@
 #[cfg(not(unix))]
 compile_error!("silk-chiffon-storage supports Unix targets only");
 
-mod backend;
+pub mod backend;
 #[cfg(any(feature = "gcs", feature = "s3"))]
 mod cloud;
-mod error;
+pub mod error;
 #[cfg(feature = "gcs")]
 pub mod gcs;
-mod handle;
-mod input;
+pub mod handle;
+pub mod input;
 pub mod local;
-mod location;
-mod output;
-mod pattern;
-mod registry;
-mod retry;
+pub mod location;
+pub mod output;
+pub mod pattern;
+pub mod registry;
+pub mod retry;
 #[cfg(feature = "s3")]
 pub mod s3;
-mod session;
-mod upload;
+pub mod session;
+pub mod upload;
 
 pub use backend::{
     BareLocationMapper, BarePatternMapper, LocationValidator, ObjectStoreCreatorFn,
@@ -66,7 +66,7 @@ pub use backend::{
     StorageBackendBuilder, StorageDirection,
 };
 pub use error::StorageError;
-pub use handle::{InputHandle, OutputTarget, PreparedOutputTarget};
+pub use handle::StorageHandle;
 pub use input::InputObject;
 pub use location::{Location, LocationInput};
 pub use object_store::RetryConfig;

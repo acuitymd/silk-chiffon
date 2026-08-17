@@ -14,6 +14,7 @@ use arrow::array::{Date32Array, Int16Array, Int32Array};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use silk_chiffon::commands::transform;
 use silk_chiffon::{Cli, Command, PartitionStrategy, TransformCommand};
 use tempfile::TempDir;
 use tokio::runtime::Runtime;
@@ -275,7 +276,7 @@ fn run_partition_benchmark(
                     );
 
                     rt.block_on(async {
-                        Command::Transform(cmd).execute().await.unwrap();
+                        transform::run(cmd).await.unwrap();
                     });
                 });
             },

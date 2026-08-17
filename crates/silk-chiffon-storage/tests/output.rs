@@ -21,8 +21,8 @@ use object_store::{
     path::Path as ObjectPath,
 };
 use silk_chiffon_storage::{
-    ExistingOutput, LocationInput, ObjectUpload, ObjectUploadTask, OutputPreparation, OutputTarget,
-    StorageAccess, StorageBackend, StorageRegistry,
+    ExistingOutput, LocationInput, ObjectUpload, ObjectUploadTask, OutputPreparation,
+    StorageAccess, StorageBackend, StorageHandle, StorageRegistry,
 };
 
 static MEMORY_STORE: OnceLock<Arc<InMemory>> = OnceLock::new();
@@ -266,7 +266,7 @@ fn create_controlled_store(
 }
 
 fn prepare_memory_target<'a>(
-    _target: &'a OutputTarget,
+    _handle: &'a StorageHandle,
     _preparation: &'a OutputPreparation,
     _settings: &'a (),
 ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>> {
@@ -274,7 +274,7 @@ fn prepare_memory_target<'a>(
 }
 
 fn reject_output_target<'a>(
-    _target: &'a OutputTarget,
+    _handle: &'a StorageHandle,
     _preparation: &'a OutputPreparation,
     _settings: &'a (),
 ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>> {

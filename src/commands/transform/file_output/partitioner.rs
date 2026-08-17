@@ -14,10 +14,12 @@ use futures::stream::Stream;
 
 use super::report::format_scalar_value;
 
-/// One partition's values, keyed by `--by` column name.
-pub(super) type PartitionValues = HashMap<String, ArrayRef>;
+/// A HashMap of column names to single-row arrays representing a partition value for a column
+pub type PartitionValues = HashMap<String, ArrayRef>;
 
-pub(super) fn partition_values_equal(a: &PartitionValues, b: &PartitionValues) -> bool {
+/// Compare two PartitionValues by their array contents, not pointers.
+/// Returns true if both have the same keys and all arrays are equal.
+pub fn partition_values_equal(a: &PartitionValues, b: &PartitionValues) -> bool {
     if a.len() != b.len() {
         return false;
     }
@@ -38,7 +40,7 @@ pub(super) fn partition_values_equal(a: &PartitionValues, b: &PartitionValues) -
 /// - ["a|b", "c"] -> "3:a|b,1:c" (no collision with ["a", "b|c"] -> "1:a,3:b|c")
 /// - `["us-west", NULL]` differs from `["us-west", "null"]`.
 /// - ["us-west", ""] -> "7:us-west,0:" (empty string is distinct from null)
-pub(super) fn partition_key(values: &PartitionValues, column_order: &[String]) -> String {
+pub fn partition_key(values: &PartitionValues, column_order: &[String]) -> String {
     column_order
         .iter()
         .map(|col| match values.get(col) {
@@ -52,7 +54,8 @@ pub(super) fn partition_key(values: &PartitionValues, column_order: &[String]) -
         .join(",")
 }
 
-fn is_primitive_type(dt: &DataType) -> bool {
+/// Check if a data type is primitive (supported for partitioning).
+pub fn is_primitive_type(dt: &DataType) -> bool {
     matches!(
         dt,
         DataType::Boolean
@@ -82,10 +85,7 @@ fn is_primitive_type(dt: &DataType) -> bool {
 }
 
 /// Validate that all partition columns are primitive types.
-pub(super) fn validate_partition_columns_primitive(
-    schema: &Schema,
-    columns: &[String],
-) -> Result<()> {
+pub fn validate_partition_columns_primitive(schema: &Schema, columns: &[String]) -> Result<()> {
     for col in columns {
         let field = schema
             .field_with_name(col)
@@ -102,11 +102,13 @@ pub(super) fn validate_partition_columns_primitive(
     Ok(())
 }
 
-/// Emits contiguous runs with equal partition values.
+/// Stream that partitions record batches by column values, yielding
+/// (partition_values, sliced_batch) tuples where partition_values contains
+/// single-row arrays for each partition column.
 ///
-/// The same partition may recur in later runs or batches. The output writer owns
-/// the policy for retaining, evicting, or reopening its sink.
-pub(super) struct PartitionRunStream {
+/// NOTE: This will yield partial ranges. You are expected to batch these up yourself
+///       in the consumer of the stream.
+pub struct PartitionedBatchStream {
     inner: SendableRecordBatchStream,
     columns: Vec<String>,
     current_batch: Option<RecordBatch>,
@@ -114,8 +116,8 @@ pub(super) struct PartitionRunStream {
     current_range_idx: usize,
 }
 
-impl PartitionRunStream {
-    pub(super) fn new(stream: SendableRecordBatchStream, columns: Vec<String>) -> Self {
+impl PartitionedBatchStream {
+    pub fn new(stream: SendableRecordBatchStream, columns: Vec<String>) -> Self {
         Self {
             inner: stream,
             columns,
@@ -142,16 +144,12 @@ impl PartitionRunStream {
     }
 }
 
-pub(super) struct PartitionRun {
-    pub(super) values: PartitionValues,
-    pub(super) batch: RecordBatch,
-}
-
-impl Stream for PartitionRunStream {
-    type Item = Result<PartitionRun>;
+impl Stream for PartitionedBatchStream {
+    type Item = Result<(PartitionValues, RecordBatch)>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
+            // if we have ranges to process, yield the next one
             if self.current_batch.is_some() && self.current_ranges.is_some() {
                 let ranges = self.current_ranges.as_ref().unwrap();
                 if self.current_range_idx < ranges.len() {
@@ -160,27 +158,30 @@ impl Stream for PartitionRunStream {
 
                     let batch = self.current_batch.as_ref().unwrap();
 
+                    // slice the batch for this partition group
                     let sliced = batch.slice(range.start, range.end - range.start);
 
+                    // extract partition values from first row of slice
                     let partition_values =
                         match Self::extract_partition_values(&sliced, 0, &self.columns) {
                             Ok(values) => values,
                             Err(e) => return Poll::Ready(Some(Err(e))),
                         };
 
-                    return Poll::Ready(Some(Ok(PartitionRun {
-                        values: partition_values,
-                        batch: sliced,
-                    })));
+                    return Poll::Ready(Some(Ok((partition_values, sliced))));
                 }
 
+                // exhausted current batch's ranges, clear state and get next batch
                 self.current_batch = None;
                 self.current_ranges = None;
                 self.current_range_idx = 0;
             }
 
+            // poll for next batch from inner stream
             match Pin::new(&mut self.inner).poll_next(cx) {
                 Poll::Ready(Some(Ok(batch))) => {
+                    // compute partition ranges using arrow::compute::partition
+                    // super efficient way to get the partitions across a list of columns
                     let partition_columns: Vec<ArrayRef> = self
                         .columns
                         .iter()
@@ -198,15 +199,32 @@ impl Stream for PartitionRunStream {
                         Err(e) => return Poll::Ready(Some(Err(e.into()))),
                     };
 
+                    // store batch and ranges, reset index
                     self.current_batch = Some(batch);
                     self.current_ranges = Some(partitions.ranges().to_vec());
                     self.current_range_idx = 0;
+
+                    // continue loop to process first range
                 }
                 Poll::Ready(Some(Err(e))) => return Poll::Ready(Some(Err(e.into()))),
                 Poll::Ready(None) => return Poll::Ready(None),
                 Poll::Pending => return Poll::Pending,
             }
         }
+    }
+}
+
+pub struct Partitioner {
+    columns: Vec<String>,
+}
+
+impl Partitioner {
+    pub fn new(columns: Vec<String>) -> Self {
+        Self { columns }
+    }
+
+    pub fn partition_stream(&self, stream: SendableRecordBatchStream) -> PartitionedBatchStream {
+        PartitionedBatchStream::new(stream, self.columns.clone())
     }
 }
 
@@ -248,11 +266,12 @@ mod tests {
         .unwrap();
 
         let stream = create_test_stream(vec![batch]);
-        let mut partitioned_stream = PartitionRunStream::new(stream, vec!["category".to_string()]);
+        let partitioner = Partitioner::new(vec!["category".to_string()]);
+        let mut partitioned_stream = partitioner.partition_stream(stream);
 
         let mut results = Vec::new();
-        while let Some(Ok(run)) = partitioned_stream.next().await {
-            results.push((run.values, run.batch));
+        while let Some(Ok((values, batch))) = partitioned_stream.next().await {
+            results.push((values, batch));
         }
 
         assert_eq!(results.len(), 1);
@@ -276,11 +295,11 @@ mod tests {
         .unwrap();
 
         let stream = create_test_stream(vec![batch]);
-        let mut partitioned_stream = PartitionRunStream::new(stream, vec!["category".to_string()]);
+        let partitioner = Partitioner::new(vec!["category".to_string()]);
+        let mut partitioned_stream = partitioner.partition_stream(stream);
 
         let mut results = Vec::new();
-        while let Some(Ok(run)) = partitioned_stream.next().await {
-            let PartitionRun { values, batch } = run;
+        while let Some(Ok((values, batch))) = partitioned_stream.next().await {
             results.push((values, batch));
         }
 
@@ -312,11 +331,11 @@ mod tests {
         .unwrap();
 
         let stream = create_test_stream(vec![batch]);
-        let mut partitioned_stream = PartitionRunStream::new(stream, vec!["region".to_string()]);
+        let partitioner = Partitioner::new(vec!["region".to_string()]);
+        let mut partitioned_stream = partitioner.partition_stream(stream);
 
         let mut results = Vec::new();
-        while let Some(Ok(run)) = partitioned_stream.next().await {
-            let PartitionRun { values, batch } = run;
+        while let Some(Ok((values, batch))) = partitioned_stream.next().await {
             results.push((values, batch));
         }
 
@@ -351,11 +370,11 @@ mod tests {
         .unwrap();
 
         let stream = create_test_stream(vec![batch1, batch2]);
-        let mut partitioned_stream = PartitionRunStream::new(stream, vec!["category".to_string()]);
+        let partitioner = Partitioner::new(vec!["category".to_string()]);
+        let mut partitioned_stream = partitioner.partition_stream(stream);
 
         let mut results = Vec::new();
-        while let Some(Ok(run)) = partitioned_stream.next().await {
-            let PartitionRun { values, batch } = run;
+        while let Some(Ok((values, batch))) = partitioned_stream.next().await {
             results.push((values, batch));
         }
 
@@ -382,12 +401,11 @@ mod tests {
         .unwrap();
 
         let stream = create_test_stream(vec![batch]);
-        let mut partitioned_stream =
-            PartitionRunStream::new(stream, vec!["year".to_string(), "month".to_string()]);
+        let partitioner = Partitioner::new(vec!["year".to_string(), "month".to_string()]);
+        let mut partitioned_stream = partitioner.partition_stream(stream);
 
         let mut results = Vec::new();
-        while let Some(Ok(run)) = partitioned_stream.next().await {
-            let PartitionRun { values, batch } = run;
+        while let Some(Ok((values, batch))) = partitioned_stream.next().await {
             results.push((values, batch));
         }
 
@@ -478,10 +496,10 @@ mod tests {
         .unwrap();
 
         let stream = create_test_stream(vec![batch]);
-        let mut partitioned_stream = PartitionRunStream::new(stream, vec!["category".to_string()]);
+        let partitioner = Partitioner::new(vec!["category".to_string()]);
+        let mut partitioned_stream = partitioner.partition_stream(stream);
 
-        if let Some(Ok(run)) = partitioned_stream.next().await {
-            let values = run.values;
+        if let Some(Ok((values, _batch))) = partitioned_stream.next().await {
             let category_array = values.get("category").unwrap();
             // verify it's a single-row array
             assert_eq!(category_array.len(), 1);
@@ -648,11 +666,11 @@ mod tests {
         .unwrap();
 
         let stream = create_test_stream(vec![batch]);
-        let mut partitioned_stream = PartitionRunStream::new(stream, vec!["category".to_string()]);
+        let partitioner = Partitioner::new(vec!["category".to_string()]);
+        let mut partitioned_stream = partitioner.partition_stream(stream);
 
         let mut results = Vec::new();
-        while let Some(Ok(run)) = partitioned_stream.next().await {
-            let PartitionRun { values, batch } = run;
+        while let Some(Ok((values, batch))) = partitioned_stream.next().await {
             results.push((values, batch));
         }
 
@@ -711,12 +729,11 @@ mod tests {
         .unwrap();
 
         let stream = create_test_stream(vec![batch]);
-        let mut partitioned_stream =
-            PartitionRunStream::new(stream, vec!["year".to_string(), "month".to_string()]);
+        let partitioner = Partitioner::new(vec!["year".to_string(), "month".to_string()]);
+        let mut partitioned_stream = partitioner.partition_stream(stream);
 
         let mut results = Vec::new();
-        while let Some(Ok(run)) = partitioned_stream.next().await {
-            let PartitionRun { values, batch } = run;
+        while let Some(Ok((values, batch))) = partitioned_stream.next().await {
             results.push((values, batch));
         }
 
@@ -774,11 +791,11 @@ mod tests {
         .unwrap();
 
         let stream = create_test_stream(vec![batch]);
-        let mut partitioned_stream = PartitionRunStream::new(stream, vec!["region".to_string()]);
+        let partitioner = Partitioner::new(vec!["region".to_string()]);
+        let mut partitioned_stream = partitioner.partition_stream(stream);
 
         let mut results = Vec::new();
-        while let Some(Ok(run)) = partitioned_stream.next().await {
-            let PartitionRun { values, batch } = run;
+        while let Some(Ok((values, batch))) = partitioned_stream.next().await {
             results.push((values, batch));
         }
 
@@ -977,7 +994,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_partition_run_stream_interleaved() {
+    async fn test_partitioner_interleaved() {
         // unsorted input: categories are interleaved
         let schema = Arc::new(Schema::new(vec![
             Field::new("category", DataType::Utf8, false),
@@ -994,11 +1011,11 @@ mod tests {
         .unwrap();
 
         let stream = create_test_stream(vec![batch]);
-        let mut partitioned_stream = PartitionRunStream::new(stream, vec!["category".to_string()]);
+        let partitioner = Partitioner::new(vec!["category".to_string()]);
+        let mut partitioned_stream = partitioner.partition_stream(stream);
 
         let mut results = Vec::new();
-        while let Some(Ok(run)) = partitioned_stream.next().await {
-            let PartitionRun { values, batch } = run;
+        while let Some(Ok((values, batch))) = partitioned_stream.next().await {
             let cat = values
                 .get("category")
                 .unwrap()

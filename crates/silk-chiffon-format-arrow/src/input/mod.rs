@@ -41,8 +41,7 @@ use futures::TryStreamExt;
 use object_store::{ObjectMeta, ObjectStore, ObjectStoreExt};
 use parking_lot::Mutex;
 use silk_chiffon_core::{
-    CanonicalInputUrl, ExactFileTableProviderBuilder, FileInputGroup,
-    schemas_match_ignoring_metadata,
+    CanonicalInput, InputLeaf, file_table_provider, schemas_match_ignoring_metadata,
 };
 use tokio::sync::OnceCell;
 
@@ -50,30 +49,30 @@ const SAMPLE_ROWS: usize = 100_000;
 pub(crate) const MAX_IPC_SAFETY_BYTES: u64 = 512 * 1024 * 1024;
 
 pub(crate) async fn create_provider(
-    group: &FileInputGroup,
+    leaf: &InputLeaf,
     session: &SessionContext,
 ) -> Result<Arc<dyn TableProvider>> {
-    let variant = IpcVariant::parse(group.variant())?;
-    let store_url = group.object_store_url().clone();
-    let files = group.files().to_vec();
+    let variant = IpcVariant::parse(leaf.variant())?;
+    let store_url = leaf.object_store_url().clone();
+    let files = leaf.files().to_vec();
     let store = session.runtime_env().object_store(&store_url)?;
-    let active_file_layouts = Arc::new(ActiveFileLayouts::default());
+    let active_files = Arc::new(ActiveFiles::default());
     let memory_pool = Arc::clone(&session.runtime_env().memory_pool);
     let format = Arc::new(IpcFileFormat {
         variant,
-        active_file_layouts,
+        active_files,
         memory_pool: Arc::clone(&memory_pool),
     });
-    let representative = group.representative();
+    let representative = leaf.representative();
     let representative_meta = &representative.object_meta;
     let representative_url = representative
-        .extension::<CanonicalInputUrl>()
+        .extension::<CanonicalInput>()
         .expect("prepared input files retain their canonical URL")
         .url()
         .as_str();
     let schema = match variant {
         IpcVariant::File => {
-            let lease = format.active_file_layouts.lease(representative_meta);
+            let lease = format.active_files.lease(representative_meta);
             Ok::<_, datafusion::common::DataFusionError>(Arc::clone(
                 &lease
                     .get_or_try_init(|| {
@@ -114,21 +113,22 @@ pub(crate) async fn create_provider(
         SampleStatistics::Available(statistics) => statistics,
         SampleStatistics::Unavailable => Statistics::new_unknown(&schema),
     };
-    ExactFileTableProviderBuilder::new()
-        .object_store_url(store_url)
-        .schema(schema)
-        .files(files)
-        .statistics(statistics)
-        .output_ordering(Vec::new())
-        .format(format)
-        .build()
-        .map_err(Into::into)
+    file_table_provider(
+        store_url,
+        schema,
+        files,
+        statistics,
+        Vec::new(),
+        format,
+        None,
+    )
+    .map_err(Into::into)
 }
 
 #[derive(Debug)]
 struct IpcFileFormat {
     variant: IpcVariant,
-    active_file_layouts: Arc<ActiveFileLayouts>,
+    active_files: Arc<ActiveFiles>,
     memory_pool: Arc<dyn MemoryPool>,
 }
 
@@ -165,7 +165,7 @@ impl FileFormat for IpcFileFormat {
         })?;
         match self.variant {
             IpcVariant::File => {
-                let lease = self.active_file_layouts.lease(object);
+                let lease = self.active_files.lease(object);
                 let memory_pool = Arc::clone(&self.memory_pool);
                 let identity = object.location.to_string();
                 Ok(Arc::clone(
@@ -230,7 +230,7 @@ impl FileFormat for IpcFileFormat {
             table_schema: table_schema.clone(),
             projection: SplitProjection::unprojected(&table_schema),
             metrics: ExecutionPlanMetricsSet::new(),
-            active_file_layouts: Arc::clone(&self.active_file_layouts),
+            active_files: Arc::clone(&self.active_files),
             memory_pool: Arc::clone(&self.memory_pool),
         })
     }
@@ -242,7 +242,7 @@ struct IpcFileSource {
     table_schema: TableSchema,
     projection: SplitProjection,
     metrics: ExecutionPlanMetricsSet,
-    active_file_layouts: Arc<ActiveFileLayouts>,
+    active_files: Arc<ActiveFiles>,
     memory_pool: Arc<dyn MemoryPool>,
 }
 
@@ -259,7 +259,7 @@ impl FileSource for IpcFileSource {
             object_store,
             projection,
             expected_schema: Arc::clone(self.table_schema.file_schema()),
-            active_file_layouts: Arc::clone(&self.active_file_layouts),
+            active_files: Arc::clone(&self.active_files),
             memory_pool: Arc::clone(&self.memory_pool),
         });
         ProjectionOpener::try_new(
@@ -381,21 +381,21 @@ struct IpcFileOpener {
     object_store: Arc<dyn ObjectStore>,
     projection: Option<Vec<usize>>,
     expected_schema: SchemaRef,
-    active_file_layouts: Arc<ActiveFileLayouts>,
+    active_files: Arc<ActiveFiles>,
     memory_pool: Arc<dyn MemoryPool>,
 }
 
 impl FileOpener for IpcFileOpener {
     fn open(&self, file: PartitionedFile) -> datafusion::common::Result<FileOpenFuture> {
         let canonical_url = file
-            .extension::<CanonicalInputUrl>()
+            .extension::<CanonicalInput>()
             .expect("registered input files retain their canonical URL")
             .url()
             .to_string();
         let store = Arc::clone(&self.object_store);
         let projection = self.projection.clone();
         let expected_schema = Arc::clone(&self.expected_schema);
-        let active_file_layouts = Arc::clone(&self.active_file_layouts);
+        let active_files = Arc::clone(&self.active_files);
         let memory_pool = Arc::clone(&self.memory_pool);
         let variant = self.variant;
         Ok(Box::pin(async move {
@@ -408,7 +408,7 @@ impl FileOpener for IpcFileOpener {
                         read_url,
                         projection,
                         expected_schema,
-                        active_file_layouts,
+                        active_files,
                         memory_pool,
                     )
                     .await
@@ -450,12 +450,12 @@ async fn open_file(
     canonical_url: String,
     projection: Option<Vec<usize>>,
     expected_schema: SchemaRef,
-    active_file_layouts: Arc<ActiveFileLayouts>,
+    active_files: Arc<ActiveFiles>,
     memory_pool: Arc<dyn MemoryPool>,
 ) -> datafusion::common::Result<
     futures::stream::BoxStream<'static, datafusion::common::Result<RecordBatch>>,
 > {
-    let lease = active_file_layouts.lease(&file.object_meta);
+    let lease = active_files.lease(&file.object_meta);
     let layout_memory_pool = Arc::clone(&memory_pool);
     let layout = Arc::clone(
         lease
@@ -775,7 +775,7 @@ async fn sample_statistics(
 ) -> Result<SampleStatistics> {
     let representative = &representative_file.object_meta;
     let identity = representative_file
-        .extension::<CanonicalInputUrl>()
+        .extension::<CanonicalInput>()
         .map_or_else(
             || representative.location.to_string(),
             |input| input.url().to_string(),
@@ -1075,20 +1075,20 @@ impl From<&ObjectMeta> for ObjectIdentity {
 type LayoutCell = OnceCell<Arc<FileLayout>>;
 
 #[derive(Default)]
-struct ActiveFileLayouts {
+struct ActiveFiles {
     entries: Mutex<HashMap<ObjectIdentity, Weak<LayoutCell>>>,
 }
 
-impl fmt::Debug for ActiveFileLayouts {
+impl fmt::Debug for ActiveFiles {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("ActiveFileLayouts")
+            .debug_struct("ActiveFiles")
             .field("entries", &self.entries.lock().len())
             .finish()
     }
 }
 
-impl ActiveFileLayouts {
+impl ActiveFiles {
     fn lease(&self, meta: &ObjectMeta) -> Arc<LayoutCell> {
         let identity = ObjectIdentity::from(meta);
         let mut entries = self.entries.lock();
@@ -1122,7 +1122,7 @@ mod tests {
         MultipartUpload, ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload, PutResult,
         Result as StoreResult, memory::InMemory, path::Path as ObjectPath,
     };
-    use silk_chiffon_core::FormatInputVariant;
+    use silk_chiffon_core::InputVariant;
     use tokio::sync::Notify;
 
     use super::*;
@@ -1249,7 +1249,7 @@ mod tests {
             table_schema: table_schema.clone(),
             projection: SplitProjection::unprojected(&table_schema),
             metrics: ExecutionPlanMetricsSet::new(),
-            active_file_layouts: Arc::new(ActiveFileLayouts::default()),
+            active_files: Arc::new(ActiveFiles::default()),
             memory_pool: Arc::new(GreedyMemoryPool::new(usize::MAX)),
         }
     }
@@ -1319,8 +1319,7 @@ mod tests {
 
     #[test]
     fn arrow_variants_reject_unknown_detector_output() {
-        let error =
-            IpcVariant::parse(&FormatInputVariant::named("unknown", "unknown")).unwrap_err();
+        let error = IpcVariant::parse(&InputVariant::named("unknown", "unknown")).unwrap_err();
 
         assert!(
             error
@@ -1333,7 +1332,7 @@ mod tests {
     async fn arrow_file_format_declares_its_input_contract() {
         let format = IpcFileFormat {
             variant: IpcVariant::File,
-            active_file_layouts: Arc::new(ActiveFileLayouts::default()),
+            active_files: Arc::new(ActiveFiles::default()),
             memory_pool: Arc::new(GreedyMemoryPool::new(usize::MAX)),
         };
         let session = SessionContext::new();
@@ -1394,15 +1393,15 @@ mod tests {
 
     #[test]
     fn active_file_debug_reports_only_live_layouts() {
-        let registry = ActiveFileLayouts::default();
+        let registry = ActiveFiles::default();
         let _lease = registry.lease(&object("one.arrow", 1));
 
-        assert_eq!(format!("{registry:?}"), "ActiveFileLayouts { entries: 1 }");
+        assert_eq!(format!("{registry:?}"), "ActiveFiles { entries: 1 }");
     }
 
     #[test]
     fn active_file_registry_prunes_dead_leases() {
-        let registry = ActiveFileLayouts::default();
+        let registry = ActiveFiles::default();
         let meta = object("one.arrow", 1);
         drop(registry.lease(&meta));
         let other = object("two.arrow", 1);
@@ -1412,7 +1411,7 @@ mod tests {
 
     #[test]
     fn active_file_registry_does_not_grow_with_completed_files() {
-        let registry = ActiveFileLayouts::default();
+        let registry = ActiveFiles::default();
         for index in 0..10_000 {
             drop(registry.lease(&object(&format!("{index}.arrow"), 1)));
         }
@@ -1805,14 +1804,14 @@ mod tests {
         let (store, meta) = stored_bytes("cancel-file.arrow", bytes).await;
         let pool = Arc::new(GreedyMemoryPool::new(usize::MAX));
         let memory_pool: Arc<dyn MemoryPool> = Arc::<GreedyMemoryPool>::clone(&pool);
-        let active_file_layouts = Arc::new(ActiveFileLayouts::default());
+        let active_files = Arc::new(ActiveFiles::default());
         let stream = open_file(
             store,
             PartitionedFile::new_from_meta(meta.clone()),
             "cancel-file.arrow".to_owned(),
             None,
             schema,
-            Arc::clone(&active_file_layouts),
+            Arc::clone(&active_files),
             memory_pool,
         )
         .await
@@ -1820,7 +1819,7 @@ mod tests {
 
         assert!(pool.reserved() > 0);
         assert!(
-            active_file_layouts
+            active_files
                 .entries
                 .lock()
                 .get(&ObjectIdentity::from(&meta))
@@ -1831,7 +1830,7 @@ mod tests {
 
         assert_eq!(pool.reserved(), 0);
         assert!(
-            active_file_layouts
+            active_files
                 .entries
                 .lock()
                 .get(&ObjectIdentity::from(&meta))
@@ -2028,7 +2027,7 @@ mod tests {
         assert!(!layout.dictionaries.is_empty());
         let split = layout.record_batches[1].offset();
         let ranges = [(0, split), (split, i64::try_from(meta.size).unwrap())];
-        let active = Arc::new(ActiveFileLayouts::default());
+        let active = Arc::new(ActiveFiles::default());
         let mut values = Vec::new();
 
         for (start, end) in ranges {

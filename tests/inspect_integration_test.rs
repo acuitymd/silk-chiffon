@@ -14,7 +14,7 @@ use tempfile::TempDir;
 fn write_vortex_file(path: &std::path::Path, schema: &SchemaRef, batches: Vec<RecordBatch>) {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let bytes = runtime
-        .block_on(silk_chiffon_test_support::vortex::encode_batches(
+        .block_on(silk_chiffon_test_support::vortex::write_batches(
             schema, batches,
         ))
         .unwrap();

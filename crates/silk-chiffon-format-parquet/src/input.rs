@@ -11,13 +11,12 @@ use datafusion::{
     catalog::TableProvider, datasource::file_format::parquet::ParquetFormat,
     prelude::SessionContext,
 };
-use silk_chiffon_core::FileInputGroup;
+use silk_chiffon_core::InputLeaf;
 
 pub(crate) async fn create_provider(
-    group: &FileInputGroup,
+    leaf: &InputLeaf,
     session: &SessionContext,
 ) -> Result<Arc<dyn TableProvider>> {
-    group
-        .create_table_provider(session, Arc::new(ParquetFormat::new()))
+    leaf.create_table_provider(session, Arc::new(ParquetFormat::new()))
         .await
 }

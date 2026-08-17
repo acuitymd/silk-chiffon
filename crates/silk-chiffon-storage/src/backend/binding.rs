@@ -52,7 +52,7 @@ use super::{
     BareLocationMapper, BarePatternMapper, CliArgumentKey, LocationValidator, ObjectStoreCreatorFn,
     PrepareOutputTargetFn, StorageAccess, StorageDirection,
 };
-use crate::{Location, LocationPattern, OutputPreparation, OutputTarget};
+use crate::{Location, LocationPattern, OutputPreparation, StorageHandle};
 
 /// Definition-time behavior shared by storage backends with different settings types.
 pub(super) trait BackendDefinition: Send + Sync {
@@ -95,7 +95,7 @@ pub(crate) trait BackendBinding: Send + Sync {
 
     fn prepare_output_target<'a>(
         &'a self,
-        target: &'a OutputTarget,
+        handle: &'a StorageHandle,
         preparation: &'a OutputPreparation,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + 'a>>;
 }
@@ -216,9 +216,9 @@ where
 
     fn prepare_output_target<'a>(
         &'a self,
-        target: &'a OutputTarget,
+        handle: &'a StorageHandle,
         preparation: &'a OutputPreparation,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + 'a>> {
-        (self.prepare_output_target)(target, preparation, &self.settings)
+        (self.prepare_output_target)(handle, preparation, &self.settings)
     }
 }

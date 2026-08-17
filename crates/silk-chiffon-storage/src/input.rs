@@ -2,7 +2,7 @@
 
 use object_store::ObjectMeta;
 
-use crate::InputHandle;
+use crate::StorageHandle;
 
 /// An exact input handle and the metadata observed while resolving it.
 ///
@@ -10,21 +10,18 @@ use crate::InputHandle;
 /// the command's lifetime.
 #[derive(Clone, Debug)]
 pub struct InputObject {
-    input_handle: InputHandle,
+    handle: StorageHandle,
     metadata: ObjectMeta,
 }
 
 impl InputObject {
-    pub(crate) fn new(input_handle: InputHandle, metadata: ObjectMeta) -> Self {
-        Self {
-            input_handle,
-            metadata,
-        }
+    pub(crate) fn new(handle: StorageHandle, metadata: ObjectMeta) -> Self {
+        Self { handle, metadata }
     }
 
-    /// Returns the input handle for this exact object.
-    pub fn input_handle(&self) -> &InputHandle {
-        &self.input_handle
+    /// Returns the storage handle for this exact object.
+    pub fn handle(&self) -> &StorageHandle {
+        &self.handle
     }
 
     /// Returns the metadata observed while resolving this object.

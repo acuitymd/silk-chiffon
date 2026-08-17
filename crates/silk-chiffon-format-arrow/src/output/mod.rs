@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use datafusion::execution::SendableRecordBatchStream;
 use futures::stream::StreamExt;
 use silk_chiffon_core::{DataSink, SinkBinding, SinkCompletion, validate_batch_schema};
-use silk_chiffon_storage::{ObjectUpload, ObjectUploadTask, PreparedOutputTarget};
+use silk_chiffon_storage::{ObjectUpload, ObjectUploadTask, StorageHandle};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -42,11 +42,11 @@ impl OutputBinding {
 impl SinkBinding for OutputBinding {
     async fn open_sink(
         &self,
-        target: PreparedOutputTarget,
+        handle: StorageHandle,
         schema: SchemaRef,
     ) -> Result<Box<dyn DataSink>> {
         Ok(Box::new(Sink::create(
-            target,
+            handle,
             &schema,
             self.variant,
             self.record_batch_size,
@@ -73,7 +73,7 @@ pub(crate) struct Sink {
 
 impl Sink {
     fn create(
-        target: PreparedOutputTarget,
+        handle: StorageHandle,
         schema: &SchemaRef,
         variant: IpcVariant,
         record_batch_size: usize,
@@ -81,7 +81,7 @@ impl Sink {
         queue_depth: usize,
     ) -> Result<Self> {
         let (tx, rx) = mpsc::channel::<RecordBatch>(queue_depth);
-        let mut upload = ObjectUpload::new(target);
+        let mut upload = ObjectUpload::new(handle);
         let writer = upload.blocking_writer()?;
 
         let sink_schema = Arc::clone(schema);
@@ -107,7 +107,7 @@ impl Sink {
         })
     }
 
-    fn cancel_writer(&mut self) {
+    fn stop_writer_input(&mut self) {
         // Closing the channel looks like successful EOF, so publish cancellation first.
         if let Some(task) = &self.task {
             task.cancellation().cancel();
@@ -225,7 +225,7 @@ impl DataSink for Sink {
     }
 
     async fn abort(mut self: Box<Self>) -> Result<()> {
-        self.cancel_writer();
+        self.stop_writer_input();
         match self.task.take() {
             Some(task) => task.abort().await,
             None => Ok(()),
@@ -235,7 +235,7 @@ impl DataSink for Sink {
 
 impl Drop for Sink {
     fn drop(&mut self) {
-        self.cancel_writer();
+        self.stop_writer_input();
     }
 }
 
@@ -266,7 +266,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use silk_chiffon_test_support::{TestBatch, TestFile, prepared_local_output_target};
+    use silk_chiffon_test_support::{TestBatch, TestFile, prepared_local_output};
     use std::sync::{
         Mutex,
         atomic::{AtomicBool, Ordering},
@@ -300,7 +300,7 @@ mod tests {
         let path = directory.path().join("output.arrow");
         let batch = TestBatch::simple_with(&[1, 2, 3, 4, 5], &["a", "b", "c", "d", "e"]);
         let mut sink = Sink::create(
-            prepared_local_output_target(&path),
+            prepared_local_output(&path),
             &batch.schema(),
             variant,
             record_batch_size,
@@ -358,7 +358,7 @@ mod tests {
         let path = directory.path().join("aborted.arrow");
         let batch = TestBatch::simple();
         let mut sink = Sink::create(
-            prepared_local_output_target(&path),
+            prepared_local_output(&path),
             &batch.schema(),
             IpcVariant::File,
             122_880,

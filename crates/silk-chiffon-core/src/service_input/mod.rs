@@ -1,8 +1,8 @@
 //! Public contracts for service-backed command inputs.
 //!
 //! A connector crate contributes an immutable [`ServiceInputDefinition`] with its name, claimed
-//! schemes, typed Clap command state, and provider function. The host adds that state to its
-//! command and binds it once after parsing. The resulting [`ServiceInputBinding`] creates a table
+//! schemes, typed Clap settings, and provider function. The host adds those settings to its command
+//! and binds them once after parsing. The resulting [`ServiceInputBinding`] creates a table
 //! provider from one raw exact reference and the command's shared DataFusion session.
 //!
 //! Provider construction may establish reusable client or snapshot state, but it must not detach
@@ -12,10 +12,10 @@
 //! work and close its channels. DataFusion's `SpawnedTask`, `JoinSet`, and
 //! `RecordBatchReceiverStreamBuilder` provide drop-bound task ownership for custom service plans.
 //!
-//! Each connector keeps its command-state type through parsing and binding. The private `binding`
+//! Each connector keeps its settings type through parsing and binding. The private `binding`
 //! module erases the complete typed definition or binding behind a trait object, allowing
-//! connectors with different command-state types to coexist without storing `Any` values or
-//! downcasting state.
+//! connectors with different settings types to coexist without storing `Any` values or
+//! downcasting settings.
 
 mod binding;
 
@@ -28,7 +28,7 @@ use futures::future::BoxFuture;
 use thiserror::Error;
 
 /// Creates one logical input provider from a raw exact reference, the shared session, and typed
-/// command state.
+/// settings.
 ///
 /// The returned provider owns reusable source state. Its physical execution streams own ongoing
 /// reads and must stop them when those streams are dropped.
@@ -54,7 +54,7 @@ impl fmt::Debug for ServiceInputDefinition {
 }
 
 impl ServiceInputDefinition {
-    /// Starts a definition whose provider receives command state parsed as `T`.
+    /// Starts a definition whose provider function receives parsed `T` settings.
     pub fn with_args<T>(provider: ServiceInputProviderFn<T>) -> ServiceInputDefinitionBuilder<T>
     where
         T: Args + FromArgMatches + Send + Sync + 'static,
@@ -62,7 +62,7 @@ impl ServiceInputDefinition {
         ServiceInputDefinitionBuilder::new(binding::ArgsParser::for_args(), provider)
     }
 
-    /// Starts a definition with no service-specific command state.
+    /// Starts a definition with no service-specific settings.
     pub fn without_args(provider: ServiceInputProviderFn<()>) -> ServiceInputDefinitionBuilder<()> {
         ServiceInputDefinitionBuilder::new(binding::ArgsParser::<()>::unit(), provider)
     }
@@ -77,12 +77,12 @@ impl ServiceInputDefinition {
         &self.schemes
     }
 
-    /// Adds this definition's typed command state to the host command.
+    /// Adds this definition's typed settings to the host command.
     pub fn augment_args(&self, command: Command) -> Command {
         self.definition.augment_args(command)
     }
 
-    /// Binds this definition's typed command state for one parsed command.
+    /// Binds this definition's typed settings for one parsed command.
     pub fn bind(&self, matches: &ArgMatches) -> Result<ServiceInputBinding, clap::Error> {
         Ok(ServiceInputBinding {
             name: self.name,
@@ -91,7 +91,7 @@ impl ServiceInputDefinition {
     }
 }
 
-/// Builds one service-input definition while preserving its concrete command-state type.
+/// Builds one service-input definition while preserving its concrete settings type.
 pub struct ServiceInputDefinitionBuilder<T> {
     name: Option<&'static str>,
     schemes: Vec<&'static str>,
@@ -159,7 +159,7 @@ pub enum ServiceInputDefinitionBuildError {
     DuplicateScheme { scheme: &'static str },
 }
 
-/// Command-scoped service-input behavior with its typed state already bound.
+/// Command-scoped service-input behavior with its typed settings already bound.
 pub struct ServiceInputBinding {
     name: &'static str,
     binding: Box<dyn binding::ErasedServiceInputBinding>,

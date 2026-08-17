@@ -149,11 +149,7 @@ Examples:
 - `--max-open-partitions <MAX_OPEN_PARTITIONS>` — Maximum number of partition output sinks to keep open simultaneously. When this limit is reached, the least-recently-written partition is finalized. Only used with --partition-strategy=nosort-evict. Defaults to 100
 - `-l`, `--list-outputs <LIST_OUTPUTS>` — List the output files after creation (only with --to-many)
 
-  Possible values:
-  - `text`:
-    Human-readable text selected by the host CLI
-  - `json`:
-    Structured JSON selected by the host CLI
+  Possible values: `none`, `text`, `json`
 
 - `--list-outputs-file <LIST_OUTPUTS_FILE>` — Write output file listing to a file instead of stdout
 - `--create-dirs` — Create file-output directories as needed
@@ -500,7 +496,7 @@ Detect the format of an input
 
 ###### **Options:**
 
-- `-f`, `--format <PRESENTATION>` — Output format (auto-detects based on TTY if not specified)
+- `-f`, `--format <FORMAT>` — Output format (auto-detects based on TTY if not specified)
 
   Default value: `auto`
 
@@ -577,7 +573,7 @@ Inspect arrow file metadata and structure
 
 ###### **Options:**
 
-- `-f`, `--format <PRESENTATION>` — Output format (auto-detects based on TTY if not specified)
+- `-f`, `--format <FORMAT>` — Output format (auto-detects based on TTY if not specified)
 
   Default value: `auto`
 
@@ -636,7 +632,7 @@ Inspect parquet file metadata and structure
 
 ###### **Options:**
 
-- `-f`, `--format <PRESENTATION>` — Output format (auto-detects based on TTY if not specified)
+- `-f`, `--format <FORMAT>` — Output format (auto-detects based on TTY if not specified)
 
   Default value: `auto`
 
@@ -697,7 +693,7 @@ Inspect vortex file metadata and structure
 
 ###### **Options:**
 
-- `-f`, `--format <PRESENTATION>` — Output format (auto-detects based on TTY if not specified)
+- `-f`, `--format <FORMAT>` — Output format (auto-detects based on TTY if not specified)
 
   Default value: `auto`
 

@@ -1,34 +1,22 @@
-mod commands;
-mod registration;
-mod system_memory;
+pub mod commands;
+pub mod operations;
+pub mod registration;
+pub mod sinks;
+pub mod utils;
 
+use crate::utils::collections::{uniq, uniq_by};
 use anyhow::{Result, anyhow};
 use camino::Utf8PathBuf;
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum, builder::ValueHint};
 use clap_complete::Shell;
-use silk_chiffon_core::{
-    NullPlacement, PresentationMode, QueryDialect, SortColumn, SortDirection, SpillCompression,
-};
+use silk_chiffon_core::{QueryDialect, SpillCompression};
 use std::{
-    collections::HashSet,
     ffi::OsString,
     fmt::{self, Formatter},
     io::{self, IsTerminal},
     str::FromStr,
 };
 use strum_macros::Display;
-
-fn unique_by<'a, T: Clone, U: Eq + std::hash::Hash>(
-    items: &'a [T],
-    key: impl Fn(&'a T) -> U,
-) -> Vec<T> {
-    let mut seen = HashSet::new();
-    items
-        .iter()
-        .filter(|item| seen.insert(key(item)))
-        .cloned()
-        .collect()
-}
 
 /// Parse a usize that must be at least 1.
 pub fn parse_at_least_one(s: &str) -> Result<usize> {
@@ -138,16 +126,16 @@ impl MemoryBudgetSpec {
     pub fn resolve(&self) -> usize {
         match self {
             MemoryBudgetSpec::Total { pct, min } => {
-                let budget = system_memory::total_memory() * usize::from(*pct) / 100;
+                let budget = utils::memory::total_memory() * usize::from(*pct) / 100;
                 budget.max(min.unwrap_or(0))
             }
             MemoryBudgetSpec::Available { pct, min } => {
-                let budget = system_memory::available_memory() * usize::from(*pct) / 100;
+                let budget = utils::memory::available_memory() * usize::from(*pct) / 100;
                 budget.max(min.unwrap_or(0))
             }
             MemoryBudgetSpec::Fixed(n) => *n,
             MemoryBudgetSpec::Reserve { reserve, min } => {
-                let budget = system_memory::total_memory().saturating_sub(*reserve);
+                let budget = utils::memory::total_memory().saturating_sub(*reserve);
                 budget.max(min.unwrap_or(0))
             }
         }
@@ -306,8 +294,7 @@ struct CliSchema {
     command: CommandSchema,
 }
 
-/// A parsed command with its format, storage, and service configuration prepared
-/// for this invocation.
+/// A parsed command whose registered format, storage, and service settings are bound.
 pub struct Cli {
     pub command: Command,
 }
@@ -426,19 +413,6 @@ impl clap::CommandFactory for Cli {
 }
 
 impl Command {
-    /// Executes this command using its bound invocation state.
-    pub async fn execute(self) -> Result<()> {
-        match self {
-            Self::Transform(command) => commands::transform::run(command).await,
-            Self::Detect(command) => commands::detect::run(command).await,
-            Self::Inspect(command) => commands::inspect::run(command).await,
-            Self::Completions { shell } => {
-                Self::generate_completions(shell);
-                Ok(())
-            }
-        }
-    }
-
     /// Resolves the Tokio runtime worker count for this command.
     pub fn runtime_worker_threads(&self) -> usize {
         match self {
@@ -460,6 +434,16 @@ impl Command {
             &mut std::io::stdout(),
         );
     }
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, Default, Display)]
+#[value(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
+pub enum ListOutputsFormat {
+    #[default]
+    None,
+    Text,
+    Json,
 }
 
 /// Strategy for writing partitioned output files.
@@ -487,25 +471,35 @@ pub enum PartitionStrategy {
     NosortEvict,
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct SortSpec {
-    pub(crate) columns: Vec<SortColumn>,
+#[derive(Debug, Clone)]
+pub struct SortColumn {
+    pub name: String,
+    pub direction: SortDirection,
 }
 
-fn sort_column(name: impl Into<String>, direction: SortDirection) -> SortColumn {
-    let null_placement = match direction {
-        SortDirection::Ascending => NullPlacement::Last,
-        SortDirection::Descending => NullPlacement::First,
-    };
-    SortColumn::new(name, direction, null_placement)
+#[derive(ValueEnum, Clone, Debug, PartialEq)]
+#[value(rename_all = "lowercase")]
+pub enum SortDirection {
+    #[value(name = "asc")]
+    Ascending,
+    #[value(name = "desc")]
+    Descending,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SortSpec {
+    pub columns: Vec<SortColumn>,
 }
 
 impl From<Vec<String>> for SortSpec {
     fn from(names: Vec<String>) -> Self {
         Self {
-            columns: unique_by(&names, |name| name)
+            columns: uniq(&names)
                 .iter()
-                .map(|name| sort_column(name.clone(), SortDirection::Ascending))
+                .map(|name| SortColumn {
+                    name: name.clone(),
+                    direction: SortDirection::Ascending,
+                })
                 .collect(),
         }
     }
@@ -521,16 +515,11 @@ impl SortSpec {
     }
 
     pub fn contains(&self, column_name: &str) -> bool {
-        self.columns
-            .iter()
-            .any(|column| column.name() == column_name)
+        self.columns.iter().any(|c| c.name == column_name)
     }
 
     pub fn column_names(&self) -> Vec<String> {
-        self.columns
-            .iter()
-            .map(|column| column.name().to_owned())
-            .collect()
+        self.columns.iter().map(|c| c.name.clone()).collect()
     }
 
     pub fn without_columns_named(&self, column_names: &[String]) -> Self {
@@ -538,7 +527,7 @@ impl SortSpec {
             columns: self
                 .columns
                 .iter()
-                .filter(|column| !column_names.iter().any(|name| name == column.name()))
+                .filter(|c| !column_names.contains(&c.name))
                 .cloned()
                 .collect(),
         }
@@ -546,7 +535,7 @@ impl SortSpec {
 
     pub fn extend(&mut self, other: &Self) {
         self.columns.extend(other.columns.iter().cloned());
-        self.columns = unique_by(&self.columns, |column| column.name());
+        self.columns = uniq_by(&self.columns, |c| &c.name);
     }
 }
 
@@ -578,18 +567,18 @@ impl FromStr for SortSpec {
                 (part, false) // default to ascending
             };
 
-            columns.push(sort_column(
-                name,
-                if descending {
+            columns.push(SortColumn {
+                name: name.to_string(),
+                direction: if descending {
                     SortDirection::Descending
                 } else {
                     SortDirection::Ascending
                 },
-            ));
+            });
         }
 
         Ok(SortSpec {
-            columns: unique_by(&columns, |column| column.name()),
+            columns: uniq_by(&columns, |c| &c.name),
         })
     }
 }
@@ -599,9 +588,9 @@ impl fmt::Display for SortSpec {
         let parts: Vec<String> = self
             .columns
             .iter()
-            .map(|column| match column.direction() {
-                SortDirection::Descending => format!("{}:desc", column.name()),
-                SortDirection::Ascending => column.name().to_owned(),
+            .map(|col| match col.direction {
+                SortDirection::Descending => format!("{}:desc", col.name),
+                SortDirection::Ascending => col.name.clone(),
             })
             .collect();
         write!(f, "{}", parts.join(","))
@@ -809,7 +798,7 @@ struct TransformArgs {
         requires = "to_many",
         help_heading = "Partitioning"
     )]
-    pub list_outputs: Option<PresentationMode>,
+    pub list_outputs: Option<ListOutputsFormat>,
 
     /// Write output file listing to a file instead of stdout.
     #[arg(long, requires = "list_outputs", help_heading = "Partitioning")]
@@ -826,7 +815,7 @@ struct TransformArgs {
 
 /// Parsed transform arguments with command-scoped format bindings and storage state.
 pub struct TransformCommand {
-    inputs: InputOperands,
+    inputs: InputRequest,
     allow_unmatched_patterns: bool,
     input_format: Option<String>,
     output_format: Option<String>,
@@ -847,7 +836,7 @@ pub struct TransformCommand {
     by: Option<String>,
     partition_strategy: PartitionStrategy,
     max_open_partitions: Option<usize>,
-    list_outputs: Option<PresentationMode>,
+    list_outputs: Option<ListOutputsFormat>,
     list_outputs_file: Option<Utf8PathBuf>,
     create_dirs: bool,
     overwrite: bool,
@@ -859,7 +848,7 @@ pub struct TransformCommand {
     output_schemes: crate::registration::OutputSchemeIndex,
 }
 
-pub(crate) struct InputOperands {
+pub(crate) struct InputRequest {
     pub(crate) exact_references: Vec<String>,
     pub(crate) file_patterns: Vec<String>,
 }
@@ -903,7 +892,7 @@ impl TransformCommand {
             overwrite,
         } = args;
 
-        let inputs = InputOperands {
+        let inputs = InputRequest {
             exact_references: from,
             file_patterns: from_pattern,
         };
@@ -950,7 +939,7 @@ struct InspectSchema {}
 /// One format-specific inspection with its bound arguments and storage session.
 pub struct InspectCommand {
     file: Utf8PathBuf,
-    mode: PresentationMode,
+    mode: silk_chiffon_core::InspectionMode,
     inspection: silk_chiffon_core::InspectionBinding,
     storage: silk_chiffon_storage::StorageSession,
 }
@@ -958,7 +947,7 @@ pub struct InspectCommand {
 impl InspectCommand {
     fn from_parsed(
         file: Utf8PathBuf,
-        mode: PresentationMode,
+        mode: silk_chiffon_core::InspectionMode,
         inspection: silk_chiffon_core::InspectionBinding,
         storage: silk_chiffon_storage::StorageSession,
     ) -> Self {
@@ -984,7 +973,7 @@ impl InspectCommand {
         self,
     ) -> (
         Utf8PathBuf,
-        PresentationMode,
+        silk_chiffon_core::InspectionMode,
         silk_chiffon_core::InspectionBinding,
         silk_chiffon_storage::StorageSession,
     ) {
@@ -998,19 +987,19 @@ struct InspectionArgs {
     #[arg(value_hint = ValueHint::FilePath)]
     file: Utf8PathBuf,
     /// Output format (auto-detects based on TTY if not specified)
-    #[arg(long = "format", short = 'f', value_enum, default_value = "auto")]
-    presentation: PresentationPreference,
+    #[arg(long, short = 'f', value_enum, default_value = "auto")]
+    format: OutputFormat,
 }
 
 #[derive(Args, Clone, Debug)]
 /// Arguments for content-based format detection.
-struct DetectArgs {
+pub struct DetectArgs {
     /// Path to the input whose format should be detected
     #[arg(value_hint = ValueHint::FilePath)]
-    file: Utf8PathBuf,
+    pub file: Utf8PathBuf,
     /// Output format (auto-detects based on TTY if not specified)
-    #[arg(long = "format", short = 'f', value_enum, default_value = "auto")]
-    presentation: PresentationPreference,
+    #[arg(long, short = 'f', value_enum, default_value = "auto")]
+    pub format: OutputFormat,
 }
 
 /// A detection request with the immutable format registry and command storage session.
@@ -1044,10 +1033,10 @@ impl DetectCommand {
     }
 }
 
-/// The requested output representation before TTY resolution.
+/// Output format for inspect commands
 #[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[value(rename_all = "lowercase")]
-pub enum PresentationPreference {
+pub enum OutputFormat {
     /// Auto-detect: JSON if stdout is not a TTY, otherwise text
     #[default]
     Auto,
@@ -1057,13 +1046,20 @@ pub enum PresentationPreference {
     Json,
 }
 
-impl PresentationPreference {
-    pub fn resolve(self) -> PresentationMode {
+impl OutputFormat {
+    pub fn resolves_to_json(&self) -> bool {
         match self {
-            Self::Auto if io::stdout().is_terminal() => PresentationMode::Text,
-            Self::Auto => PresentationMode::Json,
-            Self::Text => PresentationMode::Text,
-            Self::Json => PresentationMode::Json,
+            OutputFormat::Auto => !io::stdout().is_terminal(),
+            OutputFormat::Text => false,
+            OutputFormat::Json => true,
+        }
+    }
+
+    pub fn resolves_to_text(&self) -> bool {
+        match self {
+            OutputFormat::Auto => io::stdout().is_terminal(),
+            OutputFormat::Text => true,
+            OutputFormat::Json => false,
         }
     }
 }
@@ -1071,13 +1067,6 @@ impl PresentationPreference {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn sort_spec_assigns_explicit_conventional_null_placement() {
-        let spec: SortSpec = "ascending,descending:desc".parse().unwrap();
-        assert_eq!(spec.columns[0].null_placement(), NullPlacement::Last);
-        assert_eq!(spec.columns[1].null_placement(), NullPlacement::First);
-    }
 
     #[test]
     fn test_value_enum_from_str() {

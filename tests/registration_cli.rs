@@ -1,11 +1,57 @@
 use clap::CommandFactory;
-use silk_chiffon::{Cli, Command};
+use silk_chiffon::{Cli, Command, registration};
 #[cfg(feature = "local-bare-paths")]
-use silk_chiffon_core::{InspectionOutput, PresentationMode};
+use silk_chiffon_core::{InspectionMode, InspectionOutput};
 #[cfg(feature = "local-bare-paths")]
 use silk_chiffon_storage::LocationInput;
 #[cfg(feature = "local-bare-paths")]
 use silk_chiffon_test_support::{TestBatch, TestFile};
+
+#[test]
+fn executable_registers_formats_and_the_available_storage() {
+    let formats = registration::format_registry();
+    assert_eq!(
+        formats
+            .formats()
+            .map(|format| format.name())
+            .collect::<Vec<_>>(),
+        ["arrow", "parquet", "vortex"]
+    );
+    assert!(formats.formats().all(|format| {
+        format.has_detector()
+            && format.has_input_provider()
+            && format.has_sink()
+            && format.has_inspector()
+    }));
+
+    let storage = registration::storage_registry();
+    let expected_backends = [
+        ("gcs", cfg!(feature = "gcs")),
+        ("local", cfg!(feature = "local")),
+        ("s3", cfg!(feature = "s3")),
+    ]
+    .into_iter()
+    .filter_map(|(name, enabled)| enabled.then_some(name))
+    .collect::<Vec<_>>();
+    assert_eq!(
+        storage
+            .backends()
+            .iter()
+            .map(|backend| backend.name())
+            .collect::<Vec<_>>(),
+        expected_backends
+    );
+
+    #[cfg(feature = "local-bare-paths")]
+    assert_eq!(
+        storage
+            .bare_location_backend()
+            .map(|backend| backend.name()),
+        Some("local")
+    );
+    #[cfg(not(feature = "local-bare-paths"))]
+    assert!(storage.bare_location_backend().is_none());
+}
 
 #[test]
 fn composed_cli_binds_registered_transform_arguments() {
@@ -217,7 +263,9 @@ async fn registered_transform_uses_bound_format_and_storage_settings() {
     let Command::Transform(command) = cli.command else {
         panic!("expected transform command");
     };
-    Command::Transform(command).execute().await.unwrap();
+    silk_chiffon::commands::transform::run(command)
+        .await
+        .unwrap();
     assert!(output_one.exists());
     assert_eq!(
         TestFile::read_parquet(&output_one)
@@ -232,7 +280,13 @@ async fn registered_transform_uses_bound_format_and_storage_settings() {
         .lookup_input(&LocationInput::parse(input.to_str().unwrap()).unwrap())
         .await
         .unwrap();
-    assert!(input_object.metadata().size > 0);
+    let detected = registration::format_registry()
+        .detect(&input_object)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(detected.format(), "parquet");
+    assert_eq!(detected.variant(), None);
 }
 
 #[cfg(feature = "local-bare-paths")]
@@ -263,7 +317,7 @@ async fn composed_inspection_invokes_the_bound_registration() {
         .unwrap();
     let output = command
         .inspection()
-        .inspect(&object, PresentationMode::Json)
+        .inspect(&object, InspectionMode::Json)
         .await
         .unwrap();
     let InspectionOutput::Json(output) = output else {

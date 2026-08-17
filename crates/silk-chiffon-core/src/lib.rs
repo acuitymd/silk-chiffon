@@ -1,28 +1,31 @@
+mod data_operation;
 mod data_sink;
-mod exact_file_provider;
-mod file_input;
+mod file_table_provider;
 mod format;
+mod input_leaf_provider;
+mod input_store;
 mod inspection;
 mod pipeline;
 mod schema;
 mod service_input;
 mod service_output;
 
+pub use data_operation::DataOperation;
 pub use data_sink::{DataSink, SinkBinding, SinkCompletion};
-pub use exact_file_provider::ExactFileTableProviderBuilder;
-pub use file_input::{CanonicalInputUrl, FileInputGroup};
+pub use file_table_provider::file_table_provider;
 pub use format::{
-    DetectedFormat, FormatDefinition, FormatDefinitionBuilder, FormatFuture, FormatInputVariant,
-    FormatOperation, FormatOperationError, FormatRegistry, FormatRegistryBuilder,
-    FormatRegistryError, InputDetection, InputDetectorFn, InputProviderFn, InspectionBinding,
-    InspectionDefinition, InspectorFn, NullPlacement, OpenSinkMode, PresentationMode, SinkBinderFn,
-    SinkBindingConfig, SortColumn, SortDirection, TransformBinding, TransformBindings,
+    DetectedFormat, FormatDefinition, FormatDefinitionBuilder, FormatFuture, FormatOperation,
+    FormatOperationError, FormatRegistry, FormatRegistryBuilder, FormatRegistryError,
+    InputDetection, InputDetectorFn, InputProviderFn, InputVariant, InspectionBinding,
+    InspectionDefinition, InspectionMode, InspectorFn, OpenSinkMode, OutputOrderingColumn,
+    SinkBinderFn, SinkBindingConfig, SortDirection, TransformBinding, TransformBindings,
     TransformDefinition, TransformDefinitionBuilder,
 };
+pub use input_store::{CanonicalInput, InputLeaf};
 pub use inspection::InspectionOutput;
 pub use pipeline::{
-    Pipeline, PipelineExecution, PipelineExecutionStartError, PipelinePreparationError,
-    PreparedPipeline, QueryDialect, SpillCompression, union_input_providers_by_name,
+    InputSources, Pipeline, PipelineExecution, PipelineExecutionStartError,
+    PipelinePreparationError, PreparedPipeline, QueryDialect, SpillCompression,
 };
 pub use schema::{schemas_match_ignoring_metadata, validate_batch_schema};
 pub use service_input::{
@@ -30,6 +33,6 @@ pub use service_input::{
     ServiceInputDefinitionBuilder, ServiceInputProviderError, ServiceInputProviderFn,
 };
 pub use service_output::{
-    ServiceOutputBinding, ServiceOutputConsumerFn, ServiceOutputConsumptionError,
-    ServiceOutputDefinition, ServiceOutputDefinitionBuildError, ServiceOutputDefinitionBuilder,
+    ServiceOutputBinding, ServiceOutputDefinition, ServiceOutputDefinitionBuildError,
+    ServiceOutputDefinitionBuilder, ServiceOutputWriteError, ServiceOutputWriteFn,
 };

@@ -5,7 +5,7 @@ use arrow::util::display::ArrayFormatter;
 use serde::Serialize;
 use serde_json::Value;
 
-use super::partition_runs::PartitionValues;
+use super::partitioner::PartitionValues;
 
 /// One file sink completion with its partition identity.
 #[derive(Debug, Clone, Serialize)]

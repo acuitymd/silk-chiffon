@@ -1,51 +1,58 @@
 //! DataFusion object-store views for exact input files.
 
-mod provider;
-mod store;
+use std::{fmt, sync::Arc};
 
+use async_trait::async_trait;
 use datafusion::{
     datasource::listing::PartitionedFile, execution::object_store::ObjectStoreUrl,
     prelude::SessionContext,
 };
+use futures::{StreamExt, TryStreamExt, stream::BoxStream};
+use object_store::{
+    CopyOptions, GetOptions, GetResult, GetResultPayload, ListResult, MultipartUpload, ObjectMeta,
+    ObjectStore, PutMultipartOptions, PutOptions, PutPayload, PutResult, Result as StoreResult,
+    path::Path as ObjectPath,
+};
 use silk_chiffon_storage::InputObject;
 use url::Url;
 
-use crate::FormatInputVariant;
-use store::register_input_store;
+use crate::InputVariant;
+
+const INTERNAL_PREFIX: &str = "__silk_input";
 
 /// The canonical input URL attached to a DataFusion file descriptor.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CanonicalInputUrl {
+pub struct CanonicalInput {
     url: Url,
 }
 
-impl CanonicalInputUrl {
+impl CanonicalInput {
     /// Returns the exact input URL, including its query.
     pub fn url(&self) -> &Url {
         &self.url
     }
 }
 
-/// Exact files prepared by the host as one homogeneous format group.
+/// Exact files prepared by the host as one homogeneous format leaf.
 ///
-/// Construction enforces the format-independent group invariants: at least
+/// Construction enforces the format-independent leaf invariants: at least
 /// one object, one storage root, deterministic representative selection, and
 /// one scoped DataFusion store registration. Format implementations can then
 /// focus on schema, statistics, and decoding.
 #[derive(Debug)]
-pub struct FileInputGroup {
+pub struct InputLeaf {
     object_store_url: ObjectStoreUrl,
     files: Vec<PartitionedFile>,
     representative_index: usize,
-    variant: FormatInputVariant,
+    variant: InputVariant,
 }
 
-impl FileInputGroup {
-    /// Prepares one group from objects already grouped by format and variant.
-    pub(crate) fn try_new(
+impl InputLeaf {
+    /// Prepares one leaf from objects already grouped by format and variant.
+    pub fn try_new(
         session: &SessionContext,
         objects: &[InputObject],
-        variant: FormatInputVariant,
+        variant: InputVariant,
     ) -> anyhow::Result<Self> {
         let representative_index = objects
             .iter()
@@ -56,14 +63,14 @@ impl FileInputGroup {
                     .cmp(&right.metadata().size)
                     .then_with(|| {
                         right
-                            .input_handle()
+                            .handle()
                             .url()
                             .as_str()
-                            .cmp(left.input_handle().url().as_str())
+                            .cmp(left.handle().url().as_str())
                     })
             })
             .map(|(index, _)| index)
-            .ok_or_else(|| anyhow::anyhow!("cannot build an empty file-input group"))?;
+            .ok_or_else(|| anyhow::anyhow!("cannot build an empty file-input leaf"))?;
         let (object_store_url, files) = register_input_store(session, objects)?;
         Ok(Self {
             object_store_url,
@@ -73,7 +80,7 @@ impl FileInputGroup {
         })
     }
 
-    /// Returns the scoped store registered for this group.
+    /// Returns the scoped store registered for this leaf.
     pub fn object_store_url(&self) -> &ObjectStoreUrl {
         &self.object_store_url
     }
@@ -89,28 +96,251 @@ impl FileInputGroup {
     }
 
     /// Returns the format-specific container variant selected before grouping.
-    pub fn variant(&self) -> &FormatInputVariant {
+    pub fn variant(&self) -> &InputVariant {
         &self.variant
+    }
+}
+
+/// Registers one reversible DataFusion view for an input storage root.
+///
+/// Scoped paths encode both the canonical URL and the backend object path.
+/// The view therefore needs no per-file lookup map, and registering another
+/// leaf from the same root safely reuses the same DataFusion store URL.
+fn register_input_store(
+    session: &SessionContext,
+    objects: &[InputObject],
+) -> anyhow::Result<(ObjectStoreUrl, Vec<PartitionedFile>)> {
+    let object = objects
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("cannot register an empty input leaf"))?;
+    let handle = object.handle();
+    if objects
+        .iter()
+        .any(|object| object.handle().store_url() != handle.store_url())
+    {
+        anyhow::bail!("input leaf spans multiple object-store roots");
+    }
+
+    let namespace = encode(handle.store_url().as_str().as_bytes());
+    let store_url = ObjectStoreUrl::parse(format!("silk-input://{namespace}"))?;
+    let files = objects
+        .iter()
+        .map(|object| {
+            let canonical = object.handle().url().clone();
+            let mut metadata = object.metadata().clone();
+            metadata.location = scoped_path(&canonical, object.handle().object_path());
+            PartitionedFile::new_from_meta(metadata)
+                .with_extension(CanonicalInput { url: canonical })
+        })
+        .collect();
+    let view = Arc::new(InputStoreView {
+        inner: handle.object_store(),
+        store_root: handle.store_url().clone(),
+    });
+    session
+        .runtime_env()
+        .register_object_store(store_url.as_ref(), view);
+    Ok((store_url, files))
+}
+
+fn scoped_path(canonical_url: &Url, inner_path: &ObjectPath) -> ObjectPath {
+    ObjectPath::from(format!(
+        "{INTERNAL_PREFIX}/{}/{}",
+        encode(canonical_url.as_str().as_bytes()),
+        encode(inner_path.as_ref().as_bytes())
+    ))
+}
+
+fn encode(bytes: &[u8]) -> String {
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use fmt::Write as _;
+        write!(&mut encoded, "{byte:02x}").expect("writing to a string cannot fail");
+    }
+    encoded
+}
+
+fn decode(encoded: &str) -> StoreResult<Vec<u8>> {
+    if !encoded.len().is_multiple_of(2) {
+        return Err(invalid_path("an encoded component has odd length"));
+    }
+    encoded
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|digits| {
+            let digits = std::str::from_utf8(digits).map_err(invalid_path)?;
+            u8::from_str_radix(digits, 16).map_err(invalid_path)
+        })
+        .collect()
+}
+
+fn invalid_path(source: impl fmt::Display) -> object_store::Error {
+    object_store::Error::Generic {
+        store: "SilkInputView",
+        source: format!("invalid internal input path: {source}").into(),
+    }
+}
+
+fn canonical_error(canonical_url: &Url, error: &object_store::Error) -> object_store::Error {
+    object_store::Error::Generic {
+        store: "SilkInputView",
+        source: format!("input {canonical_url}: {error}").into(),
+    }
+}
+
+#[derive(Debug)]
+struct InputStoreView {
+    inner: Arc<dyn ObjectStore>,
+    store_root: Url,
+}
+
+impl fmt::Display for InputStoreView {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "Silk input view for {}", self.store_root)
+    }
+}
+
+struct DecodedPath {
+    canonical_url: Url,
+    inner_path: ObjectPath,
+}
+
+impl InputStoreView {
+    fn decode_path(&self, location: &ObjectPath) -> StoreResult<DecodedPath> {
+        let encoded = location
+            .as_ref()
+            .strip_prefix(&format!("{INTERNAL_PREFIX}/"))
+            .ok_or_else(|| invalid_path("the Silk input prefix is missing"))?;
+        let (url, path) = encoded
+            .split_once('/')
+            .ok_or_else(|| invalid_path("the canonical URL or object path is missing"))?;
+        let canonical_url = Url::parse(std::str::from_utf8(&decode(url)?).map_err(invalid_path)?)
+            .map_err(invalid_path)?;
+        let mut root = canonical_url.clone();
+        root.set_path("/");
+        root.set_query(None);
+        root.set_fragment(None);
+        if root != self.store_root {
+            return Err(invalid_path("the canonical URL belongs to another root"));
+        }
+        let inner_path =
+            ObjectPath::parse(std::str::from_utf8(&decode(path)?).map_err(invalid_path)?)
+                .map_err(invalid_path)?;
+        Ok(DecodedPath {
+            canonical_url,
+            inner_path,
+        })
+    }
+
+    fn unsupported<T>(&self, operation: &str) -> StoreResult<T> {
+        Err(object_store::Error::NotImplemented {
+            operation: operation.to_owned(),
+            implementer: "SilkInputView".to_owned(),
+        })
+    }
+}
+
+#[async_trait]
+impl ObjectStore for InputStoreView {
+    async fn put_opts(
+        &self,
+        _location: &ObjectPath,
+        _payload: PutPayload,
+        _options: PutOptions,
+    ) -> StoreResult<PutResult> {
+        self.unsupported("put_opts")
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        _location: &ObjectPath,
+        _options: PutMultipartOptions,
+    ) -> StoreResult<Box<dyn MultipartUpload>> {
+        self.unsupported("put_multipart_opts")
+    }
+
+    async fn get_opts(&self, location: &ObjectPath, options: GetOptions) -> StoreResult<GetResult> {
+        let decoded = self.decode_path(location)?;
+        let result = self
+            .inner
+            .get_opts(&decoded.inner_path, options)
+            .await
+            .map_err(|error| canonical_error(&decoded.canonical_url, &error))?;
+        let range = result.range.clone();
+        let attributes = result.attributes.clone();
+        let mut meta = result.meta.clone();
+        let canonical_url = decoded.canonical_url.clone();
+        let payload = GetResultPayload::Stream(
+            result
+                .into_stream()
+                .map_err(move |error| canonical_error(&canonical_url, &error))
+                .boxed(),
+        );
+        meta.location = location.clone();
+        Ok(GetResult {
+            payload,
+            meta,
+            range,
+            attributes,
+        })
+    }
+
+    async fn get_ranges(
+        &self,
+        location: &ObjectPath,
+        ranges: &[std::ops::Range<u64>],
+    ) -> StoreResult<Vec<bytes::Bytes>> {
+        let decoded = self.decode_path(location)?;
+        self.inner
+            .get_ranges(&decoded.inner_path, ranges)
+            .await
+            .map_err(|error| canonical_error(&decoded.canonical_url, &error))
+    }
+
+    fn delete_stream(
+        &self,
+        _locations: BoxStream<'static, StoreResult<ObjectPath>>,
+    ) -> BoxStream<'static, StoreResult<ObjectPath>> {
+        Box::pin(futures::stream::once(async {
+            Err(object_store::Error::NotImplemented {
+                operation: "delete_stream".to_owned(),
+                implementer: "SilkInputView".to_owned(),
+            })
+        }))
+    }
+
+    fn list(&self, _prefix: Option<&ObjectPath>) -> BoxStream<'static, StoreResult<ObjectMeta>> {
+        Box::pin(futures::stream::once(async {
+            Err(object_store::Error::NotImplemented {
+                operation: "list".to_owned(),
+                implementer: "SilkInputView".to_owned(),
+            })
+        }))
+    }
+
+    async fn list_with_delimiter(&self, _prefix: Option<&ObjectPath>) -> StoreResult<ListResult> {
+        self.unsupported("list_with_delimiter")
+    }
+
+    async fn copy_opts(
+        &self,
+        _from: &ObjectPath,
+        _to: &ObjectPath,
+        _options: CopyOptions,
+    ) -> StoreResult<()> {
+        self.unsupported("copy_opts")
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use bytes::Bytes;
     use clap::Command;
-    use futures::{StreamExt, TryStreamExt};
-    use object_store::{
-        CopyOptions, GetOptions, ObjectStore, ObjectStoreExt, PutMultipartOptions, PutOptions,
-        Result as StoreResult, memory::InMemory, path::Path as ObjectPath,
-    };
+    use object_store::{ObjectStoreExt, memory::InMemory};
     use silk_chiffon_storage::{
-        ExistingOutput, LocationInput, OutputPreparation, StorageAccess, StorageBackend,
-        StorageRegistry, StorageSession,
+        LocationInput, StorageAccess, StorageBackend, StorageRegistry, StorageSession,
     };
 
-    use super::store::{INTERNAL_PREFIX, InputStoreView, encode, scoped_path};
     use super::*;
 
     fn memory_storage() -> StorageSession {
@@ -143,16 +373,10 @@ mod tests {
 
     async fn put_input(storage: &StorageSession, url: &str, bytes: &'static [u8]) -> InputObject {
         let input = LocationInput::parse(url).unwrap();
-        let target = storage
-            .prepare_output_target(
-                &input,
-                &OutputPreparation::new(ExistingOutput::Allow, false),
-            )
-            .await
-            .unwrap();
-        target
+        let handle = storage.input_handle(&input).unwrap();
+        handle
             .object_store()
-            .put(target.object_path(), Bytes::from_static(bytes).into())
+            .put(handle.object_path(), Bytes::from_static(bytes).into())
             .await
             .unwrap();
         storage.lookup_input(&input).await.unwrap()
@@ -342,30 +566,24 @@ mod tests {
                 .unwrap();
             let session = SessionContext::new();
 
-            let first_group = FileInputGroup::try_new(
-                &session,
-                &[first],
-                FormatInputVariant::named("file", "file"),
-            )
-            .unwrap();
-            let second_group = FileInputGroup::try_new(
-                &session,
-                &[second],
-                FormatInputVariant::named("file", "file"),
-            )
-            .unwrap();
+            let first_leaf =
+                InputLeaf::try_new(&session, &[first], InputVariant::named("file", "file"))
+                    .unwrap();
+            let second_leaf =
+                InputLeaf::try_new(&session, &[second], InputVariant::named("file", "file"))
+                    .unwrap();
 
             assert_eq!(
-                first_group.object_store_url(),
-                second_group.object_store_url()
+                first_leaf.object_store_url(),
+                second_leaf.object_store_url()
             );
             let store = session
                 .runtime_env()
-                .object_store(first_group.object_store_url())
+                .object_store(first_leaf.object_store_url())
                 .unwrap();
             assert_eq!(
                 store
-                    .get_range(&first_group.files()[0].object_meta.location, 0..5)
+                    .get_range(&first_leaf.files()[0].object_meta.location, 0..5)
                     .await
                     .unwrap(),
                 bytes::Bytes::from_static(b"first")
@@ -389,18 +607,18 @@ mod tests {
     }
 
     #[test]
-    fn a_group_cannot_span_storage_roots() {
+    fn a_leaf_cannot_span_storage_roots() {
         futures::executor::block_on(async {
             let storage = memory_storage();
             let first = put_input(&storage, "mem://first/object.arrow", b"first").await;
             let second = put_input(&storage, "mem://second/object.arrow", b"second").await;
 
-            let error = FileInputGroup::try_new(
+            let error = InputLeaf::try_new(
                 &SessionContext::new(),
                 &[first, second],
-                FormatInputVariant::new(),
+                InputVariant::new(),
             )
-            .expect_err("one group must not span storage roots");
+            .expect_err("one leaf must not span storage roots");
 
             assert!(
                 error
@@ -411,15 +629,15 @@ mod tests {
     }
 
     #[test]
-    fn a_group_requires_at_least_one_file() {
-        let error = FileInputGroup::try_new(&SessionContext::new(), &[], FormatInputVariant::new())
-            .expect_err("an empty group must be rejected");
+    fn a_leaf_requires_at_least_one_file() {
+        let error = InputLeaf::try_new(&SessionContext::new(), &[], InputVariant::new())
+            .expect_err("an empty leaf must be rejected");
 
-        assert!(error.to_string().contains("empty file-input group"));
+        assert!(error.to_string().contains("empty file-input leaf"));
     }
 
     #[test]
-    fn a_group_selects_the_largest_file_as_its_representative() {
+    fn a_leaf_selects_the_largest_file_as_its_representative() {
         futures::executor::block_on(async {
             let directory = tempfile::tempdir().unwrap();
             let smaller_path = directory.path().join("smaller.arrow");
@@ -441,17 +659,16 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            let group = FileInputGroup::try_new(
+            let leaf = InputLeaf::try_new(
                 &SessionContext::new(),
                 &[smaller, larger],
-                FormatInputVariant::named("stream", "stream"),
+                InputVariant::named("stream", "stream"),
             )
             .unwrap();
 
             assert!(
-                group
-                    .representative()
-                    .extension::<CanonicalInputUrl>()
+                leaf.representative()
+                    .extension::<CanonicalInput>()
                     .unwrap()
                     .url()
                     .path()
@@ -466,17 +683,16 @@ mod tests {
             let storage = memory_storage();
             let later = put_input(&storage, "mem://bucket/z.arrow", b"same").await;
             let earlier = put_input(&storage, "mem://bucket/a.arrow", b"same").await;
-            let group = FileInputGroup::try_new(
+            let leaf = InputLeaf::try_new(
                 &SessionContext::new(),
                 &[later, earlier],
-                FormatInputVariant::new(),
+                InputVariant::new(),
             )
             .unwrap();
 
             assert_eq!(
-                group
-                    .representative()
-                    .extension::<CanonicalInputUrl>()
+                leaf.representative()
+                    .extension::<CanonicalInput>()
                     .unwrap()
                     .url()
                     .as_str(),

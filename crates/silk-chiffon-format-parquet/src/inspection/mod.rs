@@ -47,7 +47,7 @@ use tabled::{
     },
 };
 
-use silk_chiffon_core::{FormatFuture, InspectionOutput, PresentationMode};
+use silk_chiffon_core::{FormatFuture, InspectionMode, InspectionOutput};
 use silk_chiffon_inspection_output::{
     apply_theme, boolean_display, compression, dim, encoding, format_bytes, format_number, header,
     label, missing_value, render_schema_fields, schema_json as schema_to_json,
@@ -447,7 +447,7 @@ impl Inspector {
     }
 
     async fn load(object: &InputObject) -> Result<Self> {
-        let handle = object.input_handle();
+        let handle = object.handle();
         let mut reader =
             ParquetObjectReader::new(handle.object_store(), handle.object_path().clone())
                 .with_file_size(object.metadata().size);
@@ -481,9 +481,9 @@ impl Inspector {
         let (start, length) = column_metadata.byte_range();
         let range = checked_column_chunk_range(start, length)?;
         let bytes = object
-            .input_handle()
+            .handle()
             .object_store()
-            .get_range(object.input_handle().object_path(), range)
+            .get_range(object.handle().object_path(), range)
             .await?;
         let rows = usize::try_from(row_group_metadata.num_rows())?;
         Ok(SerializedPageReader::new(
@@ -1321,7 +1321,7 @@ impl Inspector {
 
 pub(crate) fn inspect<'a>(
     object: &'a InputObject,
-    mode: PresentationMode,
+    mode: InspectionMode,
     args: &'a crate::InspectionArgs,
 ) -> FormatFuture<'a, InspectionOutput> {
     Box::pin(async move {
@@ -1334,7 +1334,7 @@ pub(crate) fn inspect<'a>(
         let columns = args.pages.as_ref().and_then(|columns| {
             (!columns.is_empty()).then(|| columns.split(',').map(str::trim).collect::<Vec<_>>())
         });
-        if mode == PresentationMode::Json {
+        if mode == InspectionMode::Json {
             let value = if args.pages.is_some() {
                 inspector
                     .to_json_with_pages(page_row_group, columns.as_deref())
@@ -1369,10 +1369,9 @@ mod tests {
     use clap::Command;
     use object_store::{GetRange, ObjectStore};
     use parquet::{arrow::ArrowWriter, file::properties::WriterProperties};
-    use silk_chiffon_core::{InspectionOutput, PresentationMode};
+    use silk_chiffon_core::{InspectionMode, InspectionOutput};
     use silk_chiffon_storage::{
-        ExistingOutput, LocationInput, OutputPreparation, StorageAccess, StorageBackend,
-        StorageRegistry, StorageSession,
+        LocationInput, StorageAccess, StorageBackend, StorageRegistry, StorageSession,
     };
     use silk_chiffon_test_support::ReadProbeStore;
 
@@ -1437,7 +1436,7 @@ mod tests {
                 StorageBackend::without_args()
                     .name("memory")
                     .schemes(["memory"])
-                    .access(StorageAccess::ReadWrite)
+                    .access(StorageAccess::ReadOnly)
                     .allow_any_location()
                     .object_store_creator(create_store)
                     .build()
@@ -1481,16 +1480,10 @@ mod tests {
         let sequence = OBJECT_SEQUENCE.fetch_add(1, Ordering::SeqCst);
         let location =
             LocationInput::parse(format!("memory://bucket/inspection-{sequence}.parquet")).unwrap();
-        let target = session
-            .prepare_output_target(
-                &location,
-                &OutputPreparation::new(ExistingOutput::Allow, false),
-            )
-            .await
-            .unwrap();
-        target
+        let handle = session.input_handle(&location).unwrap();
+        handle
             .object_store()
-            .put(target.object_path(), bytes.into())
+            .put(handle.object_path(), bytes.into())
             .await
             .unwrap();
         session.lookup_input(&location).await.unwrap()
@@ -1607,7 +1600,7 @@ mod tests {
         store().reset_observation();
 
         let output = inspection_binding(&[])
-            .inspect(&object, PresentationMode::Json)
+            .inspect(&object, InspectionMode::Json)
             .await
             .unwrap();
         let InspectionOutput::Json(output) = output else {
@@ -1616,7 +1609,7 @@ mod tests {
 
         assert_eq!(output["format"], "parquet");
         assert_eq!(output["rows"], 3);
-        assert_eq!(output["file"], object.input_handle().url().as_str());
+        assert_eq!(output["file"], object.handle().url().as_str());
         let ranges = store().ranges();
         assert!(!ranges.is_empty());
         assert!(
@@ -1632,7 +1625,7 @@ mod tests {
         let object = remote_object_with(empty_parquet_bytes()).await;
 
         let output = inspection_binding(&[])
-            .inspect(&object, PresentationMode::Text)
+            .inspect(&object, InspectionMode::Text)
             .await
             .unwrap();
         let InspectionOutput::Text(output) = output else {
@@ -1643,7 +1636,7 @@ mod tests {
         assert!(!output.contains("does not exist"));
 
         let output = inspection_binding(&[])
-            .inspect(&object, PresentationMode::Json)
+            .inspect(&object, InspectionMode::Json)
             .await
             .unwrap();
         let InspectionOutput::Json(output) = output else {
@@ -1658,7 +1651,7 @@ mod tests {
         let _guard = test_guard().await;
         let object = remote_object_with(empty_parquet_bytes()).await;
 
-        for mode in [PresentationMode::Text, PresentationMode::Json] {
+        for mode in [InspectionMode::Text, InspectionMode::Json] {
             for arguments in [["--row-group=0"].as_slice(), ["--pages"].as_slice()] {
                 let error = inspection_binding(arguments)
                     .inspect(&object, mode)
@@ -1676,7 +1669,7 @@ mod tests {
 
         store().reset_observation();
         let output = inspection_binding(&["--pages=id"])
-            .inspect(&object, PresentationMode::Json)
+            .inspect(&object, InspectionMode::Json)
             .await
             .unwrap();
         let InspectionOutput::Json(output) = output else {
@@ -1688,7 +1681,7 @@ mod tests {
 
         store().reset_observation();
         let error = inspection_binding(&["--pages=missing"])
-            .inspect(&object, PresentationMode::Json)
+            .inspect(&object, InspectionMode::Json)
             .await
             .unwrap_err();
         assert!(
@@ -1706,7 +1699,7 @@ mod tests {
         store().reset_observation();
 
         inspection_binding(&["--pages"])
-            .inspect(&object, PresentationMode::Json)
+            .inspect(&object, InspectionMode::Json)
             .await
             .unwrap();
 
@@ -1721,7 +1714,7 @@ mod tests {
         store().reset_observation();
 
         let output = inspection_binding(&["--row-group=1", "--pages=id"])
-            .inspect(&object, PresentationMode::Json)
+            .inspect(&object, InspectionMode::Json)
             .await
             .unwrap();
         let InspectionOutput::Json(output) = output else {
@@ -1737,7 +1730,7 @@ mod tests {
         let _guard = test_guard().await;
         let object = remote_object().await;
 
-        for mode in [PresentationMode::Text, PresentationMode::Json] {
+        for mode in [InspectionMode::Text, InspectionMode::Json] {
             let error = inspection_binding(&["--row-group=1"])
                 .inspect(&object, mode)
                 .await
@@ -1754,7 +1747,7 @@ mod tests {
         store().set_fail_reads(true);
 
         let error = inspection_binding(&[])
-            .inspect(&object, PresentationMode::Text)
+            .inspect(&object, InspectionMode::Text)
             .await
             .unwrap_err();
 

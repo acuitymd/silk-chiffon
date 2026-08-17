@@ -4372,7 +4372,6 @@ dependencies = [
  "parking_lot",
  "serde_json",
  "silk-chiffon-storage",
- "silk-chiffon-test-support",
  "strum_macros",
  "sysinfo",
  "tempfile",

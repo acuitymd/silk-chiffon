@@ -8,7 +8,7 @@ use silk_chiffon_storage::LocationInput;
 
 use crate::InspectCommand;
 
-pub(crate) async fn run(command: InspectCommand) -> Result<()> {
+pub async fn run(command: InspectCommand) -> Result<()> {
     let (file, mode, inspection, storage) = command.into_parts();
     let location = LocationInput::parse(file.as_str())?;
     let object = storage.lookup_input(&location).await?;

@@ -56,16 +56,12 @@ async fn exercise_cloud_location_contract(scheme: &'static str) {
         (&first_url, Bytes::from_static(b"first")),
         (&second_url, Bytes::from_static(b"second")),
     ] {
-        let target = storage
-            .prepare_output_target(
-                &LocationInput::parse(url).unwrap(),
-                &OutputPreparation::new(ExistingOutput::Allow, false),
-            )
-            .await
+        let handle = storage
+            .input_handle(&LocationInput::parse(url).unwrap())
             .unwrap();
-        target
+        handle
             .object_store()
-            .put(target.object_path(), contents.into())
+            .put(handle.object_path(), contents.into())
             .await
             .unwrap();
     }
@@ -77,9 +73,9 @@ async fn exercise_cloud_location_contract(scheme: &'static str) {
     assert_eq!(exact.metadata().size, 5);
     assert_eq!(
         exact
-            .input_handle()
+            .handle()
             .object_store()
-            .get_range(exact.input_handle().object_path(), 1..4)
+            .get_range(exact.handle().object_path(), 1..4)
             .await
             .unwrap(),
         Bytes::from_static(b"irs")
@@ -91,7 +87,7 @@ async fn exercise_cloud_location_contract(scheme: &'static str) {
         .await
         .unwrap()
         .into_iter()
-        .map(|input| input.input_handle().url().to_string())
+        .map(|input| input.handle().url().to_string())
         .collect::<Vec<_>>();
     matches.sort();
     assert_eq!(matches, [first_url.clone(), second_url.clone()]);

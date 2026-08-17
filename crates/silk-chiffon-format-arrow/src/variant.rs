@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::ValueEnum;
-use silk_chiffon_core::FormatInputVariant;
+use silk_chiffon_core::InputVariant;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
 #[value(rename_all = "lowercase")]
@@ -11,7 +11,7 @@ pub(crate) enum IpcVariant {
 }
 
 impl IpcVariant {
-    pub(crate) fn parse(variant: &FormatInputVariant) -> Result<Self> {
+    pub(crate) fn parse(variant: &InputVariant) -> Result<Self> {
         match variant.name() {
             Some("file") => Ok(Self::File),
             Some("stream") => Ok(Self::Stream),
@@ -19,8 +19,8 @@ impl IpcVariant {
         }
     }
 
-    pub(crate) fn format_input_variant(self) -> FormatInputVariant {
-        FormatInputVariant::named(self.canonical_name(), self.display_name())
+    pub(crate) fn input_variant(self) -> InputVariant {
+        InputVariant::named(self.canonical_name(), self.display_name())
     }
 
     pub(crate) const fn canonical_name(self) -> &'static str {

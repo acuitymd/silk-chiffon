@@ -1,24 +1,24 @@
 //! Detect command for recognizing an input's data format.
 
 use anyhow::Result;
-use silk_chiffon_core::{DetectedFormat, PresentationMode};
+use silk_chiffon_core::DetectedFormat;
 use silk_chiffon_storage::LocationInput;
 
 use crate::DetectCommand;
 use silk_chiffon_inspection_output::{dim, value};
 
-pub(crate) async fn run(command: DetectCommand) -> Result<()> {
+pub async fn run(command: DetectCommand) -> Result<()> {
     let (args, storage, formats) = command.into_parts();
     let location = LocationInput::parse(args.file.as_str())?;
     let object = storage.lookup_input(&location).await?;
     let detected = formats.detect(&object).await?;
 
-    if args.presentation.resolve() == PresentationMode::Json {
+    if args.format.resolves_to_json() {
         let output = match &detected {
             Some(result) => {
                 let mut object = serde_json::Map::new();
                 object.insert("format".to_owned(), result.format().into());
-                if let Some(variant) = result.variant_name() {
+                if let Some(variant) = result.variant() {
                     object.insert("variant".to_owned(), variant.into());
                 }
                 serde_json::Value::Object(object)

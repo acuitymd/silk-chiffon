@@ -15,13 +15,13 @@ use async_trait::async_trait;
 use clap::{Args, Command};
 use datafusion::{catalog::TableProvider, datasource::empty::EmptyTable, prelude::SessionContext};
 use silk_chiffon_core::{
-    DataSink, DetectedFormat, FileInputGroup, FormatDefinition, FormatFuture, FormatInputVariant,
-    FormatOperation, FormatOperationError, FormatRegistry, FormatRegistryError, InputDetection,
-    InspectionDefinition, InspectionOutput, NullPlacement, OpenSinkMode, PresentationMode,
-    SinkBinding, SinkBindingConfig, SinkCompletion, SortColumn, SortDirection, TransformDefinition,
+    DataSink, DetectedFormat, FormatDefinition, FormatFuture, FormatOperation,
+    FormatOperationError, FormatRegistry, FormatRegistryError, InputDetection, InputLeaf,
+    InputVariant, InspectionDefinition, InspectionMode, InspectionOutput, OpenSinkMode,
+    OutputOrderingColumn, SinkBinding, SinkBindingConfig, SinkCompletion, SortDirection,
+    TransformDefinition,
 };
-use silk_chiffon_storage::{InputObject, LocationInput, PreparedOutputTarget, local};
-use silk_chiffon_test_support::prepared_local_output_target;
+use silk_chiffon_storage::{InputObject, LocationInput, StorageHandle, local};
 
 #[derive(Args)]
 struct TestArgs {
@@ -47,7 +47,7 @@ struct TestSinkBinding {
     aborted: Arc<AtomicUsize>,
     workers: usize,
     thread_budget: NonZeroUsize,
-    output_ordering: Arc<[SortColumn]>,
+    output_ordering: Arc<[OutputOrderingColumn]>,
 }
 
 struct TestSink {
@@ -56,19 +56,15 @@ struct TestSink {
     aborted: Arc<AtomicUsize>,
     workers: usize,
     thread_budget: NonZeroUsize,
-    output_ordering: Arc<[SortColumn]>,
+    output_ordering: Arc<[OutputOrderingColumn]>,
 }
 
 #[async_trait]
 impl SinkBinding for TestSinkBinding {
-    async fn open_sink(
-        &self,
-        target: PreparedOutputTarget,
-        _: SchemaRef,
-    ) -> Result<Box<dyn DataSink>> {
+    async fn open_sink(&self, handle: StorageHandle, _: SchemaRef) -> Result<Box<dyn DataSink>> {
         self.opened.fetch_add(1, Ordering::SeqCst);
         Ok(Box::new(TestSink {
-            output: target.url().clone(),
+            output: handle.url().clone(),
             opened: Arc::clone(&self.opened),
             aborted: Arc::clone(&self.aborted),
             workers: self.workers,
@@ -115,8 +111,8 @@ impl DataSink for TestSink {
 fn detect_test(object: &InputObject) -> FormatFuture<'_, InputDetection> {
     Box::pin(async move {
         Ok(
-            if object.input_handle().object_path().extension() == Some("test") {
-                InputDetection::Match(FormatInputVariant::named("test-stream", "test stream"))
+            if object.handle().object_path().extension() == Some("test") {
+                InputDetection::Match(InputVariant::named("test-stream", "test stream"))
             } else {
                 InputDetection::Mismatch
             },
@@ -125,11 +121,11 @@ fn detect_test(object: &InputObject) -> FormatFuture<'_, InputDetection> {
 }
 
 fn detect_any(_: &InputObject) -> FormatFuture<'_, InputDetection> {
-    Box::pin(async { Ok(InputDetection::Match(FormatInputVariant::new())) })
+    Box::pin(async { Ok(InputDetection::Match(InputVariant::new())) })
 }
 
 fn create_unit_provider<'a>(
-    _: &'a FileInputGroup,
+    _: &'a InputLeaf,
     _: &'a SessionContext,
     _: &'a (),
 ) -> FormatFuture<'a, Arc<dyn TableProvider>> {
@@ -139,13 +135,13 @@ fn create_unit_provider<'a>(
 }
 
 fn create_provider<'a>(
-    group: &'a FileInputGroup,
+    leaf: &'a InputLeaf,
     session: &'a SessionContext,
     settings: &'a TestArgs,
 ) -> FormatFuture<'a, Arc<dyn TableProvider>> {
     Box::pin(async move {
         let partitions = session.state().config_options().execution.target_partitions;
-        let variant = group.variant().name().unwrap_or("none");
+        let variant = leaf.variant().name().unwrap_or("none");
         let schema = Arc::new(Schema::new(vec![Field::new(
             format!(
                 "workers-{}-partitions-{partitions}-variant-{variant}",
@@ -175,17 +171,17 @@ fn bind_sink<'a>(
 
 fn inspect<'a>(
     object: &'a InputObject,
-    mode: PresentationMode,
+    mode: InspectionMode,
     settings: &'a InspectionArgs,
 ) -> FormatFuture<'a, InspectionOutput> {
     Box::pin(async move {
         Ok(match mode {
-            PresentationMode::Text => InspectionOutput::Text(format!(
+            InspectionMode::Text => InspectionOutput::Text(format!(
                 "{} details={}",
-                object.input_handle().url(),
+                object.handle().url(),
                 settings.test_details
             )),
-            PresentationMode::Json => InspectionOutput::Json(serde_json::json!({
+            InspectionMode::Json => InspectionOutput::Json(serde_json::json!({
                 "details": settings.test_details,
             })),
         })
@@ -217,12 +213,13 @@ fn local_object(extension: &str) -> InputObject {
     futures::executor::block_on(local::session().unwrap().lookup_input(&location)).unwrap()
 }
 
-fn local_output_target(path: &str) -> PreparedOutputTarget {
-    prepared_local_output_target(path)
+fn local_handle(path: &str) -> StorageHandle {
+    let location = LocationInput::parse(path).unwrap();
+    local::session().unwrap().input_handle(&location).unwrap()
 }
 
-fn local_objects(extension: &str) -> Vec<InputObject> {
-    vec![local_object(extension)]
+fn local_leaf(session: &SessionContext, extension: &str, variant: InputVariant) -> InputLeaf {
+    InputLeaf::try_new(session, &[local_object(extension)], variant).unwrap()
 }
 
 fn bind_test_transform(
@@ -269,13 +266,16 @@ fn transform_arguments_remain_bound_to_typed_functions() {
 
     let bindings = bind_test_transform(&registry, &["test", "--test-workers", "9"]);
     let session = SessionContext::new();
-    let objects = local_objects(".test");
-    let variant = FormatInputVariant::named("test-stream", "test stream");
+    let leaf = local_leaf(
+        &session,
+        ".test",
+        InputVariant::named("test-stream", "test stream"),
+    );
     let provider = futures::executor::block_on(
         bindings
             .get("test")
             .unwrap()
-            .create_input_provider(&objects, variant, &session),
+            .create_input_provider(&leaf, &session),
     )
     .unwrap();
     assert!(
@@ -304,7 +304,7 @@ fn inspection_arguments_and_mode_reach_the_inspector() {
     let binding = format.bind_inspection(&matches).unwrap();
     let object = local_object(".test");
     let output =
-        futures::executor::block_on(binding.inspect(&object, PresentationMode::Json)).unwrap();
+        futures::executor::block_on(binding.inspect(&object, InspectionMode::Json)).unwrap();
     assert_eq!(
         output,
         InspectionOutput::Json(serde_json::json!({ "details": true }))
@@ -319,8 +319,8 @@ fn display_names_do_not_change_canonical_variant_identity() {
     assert_eq!(format.name(), "test");
     assert_eq!(format.display_name(), "Test format");
 
-    let first = FormatInputVariant::named("stream", "stream");
-    let second = FormatInputVariant::named("stream", "streaming container");
+    let first = InputVariant::named("stream", "stream");
+    let second = InputVariant::named("stream", "streaming container");
     assert_eq!(first, second);
     assert_eq!(first.name(), Some("stream"));
     assert_eq!(second.display_name(), Some("streaming container"));
@@ -525,16 +525,15 @@ fn one_sink_binding_shares_state_across_opened_sinks() {
     let config = SinkBindingConfig::new(
         NonZeroUsize::new(3).unwrap(),
         OpenSinkMode::Multiple,
-        vec![SortColumn::new(
+        vec![OutputOrderingColumn::new(
             "event_time",
             SortDirection::Descending,
-            NullPlacement::First,
         )],
     );
     let binding = futures::executor::block_on(transform.bind_sink(&config)).unwrap();
     let schema = Arc::new(Schema::empty());
-    let first_handle = local_output_target("first.test");
-    let second_handle = local_output_target("second.test");
+    let first_handle = local_handle("first.test");
+    let second_handle = local_handle("second.test");
     let first =
         futures::executor::block_on(binding.open_sink(first_handle.clone(), Arc::clone(&schema)))
             .unwrap();
@@ -569,10 +568,9 @@ fn an_open_sink_can_be_consumed_by_abort() {
         Vec::new(),
     );
     let binding = futures::executor::block_on(transform.bind_sink(&config)).unwrap();
-    let sink = futures::executor::block_on(binding.open_sink(
-        local_output_target("aborted.test"),
-        Arc::new(Schema::empty()),
-    ))
+    let sink = futures::executor::block_on(
+        binding.open_sink(local_handle("aborted.test"), Arc::new(Schema::empty())),
+    )
     .unwrap();
 
     futures::executor::block_on(sink.abort()).unwrap();
@@ -590,12 +588,13 @@ fn unavailable_capabilities_return_structured_errors() {
         .unwrap();
     let bindings = bind_test_transform(&registry, &["test"]);
     let session = SessionContext::new();
-    let objects = local_objects(".empty");
-    let error = futures::executor::block_on(bindings.get("empty").unwrap().create_input_provider(
-        &objects,
-        FormatInputVariant::new(),
-        &session,
-    ))
+    let leaf = local_leaf(&session, ".empty", InputVariant::new());
+    let error = futures::executor::block_on(
+        bindings
+            .get("empty")
+            .unwrap()
+            .create_input_provider(&leaf, &session),
+    )
     .err()
     .unwrap();
     assert!(matches!(

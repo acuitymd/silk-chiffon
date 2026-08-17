@@ -11,7 +11,7 @@ const MAX_DETECTION_READ: u64 = 1024 * 1024;
 
 pub(crate) fn detect(object: &InputObject) -> FormatFuture<'_, InputDetection> {
     Box::pin(async move {
-        let handle = object.input_handle();
+        let handle = object.handle();
         let size = object.metadata().size;
         if size >= 12 {
             let ranges = [0..6, size - 6..size];
@@ -22,9 +22,7 @@ pub(crate) fn detect(object: &InputObject) -> FormatFuture<'_, InputDetection> {
             let starts = magic[0].as_ref() == ARROW_MAGIC;
             let ends = magic[1].as_ref() == ARROW_MAGIC;
             if starts && ends {
-                return Ok(InputDetection::Match(
-                    IpcVariant::File.format_input_variant(),
-                ));
+                return Ok(InputDetection::Match(IpcVariant::File.input_variant()));
             }
             if starts {
                 return Ok(InputDetection::Malformed(anyhow!(
@@ -64,9 +62,7 @@ pub(crate) fn detect(object: &InputObject) -> FormatFuture<'_, InputDetection> {
             });
         }
         if message_len > MAX_DETECTION_READ && recognized {
-            return Ok(InputDetection::Match(
-                IpcVariant::Stream.format_input_variant(),
-            ));
+            return Ok(InputDetection::Match(IpcVariant::Stream.input_variant()));
         }
         if message_len > MAX_DETECTION_READ {
             return Ok(InputDetection::Mismatch);
@@ -81,9 +77,9 @@ pub(crate) fn detect(object: &InputObject) -> FormatFuture<'_, InputDetection> {
         let mut decoder = StreamDecoder::new();
         let mut buffer = Buffer::from(bytes);
         match decoder.decode(&mut buffer) {
-            Ok(_) if decoder.schema().is_some() => Ok(InputDetection::Match(
-                IpcVariant::Stream.format_input_variant(),
-            )),
+            Ok(_) if decoder.schema().is_some() => {
+                Ok(InputDetection::Match(IpcVariant::Stream.input_variant()))
+            }
             Ok(_) if recognized => Ok(InputDetection::Malformed(anyhow!(
                 "Arrow IPC stream did not begin with a schema message"
             ))),

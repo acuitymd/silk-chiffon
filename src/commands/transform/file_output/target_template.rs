@@ -7,7 +7,7 @@ use percent_encoding::{AsciiSet, CONTROLS, percent_decode_str, percent_encode};
 use silk_chiffon_storage::{Location, LocationInput};
 use url::Url;
 
-use super::partition_runs::PartitionValues;
+use super::partitioner::PartitionValues;
 
 const HIVE_DEFAULT_PARTITION: &str = "__HIVE_DEFAULT_PARTITION__";
 
@@ -33,14 +33,14 @@ enum OutputEnvelope {
 }
 
 /// A partition output template whose routing envelope is fixed before execution.
-pub(super) struct OutputTargetTemplate {
+pub struct OutputTargetTemplate {
     env: Environment<'static>,
     object_path_template: String,
     envelope: OutputEnvelope,
 }
 
 impl OutputTargetTemplate {
-    pub(super) fn new(pattern: impl Into<String>) -> Result<Self> {
+    pub fn new(pattern: impl Into<String>) -> Result<Self> {
         let pattern = pattern.into();
         let (envelope, object_path_template) = parse_envelope(&pattern)?;
         let protects_percent_encoding = matches!(envelope, OutputEnvelope::Url { .. });
@@ -80,7 +80,7 @@ impl OutputTargetTemplate {
         })
     }
 
-    pub(super) fn referenced_fields(&self) -> Result<BTreeSet<String>> {
+    pub fn referenced_fields(&self) -> Result<BTreeSet<String>> {
         Ok(self
             .env
             .template_from_str(&self.object_path_template)?
@@ -89,7 +89,7 @@ impl OutputTargetTemplate {
             .collect())
     }
 
-    pub(super) fn static_extension(&self) -> Option<&str> {
+    pub fn static_extension(&self) -> Option<&str> {
         let component = self.object_path_template.rsplit('/').next()?;
         let extension = component.rsplit_once('.')?.1;
         (!extension.is_empty()
@@ -99,7 +99,7 @@ impl OutputTargetTemplate {
         .then_some(extension)
     }
 
-    pub(super) fn require_file_number(&self) -> Result<()> {
+    pub fn require_file_number(&self) -> Result<()> {
         let mut depth = 0usize;
         let mut direct = false;
         for tag in template_tags(&self.object_path_template)? {
@@ -146,7 +146,7 @@ impl OutputTargetTemplate {
         Ok(())
     }
 
-    pub(super) fn render(
+    pub fn render(
         &self,
         values: &PartitionValues,
         file_number: Option<usize>,

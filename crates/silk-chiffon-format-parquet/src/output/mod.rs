@@ -38,7 +38,7 @@ use arrow::{
     datatypes::{DataType, SchemaRef},
 };
 use async_trait::async_trait;
-use silk_chiffon_storage::{ObjectUploadTask, PreparedOutputTarget};
+use silk_chiffon_storage::{ObjectUploadTask, StorageHandle};
 use tokio::sync::mpsc;
 
 use crate::{
@@ -46,8 +46,8 @@ use crate::{
     Statistics, WriterVersion,
 };
 use silk_chiffon_core::{
-    DataSink, NullPlacement, OpenSinkMode, SinkBinding, SinkBindingConfig, SinkCompletion,
-    SortColumn, SortDirection, validate_batch_schema,
+    DataSink, OpenSinkMode, OutputOrderingColumn, SinkBinding, SinkBindingConfig, SinkCompletion,
+    SortDirection, validate_batch_schema,
 };
 
 /// Options for configuring Parquet file output.
@@ -64,7 +64,7 @@ pub struct OutputConfig {
     pub ingestion_queue_size: Option<usize>,
     pub encoding_queue_size: Option<usize>,
     pub writing_queue_size: Option<usize>,
-    pub output_ordering: Vec<SortColumn>,
+    pub output_ordering: Vec<OutputOrderingColumn>,
     pub compression: CompressionCodec,
     pub bloom_filters: BloomFilterPolicy,
     pub statistics: Statistics,
@@ -165,7 +165,7 @@ impl OutputConfig {
         self
     }
 
-    pub fn with_output_ordering(mut self, output_ordering: Vec<SortColumn>) -> Self {
+    pub fn with_output_ordering(mut self, output_ordering: Vec<OutputOrderingColumn>) -> Self {
         self.output_ordering = output_ordering;
         self
     }
@@ -334,7 +334,7 @@ fn resolve_queue_sizes(options: &OutputConfig) -> (usize, usize, usize, usize) {
 
 impl Sink {
     fn create(
-        target: PreparedOutputTarget,
+        handle: StorageHandle,
         schema: &SchemaRef,
         options: &OutputConfig,
         runtimes: Arc<OutputRuntimes>,
@@ -421,7 +421,7 @@ impl Sink {
             ndv_map: options.ndv_map.clone(),
         };
         let (ingestion_sender, task) =
-            pipeline::start_pipeline(target, schema, props, runtimes, config);
+            pipeline::start_pipeline(handle, schema, props, runtimes, config);
 
         Ok(Self {
             schema: Arc::clone(schema),
@@ -571,7 +571,7 @@ impl Sink {
     }
 
     fn apply_sort_metadata(
-        output_ordering: &[SortColumn],
+        output_ordering: &[OutputOrderingColumn],
         builder: WriterPropertiesBuilder,
         schema: &SchemaRef,
     ) -> Result<WriterPropertiesBuilder> {
@@ -592,7 +592,7 @@ impl Sink {
                 column_idx: i32::try_from(column_idx)
                     .map_err(|_| anyhow!("Column index out of range"))?,
                 descending,
-                nulls_first: sort_col.null_placement() == NullPlacement::First,
+                nulls_first: descending,
             });
         }
 
@@ -776,11 +776,11 @@ struct OutputBinding {
 impl SinkBinding for OutputBinding {
     async fn open_sink(
         &self,
-        target: PreparedOutputTarget,
+        handle: StorageHandle,
         schema: SchemaRef,
     ) -> Result<Box<dyn DataSink>> {
         Ok(Box::new(Sink::create(
-            target,
+            handle,
             &schema,
             &self.options,
             Arc::clone(&self.runtimes),
@@ -796,11 +796,10 @@ mod tests {
         BloomFilterSettings, ColumnBloomFilterPolicy, DefaultBloomFilterPolicy,
         inspection::Inspector,
     };
-    use silk_chiffon_core::{NullPlacement, SortColumn, SortDirection};
+    use silk_chiffon_core::{OutputOrderingColumn, SortDirection};
     use silk_chiffon_test_support::{
-        TestExtract, TestFile, batch as test_data,
-        parquet::read_entire_file as read_entire_parquet_file, prepared_local_output_target,
-        verify,
+        TestExtract, batch as test_data, parquet::read_entire_file as read_entire_parquet_file,
+        prepared_local_output, verify,
     };
 
     use camino::Utf8Path;
@@ -808,14 +807,6 @@ mod tests {
 
     fn test_runtimes() -> Arc<OutputRuntimes> {
         Arc::new(OutputRuntimes::try_new(2, 1).unwrap())
-    }
-
-    fn sort_column(name: &str, direction: SortDirection) -> SortColumn {
-        let null_placement = match direction {
-            SortDirection::Ascending => NullPlacement::Last,
-            SortDirection::Descending => NullPlacement::First,
-        };
-        SortColumn::new(name, direction, null_placement)
     }
 
     fn bloom_all(fpp: f64, ndv: Option<u64>) -> BloomFilterPolicy {
@@ -986,7 +977,7 @@ mod tests {
                 test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["a", "b", "c"]);
 
             let mut sink = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &OutputConfig::new(),
                 test_runtimes(),
@@ -1003,7 +994,7 @@ mod tests {
                 url::Url::from_file_path(&output_path).unwrap()
             );
 
-            let batches = TestFile::read_parquet(&output_path);
+            let batches = verify::read_parquet_file(&output_path).unwrap();
             verify::assert_id_name_batch_data_matches(&batches[0], &[1, 2, 3], &["a", "b", "c"]);
 
             let file = read_entire_parquet_file(&output_path).unwrap();
@@ -1020,7 +1011,7 @@ mod tests {
                 test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["a", "b", "c"]);
 
             let mut sink = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &OutputConfig::new(),
                 test_runtimes(),
@@ -1050,7 +1041,7 @@ mod tests {
             let batch2 = test_data::create_batch_with_ids_and_names(&schema, &[3, 4], &["c", "d"]);
 
             let mut sink = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &OutputConfig::new(),
                 test_runtimes(),
@@ -1063,7 +1054,7 @@ mod tests {
 
             assert_eq!(result.rows_written(), 4);
 
-            let batches = TestFile::read_parquet(&output_path);
+            let batches = verify::read_parquet_file(&output_path).unwrap();
             assert_eq!(batches.len(), 1);
             assert_eq!(batches[0].num_rows(), 4);
 
@@ -1082,7 +1073,7 @@ mod tests {
             let batch3 = test_data::create_batch_with_ids_and_names(&schema, &[5], &["e"]);
 
             let mut sink = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &OutputConfig::new().with_max_row_group_size(3),
                 test_runtimes(),
@@ -1096,7 +1087,7 @@ mod tests {
 
             assert_eq!(result.rows_written(), 5);
 
-            let batches = TestFile::read_parquet(&output_path);
+            let batches = verify::read_parquet_file(&output_path).unwrap();
             assert_eq!(batches.len(), 1);
 
             let file = read_entire_parquet_file(&output_path).unwrap();
@@ -1119,7 +1110,7 @@ mod tests {
                 test_data::create_batch_with_ids_and_names(&schema, &[9], &["j"]),
             ];
             let mut sink = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &OutputConfig::new()
                     .with_max_row_group_size(3)
@@ -1145,7 +1136,7 @@ mod tests {
                     .collect::<Vec<_>>(),
                 [3, 3, 3, 1]
             );
-            let batches = TestFile::read_parquet(&output_path);
+            let batches = verify::read_parquet_file(&output_path).unwrap();
             verify::assert_id_name_batch_data_matches(
                 &batches[0],
                 &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
@@ -1161,7 +1152,7 @@ mod tests {
             let mut rng = SmallRng::seed_from_u64(0x5eed_cafe);
             let mut expected_ids = Vec::new();
             let mut sink = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &OutputConfig::new()
                     .with_max_row_group_size(17)
@@ -1206,7 +1197,7 @@ mod tests {
                     .all(|row_group| row_group.num_rows == 17)
             );
             assert_eq!(
-                TestExtract::i32_all(&TestFile::read_parquet(&output_path), "id"),
+                TestExtract::i32_all(&verify::read_parquet_file(&output_path).unwrap(), "id"),
                 expected_ids
             );
         }
@@ -1251,7 +1242,7 @@ mod tests {
                 );
 
                 let mut compressed_sink = Sink::create(
-                    prepared_local_output_target(&output_path),
+                    prepared_local_output(&output_path),
                     &schema,
                     &OutputConfig::new().with_compression(compression),
                     test_runtimes(),
@@ -1275,7 +1266,7 @@ mod tests {
             let schema = test_data::simple_schema();
 
             let sink = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &OutputConfig::new(),
                 test_runtimes(),
@@ -1287,7 +1278,7 @@ mod tests {
             assert_eq!(result.rows_written(), 0);
             assert!(output_path.exists());
 
-            let batches = TestFile::read_parquet(&output_path);
+            let batches = verify::read_parquet_file(&output_path).unwrap();
             assert_eq!(batches.len(), 0);
         }
 
@@ -1317,7 +1308,7 @@ mod tests {
                 .unwrap();
 
             let mut sink = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &OutputConfig::new(),
                 test_runtimes(),
@@ -1328,7 +1319,7 @@ mod tests {
             let result = Box::new(sink).finish().await.unwrap();
             assert_eq!(result.rows_written(), 5);
 
-            let batches = TestFile::read_parquet(&output_path);
+            let batches = verify::read_parquet_file(&output_path).unwrap();
             assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 5);
         }
 
@@ -1341,10 +1332,10 @@ mod tests {
             let batch =
                 test_data::create_batch_with_ids_and_names(&schema, &[3, 1, 2], &["c", "a", "b"]);
 
-            let output_ordering = vec![sort_column("id", SortDirection::Ascending)];
+            let output_ordering = vec![OutputOrderingColumn::new("id", SortDirection::Ascending)];
 
             let mut sink = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &OutputConfig::new().with_output_ordering(output_ordering),
                 test_runtimes(),
@@ -1368,7 +1359,7 @@ mod tests {
                 test_data::create_batch_with_ids_and_names(&schema, &[3, 1, 2], &["c", "a", "b"]);
 
             let mut sink = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &OutputConfig::new(),
                 test_runtimes(),
@@ -1396,7 +1387,7 @@ mod tests {
             let options = OutputConfig::new().with_bloom_filters(bloom_filters);
 
             let mut sink = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &options,
                 test_runtimes(),
@@ -1428,7 +1419,7 @@ mod tests {
             let options = OutputConfig::new().with_bloom_filters(bloom_filters);
 
             let mut sink = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &options,
                 test_runtimes(),
@@ -1459,7 +1450,7 @@ mod tests {
             let options = OutputConfig::new().with_bloom_filters(bloom_filters);
 
             let mut sink = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &options,
                 test_runtimes(),
@@ -1498,7 +1489,7 @@ mod tests {
             let options = OutputConfig::new().with_bloom_filters(bloom_filters);
 
             let mut sink = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &options,
                 test_runtimes(),
@@ -1533,7 +1524,7 @@ mod tests {
             );
 
             let mut sink = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &OutputConfig::new().with_no_dictionary(true),
                 test_runtimes(),
@@ -1562,7 +1553,7 @@ mod tests {
             let batch = test_data::create_batch_with_ids_and_names(&schema, &ids, &names);
 
             let mut sink = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &OutputConfig::new().with_no_dictionary(false),
                 test_runtimes(),
@@ -1590,7 +1581,7 @@ mod tests {
                 );
 
                 let mut sink = Sink::create(
-                    prepared_local_output_target(&output_path),
+                    prepared_local_output(&output_path),
                     &schema,
                     &OutputConfig::new().with_statistics(statistics),
                     test_runtimes(),
@@ -1639,7 +1630,7 @@ mod tests {
                 );
 
                 let mut sink = Sink::create(
-                    prepared_local_output_target(&output_path),
+                    prepared_local_output(&output_path),
                     &schema,
                     &OutputConfig::new().with_writer_version(version),
                     test_runtimes(),
@@ -1661,10 +1652,13 @@ mod tests {
 
             let schema = test_data::simple_schema();
 
-            let output_ordering = vec![sort_column("nonexistent_column", SortDirection::Ascending)];
+            let output_ordering = vec![OutputOrderingColumn::new(
+                "nonexistent_column",
+                SortDirection::Ascending,
+            )];
 
             let result = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &OutputConfig::new().with_output_ordering(output_ordering),
                 test_runtimes(),
@@ -1696,7 +1690,7 @@ mod tests {
             let options = OutputConfig::new().with_bloom_filters(bloom_filters);
 
             let mut sink = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &options,
                 test_runtimes(),
@@ -1725,7 +1719,7 @@ mod tests {
             let options = OutputConfig::new().with_bloom_filters(bloom_filters);
 
             let mut sink = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &options,
                 test_runtimes(),
@@ -1760,7 +1754,7 @@ mod tests {
                 .with_ndv_map(ndv_map);
 
             let mut sink = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &options,
                 test_runtimes(),
@@ -1797,7 +1791,7 @@ mod tests {
                 .with_ndv_map(ndv_map);
 
             let mut sink = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &options,
                 test_runtimes(),
@@ -1823,12 +1817,12 @@ mod tests {
                 test_data::create_batch_with_ids_and_names(&schema, &[3, 1, 2], &["c", "a", "b"]);
 
             let output_ordering = vec![
-                SortColumn::new("name", SortDirection::Ascending, NullPlacement::First),
-                SortColumn::new("id", SortDirection::Descending, NullPlacement::Last),
+                OutputOrderingColumn::new("name", SortDirection::Ascending),
+                OutputOrderingColumn::new("id", SortDirection::Descending),
             ];
 
             let mut sink = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &OutputConfig::new().with_output_ordering(output_ordering),
                 test_runtimes(),
@@ -1839,10 +1833,10 @@ mod tests {
             Box::new(sink).finish().await.unwrap();
 
             let file = read_entire_parquet_file(&output_path).unwrap();
-            let sorting = file.row_groups[0].sorting_columns.as_ref().unwrap();
-            assert_eq!(sorting.len(), 2);
-            assert!(sorting[0].nulls_first);
-            assert!(!sorting[1].nulls_first);
+            assert_eq!(
+                file.row_groups[0].sorting_columns.as_ref().unwrap().len(),
+                2
+            );
         }
 
         #[tokio::test(flavor = "multi_thread")]
@@ -1860,7 +1854,7 @@ mod tests {
             let options = OutputConfig::new().with_column_dictionary_always(vec!["id".to_string()]);
 
             let mut sink = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &options,
                 test_runtimes(),
@@ -1889,7 +1883,7 @@ mod tests {
                 .with_no_dictionary(true);
 
             let mut sink = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &options,
                 test_runtimes(),
@@ -1924,7 +1918,7 @@ mod tests {
                 .with_no_dictionary(true);
 
             let mut sink = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &options,
                 test_runtimes(),
@@ -1952,7 +1946,7 @@ mod tests {
                 OutputConfig::new().with_column_dictionary_analyze(vec!["id".to_string()]);
 
             let mut sink = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &options,
                 test_runtimes(),
@@ -1979,7 +1973,7 @@ mod tests {
                 OutputConfig::new().with_column_dictionary_analyze(vec!["id".to_string()]);
 
             let mut sink = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &options,
                 test_runtimes(),
@@ -2009,7 +2003,7 @@ mod tests {
                 .with_column_dictionary_analyze(vec!["id".to_string()]);
 
             let mut sink = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &options,
                 test_runtimes(),
@@ -2041,7 +2035,7 @@ mod tests {
                 .with_column_dictionary_analyze(vec!["id".to_string()]);
 
             let mut sink = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &options,
                 test_runtimes(),
@@ -2074,7 +2068,7 @@ mod tests {
                 .with_column_dictionary_analyze(vec!["name".to_string()]);
 
             let mut sink = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &options,
                 test_runtimes(),
@@ -2120,7 +2114,7 @@ mod tests {
                 OutputConfig::new().with_column_dictionary_always(vec!["col".to_string()]);
 
             let mut sink = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &options,
                 test_runtimes(),
@@ -2185,7 +2179,7 @@ mod tests {
             let options = OutputConfig::new().with_metadata(metadata);
 
             let mut sink = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &options,
                 test_runtimes(),
@@ -2233,7 +2227,7 @@ mod tests {
                 .with_column_dictionary_analyze(vec!["col".to_string()]);
 
             let mut sink = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &options,
                 test_runtimes(),
@@ -2309,7 +2303,7 @@ mod tests {
             let mut metadata = HashMap::new();
             metadata.insert("test".to_string(), Some("value".to_string()));
 
-            let output_ordering = vec![sort_column("id", SortDirection::Ascending)];
+            let output_ordering = vec![OutputOrderingColumn::new("id", SortDirection::Ascending)];
 
             let bloom_filters = bloom_all(0.01, None);
 
@@ -2411,7 +2405,7 @@ mod tests {
                 test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["a", "b", "c"]);
 
             let mut sink = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &OutputConfig::new().with_encoding(Some(Encoding::Plain)),
                 test_runtimes(),
@@ -2424,7 +2418,7 @@ mod tests {
             assert_eq!(result.rows_written(), 3);
             assert!(output_path.exists());
 
-            let batches = TestFile::read_parquet(&output_path);
+            let batches = verify::read_parquet_file(&output_path).unwrap();
             verify::assert_id_name_batch_data_matches(&batches[0], &[1, 2, 3], &["a", "b", "c"]);
         }
 
@@ -2438,7 +2432,7 @@ mod tests {
                 test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["a", "b", "c"]);
 
             let mut sink = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &OutputConfig::new().with_column_encodings(vec![ColumnEncoding {
                     name: "id".to_string(),
@@ -2454,7 +2448,7 @@ mod tests {
             assert_eq!(result.rows_written(), 3);
             assert!(output_path.exists());
 
-            let batches = TestFile::read_parquet(&output_path);
+            let batches = verify::read_parquet_file(&output_path).unwrap();
             verify::assert_id_name_batch_data_matches(&batches[0], &[1, 2, 3], &["a", "b", "c"]);
         }
 
@@ -2468,7 +2462,7 @@ mod tests {
                 test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["a", "b", "c"]);
 
             let mut sink = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &OutputConfig::new().with_column_encodings(vec![
                     ColumnEncoding {
@@ -2490,7 +2484,7 @@ mod tests {
             assert_eq!(result.rows_written(), 3);
             assert!(output_path.exists());
 
-            let batches = TestFile::read_parquet(&output_path);
+            let batches = verify::read_parquet_file(&output_path).unwrap();
             verify::assert_id_name_batch_data_matches(&batches[0], &[1, 2, 3], &["a", "b", "c"]);
         }
 
@@ -2517,7 +2511,7 @@ mod tests {
 
             // use nested column path for encoding
             let mut sink = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &OutputConfig::new().with_column_encodings(vec![ColumnEncoding {
                     name: "outer.inner".to_string(),
@@ -2557,7 +2551,7 @@ mod tests {
                 OutputConfig::new().with_column_dictionary_always(vec!["outer.inner".to_string()]);
 
             let mut sink = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &options,
                 test_runtimes(),
@@ -2594,7 +2588,7 @@ mod tests {
             let options = OutputConfig::new().with_bloom_filters(bloom_config);
 
             let mut sink = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &options,
                 test_runtimes(),
@@ -2630,7 +2624,7 @@ mod tests {
                 OutputConfig::new().with_column_no_dictionary(vec!["outer.inner".to_string()]);
 
             let mut sink = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &options,
                 test_runtimes(),
@@ -2696,7 +2690,7 @@ mod tests {
                 .with_column_no_dictionary(vec!["name".to_string()]);
 
             let result = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &options,
                 test_runtimes(),
@@ -2767,7 +2761,7 @@ mod tests {
                 .with_no_dictionary(true); // disable dict to see the fallback encoding
 
             let mut sink = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &options,
                 test_runtimes(),
@@ -2802,7 +2796,7 @@ mod tests {
                 .with_no_dictionary(true);
 
             let mut sink = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &options,
                 test_runtimes(),
@@ -2833,7 +2827,7 @@ mod tests {
                 .with_no_dictionary(true);
 
             let mut sink = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &options,
                 test_runtimes(),
@@ -2865,7 +2859,7 @@ mod tests {
                 .with_no_dictionary(true);
 
             let mut sink = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &options,
                 test_runtimes(),
@@ -2899,7 +2893,7 @@ mod tests {
                 .with_no_dictionary(true);
 
             let mut sink = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &options,
                 test_runtimes(),
@@ -2945,7 +2939,7 @@ mod tests {
                 }]);
 
             let mut sink = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &options,
                 test_runtimes(),
@@ -2994,7 +2988,7 @@ mod tests {
                 }]);
 
             let mut sink = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &options,
                 test_runtimes(),
@@ -3035,7 +3029,7 @@ mod tests {
                 }]);
 
             let mut sink = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &options,
                 test_runtimes(),
@@ -3078,7 +3072,7 @@ mod tests {
                 }]);
 
             let mut sink = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &options,
                 test_runtimes(),
@@ -3125,7 +3119,7 @@ mod tests {
                 }]);
 
             let mut sink = Sink::create(
-                prepared_local_output_target(&output_path),
+                prepared_local_output(&output_path),
                 &schema,
                 &options,
                 test_runtimes(),

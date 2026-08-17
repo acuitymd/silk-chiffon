@@ -1,15 +1,15 @@
 //! Public contracts for service-backed command outputs.
 //!
 //! A connector crate contributes an immutable [`ServiceOutputDefinition`] with its name, claimed
-//! schemes, typed Clap command state, and consumer operation. The host adds that state to its
-//! command and binds it once after parsing. The resulting [`ServiceOutputBinding`] consumes the
-//! final DataFusion record-batch stream into one exact target. The consumer must drain the stream
+//! schemes, typed Clap settings, and write operation. The host adds those settings to its command
+//! and binds them once after parsing. The resulting [`ServiceOutputBinding`] writes one exact
+//! target from the final DataFusion record-batch stream. The write operation must drain the stream
 //! and finish its writer or service operation before it returns.
 //!
-//! Each connector keeps its command-state type through parsing and binding. The private `binding`
+//! Each connector keeps its settings type through parsing and binding. The private `binding`
 //! module erases the complete typed definition or binding behind a trait object, allowing
-//! connectors with different command-state types to coexist without storing `Any` values or
-//! downcasting state.
+//! connectors with different settings types to coexist without storing `Any` values or
+//! downcasting settings.
 
 mod binding;
 
@@ -21,13 +21,13 @@ use datafusion::physical_plan::SendableRecordBatchStream;
 use futures::future::BoxFuture;
 use thiserror::Error;
 
-/// Consumes one final result stream into an exact service target.
+/// Writes one final result stream directly to an exact service target.
 ///
 /// The returned future must drain the stream and finish the target before it resolves.
-pub type ServiceOutputConsumerFn<T> =
+pub type ServiceOutputWriteFn<T> =
     for<'a> fn(&'a str, SendableRecordBatchStream, &'a T) -> BoxFuture<'a, Result<()>>;
 
-/// Immutable metadata and typed consumption behavior contributed by one service output.
+/// Immutable metadata and typed write behavior contributed by one service output.
 #[derive(Clone)]
 pub struct ServiceOutputDefinition {
     name: &'static str,
@@ -46,19 +46,17 @@ impl fmt::Debug for ServiceOutputDefinition {
 }
 
 impl ServiceOutputDefinition {
-    /// Starts a definition whose consumer receives command state parsed as `T`.
-    pub fn with_args<T>(consumer: ServiceOutputConsumerFn<T>) -> ServiceOutputDefinitionBuilder<T>
+    /// Starts a definition whose write operation receives parsed `T` settings.
+    pub fn with_args<T>(write: ServiceOutputWriteFn<T>) -> ServiceOutputDefinitionBuilder<T>
     where
         T: Args + FromArgMatches + Send + Sync + 'static,
     {
-        ServiceOutputDefinitionBuilder::new(binding::ArgsParser::for_args(), consumer)
+        ServiceOutputDefinitionBuilder::new(binding::ArgsParser::for_args(), write)
     }
 
-    /// Starts a definition with no service-specific command state.
-    pub fn without_args(
-        consumer: ServiceOutputConsumerFn<()>,
-    ) -> ServiceOutputDefinitionBuilder<()> {
-        ServiceOutputDefinitionBuilder::new(binding::ArgsParser::<()>::unit(), consumer)
+    /// Starts a definition with no service-specific settings.
+    pub fn without_args(write: ServiceOutputWriteFn<()>) -> ServiceOutputDefinitionBuilder<()> {
+        ServiceOutputDefinitionBuilder::new(binding::ArgsParser::<()>::unit(), write)
     }
 
     /// Returns the canonical name used in assembly diagnostics.
@@ -71,12 +69,12 @@ impl ServiceOutputDefinition {
         &self.schemes
     }
 
-    /// Adds this definition's typed command state to the host command.
+    /// Adds this definition's typed settings to the host command.
     pub fn augment_args(&self, command: Command) -> Command {
         self.definition.augment_args(command)
     }
 
-    /// Binds this definition's typed command state for one parsed command.
+    /// Binds this definition's typed settings for one parsed command.
     pub fn bind(&self, matches: &ArgMatches) -> Result<ServiceOutputBinding, clap::Error> {
         Ok(ServiceOutputBinding {
             name: self.name,
@@ -85,24 +83,24 @@ impl ServiceOutputDefinition {
     }
 }
 
-/// Builds one service-output definition while preserving its concrete command-state type.
+/// Builds one service-output definition while preserving its concrete settings type.
 pub struct ServiceOutputDefinitionBuilder<T> {
     name: Option<&'static str>,
     schemes: Vec<&'static str>,
     args: binding::ArgsParser<T>,
-    consumer: ServiceOutputConsumerFn<T>,
+    write: ServiceOutputWriteFn<T>,
 }
 
 impl<T> ServiceOutputDefinitionBuilder<T>
 where
     T: Send + Sync + 'static,
 {
-    fn new(args: binding::ArgsParser<T>, consumer: ServiceOutputConsumerFn<T>) -> Self {
+    fn new(args: binding::ArgsParser<T>, write: ServiceOutputWriteFn<T>) -> Self {
         Self {
             name: None,
             schemes: Vec::new(),
             args,
-            consumer,
+            write,
         }
     }
 
@@ -131,8 +129,7 @@ where
             name,
             schemes: Arc::from(self.schemes),
             definition: Arc::new(binding::TypedServiceOutputDefinition::new(
-                self.args,
-                self.consumer,
+                self.args, self.write,
             )),
         })
     }
@@ -153,7 +150,7 @@ pub enum ServiceOutputDefinitionBuildError {
     DuplicateScheme { scheme: &'static str },
 }
 
-/// Command-scoped service-output behavior with its typed state already bound.
+/// Command-scoped service-output behavior with its typed settings already bound.
 pub struct ServiceOutputBinding {
     name: &'static str,
     binding: Box<dyn binding::ErasedServiceOutputBinding>,
@@ -165,16 +162,16 @@ impl ServiceOutputBinding {
         self.name
     }
 
-    /// Consumes the complete final stream into one raw exact target.
-    pub async fn consume(
+    /// Writes the complete final stream to one raw exact target.
+    pub async fn write(
         &self,
         target: &str,
         stream: SendableRecordBatchStream,
-    ) -> Result<(), ServiceOutputConsumptionError> {
+    ) -> Result<(), ServiceOutputWriteError> {
         self.binding
-            .consume(target, stream)
+            .write(target, stream)
             .await
-            .map_err(|source| ServiceOutputConsumptionError {
+            .map_err(|source| ServiceOutputWriteError {
                 service: self.name,
                 target: target.to_owned(),
                 source,
@@ -182,10 +179,10 @@ impl ServiceOutputBinding {
     }
 }
 
-/// Failure while one bound service output consumes a stream into its exact target.
+/// Failure while one bound service output writes its exact target.
 #[derive(Debug, Error)]
-#[error("service output {service:?} failed to consume {target:?}: {source}")]
-pub struct ServiceOutputConsumptionError {
+#[error("service output {service:?} failed to write {target:?}: {source}")]
+pub struct ServiceOutputWriteError {
     service: &'static str,
     target: String,
     #[source]

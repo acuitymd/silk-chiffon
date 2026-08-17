@@ -15,7 +15,7 @@ use vortex::{
 };
 
 /// Encodes batches as one Vortex file without using Silk Chiffon's sink.
-pub async fn encode_batches(schema: &SchemaRef, batches: Vec<RecordBatch>) -> Result<Vec<u8>> {
+pub async fn write_batches(schema: &SchemaRef, batches: Vec<RecordBatch>) -> Result<Vec<u8>> {
     let arrays = batches
         .into_iter()
         .map(|batch| ArrayRef::from_arrow(batch, false))

@@ -1,7 +1,7 @@
 //! Private type erasure for service-output definitions and command bindings.
 //!
-//! `TypedServiceOutputDefinition<T>` keeps one connector's Clap command state as `T` until command
-//! binding. It then parses `T` once and stores it beside that connector's consumer. Only
+//! `TypedServiceOutputDefinition<T>` keeps one connector's Clap settings as `T` until command
+//! binding. It then parses `T` once and stores it beside that connector's write operation. Only
 //! the complete definition and binding become trait objects, so independently typed connectors
 //! can share one application collection without `Any` values or downcasts.
 
@@ -12,7 +12,7 @@ use clap::{ArgMatches, Args, Command, FromArgMatches};
 use datafusion::physical_plan::SendableRecordBatchStream;
 use futures::future::BoxFuture;
 
-use super::ServiceOutputConsumerFn;
+use super::ServiceOutputWriteFn;
 
 pub(super) trait ErasedServiceOutputDefinition: Send + Sync {
     fn augment_args(&self, command: Command) -> Command;
@@ -23,7 +23,7 @@ pub(super) trait ErasedServiceOutputDefinition: Send + Sync {
 }
 
 pub(super) trait ErasedServiceOutputBinding: Send + Sync {
-    fn consume<'a>(
+    fn write<'a>(
         &'a self,
         target: &'a str,
         stream: SendableRecordBatchStream,
@@ -56,16 +56,16 @@ impl<T> ArgsParser<T> {
 
 pub(super) struct TypedServiceOutputDefinition<T> {
     args: ArgsParser<T>,
-    consumer: ServiceOutputConsumerFn<T>,
-    state: PhantomData<fn() -> T>,
+    write: ServiceOutputWriteFn<T>,
+    settings: PhantomData<fn() -> T>,
 }
 
 impl<T> TypedServiceOutputDefinition<T> {
-    pub(super) fn new(args: ArgsParser<T>, consumer: ServiceOutputConsumerFn<T>) -> Self {
+    pub(super) fn new(args: ArgsParser<T>, write: ServiceOutputWriteFn<T>) -> Self {
         Self {
             args,
-            consumer,
-            state: PhantomData,
+            write,
+            settings: PhantomData,
         }
     }
 }
@@ -83,26 +83,26 @@ where
         matches: &ArgMatches,
     ) -> Result<Box<dyn ErasedServiceOutputBinding>, clap::Error> {
         Ok(Box::new(TypedServiceOutputBinding {
-            state: Arc::new((self.args.parse)(matches)?),
-            consumer: self.consumer,
+            settings: Arc::new((self.args.parse)(matches)?),
+            write: self.write,
         }))
     }
 }
 
 struct TypedServiceOutputBinding<T> {
-    state: Arc<T>,
-    consumer: ServiceOutputConsumerFn<T>,
+    settings: Arc<T>,
+    write: ServiceOutputWriteFn<T>,
 }
 
 impl<T> ErasedServiceOutputBinding for TypedServiceOutputBinding<T>
 where
     T: Send + Sync + 'static,
 {
-    fn consume<'a>(
+    fn write<'a>(
         &'a self,
         target: &'a str,
         stream: SendableRecordBatchStream,
     ) -> BoxFuture<'a, Result<()>> {
-        (self.consumer)(target, stream, &self.state)
+        (self.write)(target, stream, &self.settings)
     }
 }

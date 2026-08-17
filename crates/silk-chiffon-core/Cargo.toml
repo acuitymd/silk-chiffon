@@ -33,7 +33,6 @@ url.workspace = true
 chrono = "^0.4.45"
 datafusion-datasource = "=54.1.0"
 silk-chiffon-storage = { path = "../silk-chiffon-storage", features = ["local"] }
-silk-chiffon-test-support = { path = "../silk-chiffon-test-support" }
 
 [lints]
 workspace = true
