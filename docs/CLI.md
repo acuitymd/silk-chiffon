@@ -531,11 +531,11 @@ Examples:
 
 Detect the format of an input
 
-**Usage:** `silk-chiffon detect [OPTIONS] <INPUT>`
+**Usage:** `silk-chiffon detect [OPTIONS] <FILE>`
 
 ###### **Arguments:**
 
-- `<INPUT>` — Local path or object-storage URL to detect
+- `<FILE>` — Path to the input whose format should be detected
 
 ###### **Options:**
 
@@ -608,11 +608,11 @@ Examples:
 
 Inspect arrow file metadata and structure
 
-**Usage:** `silk-chiffon inspect arrow [OPTIONS] <INPUT>`
+**Usage:** `silk-chiffon inspect arrow [OPTIONS] <FILE>`
 
 ###### **Arguments:**
 
-- `<INPUT>` — Local path or object-storage URL to inspect
+- `<FILE>` — Path to the file to inspect
 
 ###### **Options:**
 
@@ -667,11 +667,11 @@ Inspect arrow file metadata and structure
 
 Inspect parquet file metadata and structure
 
-**Usage:** `silk-chiffon inspect parquet [OPTIONS] <INPUT>`
+**Usage:** `silk-chiffon inspect parquet [OPTIONS] <FILE>`
 
 ###### **Arguments:**
 
-- `<INPUT>` — Local path or object-storage URL to inspect
+- `<FILE>` — Path to the file to inspect
 
 ###### **Options:**
 
@@ -728,11 +728,11 @@ Inspect parquet file metadata and structure
 
 Inspect vortex file metadata and structure
 
-**Usage:** `silk-chiffon inspect vortex [OPTIONS] <INPUT>`
+**Usage:** `silk-chiffon inspect vortex [OPTIONS] <FILE>`
 
 ###### **Arguments:**
 
-- `<INPUT>` — Local path or object-storage URL to inspect
+- `<FILE>` — Path to the file to inspect
 
 ###### **Options:**
 

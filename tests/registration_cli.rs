@@ -1,6 +1,8 @@
 use clap::CommandFactory;
 use silk_chiffon::{Cli, Command};
 #[cfg(feature = "local-bare-paths")]
+use silk_chiffon_core::{InspectionOutput, PresentationMode};
+#[cfg(feature = "local-bare-paths")]
 use silk_chiffon_storage::LocationInput;
 #[cfg(feature = "local-bare-paths")]
 use silk_chiffon_test_support::{TestBatch, TestFile};
@@ -46,38 +48,6 @@ fn composed_cli_rejects_an_unregistered_format() {
     assert!(message.contains("arrow"));
     assert!(message.contains("parquet"));
     assert!(message.contains("vortex"));
-}
-
-#[test]
-fn detect_and_inspect_bind_exact_inputs_before_execution() {
-    for arguments in [
-        vec!["silk-chiffon", "detect", "s3://user@bucket/input.parquet"],
-        vec![
-            "silk-chiffon",
-            "inspect",
-            "parquet",
-            "s3://user@bucket/input.parquet",
-        ],
-    ] {
-        let error = Cli::try_parse_from(arguments).unwrap_err();
-        assert!(error.to_string().contains("user information"));
-    }
-}
-
-#[test]
-fn detect_and_inspect_describe_location_neutral_inputs() {
-    let mut command = Cli::command();
-    let detect = command.find_subcommand_mut("detect").unwrap();
-    let detect_help = detect.render_long_help().to_string();
-    assert!(detect_help.contains("<INPUT>"));
-    assert!(detect_help.contains("Local path or object-storage URL to detect"));
-
-    let mut command = Cli::command();
-    let inspect = command.find_subcommand_mut("inspect").unwrap();
-    let parquet = inspect.find_subcommand_mut("parquet").unwrap();
-    let inspect_help = parquet.render_long_help().to_string();
-    assert!(inspect_help.contains("<INPUT>"));
-    assert!(inspect_help.contains("Local path or object-storage URL to inspect"));
 }
 
 #[test]
@@ -282,7 +252,7 @@ async fn registered_transform_uses_bound_format_and_storage_settings() {
         3
     );
 
-    let storage = silk_chiffon_test_support::local_storage_session();
+    let storage = silk_chiffon_storage::local::session().unwrap();
     let input_object = storage
         .lookup_input(&LocationInput::parse(input.to_str().unwrap()).unwrap())
         .await
@@ -311,5 +281,19 @@ async fn composed_inspection_invokes_the_bound_registration() {
     let Command::Inspect(command) = cli.command else {
         panic!("expected inspect command");
     };
-    Command::Inspect(command).execute().await.unwrap();
+    let object = command
+        .storage()
+        .lookup_input(&LocationInput::parse(input.to_str().unwrap()).unwrap())
+        .await
+        .unwrap();
+    let output = command
+        .inspection()
+        .inspect(&object, PresentationMode::Json)
+        .await
+        .unwrap();
+    let InspectionOutput::Json(output) = output else {
+        panic!("expected JSON inspection output");
+    };
+    assert_eq!(output["format"], "parquet");
+    assert_eq!(output["rows"], 3);
 }

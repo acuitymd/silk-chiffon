@@ -17,19 +17,10 @@ use url::Url;
 
 static LAST_LABEL: Mutex<Option<String>> = Mutex::new(None);
 static LAST_BARE_LOCATION: Mutex<Option<String>> = Mutex::new(None);
-static LAST_RETRY: Mutex<Option<RetrySnapshot>> = Mutex::new(None);
+static LAST_RETRY_COUNT: Mutex<Option<usize>> = Mutex::new(None);
 static READ_ONLY_LOCATION_VALIDATIONS: AtomicUsize = AtomicUsize::new(0);
 static LOCATION_VALIDATIONS: AtomicUsize = AtomicUsize::new(0);
 static OBJECT_STORE_CREATIONS: AtomicUsize = AtomicUsize::new(0);
-
-#[derive(Debug, PartialEq)]
-struct RetrySnapshot {
-    max_retries: usize,
-    retry_timeout: std::time::Duration,
-    initial_backoff: std::time::Duration,
-    maximum_backoff: std::time::Duration,
-    backoff_base: f64,
-}
 
 #[derive(Args, Clone)]
 struct MemoryArgs {
@@ -218,13 +209,7 @@ fn retry_object_store(
     _settings: &(),
     retry: Option<&RetryConfig>,
 ) -> anyhow::Result<Arc<dyn ObjectStore>> {
-    *LAST_RETRY.lock().unwrap() = retry.map(|configuration| RetrySnapshot {
-        max_retries: configuration.max_retries,
-        retry_timeout: configuration.retry_timeout,
-        initial_backoff: configuration.backoff.init_backoff,
-        maximum_backoff: configuration.backoff.max_backoff,
-        backoff_base: configuration.backoff.base,
-    });
+    *LAST_RETRY_COUNT.lock().unwrap() = retry.map(|configuration| configuration.max_retries);
     Ok(Arc::new(InMemory::new()))
 }
 
@@ -1072,19 +1057,23 @@ fn retry_capable_backends_share_one_argument_group_and_receive_defaults() {
     );
 
     let storage = create_default_session(&registry);
-    *LAST_RETRY.lock().unwrap() = None;
+    let retry = storage.retry_configuration().unwrap();
+    assert_eq!(retry.max_retries, 10);
+    assert_eq!(retry.retry_timeout, std::time::Duration::from_secs(180));
+    assert_eq!(
+        retry.backoff.init_backoff,
+        std::time::Duration::from_millis(100)
+    );
+    assert_eq!(
+        retry.backoff.max_backoff,
+        std::time::Duration::from_secs(15)
+    );
+    assert_eq!(retry.backoff.base, 2.0);
+
+    *LAST_RETRY_COUNT.lock().unwrap() = None;
     let location = location_input("first://bucket/object");
     storage.input_handle(&location).unwrap();
-    assert_eq!(
-        *LAST_RETRY.lock().unwrap(),
-        Some(RetrySnapshot {
-            max_retries: 10,
-            retry_timeout: std::time::Duration::from_secs(180),
-            initial_backoff: std::time::Duration::from_millis(100),
-            maximum_backoff: std::time::Duration::from_secs(15),
-            backoff_base: 2.0,
-        })
-    );
+    assert_eq!(*LAST_RETRY_COUNT.lock().unwrap(), Some(10));
 }
 
 #[test]
@@ -1102,6 +1091,7 @@ fn local_only_registry_omits_shared_retry_arguments() {
             .all(|argument| argument.get_long() != Some("storage-max-retries"))
     );
     let storage = create_default_session(&registry);
+    assert!(storage.retry_configuration().is_none());
     assert_eq!(
         registry.bare_location_backend().map(StorageBackend::name),
         if cfg!(feature = "local-bare-paths") {
@@ -1138,7 +1128,7 @@ fn enabled_retries_validate_backoff_while_zero_retries_disable_validation() {
             .schemes(["mem"])
             .access(StorageAccess::ReadOnly)
             .location_validator(validate_location)
-            .object_store_creator(retry_object_store)
+            .object_store_creator(in_memory_object_store)
             .shared_retries()
             .build()
             .unwrap()
@@ -1183,11 +1173,8 @@ fn enabled_retries_validate_backoff_while_zero_retries_disable_validation() {
         ])
         .unwrap();
     let storage = zero_registry.create_session(&zero_matches).unwrap();
-    *LAST_RETRY.lock().unwrap() = None;
-    storage
-        .input_handle(&location_input("mem://bucket/object"))
-        .unwrap();
-    assert_eq!(LAST_RETRY.lock().unwrap().as_ref().unwrap().max_retries, 0);
+
+    assert_eq!(storage.retry_configuration().unwrap().max_retries, 0);
 }
 
 #[test]

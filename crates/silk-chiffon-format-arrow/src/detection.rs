@@ -102,7 +102,7 @@ mod tests {
         ipc::writer::StreamWriter,
     };
     use silk_chiffon_core::InputDetection;
-    use silk_chiffon_storage::LocationInput;
+    use silk_chiffon_storage::{LocationInput, local};
     use tempfile::tempdir;
     use url::Url;
 
@@ -114,7 +114,8 @@ mod tests {
         std::fs::write(&path, bytes).unwrap();
         let url = Url::from_file_path(path).unwrap();
         let location = LocationInput::parse(url.as_str()).unwrap();
-        let object = silk_chiffon_test_support::local_storage_session()
+        let object = local::session()
+            .unwrap()
             .lookup_input(&location)
             .await
             .unwrap();

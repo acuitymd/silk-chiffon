@@ -538,19 +538,32 @@ async fn wait_for_multipart_starts(control: &UploadControl, expected: usize) {
 }
 
 #[test]
-fn upload_arguments_expose_the_approved_defaults() {
-    let command = registry().augment_args(Command::new("output-test"));
-    let part_size = command
-        .get_arguments()
-        .find(|argument| argument.get_long() == Some("object-store-upload-part-size"))
-        .unwrap();
-    let max_parts = command
-        .get_arguments()
-        .find(|argument| argument.get_long() == Some("object-store-max-in-flight-parts"))
-        .unwrap();
+fn upload_settings_have_approved_defaults_and_accept_smaller_values() {
+    let default_session = session(&["output-test"]);
+    assert_eq!(
+        default_session.object_upload_settings().part_size().get(),
+        10 * 1024 * 1024
+    );
+    assert_eq!(
+        default_session
+            .object_upload_settings()
+            .max_in_flight_parts()
+            .get(),
+        8
+    );
 
-    assert_eq!(part_size.get_default_values(), ["10MiB"]);
-    assert_eq!(max_parts.get_default_values(), ["8"]);
+    let smaller = session(&[
+        "output-test",
+        "--object-store-upload-part-size",
+        "16",
+        "--object-store-max-in-flight-parts",
+        "2",
+    ]);
+    assert_eq!(smaller.object_upload_settings().part_size().get(), 16);
+    assert_eq!(
+        smaller.object_upload_settings().max_in_flight_parts().get(),
+        2
+    );
 }
 
 #[tokio::test]
@@ -1235,7 +1248,8 @@ async fn local_preparation_validates_or_creates_parent_directories() {
     let target = temporary.path().join("new/deep/output.arrow");
     let location = LocationInput::parse(target.to_str().unwrap()).unwrap();
 
-    let rejected = common::local_storage_session()
+    let rejected = silk_chiffon_storage::local::session()
+        .unwrap()
         .prepare_output_target(
             &location,
             &OutputPreparation::new(ExistingOutput::Allow, false),
@@ -1243,7 +1257,8 @@ async fn local_preparation_validates_or_creates_parent_directories() {
         .await;
     assert!(rejected.is_err());
 
-    let handle = common::local_storage_session()
+    let handle = silk_chiffon_storage::local::session()
+        .unwrap()
         .prepare_output_target(
             &location,
             &OutputPreparation::new(ExistingOutput::Allow, true),
@@ -1251,7 +1266,5 @@ async fn local_preparation_validates_or_creates_parent_directories() {
         .await
         .unwrap();
     assert!(target.parent().unwrap().is_dir());
-    assert_eq!(handle.url().to_file_path().unwrap(), target);
+    assert_eq!(handle.local_path().unwrap(), target);
 }
-#[cfg(feature = "local-bare-paths")]
-mod common;

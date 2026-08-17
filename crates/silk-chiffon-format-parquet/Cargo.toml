@@ -24,6 +24,7 @@ datafusion = { workspace = true, features = ["array_expressions", "default"] }
 futures.workspace = true
 num-format = "^0.4.4"
 object_store.workspace = true
+owo-colors = "^4.3.0"
 parquet = { version = "^58.4.0", features = ["default", "async", "json", "arrow_canonical_extension_types"] }
 serde = { version = "^1.0.229", features = ["derive"] }
 serde_json.workspace = true
@@ -36,6 +37,7 @@ tokio-util.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+camino = "^1.2.2"
 criterion = { version = "^0.8.2", features = ["html_reports"] }
 rand = "^0.10.2"
 silk-chiffon-storage = { path = "../silk-chiffon-storage", default-features = false, features = ["local"] }

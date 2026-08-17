@@ -892,7 +892,7 @@ mod tests {
         state: Arc<Mutex<ScriptedState>>,
     ) -> PartitionedOutputWriter {
         PartitionedOutputWriter {
-            storage: silk_chiffon_test_support::local_storage_session(),
+            storage: silk_chiffon_storage::local::session().unwrap(),
             sink_binding: Arc::new(ScriptedSinkBinding { state }),
             partition_fields: vec!["category".to_owned()],
             template: OutputTargetTemplate::new(pattern.to_string_lossy().into_owned()).unwrap(),

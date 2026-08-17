@@ -1,12 +1,14 @@
 //! Built-in storage backend for canonical `file:///` locations.
 //!
-//! The `local` Cargo feature exposes [`backend`] for explicit `file:` URLs. The separate
-//! `local-bare-paths` feature also makes this backend interpret schemeless input as a filesystem
-//! path.
+//! The `local` Cargo feature exposes [`backend`] and [`session`] for explicit `file:` URLs. The
+//! separate `local-bare-paths` feature also makes this backend interpret schemeless input as a
+//! filesystem path.
 
 #[cfg(feature = "local")]
 use std::sync::Arc;
 
+#[cfg(feature = "local")]
+use clap::Command;
 #[cfg(feature = "local")]
 use object_store::{ObjectStore, local::LocalFileSystem};
 
@@ -15,6 +17,7 @@ use crate::{Location, LocationPattern};
 #[cfg(feature = "local")]
 use crate::{
     OutputPreparation, OutputTarget, StorageAccess, StorageBackend, StorageBackendBuildError,
+    StorageRegistry, StorageSession, StorageSessionCreationError,
 };
 
 /// Builds the built-in local backend definition for canonical `file:///` locations.
@@ -41,6 +44,25 @@ pub fn backend() -> Result<StorageBackend, StorageBackendBuildError> {
         .bare_pattern_mapper(map_bare_pattern);
 
     builder.build()
+}
+
+/// Creates a storage session containing only the built-in local backend.
+///
+/// This shortcut uses default host arguments. Applications that compose multiple backends should
+/// build a [`StorageRegistry`] and pass their own parsed matches to
+/// [`StorageRegistry::create_session`].
+///
+/// # Errors
+///
+/// Returns [`StorageSessionCreationError`] if the backend, registry, or default session arguments
+/// cannot be created.
+#[cfg(feature = "local")]
+pub fn session() -> Result<StorageSession, StorageSessionCreationError> {
+    let registry = StorageRegistry::builder().register(backend()?).build()?;
+    let command_name = "fake-convenience-command-that-is-never-used";
+    let command = registry.augment_args(Command::new(command_name));
+    let matches = command.try_get_matches_from([command_name])?;
+    registry.create_session(&matches)
 }
 
 #[cfg(feature = "local")]
@@ -114,18 +136,6 @@ fn map_bare_pattern_from(
 
 #[cfg(all(test, feature = "local-bare-paths"))]
 mod tests {
-    fn local_storage_session() -> crate::StorageSession {
-        use clap::Command;
-
-        let registry = crate::StorageRegistry::builder()
-            .register(super::backend().unwrap())
-            .build()
-            .unwrap();
-        let command = registry.augment_args(Command::new("storage-test"));
-        let matches = command.try_get_matches_from(["storage-test"]).unwrap();
-        registry.create_session(&matches).unwrap()
-    }
-
     #[tokio::test]
     async fn bare_patterns_treat_the_working_directory_as_literal() {
         let temporary = tempfile::tempdir().unwrap();
@@ -140,7 +150,8 @@ mod tests {
             std::fs::write(&input, b"test").unwrap();
 
             let pattern = super::map_bare_pattern_from("*.arrow", &working_directory).unwrap();
-            let matches = local_storage_session()
+            let matches = super::session()
+                .unwrap()
                 .expand_input_pattern(&pattern)
                 .await
                 .unwrap();
@@ -161,7 +172,8 @@ mod tests {
         std::fs::write(&input, b"test").unwrap();
 
         let pattern = super::map_bare_pattern_from("../data/*.arrow", &working_directory).unwrap();
-        let matches = local_storage_session()
+        let matches = super::session()
+            .unwrap()
             .expand_input_pattern(&pattern)
             .await
             .unwrap();

@@ -21,6 +21,8 @@ use tabled::{
     },
 };
 
+const MAX_METADATA_DISPLAY_CHARS: usize = 100;
+
 /// Formats a byte count using binary units.
 pub fn format_bytes(bytes: u64) -> String {
     format_size(bytes, FormatSizeOptions::from(BINARY).decimal_places(1))
@@ -36,6 +38,20 @@ pub fn truncate_chars(value: &str, max_chars: usize) -> &str {
     match value.char_indices().nth(max_chars) {
         Some((index, _)) => &value[..index],
         None => value,
+    }
+}
+
+/// Truncates long metadata values while retaining their original character count.
+pub fn truncate_for_display(value: &str) -> String {
+    let count = value.chars().count();
+    if count > MAX_METADATA_DISPLAY_CHARS {
+        format!(
+            "{}... ({} chars total)",
+            truncate_chars(value, MAX_METADATA_DISPLAY_CHARS),
+            count
+        )
+    } else {
+        value.to_owned()
     }
 }
 
@@ -277,6 +293,23 @@ pub fn render_schema_fields_detailed(schema: &SchemaRef, output: &mut dyn Write)
     Ok(())
 }
 
+/// Renders key-value metadata under a section heading.
+pub fn render_metadata_map(
+    output: &mut dyn Write,
+    heading: &str,
+    metadata: &HashMap<String, String>,
+) -> Result<()> {
+    writeln!(output, "\n{}:", header(heading))?;
+    if metadata.is_empty() {
+        writeln!(output, "  {}", dim("(none)"))?;
+    } else {
+        for (key, value) in metadata {
+            writeln!(output, "  {}: {}", label(key), truncate_for_display(value))?;
+        }
+    }
+    Ok(())
+}
+
 /// A stable JSON representation of one Arrow field.
 #[derive(Serialize)]
 pub struct SchemaField {
@@ -313,6 +346,15 @@ mod tests {
     fn formatting_uses_binary_sizes_and_grouped_numbers() {
         assert_eq!(format_bytes(1536), "1.5 KiB");
         assert_eq!(format_number(1_000_000), "1,000,000");
+    }
+
+    #[test]
+    fn metadata_truncation_counts_unicode_characters() {
+        let value = "🎉".repeat(150);
+        let rendered = truncate_for_display(&value);
+
+        assert!(rendered.starts_with(&"🎉".repeat(100)));
+        assert!(rendered.ends_with("... (150 chars total)"));
     }
 
     #[test]

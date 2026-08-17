@@ -325,7 +325,7 @@ mod tests {
             let second_path = directory.path().join("second.arrow");
             std::fs::write(&first_path, b"first").unwrap();
             std::fs::write(&second_path, b"second").unwrap();
-            let storage = silk_chiffon_test_support::local_storage_session();
+            let storage = silk_chiffon_storage::local::session().unwrap();
             let first = storage
                 .lookup_input(
                     &silk_chiffon_storage::LocationInput::parse(first_path.to_str().unwrap())
@@ -426,7 +426,7 @@ mod tests {
             let larger_path = directory.path().join("larger.arrow");
             std::fs::write(&smaller_path, b"small").unwrap();
             std::fs::write(&larger_path, b"larger").unwrap();
-            let storage = silk_chiffon_test_support::local_storage_session();
+            let storage = silk_chiffon_storage::local::session().unwrap();
             let smaller = storage
                 .lookup_input(
                     &silk_chiffon_storage::LocationInput::parse(smaller_path.to_str().unwrap())

@@ -1,6 +1,6 @@
 //! Record-batch fixtures shared by workspace tests.
 
-use std::sync::Arc;
+use std::{fs::File, sync::Arc};
 
 use arrow::{
     array::{
@@ -9,6 +9,7 @@ use arrow::{
     },
     buffer::OffsetBuffer,
     datatypes::{DataType, Field, Schema, SchemaRef},
+    ipc::writer::FileWriter,
 };
 use futures::stream::{self, BoxStream};
 #[derive(Default)]
@@ -329,4 +330,85 @@ impl TestBatch {
     ) -> BoxStream<'static, Result<RecordBatch, arrow::error::ArrowError>> {
         Box::pin(stream::iter(batches.into_iter().map(Ok)))
     }
+}
+
+pub fn simple_schema() -> SchemaRef {
+    TestBatch::simple_schema()
+}
+
+pub fn nullable_id_schema() -> SchemaRef {
+    TestBatch::nullable_id_schema()
+}
+
+pub fn multi_column_for_sorting_schema() -> SchemaRef {
+    TestBatch::for_sorting_schema()
+}
+
+pub fn create_batch_with_ids_and_names(
+    schema: &SchemaRef,
+    ids: &[i32],
+    names: &[&str],
+) -> RecordBatch {
+    RecordBatch::try_new(
+        Arc::clone(schema),
+        vec![
+            Arc::new(Int32Array::from(ids.to_vec())),
+            Arc::new(StringArray::from(names.to_vec())),
+        ],
+    )
+    .unwrap()
+}
+
+pub fn create_batch_with_nullable_ids_and_non_nullable_names(
+    schema: &SchemaRef,
+    ids: &[Option<i32>],
+    names: &[&str],
+) -> RecordBatch {
+    RecordBatch::try_new(
+        Arc::clone(schema),
+        vec![
+            Arc::new(Int32Array::from(ids.to_vec())),
+            Arc::new(StringArray::from(names.to_vec())),
+        ],
+    )
+    .unwrap()
+}
+
+pub fn create_multi_column_for_sorting_batch(
+    schema: &Arc<Schema>,
+    groups: &[i32],
+    values: &[i32],
+) -> RecordBatch {
+    RecordBatch::try_new(
+        Arc::clone(schema),
+        vec![
+            Arc::new(Int32Array::from(groups.to_vec())),
+            Arc::new(Int32Array::from(values.to_vec())),
+        ],
+    )
+    .unwrap()
+}
+
+pub fn create_arrow_file_with_range_of_ids(path: &std::path::Path, start_id: i32, count: i32) {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int32, false),
+        Field::new("name", DataType::Utf8, false),
+        Field::new("value", DataType::Float64, false),
+    ]));
+    let ids: Vec<i32> = (start_id..start_id + count).collect();
+    let names: Vec<String> = ids.iter().map(|id| format!("Person_{id}")).collect();
+    let values: Vec<f64> = ids.iter().map(|id| f64::from(*id) * 1.5).collect();
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(Int32Array::from(ids)),
+            Arc::new(StringArray::from(names)),
+            Arc::new(Float64Array::from(values)),
+        ],
+    )
+    .unwrap();
+    let file = File::create(path).unwrap();
+    let mut writer = FileWriter::try_new(file, &schema).unwrap();
+    writer.write(&batch).unwrap();
+    writer.finish().unwrap();
 }
