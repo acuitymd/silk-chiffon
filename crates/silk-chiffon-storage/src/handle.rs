@@ -84,7 +84,7 @@ macro_rules! directional_accessors {
                 self.handle.object_path()
             }
 
-            /// Returns the root URL used for session caching and DataFusion registration.
+            /// Returns the scheme-and-authority root used as this session's store cache key.
             pub fn store_url(&self) -> &Url {
                 self.handle.store_url()
             }

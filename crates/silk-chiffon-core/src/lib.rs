@@ -1,3 +1,18 @@
+//! DataFusion-facing contracts used to compose Silk Chiffon.
+//!
+//! The crate separates four extension roles:
+//!
+//! - file formats contribute [`FormatDefinition`] values;
+//! - non-file inputs contribute [`ServiceInputDefinition`] values;
+//! - non-file outputs contribute [`ServiceOutputDefinition`] values;
+//! - the host builds and executes a [`Pipeline`] from their table providers and sinks.
+//!
+//! Concrete formats, storage backends, and cloud connectors live in other crates. Their command
+//! settings stay typed through definition and binding, then are erased behind private traits so a
+//! host can compose unrelated implementations. See the repository's
+//! [extension guide](https://github.com/acuitymd/silk-chiffon/blob/main/docs/extending.md) for the
+//! complete lifecycles and examples.
+
 mod data_sink;
 mod exact_file_provider;
 mod file_input;

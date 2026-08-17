@@ -277,7 +277,7 @@ pub fn render_schema_fields_detailed(schema: &SchemaRef, output: &mut dyn Write)
     Ok(())
 }
 
-/// A stable JSON representation of one Arrow field.
+/// The shared JSON representation of one Arrow field.
 #[derive(Serialize)]
 pub struct SchemaField {
     name: String,

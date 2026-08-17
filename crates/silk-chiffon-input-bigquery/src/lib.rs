@@ -45,6 +45,9 @@ pub mod integration_test_support {
 }
 
 /// Returns the BigQuery Storage Read service-input definition registered by a host application.
+///
+/// This also installs rustls's ring crypto provider as the process default when no provider has
+/// already been installed. Repeated calls leave the existing default unchanged.
 pub fn definition() -> ServiceInputDefinition {
     install_crypto_provider();
     ServiceInputDefinition::with_args::<BigQueryInputArgs>(create_provider)

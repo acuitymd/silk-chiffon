@@ -24,6 +24,13 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - run: cargo check --workspace --all-targets --all-features --locked
+
   format:
     runs-on: ubuntu-latest
     steps:
@@ -64,7 +71,9 @@ jobs:
 
       - uses: taiki-e/install-action@v2
         with:
-          tool: nextest,dprint
+          tool: nextest,dprint,just,lychee
+
+      - uses: astral-sh/setup-uv@v6
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -87,5 +96,8 @@ jobs:
       - name: Check disk space
         run: df -h
 
-      - name: Run tests
-        run: cargo nextest run --workspace --all-features --locked
+      - name: Run offline verification
+        run: just ci
+
+      - name: Check external documentation links
+        run: just check-links

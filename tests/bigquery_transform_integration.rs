@@ -406,7 +406,7 @@ fn assert_success(output: &Output) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn registered_bqs_transforms_to_arrow_parquet_and_mixes_with_file_input() {
+async fn registered_bqs_exercises_every_output_format_and_partitioned_output() {
     let fixture = RootFixture::start().await;
     let output_dir = tempfile::tempdir().unwrap();
 
@@ -475,8 +475,77 @@ async fn registered_bqs_transforms_to_arrow_parquet_and_mixes_with_file_input() 
         3
     );
 
+    let stream_output = output_dir.path().join("full.arrows");
+    let mut arguments = fixture.common_arguments("table");
+    arguments.extend([
+        "--to".to_owned(),
+        stream_output.to_string_lossy().into_owned(),
+        "--output-format".to_owned(),
+        "arrow".to_owned(),
+        "--arrow-format".to_owned(),
+        "stream".to_owned(),
+    ]);
+    let output = fixture.run(&argument_refs(&arguments)).await;
+    assert_success(&output);
+    assert_eq!(
+        TestFile::read_arrow_stream(&stream_output)
+            .iter()
+            .map(RecordBatch::num_rows)
+            .sum::<usize>(),
+        2
+    );
+
+    let vortex_output = output_dir.path().join("full.vortex");
+    let mut arguments = fixture.common_arguments("table");
+    arguments.extend([
+        "--to".to_owned(),
+        vortex_output.to_string_lossy().into_owned(),
+        "--output-format".to_owned(),
+        "vortex".to_owned(),
+    ]);
+    let output = fixture.run(&argument_refs(&arguments)).await;
+    assert_success(&output);
+    let vortex_verification = output_dir.path().join("vortex-verification.arrow");
+    let output = fixture
+        .run(&[
+            "transform",
+            "--from",
+            vortex_output.to_str().unwrap(),
+            "--to",
+            vortex_verification.to_str().unwrap(),
+        ])
+        .await;
+    assert_success(&output);
+    assert_eq!(
+        TestFile::read_arrow(&vortex_verification)
+            .iter()
+            .map(RecordBatch::num_rows)
+            .sum::<usize>(),
+        2
+    );
+
+    let partition_root = output_dir.path().join("partitioned");
+    let partition_template = partition_root.join("{{name}}.parquet");
+    let mut arguments = fixture.common_arguments("table");
+    arguments.extend([
+        "--to-many".to_owned(),
+        partition_template.to_string_lossy().into_owned(),
+        "--by".to_owned(),
+        "name".to_owned(),
+        "--output-format".to_owned(),
+        "parquet".to_owned(),
+    ]);
+    let output = fixture.run(&argument_refs(&arguments)).await;
+    assert_success(&output);
+    let partition_rows = ["alpha.parquet", "beta.parquet"]
+        .iter()
+        .flat_map(|name| TestFile::read_parquet(&partition_root.join(name)))
+        .map(|batch| batch.num_rows())
+        .sum::<usize>();
+    assert_eq!(partition_rows, 2);
+
     let creates = fixture.service.creates.lock().unwrap();
-    assert_eq!(creates.len(), 6);
+    assert_eq!(creates.len(), 12);
     for pair in creates.chunks_exact(2) {
         let discovery = pair[0].read_session.as_ref().unwrap();
         let execution = pair[1].read_session.as_ref().unwrap();
@@ -496,7 +565,7 @@ async fn registered_bqs_transforms_to_arrow_parquet_and_mixes_with_file_input() 
         first_execution.row_restriction,
         "(`id` > 0) AND (name IS NOT NULL)"
     );
-    assert_eq!(fixture.service.reads.lock().unwrap().len(), 3);
+    assert_eq!(fixture.service.reads.lock().unwrap().len(), 6);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

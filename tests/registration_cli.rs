@@ -222,31 +222,45 @@ fn registered_arguments_are_present_in_help_and_completions() {
     #[cfg(not(feature = "bigquery"))]
     assert!(!help.contains("--bqs-"));
 
-    let mut completions = Vec::new();
-    clap_complete::generate(
+    for shell in [
         clap_complete::Shell::Bash,
-        &mut Cli::command(),
-        "silk-chiffon",
-        &mut completions,
-    );
-    let completions = String::from_utf8(completions).unwrap();
-    assert!(completions.contains("--arrow-record-batch-size"));
-    assert!(completions.contains("--parquet-row-group-size"));
-    assert!(completions.contains("--parquet-writing-threads"));
-    assert!(!completions.contains("--parquet-io-threads"));
-    assert!(completions.contains("--vortex-record-batch-size"));
-    #[cfg(feature = "gcs")]
-    assert!(completions.contains("--gcs-endpoint"));
-    #[cfg(not(feature = "gcs"))]
-    assert!(!completions.contains("--gcs-"));
-    #[cfg(feature = "s3")]
-    assert!(completions.contains("--s3-endpoint"));
-    #[cfg(not(feature = "s3"))]
-    assert!(!completions.contains("--s3-"));
-    #[cfg(feature = "bigquery")]
-    assert!(completions.contains("--bqs-session-project"));
-    #[cfg(not(feature = "bigquery"))]
-    assert!(!completions.contains("--bqs-"));
+        clap_complete::Shell::Zsh,
+        clap_complete::Shell::Fish,
+    ] {
+        let mut completions = Vec::new();
+        clap_complete::generate(shell, &mut Cli::command(), "silk-chiffon", &mut completions);
+        let completions = String::from_utf8(completions).unwrap();
+        for option in [
+            "--arrow-record-batch-size",
+            "--parquet-row-group-size",
+            "--parquet-writing-threads",
+            "--vortex-record-batch-size",
+        ] {
+            let completion_option = match shell {
+                clap_complete::Shell::Fish => {
+                    format!("-l {}", option.trim_start_matches("--"))
+                }
+                _ => option.to_owned(),
+            };
+            assert!(
+                completions.contains(&completion_option),
+                "{shell:?} is missing {option}"
+            );
+        }
+        assert!(!completions.contains("parquet-io-threads"));
+        #[cfg(feature = "gcs")]
+        assert!(completions.contains("gcs-endpoint"));
+        #[cfg(not(feature = "gcs"))]
+        assert!(!completions.contains("gcs-"));
+        #[cfg(feature = "s3")]
+        assert!(completions.contains("s3-endpoint"));
+        #[cfg(not(feature = "s3"))]
+        assert!(!completions.contains("s3-"));
+        #[cfg(feature = "bigquery")]
+        assert!(completions.contains("bqs-session-project"));
+        #[cfg(not(feature = "bigquery"))]
+        assert!(!completions.contains("bqs-"));
+    }
 }
 
 #[cfg(feature = "local-bare-paths")]

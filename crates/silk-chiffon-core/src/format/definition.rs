@@ -745,7 +745,10 @@ impl TransformBindings {
             .map(|index| &self.bindings[*index])
     }
 
-    /// Detects an input, trying its extension owner before the normal detector order.
+    /// Detects a transform input, trying its extension owner before the normal detector order.
+    ///
+    /// Detector-only formats are skipped because the returned binding must also be able to create
+    /// an input provider.
     pub async fn detect(
         &self,
         object: &InputObject,

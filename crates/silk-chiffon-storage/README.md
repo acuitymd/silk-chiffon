@@ -80,7 +80,7 @@ Calling `create_session` again produces independently parsed settings and a fres
 
 ## Define a backend
 
-A backend crate starts with `StorageBackend::with_args::<T>()` when it contributes a Clap `Args` type, or `StorageBackend::without_args()` when it has no settings. Setters may be called in any order. The final `build` validates that all required pieces are present and that the definition is internally unambiguous.
+A backend crate starts with `StorageBackend::with_args::<T>()` when it contributes a Clap `Args` type, or `StorageBackend::without_args()` when it has no settings. Setters may be called in any order. The final `build` validates that all required pieces are present and that the definition is internally unambiguous. The compile-checked [`backend` example](examples/backend.rs) contains the smallest complete implementation.
 
 ```rust,ignore
 let backend = StorageBackend::with_args::<CloudArgs>()
@@ -97,7 +97,7 @@ let backend = StorageBackend::with_args::<CloudArgs>()
 
 The settings type `T` stays coupled to the parser and every callback that accepts `&T`. The registry can therefore store backends from unrelated crates without putting settings into `Any` or asking callers to downcast them. The backend definition retains functions typed over `T`. Creating a session produces a backend binding: that backend's parsed `T` paired with its typed callbacks. Private behavior traits let `StorageRegistry` store definitions and `StorageSession` invoke bindings without naming each concrete settings type.
 
-The callbacks divide handle creation and pattern routing into four backend-owned decisions:
+The callbacks divide handle creation and pattern routing into five backend-owned decisions:
 
 - `BareLocationMapper<T>` is an optional callback. When configured, it maps the original schemeless text to a canonical `Location` and claims the registry's single bare-location route.
 - `BarePatternMapper<T>` is an optional callback for schemeless patterns. It requires the same backend to claim exact bare locations and must return a `LocationPattern` under one of that backend's schemes.
@@ -181,7 +181,7 @@ Backends that do not opt in receive no retry configuration. Participating object
 
 A session caches one object-store client per store-root URL: scheme, host, and port, with the path reset to `/` and the query and fragment removed. Location validation and generic object-path derivation still run on cache hits. The object-store creator runs only on a cache miss while the cache lock is held, so concurrent requests cannot create duplicate clients for the same root.
 
-Each directional handle exposes the cache key through `store_url` and returns cheap shared ownership of its permitted object-store interface through `object_store`. A host may register an input pair directly or place a root-scoped view in front of it for DataFusion-specific cache identity and diagnostics. This crate itself remains independent of DataFusion.
+Each directional handle exposes the session cache key through `store_url` and returns cheap shared ownership of its permitted object-store interface through `object_store`. A host may register an input pair directly or place a root-scoped view in front of it under a separate DataFusion object-store URL. This crate itself remains independent of DataFusion.
 
 ## Existence and output policy
 
@@ -190,6 +190,8 @@ Input lookup and output policy remain explicit:
 - `StorageSession::lookup_input` calls `head` and returns an `InputObject` containing the observed metadata.
 - `StorageSession::prepare_output_target` atomically retains a command-session claim on normalized `(store_url, object_path)` identity, then applies `ExistingOutput::Allow` or `ExistingOutput::RejectIfObserved` and the backend callback. A second same-session claim fails even when overwrite is allowed.
 - `ObjectUpload` owns the one-object put or multipart lifecycle. `complete` is the durability boundary, while `abort` cancels in-flight work and awaits multipart cleanup.
+
+An upload exposes only one byte-producer path: direct async `write`, `writer`, or `blocking_writer`. The producer must close or drop its writer before `complete` can observe end of input. Use `ObjectUploadTask` when an encoder runs in its own task; it keeps the producer and upload under one owner, composes producer and cleanup failures, and propagates explicit completion or abort. Dropping either upload owner requests best-effort cancellation, but callers that can await cleanup should call `abort`.
 
 The observed input or output metadata is neither a snapshot nor an external reservation. Callers require selected inputs to remain stable for the command lifetime, and another process may race an advisory output check.
 
@@ -230,11 +232,8 @@ Normal storage and command tests use in-memory stores or loopback HTTP servers. 
 Each run appends a unique child to the configured prefix. The test rejects a bucket value that could alter URL authority or path structure, cleans only that child prefix, and reports any leftover objects. Run a provider target only after reviewing the bucket and prefix:
 
 ```bash
-cargo test -p silk-chiffon-storage --test cloud_live --features gcs live_gcs_exact_patterns_ranges_outputs_multipart_claims_and_cleanup -- --ignored --exact
-cargo test --test cloud_live_e2e live_gcs_composed_cli_detects_inspects_transforms_verifies_and_cleans_up -- --ignored --exact
-
-cargo test -p silk-chiffon-storage --test cloud_live --features s3 live_s3_exact_patterns_ranges_outputs_multipart_claims_and_cleanup -- --ignored --exact
-cargo test --test cloud_live_e2e live_s3_composed_cli_detects_inspects_transforms_verifies_and_cleans_up -- --ignored --exact
+just test-gcs-live
+just test-s3-live
 ```
 
-The storage target covers exact and pattern inputs, metadata, ranges, uploads, overwrite observation, session claims, multipart behavior, and cleanup. The root target seeds a formatted object and exercises the composed `detect`, `inspect`, and `transform` paths. It verifies the output and cleans its run prefix.
+The storage target covers exact and pattern inputs, metadata, ranges, uploads, overwrite observation, session claims, multipart behavior, and cleanup. The root target seeds a formatted object and exercises the composed `detect`, `inspect`, and `transform` paths. It verifies the output and cleans its run prefix. The repository [cloud-testing guide](../../docs/cloud-testing.md) covers authentication, BigQuery, the cross-provider soak, cost guards, and cleanup.

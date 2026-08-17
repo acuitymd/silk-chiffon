@@ -97,53 +97,7 @@ ReadRows reconnects only to the same stream at the last batch offset accepted af
 
 `--bqs-endpoint` is intended for controlled testing and drives both the REST server-clock probe and the Storage Read gRPC client. Plaintext overrides must be loopback addresses. Production defaults use Google's distinct REST and gRPC endpoints; `--bqs-universe-domain` derives both defaults for another Google Cloud universe and conflicts with an explicit endpoint.
 
-The normal test suite is offline and credential-free. Maintainers can run the ignored read-only live proof with `just test-bigquery-live` only after setting `SILK_CHIFFON_BQS_LIVE_ACKNOWLEDGE_COST=1`, `SILK_CHIFFON_BQS_LIVE_SESSION_PROJECT`, `SILK_CHIFFON_BQS_LIVE_TABLE_PROJECT`, `SILK_CHIFFON_BQS_LIVE_DATASET`, `SILK_CHIFFON_BQS_LIVE_TABLE`, `SILK_CHIFFON_BQS_LIVE_EXPECTED_LOCATION`, and a positive `SILK_CHIFFON_BQS_LIVE_MAX_ESTIMATED_BYTES`; `SILK_CHIFFON_BQS_LIVE_QUOTA_PROJECT` is optional. The fixture must be a pre-existing immutable, non-sensitive, small table. The test creates no dataset, table, job, or cloud object, requests one stream with one projected field and an exact non-null filter, applies a local `LIMIT 100`, refuses an absent, nonpositive, or excessive scanned-byte estimate before ReadRows, writes Arrow and Parquet only in a local temporary directory, and enforces a 120-second bound. The estimate, filter, and local limit are safety guards, not billing guarantees.
-
-### Seeded live cloud soak
-
-The ignored `just test-cloud-live-soak` target repeatedly runs the real composed CLI against the selected input services, formats, and object stores. By default, each case combines BQS rows with a generated local Arrow IPC file, Arrow IPC stream, Parquet file, or Vortex file; writes Arrow IPC file or stream, Parquet, or Vortex output to local storage, GCS, or S3; and varies DataFusion target partitions, requested BQS streams, direct output, `sort-single`, `nosort-multi`, and `nosort-evict`. The independent `SILK_CHIFFON_LIVE_SOAK_INPUT_FORMATS`, `SILK_CHIFFON_LIVE_SOAK_OUTPUT_FORMATS`, `SILK_CHIFFON_LIVE_SOAK_INPUT_OBJECT_STORES`, `SILK_CHIFFON_LIVE_SOAK_OUTPUT_OBJECT_STORES`, and `SILK_CHIFFON_LIVE_SOAK_INPUT_SERVICES` selectors narrow those dimensions without changing the test code. A selected GCS or S3 input fixture is uploaded under the run prefix and is removed by the final cleanup sweep along with selected output objects. The source table has an unused column so every BQS case requests a strict projection, projection order varies, and exact predicates range from a non-null check to prefix and middle ranges across the table's integer partitions. Eviction scenarios apply their 1,000-row range both as a pushed SQL predicate and an explicit BQS restriction, keep BQS rows in one output partition, and use 17 alternating local rows to visit every logical partition; this exercises bounded eviction and numbered objects without creating millions of tiny cloud requests. The other strategies can read all five million rows. It reads each result back through the registered format implementation into a local Arrow IPC stream. A native streaming oracle requires every selected fixture and local ID exactly once, rejects every unexpected or duplicate ID, and checks every row's complete `name` value. The runner does not assume row order and retains only a compact fixture-ID bitset instead of the dataset.
-
-The fixture contract is three nullable columns: `id INT64` contains every integer from 1 through `SILK_CHIFFON_BQS_LIVE_EXPECTED_ROWS` exactly once, `name STRING` contains `row-{id}` for each row, and `payload STRING` exists only to prove projection pushdown excludes an unused field. The example partitions `id` into 100,000-row integer ranges so range predicates exercise BigQuery partition pruning. A temporary five-million-row table can be created with:
-
-```bash
-export SILK_CHIFFON_BQS_LIVE_TABLE="silk_chiffon_soak_$(date -u +%Y%m%d_%H%M%S)"
-export SILK_CHIFFON_BQS_LIVE_EXPECTED_ROWS=5000000
-
-bq --location="$SILK_CHIFFON_BQS_LIVE_EXPECTED_LOCATION" query --use_legacy_sql=false "
-CREATE TABLE \`$SILK_CHIFFON_BQS_LIVE_TABLE_PROJECT.$SILK_CHIFFON_BQS_LIVE_DATASET.$SILK_CHIFFON_BQS_LIVE_TABLE\`
-PARTITION BY RANGE_BUCKET(id, GENERATE_ARRAY(0, 5100000, 100000))
-OPTIONS (expiration_timestamp = TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 1 DAY))
-AS
-SELECT major * 1000 + minor + 1 AS id,
-       CONCAT('row-', CAST(major * 1000 + minor + 1 AS STRING)) AS name,
-       CONCAT('unused-', CAST(major * 1000 + minor + 1 AS STRING)) AS payload
-FROM UNNEST(GENERATE_ARRAY(0, 4999)) AS major
-CROSS JOIN UNNEST(GENERATE_ARRAY(0, 999)) AS minor
-"
-```
-
-Set the GCS and S3 bucket and prefix variables only for the selected cloud stores, using dedicated non-root test locations; the prefixes must contain at least two path segments. Set the BQS variables required by `just test-bigquery-live`, plus `SILK_CHIFFON_BQS_LIVE_EXPECTED_ROWS`, only when `bqs` is selected. The root package enables local, GCS, S3, BQS, and every format by default. If the S3 implementation should use an AWS CLI profile, export that profile's temporary environment credentials before starting the process:
-
-The soak defaults to the full matrix, but each dimension can be narrowed without changing the test binary. Set `SILK_CHIFFON_LIVE_SOAK_INPUT_FORMATS` and `SILK_CHIFFON_LIVE_SOAK_OUTPUT_FORMATS` independently to comma-separated subsets of `arrow-file`, `arrow-stream`, `parquet`, and `vortex`. Set `SILK_CHIFFON_LIVE_SOAK_INPUT_OBJECT_STORES` and `SILK_CHIFFON_LIVE_SOAK_OUTPUT_OBJECT_STORES` independently to subsets of `local`, `gcs`, and `s3`; an input fixture selected for GCS or S3 is uploaded before the transform and removed by the final cleanup sweep. Unselected cloud stores do not require credentials or bucket variables. Set `SILK_CHIFFON_LIVE_SOAK_INPUT_SERVICES` to `bqs`, `local`, or both; omitting `bqs` avoids BigQuery credentials and table variables, while omitting `local` tests the service input alone. Each selector must contain at least one value.
-
-```bash
-eval "$(aws configure export-credentials --profile default --format env)"
-export AWS_DEFAULT_REGION="$(aws configure get region --profile default)"
-```
-
-Run `just test-bigquery-live` first so its server-provided scanned-byte estimate is checked against `SILK_CHIFFON_BQS_LIVE_MAX_ESTIMATED_BYTES`. Then choose a duration and optional reproducible seed:
-
-```bash
-export SILK_CHIFFON_LIVE_SOAK_DURATION=3h
-export SILK_CHIFFON_LIVE_SOAK_SEED=0x5eed
-just test-cloud-live-soak
-```
-
-The default duration is five minutes. The deterministic prelude includes every selected input/output object-store pair and every selected output-format/partitioned-strategy pair; with the defaults, it contains 36 local, GCS, and S3 cases. Later cases are seeded random combinations that also include selected local and direct output. `SILK_CHIFFON_LIVE_SOAK_MAX_CASES` adds a case limit. Every failure prints its seed, case number, and complete scenario. Set `SILK_CHIFFON_LIVE_SOAK_CASE` with the same seed to replay only that case. Each case uses a unique cloud child prefix, and the harness performs one final sweep of each selected cloud prefix after the case run, including after a transform or verification failure. The temporary BigQuery table is not owned by the test; remove it when the run ends, although the one-day table expiration is a fallback:
-
-```bash
-bq rm -f -t "$SILK_CHIFFON_BQS_LIVE_TABLE_PROJECT:$SILK_CHIFFON_BQS_LIVE_DATASET.$SILK_CHIFFON_BQS_LIVE_TABLE"
-```
+Live tests and the seeded cross-provider soak are documented separately because they require credentials, dedicated resources, cost acknowledgement, and explicit cleanup. See [Cloud testing](docs/cloud-testing.md).
 
 ## Recipes
 
@@ -184,6 +138,8 @@ silk-chiffon transform --from events.arrow \
 ```
 
 Object uploads use a 10 MiB adaptive single-put threshold and multipart part size by default, with at most eight multipart part requests in flight across the command. Tune these with `--object-store-upload-part-size` and `--object-store-max-in-flight-parts`.
+
+When `--list-outputs` is requested and a later sink fails, the partial report contains only targets whose sink and storage upload already completed. Open or aborted targets are never reported as durable. Target claims prevent two outputs in one command from selecting the same normalized object, even when overwrite is allowed; external existence checks remain advisory because another process can race them.
 
 ### Reshape with SQL
 
@@ -258,10 +214,18 @@ silk-chiffon uses [`just`](https://github.com/casey/just) as its task runner. Ru
 ```bash
 just build      # release build
 just test       # run the test suite (via cargo nextest)
-just verify     # type-check, format, lint, and regenerate docs/CLI.md
+just verify     # run the complete local verification gate
 ```
 
-`just verify` is the pre-push gate. Because it regenerates `docs/CLI.md`, the CLI reference tracks the code without anyone having to remember to update it.
+`just verify` is the pre-push gate. It formats and checks the code, regenerates `docs/CLI.md`, runs the complete Nextest suite and feature matrices, builds documentation and benchmarks, and checks the package inventory. See the [development guide](docs/development.md) for each layer.
+
+## Documentation
+
+- [Command reference](docs/CLI.md)
+- [Architecture](docs/architecture.md)
+- [Extending Silk Chiffon](docs/extending.md)
+- [Cloud testing](docs/cloud-testing.md)
+- [Development and verification](docs/development.md)
 
 ## License
 
