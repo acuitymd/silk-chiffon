@@ -39,14 +39,13 @@ jobs:
       SILK_CHIFFON_WATCH_GIT_REF: "1"
       SILK_CHIFFON_VERSION_OVERRIDE: ${{ needs.version.outputs.binary_version }}
     strategy:
-      fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-latest
             os: linux
           - target: aarch64-unknown-linux-gnu
-            runner: ubuntu-latest
+            runner: ubuntu-24.04-arm
             os: linux
           - target: aarch64-apple-darwin
             runner: macos-latest
@@ -65,7 +64,7 @@ jobs:
 
       - name: Install system dependencies
         if: matrix.os == 'linux'
-        run: sudo apt-get update && sudo apt-get install -y binutils lld
+        run: sudo apt-get update && sudo apt-get install -y lld
 
       - name: Install packages
         if: matrix.os == 'macos'
@@ -73,7 +72,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: "release-${{ matrix.target }}"
+          shared-key: "release-${{ matrix.runner }}"
 
       - name: Install cargo-zigbuild
         if: matrix.os == 'linux'
@@ -89,21 +88,11 @@ jobs:
         # links against older version of libc, makes it more compatible with older distros
         run: cargo zigbuild --locked --release --target ${{ matrix.target }}
 
-      - name: Test native binary
-        if: matrix.target != 'aarch64-unknown-linux-gnu'
+      - name: Test binary
         run: |
           ACTUAL="$(./target/${{ matrix.target }}/release/silk-chiffon --version)"
           EXPECTED="silk-chiffon ${{ needs.version.outputs.binary_version }}"
           test "${ACTUAL}" = "${EXPECTED}"
-
-      - name: Inspect cross-compiled binary
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          BINARY="target/${{ matrix.target }}/release/silk-chiffon"
-          file "${BINARY}"
-          readelf --file-header "${BINARY}" | grep -Eq 'Class:.*ELF64'
-          readelf --file-header "${BINARY}" | grep -Eq 'Data:.*little endian'
-          readelf --file-header "${BINARY}" | grep -Eq 'Machine:.*AArch64'
 
       - name: Rename binary
         run: |
