@@ -14,7 +14,8 @@ use arrow::array::{Date32Array, Int16Array, Int32Array};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use silk_chiffon::{Cli, Command, TransformCommand};
+use silk_chiffon::commands::transform;
+use silk_chiffon::{DataFormat, MemoryBudgetSpec, PartitionStrategy, TransformCommand};
 use tempfile::TempDir;
 use tokio::runtime::Runtime;
 
@@ -180,32 +181,29 @@ fn write_arrow_file(path: &std::path::Path, schema: &SchemaRef, batches: Vec<Rec
     writer.finish().unwrap();
 }
 
-fn benchmark_transform_command(
-    input_path: &str,
-    output_template: &str,
-    partition_strategy: &str,
-) -> TransformCommand {
-    let Cli {
-        command: Command::Transform(command),
-    } = Cli::try_parse_from(vec![
-        "silk-chiffon".to_owned(),
-        "transform".to_owned(),
-        "--from".to_owned(),
-        input_path.to_owned(),
-        "--to-many".to_owned(),
-        output_template.to_owned(),
-        "--by".to_owned(),
-        "field1".to_owned(),
-        "--partition-strategy".to_owned(),
-        partition_strategy.to_owned(),
-        "--create-dirs".to_owned(),
-        "--overwrite".to_owned(),
-    ])
-    .unwrap()
-    else {
-        unreachable!()
-    };
-    command
+fn default_transform_command() -> TransformCommand {
+    TransformCommand {
+        from: None,
+        from_many: vec![],
+        to: None,
+        to_many: None,
+        by: None,
+        partition_strategy: PartitionStrategy::SortSingle,
+        exclude_columns: vec![],
+        list_outputs: None,
+        list_outputs_file: None,
+        create_dirs: true,
+        overwrite: true,
+        query: None,
+        dialect: Default::default(),
+        sort_by: None,
+        memory_budget: MemoryBudgetSpec::Total { pct: 80, min: None },
+        preserve_input_order: false,
+        target_partitions: None,
+        input_format: None,
+        output_format: Some(DataFormat::Parquet),
+        ..TransformCommand::default()
+    }
 }
 
 type BatchCreator = fn(&SchemaRef, usize, usize) -> RecordBatch;
@@ -214,7 +212,7 @@ fn run_partition_benchmark(
     c: &mut Criterion,
     group_name: &str,
     configs: &[Config],
-    partition_strategy: &str,
+    partition_strategy: PartitionStrategy,
     create_batch: BatchCreator,
     sample_size: usize,
 ) {
@@ -268,14 +266,16 @@ fn run_partition_benchmark(
                         .unwrap();
                     let _ = std::fs::remove_dir_all(out_dir);
 
-                    let cmd = benchmark_transform_command(
-                        &fixture.input_path,
-                        &fixture.output_template,
+                    let cmd = TransformCommand {
+                        from: Some(fixture.input_path.clone()),
+                        to_many: Some(fixture.output_template.clone()),
+                        by: Some("field1".to_string()),
                         partition_strategy,
-                    );
+                        ..default_transform_command()
+                    };
 
                     rt.block_on(async {
-                        Command::Transform(cmd).execute().await.unwrap();
+                        transform::run(cmd).await.unwrap();
                     });
                 });
             },
@@ -291,7 +291,7 @@ fn bench_high_card_interleaved(c: &mut Criterion) {
         c,
         "high_card/interleaved",
         STRESS_CONFIGS,
-        "sort-single",
+        PartitionStrategy::SortSingle,
         create_interleaved_batch,
         10,
     );
@@ -302,7 +302,7 @@ fn bench_high_card_sorted(c: &mut Criterion) {
         c,
         "high_card/sorted",
         STRESS_CONFIGS,
-        "sort-single",
+        PartitionStrategy::SortSingle,
         create_sorted_batch,
         30,
     );
@@ -313,7 +313,7 @@ fn bench_low_card_interleaved(c: &mut Criterion) {
         c,
         "low_card/interleaved",
         STRESS_CONFIGS,
-        "nosort-multi",
+        PartitionStrategy::NosortMulti,
         create_interleaved_batch,
         10,
     );
@@ -324,7 +324,7 @@ fn bench_low_card_sorted(c: &mut Criterion) {
         c,
         "low_card/sorted",
         STRESS_CONFIGS,
-        "nosort-multi",
+        PartitionStrategy::NosortMulti,
         create_sorted_batch,
         30,
     );
@@ -336,7 +336,7 @@ fn bench_high_card_realistic(c: &mut Criterion) {
         c,
         "high_card/realistic",
         REALISTIC_CONFIGS,
-        "sort-single",
+        PartitionStrategy::SortSingle,
         create_clustered_batch,
         30,
     );
@@ -347,7 +347,7 @@ fn bench_low_card_realistic(c: &mut Criterion) {
         c,
         "low_card/realistic",
         REALISTIC_CONFIGS,
-        "nosort-multi",
+        PartitionStrategy::NosortMulti,
         create_clustered_batch,
         30,
     );

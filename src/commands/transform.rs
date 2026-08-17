@@ -1,33 +1,39 @@
-use std::{num::NonZeroUsize, sync::Arc};
+use std::num::NonZeroUsize;
+use std::sync::Arc;
 
-use crate::{PartitionStrategy, SortSpec, TransformCommand, default_thread_budget};
-use anyhow::{Result, anyhow};
-use camino::Utf8Path;
-use datafusion::catalog::TableProvider;
-use owo_colors::OwoColorize;
-use silk_chiffon_core::{
-    OpenSinkMode, Pipeline, PresentationMode, SinkBindingConfig, union_input_providers_by_name,
+use crate::{
+    AllColumnsBloomFilterConfig, BloomFilterConfig, DEFAULT_BLOOM_FILTER_FPP, DataFormat,
+    ListOutputsFormat, PartitionStrategy, SortSpec, TransformCommand, default_thread_budget,
+    io_strategies::{
+        OutputFileInfo, input_strategy::InputStrategy, output_strategy::SinkFactory,
+        path_template::PathTemplate,
+    },
+    operations::{query::QueryOperation, sort::SortOperation},
+    pipeline::Pipeline,
+    sinks::{
+        arrow::{ArrowSink, ArrowSinkOptions},
+        data_sink::DataSink,
+        parquet::{ParquetRuntimes, ParquetSink, ParquetSinkOptions},
+        vortex::{VortexSink, VortexSinkOptions},
+    },
+    sources::{
+        arrow::ArrowDataSource, data_source::DataSource, parquet::ParquetDataSource,
+        vortex::VortexDataSource,
+    },
+    utils::memory::{estimate_sort_spill_reservation, sample_avg_row_bytes},
 };
+use anyhow::{Result, anyhow};
+use apply_if::ApplyIf;
+use arrow::datatypes::SchemaRef;
+use camino::Utf8Path;
+use glob::glob;
+use owo_colors::OwoColorize;
 use tabled::{builder::Builder, settings::Style};
 
-mod file_input;
-mod file_output;
-mod projection;
-mod query;
-mod scheme;
-mod sort;
-mod sort_memory;
-
-use file_input::FileInputPreparer;
-use file_output::{FileOutputBinder, FileOutputReport, FileOutputRequest};
-use projection::project_stream;
-use query::apply_query;
-use scheme::explicit_scheme;
-use sort::apply_sort;
-
-pub(crate) async fn run(args: TransformCommand) -> Result<()> {
+pub async fn run(args: TransformCommand) -> Result<()> {
     let TransformCommand {
-        inputs,
+        from,
+        from_many,
         to,
         to_many,
         by,
@@ -47,31 +53,103 @@ pub(crate) async fn run(args: TransformCommand) -> Result<()> {
         preserve_input_order,
         target_partitions,
         input_format,
-        allow_unmatched_patterns,
         output_format,
+        arrow_compression,
+        arrow_format,
+        arrow_record_batch_size,
+        arrow_writing_queue_size,
+        parquet_bloom_all,
+        parquet_bloom_all_off,
+        parquet_bloom_column,
+        parquet_bloom_column_off,
+        parquet_buffer_size,
+        parquet_dictionary_column,
+        parquet_column_encoding,
+        parquet_column_encoding_threads,
+        parquet_dictionary_column_off,
+        parquet_compression,
+        parquet_compression_level,
+        parquet_ingestion_queue_size,
+        parquet_encoding_queue_size,
+        parquet_writing_queue_size,
+        parquet_encoding,
+        parquet_io_threads,
+        parquet_dictionary_all_off,
+        parquet_row_group_concurrency,
+        parquet_row_group_size,
+        parquet_sorted_metadata,
+        parquet_statistics,
+        parquet_writer_version,
+        parquet_data_page_size,
+        parquet_data_page_row_limit,
+        parquet_dictionary_page_size,
+        parquet_write_batch_size,
+        parquet_offset_index,
+        parquet_page_header_statistics,
+        parquet_arrow_metadata,
         thread_budget,
         spill_path,
         spill_compression,
-        formats,
-        storage,
-        service_inputs,
-        service_outputs,
-        input_schemes,
-        output_schemes,
+        vortex_record_batch_size,
     } = args;
 
     let usable_cpus = thread_budget
         .map(|spec| spec.resolve())
         .unwrap_or_else(default_thread_budget);
+    let quarter_cpus = (usable_cpus / 4).max(1);
     let three_quarter_cpus = (usable_cpus * 3 / 4).max(1);
 
+    // allocate threads based on workload:
+    // - sorting is CPU-intensive in DataFusion, so give encoding fewer threads
+    // - without sorting, encoding is the bottleneck, so give it more threads
+    // NOTE: output partitioning with sort-single strategy requires sorting by partition columns
     let has_sort =
         sort_by.is_some() || (by.is_some() && partition_strategy == PartitionStrategy::SortSingle);
+    let default_encoding_threads = if has_sort {
+        quarter_cpus
+    } else {
+        three_quarter_cpus
+    };
+    let runtimes = Arc::new(ParquetRuntimes::try_new(
+        parquet_column_encoding_threads.unwrap_or(default_encoding_threads),
+        parquet_io_threads.unwrap_or(1),
+    )?);
 
-    if preserve_input_order
-        && (inputs.exact_references.len() != 1 || !inputs.file_patterns.is_empty())
-    {
-        anyhow::bail!("--preserve-input-order requires exactly one --from reference");
+    for disabled_col in &parquet_bloom_column_off {
+        if parquet_bloom_column.iter().any(|c| &c.name == disabled_col) {
+            anyhow::bail!(
+                "column '{}' specified in both --parquet-bloom-column-off and --parquet-bloom-column",
+                disabled_col
+            );
+        }
+    }
+
+    for disabled_col in &parquet_dictionary_column_off {
+        if parquet_dictionary_column
+            .iter()
+            .any(|c| &c.name == disabled_col)
+        {
+            anyhow::bail!(
+                "column '{}' specified in both --parquet-dictionary-column-off and --parquet-dictionary-column",
+                disabled_col
+            );
+        }
+    }
+
+    let all_enabled = if parquet_bloom_all_off {
+        None
+    } else {
+        parquet_bloom_all.or(Some(AllColumnsBloomFilterConfig {
+            fpp: DEFAULT_BLOOM_FILTER_FPP,
+            ndv: None,
+        }))
+    };
+    let bloom_filter =
+        BloomFilterConfig::try_new(all_enabled, parquet_bloom_column, parquet_bloom_column_off)
+            .map_err(anyhow::Error::msg)?;
+
+    if preserve_input_order && from.is_none() {
+        anyhow::bail!("--preserve-input-order requires --from (single input file)");
     }
 
     let effective_target_partitions = if preserve_input_order {
@@ -111,59 +189,87 @@ pub(crate) async fn run(args: TransformCommand) -> Result<()> {
         .with_target_partitions(effective_target_partitions)
         .with_spill_path(spill_path)
         .with_spill_compression(spill_compression);
-    let session = pipeline.create_session_context()?;
 
-    let file_inputs = FileInputPreparer::new(&storage, &formats, input_format.as_deref(), &session);
-    let mut providers: Vec<Arc<dyn TableProvider>> = Vec::new();
-    let mut used_file_input = false;
-    for pattern in &inputs.file_patterns {
-        if let Some(scheme) = explicit_scheme(pattern) {
-            match input_schemes.owner(scheme) {
-                Some(crate::registration::InputSchemeOwner::FileInput) => {}
-                Some(crate::registration::InputSchemeOwner::ServiceInput(index)) => {
-                    anyhow::bail!(
-                        "service input {:?} does not support --from-pattern \
-                         {pattern:?}; use --from",
-                        service_inputs[*index].name()
-                    );
-                }
-                None => anyhow::bail!("unsupported input scheme {scheme:?}"),
+    let (input_paths, should_glob) = if let Some(single_input) = from {
+        (vec![single_input], false)
+    } else {
+        (from_many, true)
+    };
+
+    // resolve input paths (glob-expand if needed), build sources, and create InputStrategy
+    let input_strategy = if !should_glob && input_paths.len() == 1 {
+        let input_path = &input_paths[0];
+        let source = make_source(input_path, input_format)?;
+        InputStrategy::Single(source)
+    } else {
+        let mut expanded_paths = Vec::new();
+
+        for pattern in &input_paths {
+            for entry in glob(pattern)
+                .map_err(|e| anyhow!("Error expanding glob pattern {}: {}", pattern, e))?
+            {
+                expanded_paths.push(
+                    entry
+                        .map_err(|e| anyhow!("Error decoding file path: {}", e))?
+                        .to_string_lossy()
+                        .to_string(),
+                );
             }
         }
-    }
-    for reference in &inputs.exact_references {
-        let (provider, is_file) = match explicit_scheme(reference) {
-            Some(scheme) => match input_schemes.owner(scheme) {
-                Some(crate::registration::InputSchemeOwner::FileInput) => {
-                    (file_inputs.prepare_exact(reference).await?, true)
-                }
-                Some(crate::registration::InputSchemeOwner::ServiceInput(index)) => (
-                    service_inputs[*index]
-                        .create_input_provider(reference, &session)
-                        .await?,
-                    false,
-                ),
-                None => anyhow::bail!("unsupported input scheme {scheme:?}"),
-            },
-            None => (file_inputs.prepare_exact(reference).await?, true),
-        };
-        used_file_input |= is_file;
-        providers.push(provider);
-    }
-    let pattern_providers = file_inputs
-        .prepare_patterns(&inputs.file_patterns, allow_unmatched_patterns)
-        .await?;
-    used_file_input |= !pattern_providers.is_empty();
-    providers.extend(pattern_providers);
-    if input_format.is_some() && !used_file_input {
-        anyhow::bail!("--input-format applies only to file inputs");
-    }
-    if providers.is_empty() {
-        anyhow::bail!("no inputs were selected");
-    }
-    let mut input = union_input_providers_by_name(&session, providers)?;
 
-    let list_outputs_mode = list_outputs;
+        expanded_paths.sort();
+        expanded_paths.dedup();
+
+        if expanded_paths.is_empty() {
+            anyhow::bail!("No input files found matching patterns: {:?}", input_paths);
+        }
+
+        let mut sources: Vec<Box<dyn DataSource>> = Vec::new();
+        let mut schema: Option<SchemaRef> = None;
+        for input_path in &expanded_paths {
+            let source = make_source(input_path, input_format)?;
+            if let Some(ref schema) = schema {
+                let source_schema = source.schema()?;
+                if *schema != source_schema {
+                    anyhow::bail!(
+                        "Schema mismatch for input file {} (does not match other file(s))",
+                        input_path
+                    );
+                }
+            } else {
+                schema = Some(source.schema()?);
+            }
+            sources.push(source);
+        }
+        InputStrategy::Multiple(sources)
+    };
+
+    // sample rows to estimate sort spill reservation before handing strategy to pipeline
+    if has_sort {
+        let avg_row_bytes = sample_avg_row_bytes(&input_strategy, 100_000).await?;
+
+        if avg_row_bytes > 0 {
+            let total_rows = input_strategy.row_count().unwrap_or(0);
+            let total_in_memory_bytes = total_rows.saturating_mul(avg_row_bytes);
+
+            let memory_limit = effective_memory_limit.unwrap_or(total_budget * 60 / 100);
+            let partitions = effective_target_partitions.unwrap_or(three_quarter_cpus);
+            let memory_per_partition = memory_limit / partitions.max(1);
+
+            let reservation = estimate_sort_spill_reservation(
+                avg_row_bytes,
+                total_in_memory_bytes,
+                memory_per_partition,
+                8192, // DataFusion default batch size
+            );
+
+            pipeline = pipeline.with_sort_spill_reservation_bytes(reservation);
+        }
+    }
+
+    pipeline = pipeline.with_input_strategy(input_strategy);
+
+    let list_outputs_format = list_outputs;
 
     // The overall sort order is determined by the following:
     //
@@ -207,166 +313,194 @@ pub(crate) async fn run(args: TransformCommand) -> Result<()> {
     let user_sort_spec_without_partition_cols =
         user_sort_spec.without_columns_named(&partition_columns);
 
+    let parquet_sort_spec =
+        if parquet_sorted_metadata && !user_sort_spec_without_partition_cols.is_empty() {
+            Some(user_sort_spec_without_partition_cols.clone())
+        } else {
+            None
+        };
+
     let mut full_sort_spec = partition_sort_spec.clone();
     full_sort_spec.extend(&user_sort_spec_without_partition_cols);
 
-    if let Some(q) = &query {
-        input = apply_query(&session, input, q).await?;
+    let arrow_opts = ArrowSinkOptions::new()
+        .with_compression(arrow_compression)
+        .with_format(arrow_format)
+        .with_record_batch_size(arrow_record_batch_size)
+        .with_queue_depth(arrow_writing_queue_size);
+
+    let parquet_opts = ParquetSinkOptions::new()
+        .with_parquet_compression(parquet_compression, parquet_compression_level)?
+        .with_statistics(parquet_statistics)
+        .with_writer_version(parquet_writer_version)
+        .with_ingestion_queue_size(parquet_ingestion_queue_size)
+        .with_encoding_queue_size(parquet_encoding_queue_size)
+        .with_writing_queue_size(parquet_writing_queue_size)
+        .with_no_dictionary(parquet_dictionary_all_off)
+        .with_dictionary_configs(&parquet_dictionary_column)
+        .with_column_no_dictionary(parquet_dictionary_column_off)
+        .with_encoding(parquet_encoding)
+        .with_column_encodings(parquet_column_encoding)
+        .with_bloom_filters(bloom_filter)
+        .with_offset_index_enabled(parquet_offset_index)
+        .with_skip_arrow_metadata(!parquet_arrow_metadata)
+        .with_page_header_statistics(parquet_page_header_statistics)
+        .apply_if_some(parquet_buffer_size, ParquetSinkOptions::with_buffer_size)
+        .apply_if_some(
+            parquet_row_group_size,
+            ParquetSinkOptions::with_max_row_group_size,
+        )
+        .apply_if_some(
+            parquet_row_group_concurrency,
+            ParquetSinkOptions::with_max_row_group_concurrency,
+        )
+        .apply_if_some(
+            parquet_data_page_size,
+            ParquetSinkOptions::with_data_page_size_limit,
+        )
+        .apply_if_some(
+            parquet_data_page_row_limit,
+            ParquetSinkOptions::with_data_page_row_count_limit,
+        )
+        .apply_if_some(
+            parquet_dictionary_page_size,
+            ParquetSinkOptions::with_dictionary_page_size_limit,
+        )
+        .apply_if_some(
+            parquet_write_batch_size,
+            ParquetSinkOptions::with_write_batch_size,
+        )
+        .apply_if_some(parquet_sort_spec, ParquetSinkOptions::with_sort_spec);
+
+    let vortex_opts = VortexSinkOptions::new().apply_if_some(
+        vortex_record_batch_size,
+        VortexSinkOptions::with_record_batch_size,
+    );
+
+    let sink_factory = create_sink_factory(
+        output_format,
+        arrow_opts.clone(),
+        parquet_opts.clone(),
+        vortex_opts,
+        Arc::clone(&runtimes),
+    )?;
+
+    if let Some(output_path) = to {
+        pipeline = pipeline.with_output_strategy_with_single_sink(
+            output_path,
+            sink_factory,
+            exclude_columns.clone(),
+            create_dirs,
+            overwrite,
+        );
+    } else if let Some(template) = to_many {
+        let path_template = PathTemplate::new(template);
+
+        if max_open_partitions.is_some() && partition_strategy != PartitionStrategy::NosortEvict {
+            anyhow::bail!(
+                "--max-open-partitions is only supported with --partition-strategy=nosort-evict"
+            );
+        }
+
+        let max_open_partitions = NonZeroUsize::new(max_open_partitions.unwrap_or(100))
+            .ok_or_else(|| anyhow!("--max-open-partitions must be at least 1"))?;
+
+        match partition_strategy {
+            PartitionStrategy::NosortMulti => {
+                pipeline = pipeline.with_multi_writer_partitioned_sink(
+                    partition_columns,
+                    path_template,
+                    sink_factory,
+                    exclude_columns.clone(),
+                    create_dirs,
+                    overwrite,
+                    list_outputs.unwrap_or_default(),
+                );
+            }
+            PartitionStrategy::NosortEvict => {
+                // each partition gets its own writer, so we minimize per-writer
+                // concurrency to avoid scheduling overhead from 100+ parallel pipelines
+                let evict_sink_factory = create_sink_factory(
+                    output_format,
+                    arrow_opts,
+                    parquet_opts
+                        .with_ingestion_queue_size(1)
+                        .with_encoding_queue_size(1)
+                        .with_writing_queue_size(1)
+                        .with_max_row_group_concurrency(1),
+                    vortex_opts,
+                    runtimes,
+                )?;
+                pipeline = pipeline.with_evict_writer_partitioned_sink(
+                    partition_columns,
+                    path_template,
+                    evict_sink_factory,
+                    exclude_columns.clone(),
+                    create_dirs,
+                    overwrite,
+                    list_outputs.unwrap_or_default(),
+                    max_open_partitions,
+                );
+            }
+            PartitionStrategy::SortSingle => {
+                pipeline = pipeline.with_single_writer_partitioned_sink(
+                    partition_columns,
+                    path_template,
+                    sink_factory,
+                    exclude_columns.clone(),
+                    create_dirs,
+                    overwrite,
+                    list_outputs.unwrap_or_default(),
+                );
+            }
+        }
+    }
+
+    if let Some(q) = query {
+        pipeline = pipeline.with_operation(Box::new(QueryOperation::new(q)));
     }
 
     if !full_sort_spec.is_empty() {
-        input = apply_sort(input, &full_sort_spec.columns)?;
+        pipeline = pipeline.with_operation(Box::new(SortOperation::new(full_sort_spec.columns)));
     }
 
-    let mut prepared = pipeline.prepare(input, session).await?;
+    let files = pipeline.execute().await?;
 
-    if has_sort {
-        let memory_limit = effective_memory_limit.unwrap_or(total_budget * 60 / 100);
-        let partitions = effective_target_partitions.unwrap_or(three_quarter_cpus);
-        let memory_per_partition = memory_limit / partitions.max(1);
-        let reservation = sort_memory::sort_spill_reservation_from_plan(
-            prepared.execution_plan(),
-            memory_per_partition,
-            8192,
-        );
-        prepared = prepared.with_sort_spill_reservation_bytes(reservation);
-    }
-
-    if let Some(target) = to.as_deref()
-        && let Some(scheme) = explicit_scheme(target)
-    {
-        match output_schemes.owner(scheme) {
-            Some(crate::registration::OutputSchemeOwner::ServiceOutput(index)) => {
-                if output_format.is_some() {
-                    anyhow::bail!("--output-format applies only to file outputs");
-                }
-                if list_outputs.is_some() {
-                    anyhow::bail!("--list-outputs applies only to file outputs");
-                }
-                let projection = if exclude_columns.is_empty() {
-                    None
-                } else {
-                    let schema = prepared.output_schema();
-                    validate_excluded_columns(&schema, &exclude_columns)?;
-                    projection_indices_excluding(&schema, &exclude_columns)
-                };
-                let mut stream = prepared.begin_execution()?.into_sendable_stream();
-                if let Some(indices) = projection {
-                    stream = project_stream(stream, indices)?;
-                }
-                service_outputs[*index].consume(target, stream).await?;
-                return Ok(());
-            }
-            Some(crate::registration::OutputSchemeOwner::FileOutput) => {}
-            None => anyhow::bail!("unsupported output scheme {scheme:?}"),
-        }
-    }
-    if let Some(template) = to_many.as_deref()
-        && let Some(scheme) = explicit_scheme(template)
-    {
-        match output_schemes.owner(scheme) {
-            Some(crate::registration::OutputSchemeOwner::FileOutput) => {}
-            Some(crate::registration::OutputSchemeOwner::ServiceOutput(index)) => {
-                anyhow::bail!(
-                    "service output {:?} does not support --to-many {template:?}; use --to",
-                    service_outputs[*index].name()
-                );
-            }
-            None => anyhow::bail!("unsupported output scheme {scheme:?}"),
-        }
-    }
-
-    let output_ordering = user_sort_spec_without_partition_cols.columns.clone();
-    let output_threads = if has_sort {
-        (usable_cpus / 4).max(1)
-    } else {
-        three_quarter_cpus
-    };
-    let open_sink_mode = if to_many.is_some()
-        && matches!(
-            partition_strategy,
-            PartitionStrategy::NosortMulti | PartitionStrategy::NosortEvict
-        ) {
-        OpenSinkMode::Multiple
-    } else {
-        OpenSinkMode::OneAtATime
-    };
-    let sink_context = SinkBindingConfig::new(
-        NonZeroUsize::new(output_threads).expect("the thread budget is always positive"),
-        open_sink_mode,
-        output_ordering,
-    );
-    let target = match (to, to_many) {
-        (Some(target), None) => FileOutputRequest::Exact {
-            target,
-            exclude_columns,
-            create_dirs,
-            overwrite,
-        },
-        (None, Some(pattern)) => FileOutputRequest::Template {
-            pattern,
-            partition_fields: partition_columns,
-            strategy: partition_strategy,
-            max_open_partitions,
-            exclude_columns,
-            create_dirs,
-            overwrite,
-        },
-        _ => unreachable!("Clap requires exactly one output mode"),
-    };
-    let output = FileOutputBinder::new(&storage, &formats, output_format.as_deref())
-        .bind(target, &sink_context, &prepared.output_schema())
-        .await?;
-
-    let execution = prepared.begin_execution()?;
-    let report = match output.write(execution.into_sendable_stream()).await {
-        Ok(report) => report,
-        Err(failure) => {
-            if let Some(mode) = list_outputs_mode
-                && let Err(reporting) =
-                    print_output_files(failure.report(), mode, list_outputs_file.as_deref())
-            {
-                return Err(with_cleanup_error(failure.into(), reporting));
-            }
-            return Err(failure.into());
-        }
-    };
-
-    if let Some(mode) = list_outputs_mode {
-        print_output_files(&report, mode, list_outputs_file.as_deref())?;
+    if let Some(format) = list_outputs_format {
+        print_output_files(&files, format, list_outputs_file.as_deref())?;
     }
 
     Ok(())
 }
 
 fn print_output_files(
-    report: &FileOutputReport,
-    mode: PresentationMode,
+    files: &[OutputFileInfo],
+    format: ListOutputsFormat,
     output_path: Option<&Utf8Path>,
 ) -> Result<()> {
-    let output = match mode {
-        PresentationMode::Text => {
-            if report.outputs().is_empty() {
+    let output = match format {
+        ListOutputsFormat::None => return Ok(()),
+        ListOutputsFormat::Text => {
+            if files.is_empty() {
                 return Ok(());
             }
 
             let mut builder = Builder::default();
 
-            let mut header: Vec<String> = report
-                .outputs()
+            let mut header: Vec<String> = files
                 .first()
-                .map(|output| {
-                    output
-                        .partition_fields
+                .map(|f| {
+                    f.partition_values
                         .iter()
-                        .map(|value| to_title_case(&value.field))
+                        .map(|pv| to_title_case(&pv.column))
                         .collect()
                 })
                 .unwrap_or_default();
-            header.push("Durable Locations".to_string());
-            header.push("Rows Written".to_string());
+            header.push("Path".to_string());
+            header.push("Row Count".to_string());
 
             if output_path.is_none() {
+                // writing to stdout, so use colors
                 let colored_header: Vec<String> =
                     header.iter().map(|h| h.bold().to_string()).collect();
                 builder.push_record(colored_header);
@@ -374,32 +508,38 @@ fn print_output_files(
                 builder.push_record(header);
             }
 
-            for completed in report.outputs() {
-                let mut row: Vec<String> = completed
-                    .partition_fields
+            // sort by path for consistent output
+            let mut sorted_files = files.to_vec();
+            sorted_files.sort_by(|a, b| a.path.cmp(&b.path));
+
+            for file in &sorted_files {
+                let mut row: Vec<String> = file
+                    .partition_values
                     .iter()
-                    .map(|value| {
-                        let value = format_json_value(&value.value);
+                    .map(|pv| {
+                        let val = format_json_value(&pv.value);
                         if output_path.is_none() {
-                            value.green().to_string()
+                            // again, writing to stdout, so use colors
+                            val.green().to_string()
                         } else {
-                            value
+                            val
                         }
                     })
                     .collect();
-                row.push(completed.durable_locations.join(", "));
-                let rows_written = completed.rows_written.to_string();
+                row.push(file.path.clone());
+                let row_count = file.row_count.to_string();
                 if output_path.is_none() {
-                    row.push(rows_written.cyan().to_string());
+                    // once again, writing to stdout, so use colors
+                    row.push(row_count.cyan().to_string());
                 } else {
-                    row.push(rows_written);
+                    row.push(row_count);
                 }
                 builder.push_record(row);
             }
 
             builder.build().with(Style::rounded()).to_string()
         }
-        PresentationMode::Json => serde_json::to_string_pretty(report)?,
+        ListOutputsFormat::Json => serde_json::to_string_pretty(files)?,
     };
 
     if let Some(path) = output_path {
@@ -434,51 +574,60 @@ fn to_title_case(s: &str) -> String {
         .join(" ")
 }
 
-pub(super) fn with_cleanup_error(primary: anyhow::Error, cleanup: anyhow::Error) -> anyhow::Error {
-    anyhow::Error::new(PrimaryWithCleanup { primary, cleanup })
-}
-
-#[derive(Debug)]
-struct PrimaryWithCleanup {
-    primary: anyhow::Error,
-    cleanup: anyhow::Error,
-}
-
-impl std::fmt::Display for PrimaryWithCleanup {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            formatter,
-            "{}; cleanup also failed: {:#}",
-            self.primary, self.cleanup
-        )
-    }
-}
-
-impl std::error::Error for PrimaryWithCleanup {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        self.primary.source()
-    }
-}
-
-fn validate_excluded_columns(
-    schema: &arrow::datatypes::SchemaRef,
-    exclude_columns: &[String],
-) -> Result<()> {
-    for column in exclude_columns {
-        schema
-            .column_with_name(column)
-            .ok_or_else(|| anyhow!("Column {column:?} not found in schema"))?;
-    }
-    Ok(())
-}
-
-fn projection_indices_excluding(
-    schema: &arrow::datatypes::SchemaRef,
-    exclude_columns: &[String],
-) -> Option<Vec<usize>> {
-    (!exclude_columns.is_empty()).then(|| {
-        (0..schema.fields().len())
-            .filter(|index| !exclude_columns.contains(schema.field(*index).name()))
-            .collect()
+fn make_source(path: &str, input_format: Option<DataFormat>) -> Result<Box<dyn DataSource>> {
+    let format = detect_format(path, input_format)?;
+    Ok(match format {
+        DataFormat::Arrow => Box::new(ArrowDataSource::new(path.to_string())),
+        DataFormat::Parquet => Box::new(ParquetDataSource::new(path.to_string())),
+        DataFormat::Vortex => Box::new(VortexDataSource::new(path.to_string())),
     })
+}
+
+fn detect_format(path: &str, explicit_format: Option<DataFormat>) -> Result<DataFormat> {
+    if let Some(format) = explicit_format {
+        return Ok(format);
+    }
+
+    let path_obj = std::path::Path::new(path);
+    if let Some(ext) = path_obj.extension() {
+        if ext.eq_ignore_ascii_case("arrow") {
+            return Ok(DataFormat::Arrow);
+        } else if ext.eq_ignore_ascii_case("parquet") {
+            return Ok(DataFormat::Parquet);
+        } else if ext.eq_ignore_ascii_case("vortex") {
+            return Ok(DataFormat::Vortex);
+        }
+    }
+
+    Err(anyhow!(
+        "Could not detect format from path '{}'. Use --input-format or --output-format to specify explicitly.",
+        path
+    ))
+}
+
+fn create_sink_factory(
+    output_format: Option<DataFormat>,
+    arrow_opts: ArrowSinkOptions,
+    parquet_opts: ParquetSinkOptions,
+    vortex_opts: VortexSinkOptions,
+    runtimes: Arc<ParquetRuntimes>,
+) -> Result<SinkFactory> {
+    Ok(Box::new(move |path: String, schema: SchemaRef| {
+        let detected_format = detect_format(&path, output_format)?;
+
+        let sink: Box<dyn DataSink> = match detected_format {
+            DataFormat::Arrow => {
+                Box::new(ArrowSink::create(path.into(), &schema, arrow_opts.clone())?)
+            }
+            DataFormat::Parquet => Box::new(ParquetSink::create(
+                path.into(),
+                &schema,
+                &parquet_opts,
+                Arc::clone(&runtimes),
+            )?),
+            DataFormat::Vortex => Box::new(VortexSink::create(path.into(), &schema, vortex_opts)?),
+        };
+
+        Ok(sink)
+    }))
 }
