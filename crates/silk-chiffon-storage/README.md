@@ -197,38 +197,4 @@ The `local` feature enables `object_store/fs` and exposes `local::backend` and `
 
 Use `default-features = false, features = ["local"]` to keep explicit local URLs while leaving the bare route available for another backend. With neither feature, the crate exposes no built-in local backend functions. A host may still define and register other backends.
 
-The `gcs` and `s3` features expose `gcs::backend` and `s3::backend`. A host still decides whether to register either backend. The pinned `object_store` release gates `RetryConfig` behind its provider-neutral `cloud` base feature, so the storage crate enables that base without selecting GCP or AWS.
-
-| Feature | Registered by the Silk Chiffon host | Typed non-secret command settings                                                    | Credential discovery                                                      |
-| ------- | ----------------------------------- | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------- |
-| `gcs`   | `gs://`                             | endpoint, anonymous mode, request timeout                                            | Upstream Application Default Credentials and environment discovery        |
-| `s3`    | `s3://`                             | region, endpoint, path or virtual-hosted addressing, anonymous mode, request timeout | Upstream AWS environment, web-identity, container, and instance discovery |
-
-Credential values are not part of either backend's Clap settings. The builders are created with `GoogleCloudStorageBuilder::from_env` and `AmazonS3Builder::from_env`, then receive only the typed command overrides and the session's shared `RetryConfig`. Proxy and client-transport tuning remain in upstream configuration or are unsupported by the command. The command also leaves S3 encryption, checksums, conditional writes, requester-pays behavior, S3 Express, and metadata options unsupported.
-
-Cloud locations require a bucket host and reject ports and query parameters. Core location parsing rejects fragments and embedded user information before backend validation. `s3a://` is not registered. The pinned upstream S3 builder can parse that spelling, but Silk Chiffon would need cache and output-claim canonicalization before two schemes could identify one remote object safely.
-
-`--gcs-anonymous` and `--s3-anonymous` disable credential discovery and request signing. The pinned `object_store` GCS mutation path still emits the exact empty marker `Authorization: Bearer`. It carries no credential material. Anonymous access does not make an object writable. The S3 builder omits the header for anonymous reads and writes, and the GCS builder omits it for anonymous reads.
-
-An explicit S3 HTTP endpoint enables upstream HTTP support for that endpoint. Path-style addressing appends the bucket to the endpoint. With virtual-hosted addressing, the endpoint must already include the bucket name, matching the pinned upstream builder's endpoint contract.
-
-## Opt-in live tests
-
-Normal storage and command tests use in-memory stores or loopback HTTP servers. The ignored live targets compile without credentials and run only when explicitly selected. Set an explicit bucket and a prefix with at least two non-root path segments:
-
-| Provider | Bucket variable                | Prefix variable                |
-| -------- | ------------------------------ | ------------------------------ |
-| GCS      | `SILK_CHIFFON_LIVE_GCS_BUCKET` | `SILK_CHIFFON_LIVE_GCS_PREFIX` |
-| S3       | `SILK_CHIFFON_LIVE_S3_BUCKET`  | `SILK_CHIFFON_LIVE_S3_PREFIX`  |
-
-Each run appends a unique child to the configured prefix. The test rejects a bucket value that could alter URL authority or path structure, cleans only that child prefix, and reports any leftover objects. Run a provider target only after reviewing the bucket and prefix:
-
-```bash
-cargo test -p silk-chiffon-storage --test cloud_live --features gcs -- --ignored
-cargo test --test cloud_live_e2e --features gcs -- --ignored
-
-cargo test -p silk-chiffon-storage --test cloud_live --features s3 -- --ignored
-cargo test --test cloud_live_e2e --features s3 -- --ignored
-```
-
-The storage target covers exact and pattern inputs, metadata, ranges, uploads, overwrite observation, session claims, multipart behavior, and cleanup. The root target seeds a formatted object and exercises the composed `detect`, `inspect`, and `transform` paths. It verifies the output and cleans its run prefix.
+The crate enables `object_store/cloud` for shared retry types but does not register a concrete cloud backend.

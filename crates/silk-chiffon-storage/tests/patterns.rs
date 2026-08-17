@@ -28,7 +28,6 @@ static OBSERVATIONS: Mutex<Observations> = Mutex::new(Observations {
     heads: 0,
     listing_prefixes: Vec::new(),
 });
-static OBSERVATION_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[derive(Debug, Default)]
 struct ObservedStore {
@@ -193,7 +192,6 @@ async fn put(storage: &StorageSession, url: &str) {
 
 #[tokio::test]
 async fn exact_lookup_and_listing_retain_observed_metadata() {
-    let _observation_test_guard = OBSERVATION_TEST_LOCK.lock().await;
     let storage = storage_with_creator(create_observed_store);
     put(&storage, "mem://bucket/data/one.arrow").await;
     *OBSERVATIONS.lock().unwrap() = Observations::default();
@@ -485,7 +483,6 @@ async fn matches_classes_recursive_segments_case_and_leading_dots() {
 
 #[tokio::test]
 async fn exact_patterns_bypass_listing_and_globs_use_complete_literal_prefixes() {
-    let _observation_test_guard = OBSERVATION_TEST_LOCK.lock().await;
     let storage = storage_with_creator(create_observed_store);
     put(&storage, "mem://bucket/data/one.arrow").await;
     *OBSERVATIONS.lock().unwrap() = Observations::default();

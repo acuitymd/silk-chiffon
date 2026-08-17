@@ -42,11 +42,7 @@
 compile_error!("silk-chiffon-storage supports Unix targets only");
 
 pub mod backend;
-#[cfg(any(feature = "gcs", feature = "s3"))]
-mod cloud;
 pub mod error;
-#[cfg(feature = "gcs")]
-pub mod gcs;
 pub mod handle;
 pub mod input;
 pub mod local;
@@ -55,8 +51,6 @@ pub mod output;
 pub mod pattern;
 pub mod registry;
 pub mod retry;
-#[cfg(feature = "s3")]
-pub mod s3;
 pub mod session;
 pub mod upload;
 

@@ -65,7 +65,7 @@ lint-fix-linux: _check-zigbuild
 alias lint := lint-fix
 
 docs:
-    cargo run --features docs,gcs,s3 --example gen-docs
+    cargo run --features docs --example gen-docs
     dprint fmt docs/CLI.md
 
 verify: type-check fmt-fix lint-check docs

@@ -1,7 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    path::{Path, PathBuf},
     process::Command,
 };
 
@@ -53,26 +52,6 @@ fn workspace_packages() -> BTreeMap<String, BTreeSet<Dependency>> {
         .collect()
 }
 
-fn source_files_below(root: &Path) -> Vec<PathBuf> {
-    let mut pending = vec![root.to_owned()];
-    let mut files = Vec::new();
-    while let Some(path) = pending.pop() {
-        for entry in fs::read_dir(path).expect("workspace source directory should be readable") {
-            let path = entry
-                .expect("workspace source entry should be readable")
-                .path();
-            if path.is_dir() {
-                pending.push(path);
-            } else if path.extension().is_some_and(|extension| extension == "rs")
-                || path.file_name().is_some_and(|name| name == "Cargo.toml")
-            {
-                files.push(path);
-            }
-        }
-    }
-    files
-}
-
 #[test]
 fn workspace_contains_foundation_packages() {
     let packages = workspace_packages();
@@ -114,40 +93,6 @@ fn foundation_packages_do_not_depend_on_format_packages() {
                 .all(|dependency| !dependency.name.starts_with("silk-chiffon-format-")),
             "{package} must not depend on a concrete format package"
         );
-    }
-}
-
-#[test]
-fn format_packages_do_not_contain_cloud_provider_code() {
-    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let forbidden = [
-        "AmazonS3",
-        "GoogleCloudStorage",
-        "object_store::aws",
-        "object_store::gcp",
-        "silk_chiffon_storage::gcs",
-        "silk_chiffon_storage::s3",
-        "gs://",
-        "s3://",
-        "--gcs-",
-        "--s3-",
-    ];
-    for package in [
-        "silk-chiffon-format-arrow",
-        "silk-chiffon-format-parquet",
-        "silk-chiffon-format-vortex",
-    ] {
-        for path in source_files_below(&workspace.join("crates").join(package)) {
-            let source = fs::read_to_string(&path)
-                .unwrap_or_else(|error| panic!("could not read {}: {error}", path.display()));
-            for term in forbidden {
-                assert!(
-                    !source.contains(term),
-                    "format package {package} contains provider-specific term {term:?} in {}",
-                    path.display()
-                );
-            }
-        }
     }
 }
 

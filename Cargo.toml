@@ -98,10 +98,8 @@ chrono-tz = "^0.10.4"
 
 [features]
 default = ["local-bare-paths"]
-gcs = ["silk-chiffon-storage/gcs"]
 local = ["silk-chiffon-storage/local"]
 local-bare-paths = ["local", "silk-chiffon-storage/local-bare-paths"]
-s3 = ["silk-chiffon-storage/s3"]
 # generates docs/CLI.md from the clap definitions; kept optional so clap-markdown
 # stays out of the release binary. Run `just docs` (or `just verify`).
 docs = ["dep:clap-markdown"]

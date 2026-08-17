@@ -25,22 +25,17 @@ fn executable_registers_formats_and_the_available_storage() {
     }));
 
     let storage = registration::storage_registry();
-    let expected_backends = [
-        ("gcs", cfg!(feature = "gcs")),
-        ("local", cfg!(feature = "local")),
-        ("s3", cfg!(feature = "s3")),
-    ]
-    .into_iter()
-    .filter_map(|(name, enabled)| enabled.then_some(name))
-    .collect::<Vec<_>>();
+    #[cfg(feature = "local")]
     assert_eq!(
         storage
             .backends()
             .iter()
             .map(|backend| backend.name())
             .collect::<Vec<_>>(),
-        expected_backends
+        ["local"]
     );
+    #[cfg(not(feature = "local"))]
+    assert!(storage.backends().is_empty());
 
     #[cfg(feature = "local-bare-paths")]
     assert_eq!(
@@ -198,24 +193,6 @@ fn registered_arguments_are_present_in_help_and_completions() {
     assert!(!help.contains("--parquet-io-threads"));
     assert!(help.contains("--vortex-record-batch-size"));
     assert!(help.contains("possible values: arrow, parquet, vortex"));
-    #[cfg(feature = "gcs")]
-    for option in ["--gcs-endpoint", "--gcs-anonymous", "--gcs-request-timeout"] {
-        assert!(help.contains(option));
-    }
-    #[cfg(not(feature = "gcs"))]
-    assert!(!help.contains("--gcs-"));
-    #[cfg(feature = "s3")]
-    for option in [
-        "--s3-region",
-        "--s3-endpoint",
-        "--s3-addressing-style",
-        "--s3-anonymous",
-        "--s3-request-timeout",
-    ] {
-        assert!(help.contains(option));
-    }
-    #[cfg(not(feature = "s3"))]
-    assert!(!help.contains("--s3-"));
 
     let mut completions = Vec::new();
     clap_complete::generate(
@@ -230,14 +207,6 @@ fn registered_arguments_are_present_in_help_and_completions() {
     assert!(completions.contains("--parquet-writing-threads"));
     assert!(!completions.contains("--parquet-io-threads"));
     assert!(completions.contains("--vortex-record-batch-size"));
-    #[cfg(feature = "gcs")]
-    assert!(completions.contains("--gcs-endpoint"));
-    #[cfg(not(feature = "gcs"))]
-    assert!(!completions.contains("--gcs-"));
-    #[cfg(feature = "s3")]
-    assert!(completions.contains("--s3-endpoint"));
-    #[cfg(not(feature = "s3"))]
-    assert!(!completions.contains("--s3-"));
 }
 
 #[cfg(feature = "local-bare-paths")]

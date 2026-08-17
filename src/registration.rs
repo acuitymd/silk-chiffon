@@ -16,12 +16,8 @@ use silk_chiffon_core::{
 use silk_chiffon_storage::{StorageDirection, StorageRegistry};
 use thiserror::Error;
 
-#[cfg(feature = "gcs")]
-use silk_chiffon_storage::gcs;
 #[cfg(feature = "local")]
 use silk_chiffon_storage::local;
-#[cfg(feature = "s3")]
-use silk_chiffon_storage::s3;
 
 use crate::{
     Cli, Command as RuntimeCommand, DetectArgs, DetectCommand, InspectCommand, InspectionArgs,
@@ -41,12 +37,8 @@ pub fn format_registry() -> FormatRegistry {
 /// Builds the executable's feature-selected storage backends.
 pub fn storage_registry() -> StorageRegistry {
     let builder = StorageRegistry::builder();
-    #[cfg(feature = "gcs")]
-    let builder = builder.register(gcs::backend().expect("built-in GCS backend must be valid"));
     #[cfg(feature = "local")]
     let builder = builder.register(local::backend().expect("built-in local backend must be valid"));
-    #[cfg(feature = "s3")]
-    let builder = builder.register(s3::backend().expect("built-in S3 backend must be valid"));
     builder
         .build()
         .expect("built-in storage backends must not conflict")
