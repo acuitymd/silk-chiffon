@@ -4,8 +4,10 @@
 //! memory on macOS or when not containerized.
 
 use arrow::datatypes::{DataType, Schema};
-use datafusion::physical_plan::{ExecutionPlan, sorts::sort::SortExec};
+use futures::StreamExt;
 use sysinfo::System;
+
+use silk_chiffon_core::InputSources;
 
 /// Returns total memory in bytes, respecting container cgroup limits.
 ///
@@ -166,55 +168,42 @@ fn parse_memory_stat_net_used(content: &str) -> Option<u64> {
     Some(total.saturating_sub(slab_reclaimable))
 }
 
-const MIN_SORT_SPILL_RESERVATION: usize = 10 * 1024 * 1024; // 10MB (DataFusion default)
-
-/// Tunes every physical sort from its immediate input statistics.
+/// Reads source rows to measure their average in-memory Arrow size.
 ///
-/// DataFusion has already propagated or invalidated source estimates through the logical
-/// operators by this point. Each sort input partition is compared with the command's
-/// per-partition memory budget. A partition without useful statistics contributes a fallback of
-/// ten percent of that budget without discarding estimates from other partitions or sorts.
-pub fn sort_spill_reservation_from_plan(
-    plan: &std::sync::Arc<dyn ExecutionPlan>,
-    memory_per_partition: usize,
-    batch_size: usize,
-) -> Option<usize> {
-    let mut reservations = Vec::new();
-    let mut pending = vec![std::sync::Arc::clone(plan)];
-    while let Some(plan) = pending.pop() {
-        if let Some(sort) = plan.downcast_ref::<SortExec>() {
-            let input = sort.input();
-            let partition_count = input.properties().partitioning.partition_count().max(1);
-            let maximum = memory_per_partition / 2;
-            let fallback = (maximum >= MIN_SORT_SPILL_RESERVATION)
-                .then(|| (memory_per_partition / 10).clamp(MIN_SORT_SPILL_RESERVATION, maximum));
-            for partition in 0..partition_count {
-                let reservation = input
-                    .partition_statistics(Some(partition))
-                    .ok()
-                    .and_then(|statistics| {
-                        let rows = *statistics.num_rows.get_value()?;
-                        let bytes = *statistics.total_byte_size.get_value()?;
-                        let avg_row_bytes = bytes.checked_div(rows.max(1))?;
-                        estimate_sort_spill_reservation(
-                            avg_row_bytes,
-                            bytes,
-                            memory_per_partition,
-                            batch_size,
-                        )
-                    })
-                    .or(fallback);
-                reservations.push(reservation);
-            }
+/// Creates a provider in the prepared pipeline's session and streams complete batches until
+/// reaching `target_rows` at a batch boundary or reaching the end of the input. The result uses
+/// `RecordBatch::get_array_memory_size()`, including variable-width columns such as strings and
+/// lists.
+///
+/// This consumes one read of the source prefix. A caller that will read the input again must first
+/// require [`Replayability::Replayable`](silk_chiffon_core::Replayability::Replayable).
+pub async fn measure_avg_input_row_bytes(
+    session: &datafusion::prelude::SessionContext,
+    inputs: &InputSources,
+    target_rows: usize,
+) -> anyhow::Result<usize> {
+    let provider = inputs.table_provider(session).await?;
+    let frame = session.read_table(provider)?.limit(0, Some(target_rows))?;
+    let mut stream = frame.execute_stream().await?;
+
+    let mut total_bytes: usize = 0;
+    let mut total_rows: usize = 0;
+    while let Some(batch) = stream.next().await {
+        let batch = batch?;
+        total_bytes += batch.get_array_memory_size();
+        total_rows += batch.num_rows();
+        if total_rows >= target_rows {
+            break;
         }
-        pending.extend(plan.children().into_iter().cloned());
     }
 
-    if reservations.is_empty() {
-        return None;
+    if total_rows == 0 {
+        return Ok(0);
     }
-    reservations.into_iter().flatten().max()
+    Ok(total_bytes / total_rows)
 }
+
+const MIN_SORT_SPILL_RESERVATION: usize = 10 * 1024 * 1024; // 10MB (DataFusion default)
 
 /// Estimate `sort_spill_reservation_bytes` from measured row size and input characteristics.
 ///
@@ -296,8 +285,6 @@ pub fn estimate_row_bytes(schema: &Schema) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use super::*;
 
     #[test]
@@ -540,112 +527,162 @@ kernel 500";
         assert_eq!(reservation, None);
     }
 
-    fn sort_with_statistics(
-        statistics: datafusion::common::Statistics,
-        partitions: usize,
-    ) -> Arc<dyn ExecutionPlan> {
-        use arrow::datatypes::Field;
-        use datafusion::{
-            physical_expr::Partitioning,
-            physical_expr::{PhysicalSortExpr, expressions::Column},
-            physical_plan::{
-                repartition::RepartitionExec, sorts::sort::SortExec, test::exec::StatisticsExec,
-            },
-        };
+    #[tokio::test]
+    async fn test_measure_avg_input_row_bytes_single_arrow() {
+        use crate::sources::arrow::ArrowDataSource;
+        use crate::utils::test_data::{TestBatch, TestFile};
 
-        let schema = Schema::new(vec![Field::new("value", DataType::Int64, false)]);
-        let input = Arc::new(StatisticsExec::new(statistics, schema));
-        let input = Arc::new(
-            RepartitionExec::try_new(input, Partitioning::RoundRobinBatch(partitions)).unwrap(),
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.arrow");
+        let batch = TestBatch::simple_with(&[1, 2, 3], &["hello", "world", "foo"]);
+        TestFile::write_arrow_batch(&path, &batch);
+
+        let session = datafusion::prelude::SessionContext::new();
+        let source: Box<dyn crate::sources::data_source::DataSource> = Box::new(
+            ArrowDataSource::new(path.to_string_lossy().to_string(), session.clone()),
         );
-        Arc::new(SortExec::new(
-            [PhysicalSortExpr::new_default(Arc::new(Column::new(
-                "value", 0,
-            )))]
-            .into(),
-            input,
-        ))
+        let inputs = InputSources::new(source);
+
+        let avg = measure_avg_input_row_bytes(&session, &inputs, 100)
+            .await
+            .unwrap();
+        // i32 (4 bytes) + variable-length strings -- should be non-trivial
+        assert!(avg > 0, "avg_row_bytes should be > 0, got {avg}");
     }
 
-    #[test]
-    fn final_sort_input_statistics_drive_the_existing_estimator() {
-        use datafusion::common::{ColumnStatistics, Statistics, stats::Precision};
+    #[tokio::test]
+    async fn test_measure_avg_input_row_bytes_multiple_files() {
+        use crate::sources::arrow::ArrowDataSource;
+        use crate::utils::test_data::{TestBatch, TestFile};
 
-        let plan = sort_with_statistics(
-            Statistics {
-                num_rows: Precision::Inexact(50_000_000),
-                total_byte_size: Precision::Inexact(10_000_000_000),
-                column_statistics: vec![ColumnStatistics::new_unknown()],
-            },
-            2,
-        );
-        let reservation = sort_spill_reservation_from_plan(&plan, 500_000_000, 8192);
+        let dir = tempfile::tempdir().unwrap();
+        let path1 = dir.path().join("a.arrow");
+        let path2 = dir.path().join("b.arrow");
+        let batch1 = TestBatch::simple_with(&[1, 2], &["aa", "bb"]);
+        let batch2 = TestBatch::simple_with(&[3, 4], &["cc", "dd"]);
+        TestFile::write_arrow_batch(&path1, &batch1);
+        TestFile::write_arrow_batch(&path2, &batch2);
 
-        assert_eq!(reservation, Some(10 * 8192 * 200));
+        let session = datafusion::prelude::SessionContext::new();
+        let mut inputs = InputSources::new(Box::new(ArrowDataSource::new(
+            path1.to_string_lossy().to_string(),
+            session.clone(),
+        )));
+        inputs.push(Box::new(ArrowDataSource::new(
+            path2.to_string_lossy().to_string(),
+            session.clone(),
+        )));
+
+        let avg = measure_avg_input_row_bytes(&session, &inputs, 100)
+            .await
+            .unwrap();
+        assert!(avg > 0);
     }
 
-    #[test]
-    fn unknown_final_sort_input_statistics_use_the_percentage_fallback() {
-        let schema = Schema::new(vec![arrow::datatypes::Field::new(
-            "value",
-            DataType::Int64,
-            false,
-        )]);
-        let plan = sort_with_statistics(datafusion::common::Statistics::new_unknown(&schema), 2);
-        let reservation = sort_spill_reservation_from_plan(&plan, 200_000_000, 8192);
+    #[tokio::test]
+    async fn test_measure_avg_input_row_bytes_parquet() {
+        use crate::sources::parquet::ParquetDataSource;
+        use crate::utils::test_data::{TestBatch, TestFile};
 
-        assert_eq!(reservation, Some(20_000_000));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.parquet");
+        let batch = TestBatch::builder()
+            .column_i32("id", &[1, 2, 3, 4, 5])
+            .column_string("name", &["alpha", "bravo", "charlie", "delta", "echo"])
+            .column_f64("score", &[1.0, 2.0, 3.0, 4.0, 5.0])
+            .build();
+        TestFile::write_parquet_batch(&path, &batch);
+
+        let session = datafusion::prelude::SessionContext::new();
+        let source: Box<dyn crate::sources::data_source::DataSource> = Box::new(
+            ParquetDataSource::new(path.to_string_lossy().to_string(), session.clone()),
+        );
+        let inputs = InputSources::new(source);
+
+        let avg = measure_avg_input_row_bytes(&session, &inputs, 100)
+            .await
+            .unwrap();
+        assert!(avg > 0);
     }
 
-    #[test]
-    fn an_unknown_sort_does_not_discard_a_larger_known_estimate() {
-        use datafusion::{
-            common::{ColumnStatistics, Statistics, stats::Precision},
-            physical_plan::union::UnionExec,
-        };
+    #[tokio::test]
+    async fn test_measure_avg_input_row_bytes_respects_target_rows() {
+        use crate::sources::arrow::ArrowDataSource;
+        use crate::utils::test_data::{TestBatch, TestFile};
 
-        let known = sort_with_statistics(
-            Statistics {
-                num_rows: Precision::Inexact(200_000_000),
-                total_byte_size: Precision::Inexact(40_000_000_000),
-                column_statistics: vec![ColumnStatistics::new_unknown()],
-            },
-            2,
-        );
-        let schema = known.schema();
-        let unknown = sort_with_statistics(Statistics::new_unknown(&schema), 2);
-        let plan = UnionExec::try_new(vec![known, unknown]).unwrap();
+        let dir = tempfile::tempdir().unwrap();
 
-        assert_eq!(
-            sort_spill_reservation_from_plan(&plan, 500_000_000, 8192),
-            Some(40 * 8192 * 200)
-        );
-    }
-
-    #[test]
-    fn sort_walk_handles_deep_physical_plans() {
-        use datafusion::{
-            common::{ColumnStatistics, Statistics, stats::Precision},
-            physical_expr::Partitioning,
-            physical_plan::repartition::RepartitionExec,
-        };
-
-        let mut plan = sort_with_statistics(
-            Statistics {
-                num_rows: Precision::Inexact(50_000_000),
-                total_byte_size: Precision::Inexact(10_000_000_000),
-                column_statistics: vec![ColumnStatistics::new_unknown()],
-            },
-            2,
-        );
-        for _ in 0..2_048 {
-            plan =
-                Arc::new(RepartitionExec::try_new(plan, Partitioning::RoundRobinBatch(1)).unwrap());
+        // write 5 files with 100 rows each = 500 rows total
+        let session = datafusion::prelude::SessionContext::new();
+        let mut sources: Vec<Box<dyn crate::sources::data_source::DataSource>> = Vec::new();
+        for i in 0..5 {
+            let path = dir.path().join(format!("file_{i}.arrow"));
+            let ids: Vec<i32> = (0..100).collect();
+            let names: Vec<&str> = (0..100).map(|_| "test_value").collect();
+            let batch = TestBatch::simple_with(&ids, &names);
+            TestFile::write_arrow_batch(&path, &batch);
+            sources.push(Box::new(ArrowDataSource::new(
+                path.to_string_lossy().to_string(),
+                session.clone(),
+            )));
         }
 
-        assert_eq!(
-            sort_spill_reservation_from_plan(&plan, 500_000_000, 8192),
-            Some(10 * 8192 * 200)
+        let mut sources = sources.into_iter();
+        let mut inputs = InputSources::new(sources.next().unwrap());
+        for source in sources {
+            inputs.push(source);
+        }
+
+        // target only 50 rows -- should still produce a valid average
+        let avg = measure_avg_input_row_bytes(&session, &inputs, 50)
+            .await
+            .unwrap();
+        assert!(avg > 0);
+    }
+
+    #[tokio::test]
+    async fn test_measure_avg_input_row_bytes_wide_vs_narrow() {
+        use crate::sources::arrow::ArrowDataSource;
+        use crate::utils::test_data::{TestBatch, TestFile};
+
+        let dir = tempfile::tempdir().unwrap();
+
+        // narrow: single i32 column
+        let narrow_path = dir.path().join("narrow.arrow");
+        let narrow_batch = TestBatch::builder().column_i32("x", &[1, 2, 3]).build();
+        TestFile::write_arrow_batch(&narrow_path, &narrow_batch);
+
+        let session = datafusion::prelude::SessionContext::new();
+        let narrow_inputs = InputSources::new(Box::new(ArrowDataSource::new(
+            narrow_path.to_string_lossy().to_string(),
+            session.clone(),
+        )));
+        let narrow_avg = measure_avg_input_row_bytes(&session, &narrow_inputs, 100)
+            .await
+            .unwrap();
+
+        // wide: many columns including strings
+        let wide_path = dir.path().join("wide.arrow");
+        let wide_batch = TestBatch::builder()
+            .column_i32("a", &[1, 2, 3])
+            .column_i64("b", &[100, 200, 300])
+            .column_f64("c", &[1.1, 2.2, 3.3])
+            .column_string("d", &["a long string value", "another one here", "third"])
+            .column_string("e", &["more text data", "for testing", "purposes"])
+            .build();
+        TestFile::write_arrow_batch(&wide_path, &wide_batch);
+
+        let wide_inputs = InputSources::new(Box::new(ArrowDataSource::new(
+            wide_path.to_string_lossy().to_string(),
+            session.clone(),
+        )));
+        let wide_avg = measure_avg_input_row_bytes(&session, &wide_inputs, 100)
+            .await
+            .unwrap();
+
+        assert!(
+            wide_avg > narrow_avg,
+            "wide schema ({wide_avg} bytes/row) should be larger than narrow ({narrow_avg} bytes/row)"
         );
     }
 }

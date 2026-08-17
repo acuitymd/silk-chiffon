@@ -1,4 +1,4 @@
 pub mod arrow;
-pub(crate) mod file;
+pub mod data_source;
 pub mod parquet;
 pub mod vortex;

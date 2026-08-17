@@ -5,24 +5,23 @@ use std::{
     sync::Arc,
 };
 
-use ::arrow::{buffer::Buffer, datatypes::SchemaRef, ipc::reader::StreamDecoder};
 use anyhow::{Context, Result, anyhow};
 use apply_if::ApplyIf;
+use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use camino::Utf8PathBuf;
 use clap::{
     Args, Command as ClapCommand, CommandFactory, FromArgMatches,
     builder::{PossibleValue, PossibleValuesParser},
 };
-use datafusion::{catalog::TableProvider, prelude::SessionContext};
-use object_store::ObjectStoreExt;
+use datafusion::prelude::SessionContext;
 use silk_chiffon_core::{
-    DataSink, FormatDefinition, FormatFuture, FormatRegistry, InputDetection, InputLeaf,
-    InputVariant, InspectionDefinition, InspectionMode, InspectionOutput, OutputOrderingColumn,
+    DataSink, DataSource, FormatDefinition, FormatFuture, FormatMatch, FormatRegistry,
+    InspectionDefinition, InspectionMode, InspectionOutput, OutputOrderingColumn,
     ServiceInputBinding, ServiceInputDefinition, ServiceOutputBinding, ServiceOutputDefinition,
     SinkBinding, SinkBindingConfig, SinkConcurrency, TransformDefinition,
 };
-use silk_chiffon_storage::{InputObject, StorageDirection, StorageHandle, StorageRegistry};
+use silk_chiffon_storage::{StorageDirection, StorageHandle, StorageRegistry};
 use thiserror::Error;
 
 #[cfg(feature = "local")]
@@ -42,7 +41,7 @@ use crate::{
         parquet::{ParquetRuntimes, ParquetSink, ParquetSinkOptions},
         vortex::{VortexSink, VortexSinkOptions},
     },
-    sources::{arrow as arrow_source, parquet as parquet_source, vortex as vortex_source},
+    sources::{arrow::ArrowDataSource, parquet::ParquetDataSource, vortex::VortexDataSource},
 };
 
 /// Builds the executable's set of available data formats.
@@ -512,7 +511,7 @@ impl ApplicationDefinition {
         let input_formats = self
             .formats
             .formats()
-            .filter(|format| format.has_input_provider())
+            .filter(|format| format.has_source())
             .map(|format| PossibleValue::new(format.name()).aliases(format.aliases()))
             .collect::<Vec<_>>();
         let output_formats = self
@@ -682,7 +681,7 @@ fn arrow_format() -> FormatDefinition {
         .detection_priority(1)
         .transform(
             TransformDefinition::with_args::<ArrowArgs>()
-                .input_provider(create_arrow_provider)
+                .source(create_arrow_source)
                 .sink(bind_arrow_sink)
                 .build(),
         )
@@ -699,7 +698,7 @@ fn parquet_format() -> FormatDefinition {
         .detection_priority(0)
         .transform(
             TransformDefinition::with_args::<ParquetArgs>()
-                .input_provider(create_parquet_provider)
+                .source(create_parquet_source)
                 .sink(bind_parquet_sink)
                 .build(),
         )
@@ -716,7 +715,7 @@ fn vortex_format() -> FormatDefinition {
         .detection_priority(2)
         .transform(
             TransformDefinition::with_args::<VortexArgs>()
-                .input_provider(create_vortex_provider)
+                .source(create_vortex_source)
                 .sink(bind_vortex_sink)
                 .build(),
         )
@@ -726,153 +725,66 @@ fn vortex_format() -> FormatDefinition {
         .build()
 }
 
-fn detect_arrow(object: &InputObject) -> FormatFuture<'_, InputDetection> {
+fn detect_arrow(handle: &StorageHandle) -> FormatFuture<'_, Option<FormatMatch>> {
     Box::pin(async move {
-        const ARROW_MAGIC: &[u8] = b"ARROW1";
-        const MAX_DETECTION_READ: u64 = 1024 * 1024;
-
-        let handle = object.handle();
-        let size = object.metadata().size;
-        if size >= 12 {
-            let ranges = [0..6, size - 6..size];
-            let magic = handle
-                .object_store()
-                .get_ranges(handle.object_path(), &ranges)
-                .await?;
-            let starts = magic[0].as_ref() == ARROW_MAGIC;
-            let ends = magic[1].as_ref() == ARROW_MAGIC;
-            if starts && ends {
-                return Ok(InputDetection::Match(InputVariant::named("file")));
-            }
-            if starts || ends {
-                return Ok(InputDetection::Malformed(anyhow!(
-                    "Arrow IPC file has only one of its two magic markers"
-                )));
-            }
-        }
-
-        let prefix_len = size.min(8);
-        if prefix_len < 4 {
-            return Ok(InputDetection::Mismatch);
-        }
-        let prefix = handle
-            .object_store()
-            .get_range(handle.object_path(), 0..prefix_len)
-            .await?;
-        let first = u32::from_le_bytes(prefix[..4].try_into().expect("four bytes were read"));
-        let (header_len, message_len, recognized) = if first == u32::MAX {
-            if prefix.len() < 8 {
-                return Ok(InputDetection::Malformed(anyhow!(
-                    "Arrow IPC continuation marker is missing its message length"
-                )));
-            }
-            (
-                8_u64,
-                u64::from(u32::from_le_bytes(prefix[4..8].try_into().unwrap())),
-                true,
-            )
-        } else {
-            (4_u64, u64::from(first), false)
-        };
-        if message_len == 0 || header_len + message_len > size {
-            return Ok(if recognized {
-                InputDetection::Malformed(anyhow!("Arrow IPC schema message is truncated"))
-            } else {
-                InputDetection::Mismatch
-            });
-        }
-        if message_len > MAX_DETECTION_READ && recognized {
-            return Ok(InputDetection::Match(InputVariant::named("stream")));
-        }
-        if message_len > MAX_DETECTION_READ {
-            return Ok(InputDetection::Mismatch);
-        }
-        let bytes = handle
-            .object_store()
-            .get_range(
-                handle.object_path(),
-                0..(header_len + message_len + 1).min(size),
-            )
-            .await?;
-        let mut decoder = StreamDecoder::new();
-        let mut buffer = Buffer::from(bytes);
-        match decoder.decode(&mut buffer) {
-            Ok(_) if decoder.schema().is_some() => {
-                Ok(InputDetection::Match(InputVariant::named("stream")))
-            }
-            Ok(_) if recognized => Ok(InputDetection::Malformed(anyhow!(
-                "Arrow IPC stream did not begin with a schema message"
-            ))),
-            Err(error) if recognized => Ok(InputDetection::Malformed(error.into())),
-            Ok(_) | Err(_) => Ok(InputDetection::Mismatch),
-        }
+        let path = local_utf8_path(handle)?;
+        Ok(ArrowInspector::detect_variant(&path)
+            .ok()
+            .map(|variant| FormatMatch::with_variant(variant.to_string())))
     })
 }
 
-fn detect_parquet(object: &InputObject) -> FormatFuture<'_, InputDetection> {
+fn detect_parquet(handle: &StorageHandle) -> FormatFuture<'_, Option<FormatMatch>> {
     Box::pin(async move {
-        const MAGIC: &[u8] = b"PAR1";
-        if object.metadata().size < 8 {
-            return Ok(InputDetection::Mismatch);
-        }
-        let handle = object.handle();
-        let size = object.metadata().size;
-        let magic = handle
-            .object_store()
-            .get_ranges(handle.object_path(), &[0..4, size - 4..size])
-            .await?;
-        let starts = magic[0].as_ref() == MAGIC;
-        let ends = magic[1].as_ref() == MAGIC;
-        Ok(match (starts, ends) {
-            (true, true) => InputDetection::Match(InputVariant::new()),
-            (true, false) | (false, true) => InputDetection::Malformed(anyhow!(
-                "Parquet input has only one of its two magic markers"
-            )),
-            (false, false) => InputDetection::Mismatch,
-        })
+        let path = local_utf8_path(handle)?;
+        Ok(ParquetInspector::is_format(&path)?.then(FormatMatch::new))
     })
 }
 
-fn detect_vortex(object: &InputObject) -> FormatFuture<'_, InputDetection> {
+fn detect_vortex(handle: &StorageHandle) -> FormatFuture<'_, Option<FormatMatch>> {
     Box::pin(async move {
-        if object.metadata().size < 4 {
-            return Ok(InputDetection::Mismatch);
-        }
-        let handle = object.handle();
-        let magic = handle
-            .object_store()
-            .get_range(handle.object_path(), 0..4)
-            .await?;
-        Ok(if magic.as_ref() == b"VTXF" {
-            InputDetection::Match(InputVariant::named("file"))
-        } else {
-            InputDetection::Mismatch
-        })
+        let path = local_utf8_path(handle)?;
+        Ok(VortexInspector::is_format(&path)?.then(|| FormatMatch::with_variant("file")))
     })
 }
 
-fn create_arrow_provider<'a>(
-    leaf: &'a InputLeaf,
+fn create_arrow_source<'a>(
+    handle: &'a StorageHandle,
     session: &'a SessionContext,
     _args: &'a ArrowArgs,
-) -> FormatFuture<'a, Arc<dyn TableProvider>> {
-    Box::pin(arrow_source::create_provider(leaf, session))
+) -> FormatFuture<'a, Box<dyn DataSource>> {
+    Box::pin(async move {
+        Ok(Box::new(ArrowDataSource::new(
+            local_path_string(handle)?,
+            session.clone(),
+        )) as Box<dyn DataSource>)
+    })
 }
 
-fn create_parquet_provider<'a>(
-    leaf: &'a InputLeaf,
+fn create_parquet_source<'a>(
+    handle: &'a StorageHandle,
     session: &'a SessionContext,
     _args: &'a ParquetArgs,
-) -> FormatFuture<'a, Arc<dyn TableProvider>> {
-    Box::pin(parquet_source::create_provider(leaf, session))
+) -> FormatFuture<'a, Box<dyn DataSource>> {
+    Box::pin(async move {
+        Ok(Box::new(ParquetDataSource::new(
+            local_path_string(handle)?,
+            session.clone(),
+        )) as Box<dyn DataSource>)
+    })
 }
 
-fn create_vortex_provider<'a>(
-    leaf: &'a InputLeaf,
+fn create_vortex_source<'a>(
+    handle: &'a StorageHandle,
     session: &'a SessionContext,
     _args: &'a VortexArgs,
-) -> FormatFuture<'a, Arc<dyn TableProvider>> {
-    Box::pin(vortex_source::create_provider(leaf, session))
+) -> FormatFuture<'a, Box<dyn DataSource>> {
+    Box::pin(async move {
+        Ok(Box::new(VortexDataSource::new(
+            local_path_string(handle)?,
+            session.clone(),
+        )) as Box<dyn DataSource>)
+    })
 }
 
 fn bind_arrow_sink<'a>(
@@ -1170,34 +1082,40 @@ fn local_utf8_path(handle: &StorageHandle) -> Result<Utf8PathBuf> {
         .map_err(|path| anyhow!("Local path is not valid UTF-8: {}", path.display()))
 }
 
+fn local_path_string(handle: &StorageHandle) -> Result<String> {
+    Ok(local_utf8_path(handle)?.into_string())
+}
+
 #[cfg(all(test, feature = "local-bare-paths"))]
 mod tests {
     use std::{
-        collections::HashMap,
         num::NonZeroUsize,
         sync::{
-            Arc, LazyLock, Mutex,
+            Arc, Mutex,
             atomic::{AtomicUsize, Ordering},
         },
     };
 
     use anyhow::Result;
-    use arrow::array::RecordBatch;
-    use bytes::Bytes;
+    use arrow::{array::RecordBatch, datatypes::SchemaRef};
+    use async_trait::async_trait;
     use clap::{Args, CommandFactory, FromArgMatches};
     use datafusion::{
-        catalog::TableProvider, datasource::MemTable, physical_plan::SendableRecordBatchStream,
+        catalog::{TableProvider, streaming::StreamingTable},
+        datasource::MemTable,
+        error::DataFusionError,
+        execution::TaskContext,
+        physical_plan::{
+            SendableRecordBatchStream, stream::RecordBatchStreamAdapter, streaming::PartitionStream,
+        },
         prelude::SessionContext,
     };
     use futures::{StreamExt, future::BoxFuture};
-    use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory, path::Path as ObjectPath};
     use silk_chiffon_core::{
-        DataSink, FormatDefinition, FormatFuture, FormatRegistry, InputLeaf,
+        DataSource, FormatDefinition, FormatFuture, FormatRegistry, Replayability,
         ServiceInputDefinition, ServiceOutputDefinition, SinkBinding, SinkBindingConfig,
         SinkConcurrency, TransformDefinition,
     };
-    use silk_chiffon_storage::{StorageAccess, StorageBackend, StorageRegistry};
-    use url::Url;
 
     use super::{
         ApplicationAssemblyError, ApplicationDefinition, arrow_format, parquet_options,
@@ -1207,13 +1125,13 @@ mod tests {
         CliSchema, Command, ParquetArgs,
         utils::test_data::{TestBatch, TestExtract, TestFile},
     };
+    use silk_chiffon_storage::StorageHandle;
+
+    static STREAM_EXECUTIONS: AtomicUsize = AtomicUsize::new(0);
     static SINK_BINDINGS: AtomicUsize = AtomicUsize::new(0);
     static SERVICE_INPUT_REFERENCES: Mutex<Vec<String>> = Mutex::new(Vec::new());
     static SERVICE_OUTPUT_RESULT: Mutex<Option<(String, usize)>> = Mutex::new(None);
     static TYPED_SERVICE_OUTPUT_RESULT: Mutex<Option<TypedServiceOutputResult>> = Mutex::new(None);
-    static LARGE_LEAF_FILES: AtomicUsize = AtomicUsize::new(0);
-    static REMOTE_STORES: LazyLock<Mutex<HashMap<String, Arc<InMemory>>>> =
-        LazyLock::new(|| Mutex::new(HashMap::new()));
 
     #[derive(Debug, Eq, PartialEq)]
     struct TypedServiceOutputResult {
@@ -1223,99 +1141,42 @@ mod tests {
         ids: Vec<i32>,
     }
 
-    fn remote_store(root: &str) -> Arc<InMemory> {
-        Arc::clone(
-            REMOTE_STORES
-                .lock()
-                .unwrap()
-                .entry(root.to_owned())
-                .or_insert_with(|| Arc::new(InMemory::new())),
-        )
+    struct TestServiceSource {
+        batch: RecordBatch,
     }
 
-    fn create_remote_store(
-        store_url: &Url,
-        _: &(),
-        _: Option<&object_store::RetryConfig>,
-    ) -> Result<Arc<dyn ObjectStore>> {
-        Ok(remote_store(store_url.as_str()))
-    }
-
-    fn remote_backend() -> StorageBackend {
-        StorageBackend::without_args()
-            .name("test-remote")
-            .schemes(["test-remote"])
-            .access(StorageAccess::ReadOnly)
-            .allow_any_location()
-            .object_store_creator(create_remote_store)
-            .build()
-            .unwrap()
-    }
-
-    fn remote_storage_registry() -> StorageRegistry {
-        StorageRegistry::builder()
-            .register(super::local::backend().unwrap())
-            .register(remote_backend())
-            .build()
-            .unwrap()
-    }
-
-    async fn put_remote_file(root: &str, path: &str, bytes: Vec<u8>) {
-        remote_store(root)
-            .put(&ObjectPath::from(path), Bytes::from(bytes).into())
-            .await
-            .unwrap();
-    }
-
-    fn file_bytes(extension: &str, batch: &RecordBatch) -> Vec<u8> {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join(format!("input.{extension}"));
-        match extension {
-            "arrow" => TestFile::write_arrow_batch(&path, batch),
-            "parquet" => TestFile::write_parquet_batch(&path, batch),
-            _ => panic!("unsupported test format {extension}"),
+    #[async_trait]
+    impl DataSource for TestServiceSource {
+        fn name(&self) -> &str {
+            "test-service"
         }
-        std::fs::read(path).unwrap()
-    }
 
-    fn arrow_stream_bytes(batches: &[RecordBatch]) -> Vec<u8> {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("input.arrow");
-        TestFile::write_arrow_stream(&path, batches);
-        std::fs::read(path).unwrap()
-    }
+        fn replayability(&self) -> Replayability {
+            Replayability::Replayable
+        }
 
-    async fn vortex_bytes(batch: RecordBatch) -> Vec<u8> {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("input.vortex");
-        let mut sink = crate::sinks::vortex::VortexSink::create(
-            path.clone(),
-            &batch.schema(),
-            crate::sinks::vortex::VortexSinkOptions::new(),
-        )
-        .unwrap();
-        sink.write_batch(batch).await.unwrap();
-        Box::new(sink).finish().await.unwrap();
-        std::fs::read(path).unwrap()
-    }
-
-    fn test_provider(batch: RecordBatch) -> Result<Arc<dyn TableProvider>> {
-        Ok(Arc::new(MemTable::try_new(
-            batch.schema(),
-            vec![vec![batch]],
-        )?))
+        async fn table_provider(&self) -> Result<Arc<dyn TableProvider>> {
+            Ok(Arc::new(MemTable::try_new(
+                self.batch.schema(),
+                vec![vec![self.batch.clone()]],
+            )?))
+        }
     }
 
     fn create_test_service_input<'a>(
         reference: &'a str,
         _: &'a SessionContext,
         _: &'a (),
-    ) -> BoxFuture<'a, Result<Arc<dyn TableProvider>>> {
+    ) -> BoxFuture<'a, Result<Box<dyn DataSource>>> {
         SERVICE_INPUT_REFERENCES
             .lock()
             .unwrap()
             .push(reference.to_owned());
-        Box::pin(async { test_provider(TestBatch::simple_with(&[4, 5, 6], &["d", "e", "f"])) })
+        Box::pin(async {
+            Ok(Box::new(TestServiceSource {
+                batch: TestBatch::simple_with(&[4, 5, 6], &["d", "e", "f"]),
+            }) as Box<dyn DataSource>)
+        })
     }
 
     fn write_test_service_output<'a>(
@@ -1365,14 +1226,13 @@ mod tests {
         reference: &'a str,
         _: &'a SessionContext,
         settings: &'a TypedServiceInputArgs,
-    ) -> BoxFuture<'a, Result<Arc<dyn TableProvider>>> {
+    ) -> BoxFuture<'a, Result<Box<dyn DataSource>>> {
         Box::pin(async move {
             anyhow::ensure!(reference == "typed-input://dataset");
             let start = settings.test_service_input_start;
-            test_provider(TestBatch::simple_with(
-                &[start, start + 1, start + 2],
-                &["a", "b", "c"],
-            ))
+            Ok(Box::new(TestServiceSource {
+                batch: TestBatch::simple_with(&[start, start + 1, start + 2], &["a", "b", "c"]),
+            }) as Box<dyn DataSource>)
         })
     }
 
@@ -1418,12 +1278,16 @@ mod tests {
         reference: &'a str,
         _: &'a SessionContext,
         _: &'a ConflictingInputArgs,
-    ) -> BoxFuture<'a, Result<Arc<dyn TableProvider>>> {
+    ) -> BoxFuture<'a, Result<Box<dyn DataSource>>> {
         SERVICE_INPUT_REFERENCES
             .lock()
             .unwrap()
             .push(reference.to_owned());
-        Box::pin(async { test_provider(TestBatch::simple_with(&[4, 5, 6], &["d", "e", "f"])) })
+        Box::pin(async {
+            Ok(Box::new(TestServiceSource {
+                batch: TestBatch::simple_with(&[4, 5, 6], &["d", "e", "f"]),
+            }) as Box<dyn DataSource>)
+        })
     }
 
     fn write_conflicting_service_output<'a>(
@@ -1441,40 +1305,159 @@ mod tests {
         })
     }
 
-    fn input_only_provider<'a>(
-        _: &'a InputLeaf,
-        _: &'a SessionContext,
-        _: &'a (),
-    ) -> FormatFuture<'a, Arc<dyn TableProvider>> {
-        Box::pin(async { test_provider(TestBatch::simple_with(&[3, 1, 2], &["c", "a", "b"])) })
+    #[derive(Debug)]
+    struct SinglePassPartition {
+        batch: RecordBatch,
     }
 
-    fn large_leaf_provider<'a>(
-        leaf: &'a InputLeaf,
-        _: &'a SessionContext,
-        _: &'a (),
-    ) -> FormatFuture<'a, Arc<dyn TableProvider>> {
-        LARGE_LEAF_FILES.store(leaf.files().len(), Ordering::SeqCst);
-        Box::pin(async { test_provider(TestBatch::simple_with(&[1], &["one"])) })
+    impl PartitionStream for SinglePassPartition {
+        fn schema(&self) -> &SchemaRef {
+            self.batch.schema_ref()
+        }
+
+        fn execute(&self, _: Arc<TaskContext>) -> SendableRecordBatchStream {
+            let stream = if STREAM_EXECUTIONS.fetch_add(1, Ordering::SeqCst) == 0 {
+                futures::stream::iter([Ok(self.batch.clone())])
+            } else {
+                futures::stream::iter([Err(DataFusionError::Execution(
+                    "single-pass source was consumed more than once".to_owned(),
+                ))])
+            };
+            Box::pin(RecordBatchStreamAdapter::new(self.batch.schema(), stream))
+        }
     }
 
-    fn input_only_format() -> FormatDefinition {
-        FormatDefinition::builder("input-only-test")
-            .extensions(["input-only-test"])
+    struct SinglePassSource;
+
+    #[async_trait]
+    impl DataSource for SinglePassSource {
+        fn name(&self) -> &str {
+            "single-pass-test"
+        }
+
+        fn replayability(&self) -> Replayability {
+            Replayability::SinglePass
+        }
+
+        async fn schema(&self) -> Result<SchemaRef> {
+            Ok(TestBatch::simple_schema())
+        }
+
+        async fn table_provider(&self) -> Result<Arc<dyn TableProvider>> {
+            let batch = TestBatch::simple_with(&[3, 1, 2], &["c", "a", "b"]);
+            let partition: Arc<dyn PartitionStream> = Arc::new(SinglePassPartition { batch });
+            let table = StreamingTable::try_new(TestBatch::simple_schema(), vec![partition])?;
+            Ok(Arc::new(table))
+        }
+    }
+
+    fn single_pass_source<'a>(
+        _: &'a StorageHandle,
+        _: &'a SessionContext,
+        _: &'a (),
+    ) -> FormatFuture<'a, Box<dyn DataSource>> {
+        Box::pin(async { Ok(Box::new(SinglePassSource) as Box<dyn DataSource>) })
+    }
+
+    fn single_pass_format() -> FormatDefinition {
+        FormatDefinition::builder("single-pass-test")
+            .extensions(["single-pass-test"])
             .transform(
                 TransformDefinition::without_args()
-                    .input_provider(input_only_provider)
+                    .source(single_pass_source)
                     .build(),
             )
             .build()
     }
 
-    fn large_leaf_format() -> FormatDefinition {
-        FormatDefinition::builder("large-leaf-test")
-            .extensions(["large-leaf-test"])
+    fn registered_store_source<'a>(
+        handle: &'a StorageHandle,
+        session: &'a SessionContext,
+        _: &'a (),
+    ) -> FormatFuture<'a, Box<dyn DataSource>> {
+        Box::pin(async move {
+            let handle_store = handle.object_store();
+            let registered_store = session
+                .runtime_env()
+                .object_store_registry
+                .get_store(handle.store_url())?;
+            assert!(Arc::ptr_eq(&handle_store, &registered_store));
+
+            Ok(Box::new(TestServiceSource {
+                batch: TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]),
+            }) as Box<dyn DataSource>)
+        })
+    }
+
+    fn registered_store_format() -> FormatDefinition {
+        FormatDefinition::builder("registered-store-test")
+            .extensions(["registered-store-test"])
             .transform(
                 TransformDefinition::without_args()
-                    .input_provider(large_leaf_provider)
+                    .source(registered_store_source)
+                    .build(),
+            )
+            .build()
+    }
+
+    #[derive(Debug)]
+    struct InfinitePartition {
+        batch: RecordBatch,
+    }
+
+    impl PartitionStream for InfinitePartition {
+        fn schema(&self) -> &SchemaRef {
+            self.batch.schema_ref()
+        }
+
+        fn execute(&self, _: Arc<TaskContext>) -> SendableRecordBatchStream {
+            let stream =
+                futures::stream::iter([Ok(self.batch.clone())]).chain(futures::stream::pending::<
+                    Result<RecordBatch, DataFusionError>,
+                >());
+            Box::pin(RecordBatchStreamAdapter::new(self.batch.schema(), stream))
+        }
+    }
+
+    struct InfiniteSource;
+
+    #[async_trait]
+    impl DataSource for InfiniteSource {
+        fn name(&self) -> &str {
+            "infinite-test"
+        }
+
+        fn replayability(&self) -> Replayability {
+            Replayability::SinglePass
+        }
+
+        async fn schema(&self) -> Result<SchemaRef> {
+            Ok(TestBatch::simple_schema())
+        }
+
+        async fn table_provider(&self) -> Result<Arc<dyn TableProvider>> {
+            let batch = TestBatch::simple_with(&[3, 1, 2], &["c", "a", "b"]);
+            let partition: Arc<dyn PartitionStream> = Arc::new(InfinitePartition { batch });
+            let table = StreamingTable::try_new(TestBatch::simple_schema(), vec![partition])?
+                .with_infinite_table(true);
+            Ok(Arc::new(table))
+        }
+    }
+
+    fn infinite_source<'a>(
+        _: &'a StorageHandle,
+        _: &'a SessionContext,
+        _: &'a (),
+    ) -> FormatFuture<'a, Box<dyn DataSource>> {
+        Box::pin(async { Ok(Box::new(InfiniteSource) as Box<dyn DataSource>) })
+    }
+
+    fn infinite_format() -> FormatDefinition {
+        FormatDefinition::builder("infinite-test")
+            .extensions(["infinite-test"])
+            .transform(
+                TransformDefinition::without_args()
+                    .source(infinite_source)
                     .build(),
             )
             .build()
@@ -1526,21 +1509,6 @@ mod tests {
             storage_registry(),
             service_inputs,
             service_outputs,
-        )
-        .unwrap()
-    }
-
-    fn remote_application_definition() -> ApplicationDefinition {
-        ApplicationDefinition::from_parts(
-            FormatRegistry::builder()
-                .register(arrow_format())
-                .register(super::parquet_format())
-                .register(super::vortex_format())
-                .build()
-                .unwrap(),
-            remote_storage_registry(),
-            Vec::new(),
-            Vec::new(),
         )
         .unwrap()
     }
@@ -1720,342 +1688,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remote_exact_input_runs_through_query_projection_and_limit() {
-        let root = "test-remote://coverage-exact/";
-        let batch = TestBatch::simple_with(&[1, 2, 3, 4], &["a", "b", "c", "d"]);
-        put_remote_file(root, "nested/input.arrow", file_bytes("arrow", &batch)).await;
-        let directory = tempfile::tempdir().unwrap();
-        let output = directory.path().join("output.arrow");
-        let cli = test_cli(
-            remote_application_definition(),
-            &[
-                "silk-chiffon",
-                "transform",
-                "--from",
-                "test-remote://coverage-exact/nested/input.arrow",
-                "--to",
-                output.to_str().unwrap(),
-                "--query",
-                "SELECT name FROM data WHERE id >= 2 ORDER BY id LIMIT 2",
-            ],
-        );
-        let Command::Transform(command) = cli.command else {
-            panic!("expected transform command");
-        };
-
-        crate::commands::transform::run(command).await.unwrap();
-
-        let batches = TestFile::read_arrow(&output);
-        assert_eq!(batches[0].schema().fields().len(), 1);
-        assert_eq!(TestExtract::string_all(&batches, "name"), ["b", "c"]);
-    }
-
-    #[tokio::test]
-    async fn remote_arrow_stream_executes_through_the_scoped_store() {
-        let root = "test-remote://coverage-stream/";
-        put_remote_file(
-            root,
-            "input.arrow",
-            arrow_stream_bytes(&[
-                TestBatch::simple_with(&[1, 2], &["a", "b"]),
-                TestBatch::simple_with(&[3, 4], &["c", "d"]),
-            ]),
-        )
-        .await;
-        let directory = tempfile::tempdir().unwrap();
-        let output = directory.path().join("output.arrow");
-        let cli = test_cli(
-            remote_application_definition(),
-            &[
-                "silk-chiffon",
-                "transform",
-                "--from",
-                "test-remote://coverage-stream/input.arrow?versionId=pinned",
-                "--to",
-                output.to_str().unwrap(),
-                "--query",
-                "SELECT name FROM data WHERE id > 1 ORDER BY id DESC LIMIT 2",
-            ],
-        );
-        let Command::Transform(command) = cli.command else {
-            panic!("expected transform command");
-        };
-
-        crate::commands::transform::run(command).await.unwrap();
-
-        let batches = TestFile::read_arrow(&output);
-        assert_eq!(batches[0].schema().fields().len(), 1);
-        assert_eq!(TestExtract::string_all(&batches, "name"), ["d", "c"]);
-    }
-
-    #[tokio::test]
-    async fn missing_remote_exact_input_fails_before_output_construction() {
-        let directory = tempfile::tempdir().unwrap();
-        let output = directory.path().join("output.arrow");
-        let input = "test-remote://coverage-missing/missing.arrow?versionId=absent";
-        let cli = test_cli(
-            remote_application_definition(),
-            &[
-                "silk-chiffon",
-                "transform",
-                "--from",
-                input,
-                "--to",
-                output.to_str().unwrap(),
-            ],
-        );
-        let Command::Transform(command) = cli.command else {
-            panic!("expected transform command");
-        };
-
-        let error = crate::commands::transform::run(command).await.unwrap_err();
-
-        let message = format!("{error:#}");
-        assert!(message.contains(input), "{message}");
-        assert!(
-            message.to_ascii_lowercase().contains("not found"),
-            "{message}"
-        );
-        assert!(!message.contains("__silk_input"), "{message}");
-        assert!(!output.exists());
-    }
-
-    #[tokio::test]
-    async fn remote_vortex_input_uses_its_native_provider_end_to_end() {
-        let root = "test-remote://coverage-vortex/";
-        let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
-        put_remote_file(root, "input.vortex", vortex_bytes(batch).await).await;
-        let directory = tempfile::tempdir().unwrap();
-        let output = directory.path().join("output.arrow");
-        let cli = test_cli(
-            remote_application_definition(),
-            &[
-                "silk-chiffon",
-                "transform",
-                "--from",
-                "test-remote://coverage-vortex/input.vortex",
-                "--to",
-                output.to_str().unwrap(),
-                "--query",
-                "SELECT id FROM data WHERE id >= 2",
-            ],
-        );
-        let Command::Transform(command) = cli.command else {
-            panic!("expected transform command");
-        };
-
-        crate::commands::transform::run(command).await.unwrap();
-
-        assert_eq!(
-            TestExtract::i32_all(&TestFile::read_arrow(&output), "id"),
-            [2, 3]
-        );
-    }
-
-    #[tokio::test]
-    async fn recognized_malformed_remote_input_stops_format_fallback() {
-        let root = "test-remote://coverage-malformed/";
-        let mut bytes = b"ARROW1".to_vec();
-        bytes.extend_from_slice(&[0; 16]);
-        put_remote_file(root, "input.arrow", bytes).await;
-        let directory = tempfile::tempdir().unwrap();
-        let output = directory.path().join("output.arrow");
-        let cli = test_cli(
-            remote_application_definition(),
-            &[
-                "silk-chiffon",
-                "transform",
-                "--from",
-                "test-remote://coverage-malformed/input.arrow",
-                "--to",
-                output.to_str().unwrap(),
-            ],
-        );
-        let Command::Transform(command) = cli.command else {
-            panic!("expected transform command");
-        };
-
-        let error = crate::commands::transform::run(command).await.unwrap_err();
-
-        let message = format!("{error:#}");
-        assert!(message.contains("malformed arrow input"), "{message}");
-        assert!(
-            message.contains("coverage-malformed/input.arrow"),
-            "{message}"
-        );
-        assert!(
-            message.contains("only one of its two magic markers"),
-            "{message}"
-        );
-        assert!(!output.exists());
-    }
-
-    #[tokio::test]
-    async fn unknown_remote_bytes_report_the_canonical_input() {
-        let root = "test-remote://coverage-unknown/";
-        put_remote_file(root, "input.unknown", b"not a known format".to_vec()).await;
-        let directory = tempfile::tempdir().unwrap();
-        let output = directory.path().join("output.arrow");
-        let cli = test_cli(
-            remote_application_definition(),
-            &[
-                "silk-chiffon",
-                "transform",
-                "--from",
-                "test-remote://coverage-unknown/input.unknown",
-                "--to",
-                output.to_str().unwrap(),
-            ],
-        );
-        let Command::Transform(command) = cli.command else {
-            panic!("expected transform command");
-        };
-
-        let error = crate::commands::transform::run(command).await.unwrap_err();
-
-        let message = format!("{error:#}");
-        assert!(message.contains("could not detect the format"), "{message}");
-        assert!(
-            message.contains("coverage-unknown/input.unknown"),
-            "{message}"
-        );
-        assert!(!output.exists());
-    }
-
-    #[tokio::test]
-    async fn identical_paths_in_different_remote_roots_cannot_cross_read() {
-        let first_root = "test-remote://coverage-root-a/";
-        let second_root = "test-remote://coverage-root-b/";
-        put_remote_file(
-            first_root,
-            "shared.arrow",
-            file_bytes("arrow", &TestBatch::simple_with(&[1, 2], &["a", "b"])),
-        )
-        .await;
-        put_remote_file(
-            second_root,
-            "shared.arrow",
-            file_bytes("arrow", &TestBatch::simple_with(&[90], &["z"])),
-        )
-        .await;
-        let directory = tempfile::tempdir().unwrap();
-        let output = directory.path().join("output.arrow");
-        let cli = test_cli(
-            remote_application_definition(),
-            &[
-                "silk-chiffon",
-                "transform",
-                "--from",
-                "test-remote://coverage-root-a/shared.arrow",
-                "--from",
-                "test-remote://coverage-root-b/shared.arrow",
-                "--to",
-                output.to_str().unwrap(),
-            ],
-        );
-        let Command::Transform(command) = cli.command else {
-            panic!("expected transform command");
-        };
-
-        crate::commands::transform::run(command).await.unwrap();
-
-        let mut ids = TestExtract::i32_all(&TestFile::read_arrow(&output), "id");
-        ids.sort_unstable();
-        assert_eq!(ids, [1, 2, 90]);
-    }
-
-    #[tokio::test]
-    async fn remote_pattern_groups_mixed_formats_without_losing_rows() {
-        let root = "test-remote://coverage-pattern/";
-        put_remote_file(
-            root,
-            "dataset/a.arrow",
-            file_bytes("arrow", &TestBatch::simple_with(&[1, 2], &["a", "b"])),
-        )
-        .await;
-        put_remote_file(
-            root,
-            "dataset/b.parquet",
-            file_bytes("parquet", &TestBatch::simple_with(&[3, 4], &["c", "d"])),
-        )
-        .await;
-        let directory = tempfile::tempdir().unwrap();
-        let output = directory.path().join("output.arrow");
-        let cli = test_cli(
-            remote_application_definition(),
-            &[
-                "silk-chiffon",
-                "transform",
-                "--from-pattern",
-                "test-remote://coverage-pattern/dataset/*",
-                "--to",
-                output.to_str().unwrap(),
-            ],
-        );
-        let Command::Transform(command) = cli.command else {
-            panic!("expected transform command");
-        };
-
-        crate::commands::transform::run(command).await.unwrap();
-
-        let mut ids = TestExtract::i32_all(&TestFile::read_arrow(&output), "id");
-        ids.sort_unstable();
-        assert_eq!(ids, [1, 2, 3, 4]);
-    }
-
-    #[tokio::test]
-    async fn six_figure_remote_pattern_builds_one_leaf_and_executes() {
-        const FILES: usize = 100_000;
-        LARGE_LEAF_FILES.store(0, Ordering::SeqCst);
-        SERVICE_OUTPUT_RESULT.lock().unwrap().take();
-        let root = "test-remote://coverage-large/";
-        let store = remote_store(root);
-        for index in 0..FILES {
-            store
-                .put(
-                    &ObjectPath::from(format!("dataset/{index:06}.large-leaf-test")),
-                    Bytes::new().into(),
-                )
-                .await
-                .unwrap();
-        }
-        let definition = ApplicationDefinition::from_parts(
-            FormatRegistry::builder()
-                .register(large_leaf_format())
-                .build()
-                .unwrap(),
-            remote_storage_registry(),
-            Vec::new(),
-            vec![test_service_output("test-output", "test-output")],
-        )
-        .unwrap();
-        let cli = test_cli(
-            definition,
-            &[
-                "silk-chiffon",
-                "transform",
-                "--from-pattern",
-                "test-remote://coverage-large/dataset/*.large-leaf-test",
-                "--input-format",
-                "large-leaf-test",
-                "--to",
-                "test-output://large",
-            ],
-        );
-        let Command::Transform(command) = cli.command else {
-            panic!("expected transform command");
-        };
-
-        crate::commands::transform::run(command).await.unwrap();
-
-        assert_eq!(LARGE_LEAF_FILES.load(Ordering::SeqCst), FILES);
-        assert_eq!(
-            SERVICE_OUTPUT_RESULT.lock().unwrap().as_ref(),
-            Some(&("test-output://large".to_owned(), 1))
-        );
-    }
-
-    #[tokio::test]
     async fn typed_service_only_transform_projects_and_drains_the_output() {
         TYPED_SERVICE_OUTPUT_RESULT.lock().unwrap().take();
         let input = ServiceInputDefinition::with_args(create_typed_service_input)
@@ -2104,6 +1736,43 @@ mod tests {
                 fields: vec!["id".to_owned()],
                 ids: vec![40, 41, 42],
             })
+        );
+    }
+
+    #[tokio::test]
+    async fn file_input_registers_the_handle_store_before_source_creation() {
+        SERVICE_OUTPUT_RESULT.lock().unwrap().take();
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("input.registered-store-test");
+        std::fs::write(&input, []).unwrap();
+        let definition = application_definition_with_services(
+            FormatRegistry::builder()
+                .register(registered_store_format())
+                .build()
+                .unwrap(),
+            Vec::new(),
+            vec![test_service_output("test-output", "test-output")],
+        );
+        let cli = test_cli(
+            definition,
+            &[
+                "silk-chiffon",
+                "transform",
+                "--from",
+                input.to_str().unwrap(),
+                "--to",
+                "test-output://result",
+            ],
+        );
+        let Command::Transform(command) = cli.command else {
+            panic!("expected transform command");
+        };
+
+        crate::commands::transform::run(command).await.unwrap();
+
+        assert_eq!(
+            SERVICE_OUTPUT_RESULT.lock().unwrap().as_ref(),
+            Some(&("test-output://result".to_owned(), 3))
         );
     }
 
@@ -2315,7 +1984,7 @@ mod tests {
     fn directional_format_definition() -> ApplicationDefinition {
         application_definition(
             FormatRegistry::builder()
-                .register(input_only_format())
+                .register(single_pass_format())
                 .register(counted_sink_format())
                 .build()
                 .unwrap(),
@@ -2323,16 +1992,16 @@ mod tests {
     }
 
     #[test]
-    fn transform_format_values_follow_input_and_output_capabilities() {
+    fn transform_format_values_follow_source_and_sink_capabilities() {
         directional_format_definition()
             .command(CliSchema::command())
             .try_get_matches_from([
                 "silk-chiffon",
                 "transform",
                 "--from",
-                "input.input-only-test",
+                "input.single-pass-test",
                 "--input-format",
-                "input-only-test",
+                "single-pass-test",
                 "--to",
                 "output.counted-sink-test",
                 "--output-format",
@@ -2361,11 +2030,11 @@ mod tests {
                 "silk-chiffon",
                 "transform",
                 "--from",
-                "input.input-only-test",
+                "input.single-pass-test",
                 "--to",
-                "output.input-only-test",
+                "output.single-pass-test",
                 "--output-format",
-                "input-only-test",
+                "single-pass-test",
             ])
             .unwrap_err();
         assert_eq!(output_error.kind(), clap::error::ErrorKind::InvalidValue);
@@ -2397,5 +2066,120 @@ mod tests {
         assert_eq!(options.encoding_queue_size, Some(1));
         assert_eq!(options.writing_queue_size, Some(1));
         assert_eq!(options.max_row_group_concurrency, Some(1));
+    }
+
+    #[tokio::test]
+    async fn sort_skips_row_size_measurement_for_single_pass_source() {
+        STREAM_EXECUTIONS.store(0, Ordering::SeqCst);
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("input.single-pass-test");
+        let output = directory.path().join("output.arrow");
+        std::fs::write(&input, b"test source input").unwrap();
+
+        let formats = FormatRegistry::builder()
+            .register(single_pass_format())
+            .register(arrow_format())
+            .build()
+            .unwrap();
+        let definition = application_definition(formats);
+        let matches = definition
+            .command(CliSchema::command())
+            .try_get_matches_from([
+                "silk-chiffon",
+                "transform",
+                "--from",
+                input.to_str().unwrap(),
+                "--input-format",
+                "single-pass-test",
+                "--to",
+                output.to_str().unwrap(),
+                "--output-format",
+                "arrow",
+                "--sort-by",
+                "id",
+            ])
+            .unwrap();
+        let cli = definition.bind(&matches).unwrap();
+        let Command::Transform(command) = cli.command else {
+            panic!("expected transform command");
+        };
+
+        crate::commands::transform::run(command).await.unwrap();
+
+        let batches = TestFile::read_arrow(&output);
+        assert_eq!(TestExtract::i32_all(&batches, "id"), [1, 2, 3]);
+        assert_eq!(STREAM_EXECUTIONS.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn unbounded_plan_is_rejected_before_sink_binding() {
+        SINK_BINDINGS.store(0, Ordering::SeqCst);
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("input.infinite-test");
+        let output = directory.path().join("output.counted-sink-test");
+        std::fs::write(&input, b"test source input").unwrap();
+
+        let definition = application_definition(
+            FormatRegistry::builder()
+                .register(infinite_format())
+                .register(counted_sink_format())
+                .build()
+                .unwrap(),
+        );
+        let cli = test_cli(
+            definition,
+            &[
+                "silk-chiffon",
+                "transform",
+                "--from",
+                input.to_str().unwrap(),
+                "--to",
+                output.to_str().unwrap(),
+            ],
+        );
+        let Command::Transform(command) = cli.command else {
+            panic!("expected transform command");
+        };
+
+        let error = crate::commands::transform::run(command).await.unwrap_err();
+        assert!(error.to_string().contains("require a bounded final plan"));
+        assert_eq!(SINK_BINDINGS.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn bounded_query_can_replace_an_unbounded_source_plan() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("input.infinite-test");
+        let output = directory.path().join("output.arrow");
+        std::fs::write(&input, b"test source input").unwrap();
+
+        let definition = application_definition(
+            FormatRegistry::builder()
+                .register(infinite_format())
+                .register(arrow_format())
+                .build()
+                .unwrap(),
+        );
+        let cli = test_cli(
+            definition,
+            &[
+                "silk-chiffon",
+                "transform",
+                "--from",
+                input.to_str().unwrap(),
+                "--to",
+                output.to_str().unwrap(),
+                "--query",
+                "SELECT CAST(1 AS INT) AS id, 'a' AS name",
+            ],
+        );
+        let Command::Transform(command) = cli.command else {
+            panic!("expected transform command");
+        };
+
+        crate::commands::transform::run(command).await.unwrap();
+
+        let batches = TestFile::read_arrow(&output);
+        assert_eq!(TestExtract::i32_all(&batches, "id"), [1]);
     }
 }

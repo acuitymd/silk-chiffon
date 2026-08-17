@@ -64,9 +64,9 @@ impl Default for PipelineConfig {
 
 /// A transform definition before its final DataFusion plan has been built.
 ///
-/// The host creates the session first, constructs every input provider in that
-/// session, and then attaches the nonempty inputs and logical operations. Output
-/// behavior is intentionally absent.
+/// The host creates the session first, constructs every source in that session,
+/// and then attaches the nonempty inputs and logical operations. Output behavior
+/// is intentionally absent.
 #[derive(Default)]
 pub struct Pipeline {
     inputs: Option<InputSources>,
@@ -144,7 +144,7 @@ impl Pipeline {
         self
     }
 
-    /// Creates the session shared by input-provider construction, planning, and execution.
+    /// Creates the one session shared by source construction, planning, and execution.
     pub fn create_session_context(
         &mut self,
     ) -> std::result::Result<SessionContext, PipelinePreparationError> {
@@ -210,7 +210,8 @@ impl Pipeline {
         self.prepare_inner(&mut session)
             .await
             .map_err(PipelinePreparationError::new)
-            .map(|plan| PreparedPipeline {
+            .map(|(inputs, plan)| PreparedPipeline {
+                inputs,
                 plan,
                 session,
                 sort_spill_reservation_bytes: self.config.sort_spill_reservation_bytes,
@@ -221,12 +222,13 @@ impl Pipeline {
     async fn prepare_inner(
         &mut self,
         session: &mut SessionContext,
-    ) -> Result<Arc<dyn ExecutionPlan>> {
+    ) -> Result<(InputSources, Arc<dyn ExecutionPlan>)> {
         let inputs = self
             .inputs
             .take()
-            .ok_or_else(|| anyhow!("no inputs provided"))?;
-        let mut data_frame = inputs.data_frame();
+            .ok_or_else(|| anyhow!("no input sources provided"))?;
+        let provider = inputs.table_provider(session).await?;
+        let mut data_frame = session.read_table(provider)?;
         for operation in &self.operations {
             data_frame = operation.apply(session, data_frame).await?;
         }
@@ -234,12 +236,13 @@ impl Pipeline {
         if plan.properties().boundedness.is_unbounded() {
             anyhow::bail!("current outputs require a bounded final plan");
         }
-        Ok(plan)
+        Ok((inputs, plan))
     }
 }
 
 /// A validated physical plan awaiting execution.
 pub struct PreparedPipeline {
+    inputs: InputSources,
     plan: Arc<dyn ExecutionPlan>,
     session: SessionContext,
     sort_spill_reservation_bytes: Option<usize>,
@@ -247,6 +250,11 @@ pub struct PreparedPipeline {
 }
 
 impl PreparedPipeline {
+    /// Returns the retained inputs used for capability checks and measurement.
+    pub fn inputs(&self) -> &InputSources {
+        &self.inputs
+    }
+
     /// Returns the session shared by planning, binding, and execution.
     pub fn session(&self) -> &SessionContext {
         &self.session
@@ -257,12 +265,7 @@ impl PreparedPipeline {
         self.plan.schema()
     }
 
-    /// Returns the validated physical plan for final-plan resource tuning.
-    pub fn execution_plan(&self) -> &Arc<dyn ExecutionPlan> {
-        &self.plan
-    }
-
-    /// Replaces the sort reservation after final-plan statistics are evaluated.
+    /// Replaces the sort reservation after input measurement.
     pub fn with_sort_spill_reservation_bytes(mut self, reservation: Option<usize>) -> Self {
         self.sort_spill_reservation_bytes = reservation;
         self

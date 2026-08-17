@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use arrow::array::{Date32Array, Int16Array, Int32Array, RecordBatch};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
-use datafusion::{datasource::file_format::options::ArrowReadOptions, prelude::SessionContext};
+use datafusion::prelude::SessionContext;
 use rand::rngs::SmallRng;
 use rand::{Rng, RngExt, SeedableRng};
 use silk_chiffon::sinks::arrow::{ArrowSink, ArrowSinkOptions};
@@ -23,6 +23,10 @@ use silk_chiffon::sinks::parquet::ParquetSink;
 use silk_chiffon::sinks::parquet::ParquetSinkOptions;
 use silk_chiffon::sinks::parquet::pools::ParquetRuntimes;
 use silk_chiffon::sinks::vortex::{VortexSink, VortexSinkOptions};
+use silk_chiffon::sources::arrow::ArrowDataSource;
+use silk_chiffon::sources::data_source::DataSource;
+use silk_chiffon::sources::parquet::ParquetDataSource;
+use silk_chiffon::sources::vortex::VortexDataSource;
 use tempfile::TempDir;
 
 const NUM_ROWS: usize = 10_000_000;
@@ -161,38 +165,15 @@ async fn row_count(ctx: &SessionContext, table: &str) -> usize {
 }
 
 async fn register_table(ctx: &mut SessionContext, name: &str, path: &Path, ext: &str) {
-    let arrow_path = if ext == "arrow" {
-        path.to_path_buf()
-    } else {
-        let arrow_path = path.with_extension(format!("{ext}.df.arrow"));
-        let silk_chiffon::Cli {
-            command: silk_chiffon::Command::Transform(command),
-        } = silk_chiffon::Cli::try_parse_from([
-            "silk-chiffon",
-            "transform",
-            "--from",
-            path.to_str().unwrap(),
-            "--to",
-            arrow_path.to_str().unwrap(),
-            "--output-format",
-            "arrow",
-        ])
-        .unwrap()
-        else {
-            unreachable!()
-        };
-        silk_chiffon::commands::transform::run(command)
-            .await
-            .unwrap();
-        arrow_path
+    let path_str = path.to_string_lossy().to_string();
+    let source: Box<dyn DataSource> = match ext {
+        "arrow" => Box::new(ArrowDataSource::new(path_str, ctx.clone())),
+        "parquet" => Box::new(ParquetDataSource::new(path_str, ctx.clone())),
+        "vortex" => Box::new(VortexDataSource::new(path_str, ctx.clone())),
+        _ => panic!("unsupported format: {ext}"),
     };
-    ctx.register_arrow(
-        name,
-        arrow_path.to_str().unwrap(),
-        ArrowReadOptions::default(),
-    )
-    .await
-    .unwrap();
+    let provider = source.table_provider().await.unwrap();
+    ctx.register_table(name, provider).unwrap();
 }
 
 async fn write_test_data(path: &Path, schema: &SchemaRef, ext: &str) {

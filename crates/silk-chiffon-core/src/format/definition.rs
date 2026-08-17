@@ -11,12 +11,12 @@ use std::{
 
 use anyhow::Result;
 use clap::{ArgMatches, Args, Command, FromArgMatches};
-use datafusion::{catalog::TableProvider, prelude::SessionContext};
-use silk_chiffon_storage::{InputObject, StorageHandle};
+use datafusion::prelude::SessionContext;
+use silk_chiffon_storage::StorageHandle;
 use thiserror::Error;
 
 use super::binding;
-use crate::{InspectionOutput, SinkBinding};
+use crate::{DataSource, InspectionOutput, SinkBinding};
 
 /// A boxed future returned by an asynchronous format function.
 pub type FormatFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
@@ -24,18 +24,17 @@ pub type FormatFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + '
 /// Examines an input and reports format-specific match details.
 ///
 /// The registry supplies the canonical format name, so detector functions do not repeat it.
-pub type InputDetectorFn = for<'a> fn(&'a InputObject) -> FormatFuture<'a, InputDetection>;
+pub type FormatDetectorFn = for<'a> fn(&'a StorageHandle) -> FormatFuture<'a, Option<FormatMatch>>;
 
-/// Creates one provider from a host-validated input leaf and typed settings.
+/// Creates one command input from its storage handle and typed transform settings.
 ///
-/// The leaf already owns the exact file descriptors, scoped store, deterministic
-/// representative, and format variant. Formats do not rediscover those choices
-/// during schema inference or scanning.
-pub type InputProviderFn<T> = for<'a> fn(
-    &'a crate::InputLeaf,
+/// The source receives the command's DataFusion session during construction so its table provider
+/// can participate in the same catalog, runtime, and object-store environment as the final plan.
+pub type SourceCreatorFn<T> = for<'a> fn(
+    &'a StorageHandle,
     &'a SessionContext,
     &'a T,
-) -> FormatFuture<'a, Arc<dyn TableProvider>>;
+) -> FormatFuture<'a, Box<dyn DataSource>>;
 
 /// Creates command-scoped sink state from typed transform settings.
 ///
@@ -143,47 +142,38 @@ pub enum InspectionMode {
     Json,
 }
 
-/// A format-specific container variant identified before leaf construction.
-#[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
-pub struct InputVariant {
-    name: Option<String>,
+/// Format-specific details returned when a detector recognizes an input.
+///
+/// The registry adds the canonical format name to produce [`DetectedFormat`].
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct FormatMatch {
+    variant: Option<String>,
 }
 
-impl InputVariant {
-    /// Describes a format with no more specific container variant.
+impl FormatMatch {
+    /// Reports a match with no more specific variant.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Describes a recognized container variant.
-    pub fn named(name: impl Into<String>) -> Self {
+    /// Reports a match and the recognized format variant.
+    pub fn with_variant(variant: impl Into<String>) -> Self {
         Self {
-            name: Some(name.into()),
+            variant: Some(variant.into()),
         }
     }
 
-    /// Returns the container variant name, when the format distinguishes one.
-    pub fn name(&self) -> Option<&str> {
-        self.name.as_deref()
+    /// Returns the recognized variant, when the format distinguishes one.
+    pub fn variant(&self) -> Option<&str> {
+        self.variant.as_deref()
     }
-}
-
-/// The bounded result of asking one format detector to identify an object.
-#[derive(Debug)]
-pub enum InputDetection {
-    /// The object is not this format.
-    Mismatch,
-    /// The object is this format and has the supplied container variant.
-    Match(InputVariant),
-    /// The object is recognizably this format but is structurally malformed.
-    Malformed(anyhow::Error),
 }
 
 /// A detection result paired with its definition's canonical name.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DetectedFormat {
     format: &'static str,
-    variant: InputVariant,
+    variant: Option<String>,
 }
 
 impl DetectedFormat {
@@ -194,12 +184,7 @@ impl DetectedFormat {
 
     /// Returns the format-specific variant reported by its detector.
     pub fn variant(&self) -> Option<&str> {
-        self.variant.name()
-    }
-
-    /// Returns the bound container variant.
-    pub fn input_variant(&self) -> &InputVariant {
-        &self.variant
+        self.variant.as_deref()
     }
 }
 
@@ -210,8 +195,8 @@ pub enum FormatOperation {
     Detection,
     /// Producing format-specific metadata output.
     Inspection,
-    /// Creating a DataFusion input provider.
-    InputProviderCreation,
+    /// Creating a DataFusion input source.
+    SourceCreation,
     /// Creating command-scoped output state.
     SinkBinding,
 }
@@ -221,7 +206,7 @@ impl fmt::Display for FormatOperation {
         formatter.write_str(match self {
             Self::Detection => "detection",
             Self::Inspection => "inspection",
-            Self::InputProviderCreation => "input provider creation",
+            Self::SourceCreation => "source creation",
             Self::SinkBinding => "sink binding",
         })
     }
@@ -242,19 +227,12 @@ pub enum FormatOperationError {
         #[source]
         source: anyhow::Error,
     },
-    #[error("malformed {format} input {input}: {source}")]
-    MalformedInput {
-        format: &'static str,
-        input: String,
-        #[source]
-        source: anyhow::Error,
-    },
 }
 
 /// A format's transform CLI settings and optional input and output capabilities.
 ///
-/// Input-provider creation and sink binding share the same parsed argument type so a format can
-/// expose one coherent transform configuration. Either capability may be omitted.
+/// Source creation and sink binding share the same parsed argument type so a format can expose one
+/// coherent transform configuration. Either capability may be omitted.
 #[derive(Clone)]
 pub struct TransformDefinition {
     pub(super) definition: Arc<dyn binding::ErasedTransformDefinition>,
@@ -268,7 +246,7 @@ impl TransformDefinition {
     {
         TransformDefinitionBuilder {
             args: binding::ArgsParser::for_args(),
-            input_provider: None,
+            source: None,
             sink: None,
             settings: PhantomData,
         }
@@ -278,7 +256,7 @@ impl TransformDefinition {
     pub fn without_args() -> TransformDefinitionBuilder<()> {
         TransformDefinitionBuilder {
             args: binding::ArgsParser::unit(),
-            input_provider: None,
+            source: None,
             sink: None,
             settings: PhantomData,
         }
@@ -288,10 +266,10 @@ impl TransformDefinition {
 /// Builds transform capabilities that share one concrete argument type.
 ///
 /// Calling [`Self::build`] preserves whichever capabilities were supplied; transform definitions
-/// may be input-only, sink-only, both, or neither.
+/// may be source-only, sink-only, both, or neither.
 pub struct TransformDefinitionBuilder<T> {
     args: binding::ArgsParser<T>,
-    input_provider: Option<InputProviderFn<T>>,
+    source: Option<SourceCreatorFn<T>>,
     sink: Option<SinkBinderFn<T>>,
     settings: PhantomData<fn() -> T>,
 }
@@ -300,9 +278,9 @@ impl<T> TransformDefinitionBuilder<T>
 where
     T: Send + Sync + 'static,
 {
-    /// Adds the function that creates one homogeneous input provider.
-    pub fn input_provider(mut self, input_provider: InputProviderFn<T>) -> Self {
-        self.input_provider = Some(input_provider);
+    /// Adds the function that creates one input source.
+    pub fn source(mut self, source: SourceCreatorFn<T>) -> Self {
+        self.source = Some(source);
         self
     }
 
@@ -317,7 +295,7 @@ where
         TransformDefinition {
             definition: Arc::new(binding::TypedTransformDefinition::new(
                 self.args,
-                self.input_provider,
+                self.source,
                 self.sink,
             )),
         }
@@ -365,7 +343,7 @@ pub struct FormatDefinition {
     pub(super) aliases: Vec<&'static str>,
     pub(super) extensions: Vec<&'static str>,
     pub(super) detection_priority: usize,
-    pub(super) detector: Option<InputDetectorFn>,
+    pub(super) detector: Option<FormatDetectorFn>,
     pub(super) transform: Option<TransformDefinition>,
     inspection: Option<InspectionDefinition>,
 }
@@ -406,11 +384,11 @@ impl FormatDefinition {
         self.detector.is_some()
     }
 
-    /// Reports whether the format can create input providers.
-    pub fn has_input_provider(&self) -> bool {
+    /// Reports whether the format can create input sources.
+    pub fn has_source(&self) -> bool {
         self.transform
             .as_ref()
-            .is_some_and(|transform| transform.definition.has_input_provider())
+            .is_some_and(|transform| transform.definition.has_source())
     }
 
     /// Reports whether the format can bind output sinks.
@@ -428,30 +406,24 @@ impl FormatDefinition {
     /// Runs this definition's detector and attaches its canonical format name.
     pub async fn detect(
         &self,
-        object: &InputObject,
+        handle: &StorageHandle,
     ) -> Result<Option<DetectedFormat>, FormatOperationError> {
         let detector = self.detector.ok_or(FormatOperationError::Unsupported {
             format: self.name,
             operation: FormatOperation::Detection,
         })?;
-        match detector(object)
-            .await
-            .map_err(|source| FormatOperationError::Failed {
-                format: self.name,
-                operation: FormatOperation::Detection,
-                source,
-            })? {
-            InputDetection::Mismatch => Ok(None),
-            InputDetection::Match(variant) => Ok(Some(DetectedFormat {
-                format: self.name,
-                variant,
-            })),
-            InputDetection::Malformed(source) => Err(FormatOperationError::MalformedInput {
-                format: self.name,
-                input: object.handle().url().to_string(),
-                source,
-            }),
-        }
+        let format_match =
+            detector(handle)
+                .await
+                .map_err(|source| FormatOperationError::Failed {
+                    format: self.name,
+                    operation: FormatOperation::Detection,
+                    source,
+                })?;
+        Ok(format_match.map(|format_match| DetectedFormat {
+            format: self.name,
+            variant: format_match.variant,
+        }))
     }
 
     /// Adds this format's inspection arguments to a host-owned Clap command.
@@ -517,14 +489,14 @@ impl FormatDefinitionBuilder {
         self
     }
 
-    /// Claims filename extensions for input and output format selection.
+    /// Claims filename extensions for source and sink selection.
     pub fn extensions(mut self, extensions: impl IntoIterator<Item = &'static str>) -> Self {
         self.definition.extensions.extend(extensions);
         self
     }
 
     /// Adds content-based detection and makes the format eligible for registry detection.
-    pub fn detector(mut self, detector: InputDetectorFn) -> Self {
+    pub fn detector(mut self, detector: FormatDetectorFn) -> Self {
         self.definition.detector = Some(detector);
         self
     }
@@ -537,7 +509,7 @@ impl FormatDefinitionBuilder {
         self
     }
 
-    /// Adds transform CLI settings and input-provider or sink capabilities.
+    /// Adds transform CLI settings and source or sink capabilities.
     pub fn transform(mut self, transform: TransformDefinition) -> Self {
         self.definition.transform = Some(transform);
         self
@@ -558,10 +530,9 @@ impl FormatDefinitionBuilder {
     }
 }
 
-/// One format's input-provider and sink functions bound to one invocation's transform arguments.
+/// One format's source and sink functions bound to one invocation's transform arguments.
 pub struct TransformBinding {
     pub(super) format: &'static str,
-    pub(super) detector: Option<InputDetectorFn>,
     pub(super) binding: Arc<dyn binding::ErasedTransformBinding>,
 }
 
@@ -571,14 +542,9 @@ impl TransformBinding {
         self.format
     }
 
-    /// Reports whether this binding can create input providers.
-    pub fn has_input_provider(&self) -> bool {
-        self.binding.has_input_provider()
-    }
-
-    /// Reports whether this binding can recognize inputs from their contents.
-    pub fn has_detector(&self) -> bool {
-        self.detector.is_some()
+    /// Reports whether this binding can create input sources.
+    pub fn has_source(&self) -> bool {
+        self.binding.has_source()
     }
 
     /// Reports whether this binding can create command-scoped sink state.
@@ -586,40 +552,14 @@ impl TransformBinding {
         self.binding.has_sink()
     }
 
-    /// Runs this binding's detector and retains the already-bound transform settings.
-    pub async fn detect(
+    /// Creates one input source using this binding's parsed settings.
+    pub async fn create_source(
         &self,
-        object: &InputObject,
-    ) -> Result<Option<InputVariant>, FormatOperationError> {
-        let detector = self.detector.ok_or(FormatOperationError::Unsupported {
-            format: self.format,
-            operation: FormatOperation::Detection,
-        })?;
-        match detector(object)
-            .await
-            .map_err(|source| FormatOperationError::Failed {
-                format: self.format,
-                operation: FormatOperation::Detection,
-                source,
-            })? {
-            InputDetection::Mismatch => Ok(None),
-            InputDetection::Match(variant) => Ok(Some(variant)),
-            InputDetection::Malformed(source) => Err(FormatOperationError::MalformedInput {
-                format: self.format,
-                input: object.handle().url().to_string(),
-                source,
-            }),
-        }
-    }
-
-    /// Creates one homogeneous input provider using this binding's parsed settings.
-    pub async fn create_input_provider(
-        &self,
-        leaf: &crate::InputLeaf,
+        handle: &StorageHandle,
         session: &SessionContext,
-    ) -> Result<Arc<dyn TableProvider>, FormatOperationError> {
+    ) -> Result<Box<dyn DataSource>, FormatOperationError> {
         self.binding
-            .create_input_provider(self.format, leaf, session)
+            .create_source(self.format, handle, session)
             .await
     }
 
@@ -640,7 +580,6 @@ pub struct TransformBindings {
     pub(super) bindings: Vec<TransformBinding>,
     pub(super) names: HashMap<String, usize>,
     pub(super) extensions: HashMap<String, usize>,
-    pub(super) detection_order: Vec<usize>,
 }
 
 impl TransformBindings {
@@ -661,37 +600,5 @@ impl TransformBindings {
         self.extensions
             .get(&extension.trim_start_matches('.').to_ascii_lowercase())
             .map(|index| &self.bindings[*index])
-    }
-
-    /// Detects an input, trying its extension owner before the normal detector order.
-    pub async fn detect(
-        &self,
-        object: &InputObject,
-    ) -> Result<Option<(&TransformBinding, InputVariant)>, FormatOperationError> {
-        let preferred = object
-            .handle()
-            .object_path()
-            .extension()
-            .and_then(|extension| {
-                self.extensions
-                    .get(&extension.to_ascii_lowercase())
-                    .copied()
-            });
-        if let Some(index) = preferred
-            && self.bindings[index].detector.is_some()
-            && self.bindings[index].has_input_provider()
-            && let Some(variant) = self.bindings[index].detect(object).await?
-        {
-            return Ok(Some((&self.bindings[index], variant)));
-        }
-        for &index in &self.detection_order {
-            if Some(index) == preferred {
-                continue;
-            }
-            if let Some(variant) = self.bindings[index].detect(object).await? {
-                return Ok(Some((&self.bindings[index], variant)));
-            }
-        }
-        Ok(None)
     }
 }

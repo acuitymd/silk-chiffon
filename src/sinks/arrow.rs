@@ -242,7 +242,10 @@ impl ArrowRecordBatchWriter for StreamWriter<BufWriter<File>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::test_helpers::{test_data, verify};
+    use crate::{
+        sources::data_source::DataSource,
+        utils::test_helpers::{file_helpers, test_data, verify},
+    };
     use tempfile::tempdir;
 
     mod arrow_sink_tests {
@@ -487,6 +490,7 @@ mod tests {
         #[tokio::test]
         async fn test_sink_write_stream() {
             let temp_dir = tempdir().unwrap();
+            let input_path = temp_dir.path().join("input.arrow");
             let output_path = temp_dir.path().join("output.arrow");
 
             let schema = test_data::simple_schema();
@@ -494,14 +498,14 @@ mod tests {
                 test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["a", "b", "c"]);
             let batch2 = test_data::create_batch_with_ids_and_names(&schema, &[4, 5], &["d", "e"]);
 
+            file_helpers::write_arrow_file(&input_path, &schema, vec![batch1, batch2]).unwrap();
+
             let ctx = datafusion::prelude::SessionContext::new();
-            let provider = Arc::new(
-                datafusion::datasource::MemTable::try_new(
-                    Arc::clone(&schema),
-                    vec![vec![batch1, batch2]],
-                )
-                .unwrap(),
+            let source = crate::sources::arrow::ArrowDataSource::new(
+                input_path.to_str().unwrap().to_string(),
+                ctx.clone(),
             );
+            let provider = source.table_provider().await.unwrap();
             let stream = ctx
                 .read_table(provider)
                 .unwrap()

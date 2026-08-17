@@ -3,8 +3,9 @@ use std::sync::Arc;
 use anyhow::{Result, ensure};
 use arrow::{
     array::{Int32Array, RecordBatch},
-    datatypes::{DataType, Field, Schema},
+    datatypes::{DataType, Field, Schema, SchemaRef},
 };
+use async_trait::async_trait;
 use clap::{Args, Command};
 use datafusion::{
     catalog::TableProvider,
@@ -14,7 +15,9 @@ use datafusion::{
     prelude::SessionContext,
 };
 use futures::{TryStreamExt, future::BoxFuture};
-use silk_chiffon_core::{ServiceInputDefinition, ServiceOutputDefinition, SinkCompletion};
+use silk_chiffon_core::{
+    DataSource, Replayability, ServiceInputDefinition, ServiceOutputDefinition, SinkCompletion,
+};
 use url::Url;
 
 #[derive(Args)]
@@ -29,25 +32,50 @@ struct OutputArgs {
     service_output_marker: usize,
 }
 
-fn create_provider<'a>(
+struct TestSource {
+    name: String,
+    schema: SchemaRef,
+}
+
+#[async_trait]
+impl DataSource for TestSource {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn replayability(&self) -> Replayability {
+        Replayability::Replayable
+    }
+
+    async fn table_provider(&self) -> Result<Arc<dyn TableProvider>> {
+        let batch = RecordBatch::try_new(
+            Arc::clone(&self.schema),
+            vec![Arc::new(Int32Array::from(vec![1, 2, 3]))],
+        )?;
+        Ok(Arc::new(MemTable::try_new(
+            Arc::clone(&self.schema),
+            vec![vec![batch]],
+        )?))
+    }
+}
+
+fn create_source<'a>(
     reference: &'a str,
     session: &'a SessionContext,
     settings: &'a InputArgs,
-) -> BoxFuture<'a, Result<Arc<dyn TableProvider>>> {
+) -> BoxFuture<'a, Result<Box<dyn DataSource>>> {
     Box::pin(async move {
         ensure!(reference == "svc-in://project/table");
         ensure!(settings.service_input_marker == 17);
         ensure!(session.state().config_options().execution.target_partitions == 3);
-        let schema = Arc::new(Schema::new(vec![Field::new(
-            "value",
-            DataType::Int32,
-            false,
-        )]));
-        let batch = RecordBatch::try_new(
-            Arc::clone(&schema),
-            vec![Arc::new(Int32Array::from(vec![1, 2, 3]))],
-        )?;
-        Ok(Arc::new(MemTable::try_new(schema, vec![vec![batch]])?) as Arc<dyn TableProvider>)
+        Ok(Box::new(TestSource {
+            name: reference.to_owned(),
+            schema: Arc::new(Schema::new(vec![Field::new(
+                "value",
+                DataType::Int32,
+                false,
+            )])),
+        }) as Box<dyn DataSource>)
     })
 }
 
@@ -66,14 +94,14 @@ fn write_output<'a>(
 }
 
 #[test]
-fn service_input_keeps_typed_settings_with_its_provider_function() {
-    let definition = ServiceInputDefinition::with_args::<InputArgs>(create_provider)
+fn service_input_keeps_typed_settings_with_its_creator() {
+    let definition = ServiceInputDefinition::with_args::<InputArgs>(create_source)
         .name("test-input")
         .schemes(["svc-in"])
         .build()
         .unwrap();
-    let matches = definition
-        .augment_args(Command::new("test"))
+    let command = definition.augment_args(Command::new("test"));
+    let matches = command
         .try_get_matches_from(["test", "--service-input-marker", "17"])
         .unwrap();
     let binding = definition.bind(&matches).unwrap();
@@ -81,14 +109,13 @@ fn service_input_keeps_typed_settings_with_its_provider_function() {
         datafusion::prelude::SessionConfig::new().with_target_partitions(3),
     );
 
-    let provider = futures::executor::block_on(
-        binding.create_input_provider("svc-in://project/table", &session),
-    )
-    .unwrap();
+    let source =
+        futures::executor::block_on(binding.create_source("svc-in://project/table", &session))
+            .unwrap();
 
     assert_eq!(definition.name(), "test-input");
     assert_eq!(definition.schemes(), ["svc-in"]);
-    assert_eq!(provider.schema().field(0).name(), "value");
+    assert_eq!(source.name(), "svc-in://project/table");
 }
 
 #[test]
@@ -98,8 +125,8 @@ fn service_output_keeps_typed_settings_with_its_write_operation() {
         .schemes(["svc-out"])
         .build()
         .unwrap();
-    let matches = definition
-        .augment_args(Command::new("test"))
+    let command = definition.augment_args(Command::new("test"));
+    let matches = command
         .try_get_matches_from(["test", "--service-output-marker", "23"])
         .unwrap();
     let binding = definition.bind(&matches).unwrap();

@@ -18,10 +18,7 @@ fn executable_registers_formats_and_the_available_storage() {
         ["arrow", "parquet", "vortex"]
     );
     assert!(formats.formats().all(|format| {
-        format.has_detector()
-            && format.has_input_provider()
-            && format.has_sink()
-            && format.has_inspector()
+        format.has_detector() && format.has_source() && format.has_sink() && format.has_inspector()
     }));
 
     let storage = registration::storage_registry();
@@ -241,12 +238,11 @@ async fn registered_transform_uses_bound_format_and_storage_settings() {
     );
 
     let storage = silk_chiffon_storage::local::session().unwrap();
-    let input_object = storage
-        .lookup_input(&LocationInput::parse(input.to_str().unwrap()).unwrap())
-        .await
+    let input_handle = storage
+        .input_handle(&LocationInput::parse(input.to_str().unwrap()).unwrap())
         .unwrap();
     let detected = registration::format_registry()
-        .detect(&input_object)
+        .detect(&input_handle)
         .await
         .unwrap()
         .unwrap();

@@ -1,81 +1,193 @@
-//! A command's retained lazy input frame.
+//! Nonempty command input collections and their combined source properties.
 
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
-use datafusion::{catalog::TableProvider, dataframe::DataFrame, prelude::SessionContext};
+use async_trait::async_trait;
+use datafusion::{catalog::TableProvider, prelude::SessionContext};
 
-/// The nonempty, lazy base frame for one transform command.
+use crate::{DataSource, Replayability, RowCount, RowCountCapability};
+
+/// A command's nonempty collection of input sources.
 ///
-/// Each provider is a leaf dataset. Schemas are aligned only at this boundary with DataFusion's
-/// `union_by_name`; cloning the returned frame rebuilds logical consumers without executing input.
-#[derive(Clone)]
+/// Keeping the first source separate makes the nonempty invariant part of the
+/// type. A single source exposes its provider directly. Multiple sources become
+/// a DataFusion union in the same session used to plan the command.
 pub struct InputSources {
-    data_frame: DataFrame,
+    first: Box<dyn DataSource>,
+    rest: Vec<Box<dyn DataSource>>,
 }
 
 impl InputSources {
-    /// Builds the base frame from leaf providers in operand order.
-    pub fn try_new(
-        session: &SessionContext,
-        providers: Vec<Arc<dyn TableProvider>>,
-    ) -> Result<Self> {
-        let mut providers = providers.into_iter();
-        let first = providers
-            .next()
-            .ok_or_else(|| anyhow!("no input providers supplied"))?;
-        let mut data_frame = session.read_table(first)?;
-        for provider in providers {
-            data_frame = data_frame.union_by_name(session.read_table(provider)?)?;
+    /// Starts the collection with its required first source.
+    pub fn new(first: Box<dyn DataSource>) -> Self {
+        Self {
+            first,
+            rest: Vec::new(),
         }
-        Ok(Self { data_frame })
     }
 
-    /// Returns a clone of the retained lazy base frame.
-    pub fn data_frame(&self) -> DataFrame {
-        self.data_frame.clone()
+    /// Appends another source in input order.
+    pub fn push(&mut self, source: Box<dyn DataSource>) {
+        self.rest.push(source);
+    }
+
+    /// Iterates over every source in input order.
+    pub fn iter(&self) -> impl Iterator<Item = &dyn DataSource> {
+        std::iter::once(self.first.as_ref()).chain(self.rest.iter().map(Box::as_ref))
+    }
+
+    /// Creates the provider for the complete logical input.
+    ///
+    /// Multiple inputs use DataFusion's union semantics rather than a host stream
+    /// wrapper.
+    pub async fn table_provider(&self, session: &SessionContext) -> Result<Arc<dyn TableProvider>> {
+        let first = self.first.table_provider().await?;
+        if self.rest.is_empty() {
+            return Ok(first);
+        }
+
+        let mut table = session.read_table(first)?;
+        for source in &self.rest {
+            table = table.union(session.read_table(source.table_provider().await?)?)?;
+        }
+        Ok(table.into_view())
+    }
+
+    /// Returns [`Replayability::Replayable`] only when every input is replayable.
+    pub fn replayability(&self) -> Replayability {
+        if self
+            .iter()
+            .all(|source| source.replayability() == Replayability::Replayable)
+        {
+            Replayability::Replayable
+        } else {
+            Replayability::SinglePass
+        }
+    }
+
+    /// Returns combined row-count behavior only when every input provides it.
+    ///
+    /// The combined operation returns an estimate if any component count is
+    /// estimated and returns unknown if any component count is unknown.
+    pub fn row_count_capability(&self) -> Option<&dyn RowCountCapability> {
+        self.iter()
+            .all(|source| source.row_count_capability().is_some())
+            .then_some(self)
+    }
+}
+
+#[async_trait]
+impl RowCountCapability for InputSources {
+    async fn row_count(&self) -> Result<RowCount> {
+        let mut total = 0_u64;
+        let mut estimated = false;
+        for source in self.iter() {
+            let capability = source
+                .row_count_capability()
+                .ok_or_else(|| anyhow!("source does not provide row-count metadata"))?;
+            match capability.row_count().await? {
+                RowCount::Exact(count) => {
+                    total = total
+                        .checked_add(count)
+                        .ok_or_else(|| anyhow!("combined row count exceeds u64"))?;
+                }
+                RowCount::Estimated(count) => {
+                    total = total
+                        .checked_add(count)
+                        .ok_or_else(|| anyhow!("combined row count exceeds u64"))?;
+                    estimated = true;
+                }
+                RowCount::Unknown => return Ok(RowCount::Unknown),
+            }
+        }
+        Ok(if estimated {
+            RowCount::Estimated(total)
+        } else {
+            RowCount::Exact(total)
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::datatypes::Schema;
     use datafusion::datasource::empty::EmptyTable;
 
     use super::*;
 
-    #[test]
-    fn union_by_name_aligns_leaf_schemas_in_operand_order() {
-        let session = SessionContext::new();
-        let first = Arc::new(EmptyTable::new(Arc::new(Schema::new(vec![Field::new(
-            "left",
-            DataType::Int64,
-            false,
-        )])))) as Arc<dyn TableProvider>;
-        let second = Arc::new(EmptyTable::new(Arc::new(Schema::new(vec![Field::new(
-            "right",
-            DataType::Utf8,
-            false,
-        )])))) as Arc<dyn TableProvider>;
+    struct TestSource {
+        replayability: Replayability,
+        count: Option<RowCount>,
+    }
 
-        let inputs = InputSources::try_new(&session, vec![first, second]).unwrap();
-        let names = inputs
-            .data_frame()
-            .schema()
-            .fields()
-            .iter()
-            .map(|field| field.name().to_owned())
-            .collect::<Vec<_>>();
+    #[async_trait]
+    impl DataSource for TestSource {
+        fn name(&self) -> &str {
+            "test"
+        }
 
-        assert_eq!(names, ["left", "right"]);
+        fn replayability(&self) -> Replayability {
+            self.replayability
+        }
+
+        fn row_count_capability(&self) -> Option<&dyn RowCountCapability> {
+            self.count.map(|_| self as &dyn RowCountCapability)
+        }
+
+        async fn table_provider(&self) -> Result<Arc<dyn TableProvider>> {
+            Ok(Arc::new(EmptyTable::new(Arc::new(Schema::empty()))))
+        }
+    }
+
+    #[async_trait]
+    impl RowCountCapability for TestSource {
+        async fn row_count(&self) -> Result<RowCount> {
+            Ok(self.count.expect("capability is present"))
+        }
+    }
+
+    fn source(replayability: Replayability, count: Option<RowCount>) -> Box<dyn DataSource> {
+        Box::new(TestSource {
+            replayability,
+            count,
+        })
     }
 
     #[test]
-    fn empty_provider_collection_is_rejected() {
-        let error = match InputSources::try_new(&SessionContext::new(), Vec::new()) {
-            Ok(_) => panic!("empty providers must fail"),
-            Err(error) => error,
-        };
-        assert_eq!(error.to_string(), "no input providers supplied");
+    fn replayability_requires_every_source_to_be_replayable() {
+        let mut inputs =
+            InputSources::new(source(Replayability::Replayable, Some(RowCount::Exact(2))));
+        inputs.push(source(Replayability::SinglePass, None));
+        assert_eq!(inputs.replayability(), Replayability::SinglePass);
+
+        let mut inputs =
+            InputSources::new(source(Replayability::Replayable, Some(RowCount::Exact(2))));
+        inputs.push(source(Replayability::Replayable, Some(RowCount::Exact(3))));
+        assert_eq!(inputs.replayability(), Replayability::Replayable);
+    }
+
+    #[test]
+    fn row_count_requires_every_source_capability() {
+        futures::executor::block_on(async {
+            let mut mixed =
+                InputSources::new(source(Replayability::Replayable, Some(RowCount::Exact(2))));
+            mixed.push(source(Replayability::Replayable, None));
+            assert!(mixed.row_count_capability().is_none());
+
+            let mut complete =
+                InputSources::new(source(Replayability::Replayable, Some(RowCount::Exact(2))));
+            complete.push(source(
+                Replayability::Replayable,
+                Some(RowCount::Estimated(3)),
+            ));
+            let count = complete
+                .row_count_capability()
+                .expect("all sources provide row counts")
+                .row_count()
+                .await
+                .unwrap();
+            assert_eq!(count, RowCount::Estimated(5));
+        });
     }
 }

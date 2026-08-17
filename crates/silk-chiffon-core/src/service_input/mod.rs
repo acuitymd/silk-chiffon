@@ -1,9 +1,9 @@
 //! Public contracts for service-backed command inputs.
 //!
 //! A connector crate contributes an immutable [`ServiceInputDefinition`] with its name, claimed
-//! schemes, typed Clap settings, and provider function. The host adds those settings to its command
-//! and binds them once after parsing. The resulting [`ServiceInputBinding`] creates a table
-//! provider from one raw exact reference and the command's shared DataFusion session.
+//! schemes, typed Clap settings, and source creator. The host adds those settings to its command
+//! and binds them once after parsing. The resulting [`ServiceInputBinding`] creates a
+//! [`DataSource`] from one raw exact reference and the command's shared DataFusion session.
 //!
 //! Each connector keeps its settings type through parsing and binding. The private `binding`
 //! module erases the complete typed definition or binding behind a trait object, allowing
@@ -16,14 +16,16 @@ use std::{collections::HashSet, fmt, sync::Arc};
 
 use anyhow::Result;
 use clap::{ArgMatches, Args, Command, FromArgMatches};
-use datafusion::{catalog::TableProvider, prelude::SessionContext};
+use datafusion::prelude::SessionContext;
 use futures::future::BoxFuture;
 use thiserror::Error;
 
-/// Creates one logical input provider from a raw exact reference, the shared session, and typed
-/// settings.
-pub type ServiceInputProviderFn<T> =
-    for<'a> fn(&'a str, &'a SessionContext, &'a T) -> BoxFuture<'a, Result<Arc<dyn TableProvider>>>;
+use crate::DataSource;
+
+/// Creates one logical input from a raw exact reference, the shared session,
+/// and typed settings.
+pub type ServiceInputCreatorFn<T> =
+    for<'a> fn(&'a str, &'a SessionContext, &'a T) -> BoxFuture<'a, Result<Box<dyn DataSource>>>;
 
 /// Immutable metadata and typed creation behavior contributed by one service input.
 #[derive(Clone)]
@@ -44,17 +46,17 @@ impl fmt::Debug for ServiceInputDefinition {
 }
 
 impl ServiceInputDefinition {
-    /// Starts a definition whose provider function receives parsed `T` settings.
-    pub fn with_args<T>(provider: ServiceInputProviderFn<T>) -> ServiceInputDefinitionBuilder<T>
+    /// Starts a definition whose creator receives parsed `T` settings.
+    pub fn with_args<T>(creator: ServiceInputCreatorFn<T>) -> ServiceInputDefinitionBuilder<T>
     where
         T: Args + FromArgMatches + Send + Sync + 'static,
     {
-        ServiceInputDefinitionBuilder::new(binding::ArgsParser::for_args(), provider)
+        ServiceInputDefinitionBuilder::new(binding::ArgsParser::for_args(), creator)
     }
 
     /// Starts a definition with no service-specific settings.
-    pub fn without_args(provider: ServiceInputProviderFn<()>) -> ServiceInputDefinitionBuilder<()> {
-        ServiceInputDefinitionBuilder::new(binding::ArgsParser::<()>::unit(), provider)
+    pub fn without_args(creator: ServiceInputCreatorFn<()>) -> ServiceInputDefinitionBuilder<()> {
+        ServiceInputDefinitionBuilder::new(binding::ArgsParser::<()>::unit(), creator)
     }
 
     /// Returns the canonical name used in assembly diagnostics.
@@ -86,19 +88,19 @@ pub struct ServiceInputDefinitionBuilder<T> {
     name: Option<&'static str>,
     schemes: Vec<&'static str>,
     args: binding::ArgsParser<T>,
-    provider: ServiceInputProviderFn<T>,
+    creator: ServiceInputCreatorFn<T>,
 }
 
 impl<T> ServiceInputDefinitionBuilder<T>
 where
     T: Send + Sync + 'static,
 {
-    fn new(args: binding::ArgsParser<T>, provider: ServiceInputProviderFn<T>) -> Self {
+    fn new(args: binding::ArgsParser<T>, creator: ServiceInputCreatorFn<T>) -> Self {
         Self {
             name: None,
             schemes: Vec::new(),
             args,
-            provider,
+            creator,
         }
     }
 
@@ -128,7 +130,7 @@ where
             schemes: Arc::from(self.schemes),
             definition: Arc::new(binding::TypedServiceInputDefinition::new(
                 self.args,
-                self.provider,
+                self.creator,
             )),
         })
     }
@@ -161,16 +163,16 @@ impl ServiceInputBinding {
         self.name
     }
 
-    /// Creates one provider from a raw exact reference in the shared session.
-    pub async fn create_input_provider(
+    /// Creates one source from a raw exact reference in the shared session.
+    pub async fn create_source(
         &self,
         reference: &str,
         session: &SessionContext,
-    ) -> Result<Arc<dyn TableProvider>, ServiceInputProviderError> {
+    ) -> Result<Box<dyn DataSource>, ServiceInputCreationError> {
         self.binding
-            .create_input_provider(reference, session)
+            .create_source(reference, session)
             .await
-            .map_err(|source| ServiceInputProviderError {
+            .map_err(|source| ServiceInputCreationError {
                 service: self.name,
                 reference: reference.to_owned(),
                 source,
@@ -178,10 +180,10 @@ impl ServiceInputBinding {
     }
 }
 
-/// Failure while one bound service input creates its logical provider.
+/// Failure while one bound service input creates its logical source.
 #[derive(Debug, Error)]
-#[error("service input {service:?} failed to create a provider for {reference:?}: {source}")]
-pub struct ServiceInputProviderError {
+#[error("service input {service:?} failed to create source for {reference:?}: {source}")]
+pub struct ServiceInputCreationError {
     service: &'static str,
     reference: String,
     #[source]

@@ -17,14 +17,14 @@
 use std::{future::Future, pin::Pin, sync::Arc};
 
 use clap::{ArgMatches, Args, Command, FromArgMatches};
-use datafusion::{catalog::TableProvider, prelude::SessionContext};
+use datafusion::prelude::SessionContext;
 use silk_chiffon_storage::StorageHandle;
 
 use super::{
-    FormatOperation, FormatOperationError, InputProviderFn, InspectionMode, InspectorFn,
-    SinkBinderFn, SinkBindingConfig,
+    FormatOperation, FormatOperationError, InspectionMode, InspectorFn, SinkBinderFn,
+    SinkBindingConfig, SourceCreatorFn,
 };
-use crate::{InputLeaf, InspectionOutput, SinkBinding};
+use crate::{DataSource, InspectionOutput, SinkBinding};
 
 /// The two Clap operations that must stay paired for one concrete settings type.
 #[derive(Clone, Copy)]
@@ -84,7 +84,7 @@ type BindingFuture<'a, T> =
 
 /// Definition-time transform behavior stored by the registry.
 pub(super) trait ErasedTransformDefinition: Send + Sync {
-    fn has_input_provider(&self) -> bool;
+    fn has_source(&self) -> bool;
 
     fn has_sink(&self) -> bool;
 
@@ -97,16 +97,16 @@ pub(super) trait ErasedTransformDefinition: Send + Sync {
 
 /// Invocation-time transform behavior after one settings value has been parsed.
 pub(super) trait ErasedTransformBinding: Send + Sync {
-    fn has_input_provider(&self) -> bool;
+    fn has_source(&self) -> bool;
 
     fn has_sink(&self) -> bool;
 
-    fn create_input_provider<'a>(
+    fn create_source<'a>(
         &'a self,
         format: &'static str,
-        leaf: &'a InputLeaf,
+        handle: &'a StorageHandle,
         session: &'a SessionContext,
-    ) -> BindingFuture<'a, Arc<dyn TableProvider>>;
+    ) -> BindingFuture<'a, Box<dyn DataSource>>;
 
     fn bind_sink<'a>(
         &'a self,
@@ -115,24 +115,20 @@ pub(super) trait ErasedTransformBinding: Send + Sync {
     ) -> BindingFuture<'a, Box<dyn SinkBinding>>;
 }
 
-/// A definition whose parser and input-provider or sink functions share settings type `T`.
+/// A definition whose parser and source or sink functions share settings type `T`.
 pub(super) struct TypedTransformDefinition<T> {
     args: ArgsParser<T>,
-    input_provider: Option<InputProviderFn<T>>,
+    source: Option<SourceCreatorFn<T>>,
     sink: Option<SinkBinderFn<T>>,
 }
 
 impl<T> TypedTransformDefinition<T> {
     pub(super) fn new(
         args: ArgsParser<T>,
-        input_provider: Option<InputProviderFn<T>>,
+        source: Option<SourceCreatorFn<T>>,
         sink: Option<SinkBinderFn<T>>,
     ) -> Self {
-        Self {
-            args,
-            input_provider,
-            sink,
-        }
+        Self { args, source, sink }
     }
 }
 
@@ -140,8 +136,8 @@ impl<T> ErasedTransformDefinition for TypedTransformDefinition<T>
 where
     T: Send + Sync + 'static,
 {
-    fn has_input_provider(&self) -> bool {
-        self.input_provider.is_some()
+    fn has_source(&self) -> bool {
+        self.source.is_some()
     }
 
     fn has_sink(&self) -> bool {
@@ -159,16 +155,16 @@ where
     fn bind(&self, matches: &ArgMatches) -> Result<Arc<dyn ErasedTransformBinding>, clap::Error> {
         Ok(Arc::new(TypedTransformBinding {
             settings: self.args.parse(matches)?,
-            input_provider: self.input_provider,
+            source: self.source,
             sink: self.sink,
         }))
     }
 }
 
-/// One parsed `T` retained with the input-provider and sink functions that accept it.
+/// One parsed `T` retained with the source and sink functions that accept it.
 struct TypedTransformBinding<T> {
     settings: T,
-    input_provider: Option<InputProviderFn<T>>,
+    source: Option<SourceCreatorFn<T>>,
     sink: Option<SinkBinderFn<T>>,
 }
 
@@ -176,35 +172,35 @@ impl<T> ErasedTransformBinding for TypedTransformBinding<T>
 where
     T: Send + Sync + 'static,
 {
-    fn has_input_provider(&self) -> bool {
-        self.input_provider.is_some()
+    fn has_source(&self) -> bool {
+        self.source.is_some()
     }
 
     fn has_sink(&self) -> bool {
         self.sink.is_some()
     }
 
-    fn create_input_provider<'a>(
+    fn create_source<'a>(
         &'a self,
         format: &'static str,
-        leaf: &'a InputLeaf,
+        handle: &'a StorageHandle,
         session: &'a SessionContext,
-    ) -> BindingFuture<'a, Arc<dyn TableProvider>> {
-        let Some(input_provider) = self.input_provider else {
+    ) -> BindingFuture<'a, Box<dyn DataSource>> {
+        let Some(source) = self.source else {
             return Box::pin(async move {
                 Err(FormatOperationError::Unsupported {
                     format,
-                    operation: FormatOperation::InputProviderCreation,
+                    operation: FormatOperation::SourceCreation,
                 })
             });
         };
 
         Box::pin(async move {
-            input_provider(leaf, session, &self.settings)
+            source(handle, session, &self.settings)
                 .await
                 .map_err(|source| FormatOperationError::Failed {
                     format,
-                    operation: FormatOperation::InputProviderCreation,
+                    operation: FormatOperation::SourceCreation,
                     source,
                 })
         })

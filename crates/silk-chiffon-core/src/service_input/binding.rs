@@ -1,18 +1,19 @@
 //! Private type erasure for service-input definitions and command bindings.
 //!
 //! `TypedServiceInputDefinition<T>` keeps one connector's Clap settings as `T` until command
-//! binding. It then parses `T` once and stores it beside that connector's provider function. Only
-//! the complete definition and binding become trait objects, so independently typed connectors
-//! can share one application collection without `Any` values or downcasts.
+//! binding. It then parses `T` once and stores it beside that connector's creator. Only the
+//! complete definition and binding become trait objects, so independently typed connectors can
+//! share one application collection without `Any` values or downcasts.
 
 use std::{marker::PhantomData, sync::Arc};
 
 use anyhow::Result;
 use clap::{ArgMatches, Args, Command, FromArgMatches};
-use datafusion::{catalog::TableProvider, prelude::SessionContext};
+use datafusion::prelude::SessionContext;
 use futures::future::BoxFuture;
 
-use super::ServiceInputProviderFn;
+use super::ServiceInputCreatorFn;
+use crate::DataSource;
 
 pub(super) trait ErasedServiceInputDefinition: Send + Sync {
     fn augment_args(&self, command: Command) -> Command;
@@ -21,11 +22,11 @@ pub(super) trait ErasedServiceInputDefinition: Send + Sync {
 }
 
 pub(super) trait ErasedServiceInputBinding: Send + Sync {
-    fn create_input_provider<'a>(
+    fn create_source<'a>(
         &'a self,
         reference: &'a str,
         session: &'a SessionContext,
-    ) -> BoxFuture<'a, Result<Arc<dyn TableProvider>>>;
+    ) -> BoxFuture<'a, Result<Box<dyn DataSource>>>;
 }
 
 pub(super) struct ArgsParser<T> {
@@ -54,15 +55,15 @@ impl<T> ArgsParser<T> {
 
 pub(super) struct TypedServiceInputDefinition<T> {
     args: ArgsParser<T>,
-    provider: ServiceInputProviderFn<T>,
+    creator: ServiceInputCreatorFn<T>,
     settings: PhantomData<fn() -> T>,
 }
 
 impl<T> TypedServiceInputDefinition<T> {
-    pub(super) fn new(args: ArgsParser<T>, provider: ServiceInputProviderFn<T>) -> Self {
+    pub(super) fn new(args: ArgsParser<T>, creator: ServiceInputCreatorFn<T>) -> Self {
         Self {
             args,
-            provider,
+            creator,
             settings: PhantomData,
         }
     }
@@ -82,25 +83,25 @@ where
     ) -> Result<Box<dyn ErasedServiceInputBinding>, clap::Error> {
         Ok(Box::new(TypedServiceInputBinding {
             settings: Arc::new((self.args.parse)(matches)?),
-            provider: self.provider,
+            creator: self.creator,
         }))
     }
 }
 
 struct TypedServiceInputBinding<T> {
     settings: Arc<T>,
-    provider: ServiceInputProviderFn<T>,
+    creator: ServiceInputCreatorFn<T>,
 }
 
 impl<T> ErasedServiceInputBinding for TypedServiceInputBinding<T>
 where
     T: Send + Sync + 'static,
 {
-    fn create_input_provider<'a>(
+    fn create_source<'a>(
         &'a self,
         reference: &'a str,
         session: &'a SessionContext,
-    ) -> BoxFuture<'a, Result<Arc<dyn TableProvider>>> {
-        (self.provider)(reference, session, &self.settings)
+    ) -> BoxFuture<'a, Result<Box<dyn DataSource>>> {
+        (self.creator)(reference, session, &self.settings)
     }
 }
