@@ -5,7 +5,7 @@ mod config;
 pub(crate) mod encoding;
 mod stages;
 
-use std::{future::Future, sync::Arc};
+use std::{fmt, future::Future, sync::Arc};
 
 use anyhow::Result;
 use arrow::{array::RecordBatch, datatypes::SchemaRef};
@@ -21,6 +21,17 @@ pub use config::PipelineConfig;
 
 use crate::output::OutputRuntimes;
 use stages::{PipelineSetup, run_pipeline};
+
+#[derive(Debug)]
+struct PipelineCancelled;
+
+impl fmt::Display for PipelineCancelled {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("Parquet pipeline was cancelled")
+    }
+}
+
+impl std::error::Error for PipelineCancelled {}
 
 #[derive(Clone)]
 struct PipelineTaskScope {
@@ -40,6 +51,10 @@ impl PipelineTaskScope {
         self.cancellation.cancel();
     }
 
+    fn is_cancelled(&self) -> bool {
+        self.cancellation.is_cancelled()
+    }
+
     async fn wait(&self) {
         self.tracker.close();
         self.tracker.wait().await;
@@ -54,7 +69,7 @@ impl PipelineTaskScope {
             cancellation
                 .run_until_cancelled(future)
                 .await
-                .unwrap_or(Ok(()))
+                .unwrap_or_else(|| Err(PipelineCancelled.into()))
         }));
     }
 

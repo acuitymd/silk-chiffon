@@ -58,10 +58,10 @@ use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
-use super::PipelineTaskScope;
 use super::analysis::{ColumnAnalysis, RowGroupAnalysisState};
 use super::config::{ColumnPolicies, PipelineConfig};
 use super::encoding::build_row_group_properties;
+use super::{PipelineCancelled, PipelineTaskScope};
 use crate::output::OutputRuntimes;
 
 pub(super) struct PipelineSetup {
@@ -198,6 +198,7 @@ pub(super) async fn settle_pipeline_tasks(
                 scope.cancel();
                 pipeline_tasks.abort_all();
             }
+            Ok(Err(e)) if e.is::<PipelineCancelled>() => continue,
             Ok(Err(e)) => {
                 if errors.is_empty() {
                     scope.cancel();
@@ -210,6 +211,7 @@ pub(super) async fn settle_pipeline_tasks(
     }
 
     let result = match errors.len() {
+        0 if scope.is_cancelled() => Err(PipelineCancelled.into()),
         0 => Ok(()),
         1 => Err(errors.pop().unwrap()),
         _ => Err(anyhow!(
@@ -630,6 +632,19 @@ mod tests {
                 let _ = sender.send(());
             }
         }
+    }
+
+    #[tokio::test]
+    async fn external_cancellation_is_reported_as_an_error() {
+        let cancellation = CancellationToken::new();
+        let scope = PipelineTaskScope::new(cancellation.clone());
+        let mut tasks = JoinSet::new();
+        scope.spawn_stage(&mut tasks, pending::<Result<()>>());
+
+        cancellation.cancel();
+        let error = settle_pipeline_tasks(&scope, &mut tasks).await.unwrap_err();
+
+        assert_eq!(error.to_string(), "Parquet pipeline was cancelled");
     }
 
     #[tokio::test(flavor = "multi_thread")]
