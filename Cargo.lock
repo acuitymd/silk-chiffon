@@ -3962,15 +3962,7 @@ version = "0.1.0"
 name = "silk-chiffon-storage"
 version = "0.1.0"
 dependencies = [
- "bytes",
- "datafusion",
- "datafusion-execution",
- "futures",
  "object_store",
- "tempfile",
- "thiserror",
- "tokio",
- "url",
 ]
 
 [[package]]
@@ -4007,13 +3999,11 @@ dependencies = [
  "rand 0.10.2",
  "serde",
  "serde_json",
- "silk-chiffon-storage",
  "strum_macros",
  "sysinfo",
  "tabled",
  "tempfile",
  "tokio",
- "url",
  "uuid",
  "vortex",
  "vortex-datafusion",

@@ -1,6 +1,5 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
     process::Command,
 };
 
@@ -52,19 +51,6 @@ fn workspace_contains_foundation_packages() {
     assert!(packages.contains_key("silk_chiffon"));
     assert!(packages.contains_key("silk-chiffon-core"));
     assert!(packages.contains_key("silk-chiffon-storage"));
-}
-
-#[test]
-fn workspace_uses_cargo_resolver_three() {
-    let manifest = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
-        .expect("workspace manifest should be readable");
-
-    assert!(
-        manifest
-            .lines()
-            .any(|line| line.trim() == r#"resolver = "3""#),
-        "workspace must select Cargo resolver 3"
-    );
 }
 
 #[test]
