@@ -3955,17 +3955,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "silk-chiffon-core"
-version = "0.1.0"
-
-[[package]]
-name = "silk-chiffon-storage"
-version = "0.1.0"
-dependencies = [
- "object_store",
-]
-
-[[package]]
 name = "silk_chiffon"
 version = "0.1.0"
 dependencies = [
