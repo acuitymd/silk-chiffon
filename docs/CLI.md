@@ -8,10 +8,10 @@ This document contains the help content for the `silk-chiffon` command-line prog
 
 - [`silk-chiffon`↴](#silk-chiffon)
 - [`silk-chiffon transform`↴](#silk-chiffon-transform)
+- [`silk-chiffon detect`↴](#silk-chiffon-detect)
 - [`silk-chiffon inspect`↴](#silk-chiffon-inspect)
-- [`silk-chiffon inspect identify`↴](#silk-chiffon-inspect-identify)
-- [`silk-chiffon inspect parquet`↴](#silk-chiffon-inspect-parquet)
 - [`silk-chiffon inspect arrow`↴](#silk-chiffon-inspect-arrow)
+- [`silk-chiffon inspect parquet`↴](#silk-chiffon-inspect-parquet)
 - [`silk-chiffon inspect vortex`↴](#silk-chiffon-inspect-vortex)
 - [`silk-chiffon completions`↴](#silk-chiffon-completions)
 
@@ -24,6 +24,7 @@ Silky smooth conversion between columnar data formats 💝
 ###### **Subcommands:**
 
 - `transform` — Transform data between formats with optional filtering, sorting, merging, and partitioning.
+- `detect` — Detect the format of an input
 - `inspect` — Inspect file metadata and structure.
 - `completions` — Generate shell completions for your shell.
 
@@ -37,30 +38,32 @@ Examples:
     silk-chiffon transform --from input.arrow --to output.parquet
 
     # Merge multiple files
-    silk-chiffon transform --from-many file1.arrow --from-many file2.arrow --to merged.parquet
+    silk-chiffon transform --from file1.arrow --from file2.arrow --to merged.parquet
 
     # Partition into multiple files
     silk-chiffon transform --from input.arrow --to-many "{{region}}.parquet" --by region
 
     # Merge and partition with glob
-    silk-chiffon transform --from-many '*.arrow' --to-many "{{year}}/{{month}}.parquet" --by year,month
+    silk-chiffon transform --from-pattern '*.arrow' \
+      --to-many "{{year}}/{{month}}.parquet" --by year,month
 
 **Usage:** `silk-chiffon transform [OPTIONS]`
 
 ###### **Options:**
 
-- `--from <FROM>` — Single input file path
-- `--from-many <FROM_MANY>` — Multiple input file paths (supports glob patterns). Can be specified multiple times
-- `--input-format <INPUT_FORMAT>` — Override input format detection
+- `--from <FROM>` — Exact input reference. May be specified multiple times
+- `--from-pattern <FROM_PATTERN>` — File location pattern. May be specified multiple times
+- `--allow-unmatched-patterns` — Allow an individual file location pattern to match no files
+- `--input-format <INPUT_FORMAT>` — Override file input format detection
 
   Possible values: `arrow`, `parquet`, `vortex`
 
-- `--output-format <OUTPUT_FORMAT>` — Override output format detection
+- `--output-format <OUTPUT_FORMAT>` — Override file output format detection
 
   Possible values: `arrow`, `parquet`, `vortex`
 
-- `--to <TO>` — Single output file path
-- `--to-many <TO_MANY>` — Output path template for partitioning (e.g., "{{region}}.parquet"). Requires --by
+- `--to <TO>` — Exact file or service output target
+- `--to-many <TO_MANY>` — File output template for partitioning (e.g., "{{region}}.parquet"). Requires --by
 - `-d`, `--dialect <DIALECT>` — The query dialect to use
 
   Default value: `duckdb`
@@ -123,13 +126,7 @@ Examples:
 
   Default value: `lz4`
 
-  Possible values:
-  - `none`:
-    No compression (fastest, largest files)
-  - `lz4`:
-    LZ4 frame compression (fast, good compression)
-  - `zstd`:
-    Zstd compression (slower, best compression)
+  Possible values: `none`, `lz4`, `zstd`
 
 - `--preserve-input-order` — Preserve the row order from the input file in the output.
 
@@ -143,22 +140,58 @@ Examples:
 
   Possible values:
   - `sort-single`:
-    Sort by partition columns first, then write one file at a time. Uses minimal file handles but requires sorting the entire dataset. Best for high-cardinality partition columns, or when partition columns are highly fragmented
+    Sort by partition columns first, then write one file at a time. Keeps at most one output sink open but requires sorting the entire dataset. Best for high-cardinality partition columns, or when partition columns are highly fragmented
   - `nosort-multi`:
-    Keep a file handle open per partition, write rows directly. No sorting required, preserves input order within each partition. Best for low-cardinality partition columns with low fragmentation
+    Keep one output sink open per partition and write rows directly. No sorting required, preserves input order within each partition. Best for low-cardinality partition columns with low fragmentation
   - `nosort-evict`:
-    Like nosort-multi but caps the number of simultaneously open partition writers. When the cap is hit, the least-recently-written partition is finalized. If that partition reappears, a new numbered file is created. Best for high-cardinality partitions where sorting is too expensive. Per-writer concurrency is minimized (sequential encoding) since parallelism comes from having many partition writers active simultaneously
+    Like nosort-multi but caps the number of simultaneously open partition writers. When the cap is hit, the least-recently-written partition is finalized. If that partition reappears, `file_number` advances and the complete template is rendered again. Requires a direct unconditional `{{ file_number }}` interpolation in `--to-many`. Best for high-cardinality partitions where sorting is too expensive. Per-writer concurrency is minimized (sequential encoding) since parallelism comes from having many partition writers active simultaneously
 
-- `--max-open-partitions <MAX_OPEN_PARTITIONS>` — Maximum number of partition file handles to keep open simultaneously. When this limit is reached, the least-recently-written partition is finalized. Only used with --partition-strategy=nosort-evict. Defaults to 100
+- `--max-open-partitions <MAX_OPEN_PARTITIONS>` — Maximum number of partition output sinks to keep open simultaneously. When this limit is reached, the least-recently-written partition is finalized. Only used with --partition-strategy=nosort-evict. Defaults to 100
 - `-l`, `--list-outputs <LIST_OUTPUTS>` — List the output files after creation (only with --to-many)
 
-  Possible values: `none`, `text`, `json`
+  Possible values:
+  - `text`:
+    Human-readable text selected by the host CLI
+  - `json`:
+    Structured JSON selected by the host CLI
 
 - `--list-outputs-file <LIST_OUTPUTS_FILE>` — Write output file listing to a file instead of stdout
-- `--create-dirs` — Create directories as needed
+- `--create-dirs` — Create file-output directories as needed
 
   Default value: `true`
-- `--overwrite` — Overwrite existing files
+- `--overwrite` — Overwrite existing file outputs
+- `--object-store-upload-part-size <PART_SIZE>` — Adaptive single-put threshold and multipart part size
+
+  Default value: `10MiB`
+- `--object-store-max-in-flight-parts <MAX_IN_FLIGHT_PARTS>` — Maximum multipart part requests in flight across the command
+
+  Default value: `8`
+- `--storage-max-retries <MAX_RETRIES>` — Maximum retries for one backend request
+
+  Default value: `10`
+- `--storage-retry-timeout <RETRY_TIMEOUT>` — Elapsed-time limit checked after each failed attempt, measured from the initial request
+
+  Default value: `3m`
+- `--storage-initial-backoff <INITIAL_BACKOFF>` — First delay before a retry
+
+  Default value: `100ms`
+- `--storage-max-backoff <MAX_BACKOFF>` — Maximum delay between retries
+
+  Default value: `15s`
+- `--storage-backoff-base <BACKOFF_BASE>` — Multiplier used by the backend retry policy
+
+  Default value: `2`
+- `--gcs-endpoint <URL>` — Override the Google Cloud Storage API endpoint
+- `--gcs-anonymous` — Send unsigned requests without discovering credentials
+- `--gcs-request-timeout <DURATION>` — Limit each Google Cloud Storage HTTP request
+- `--s3-region <REGION>` — Override the region discovered from the AWS environment
+- `--s3-endpoint <URL>` — Override the S3 API endpoint for an S3-compatible service
+- `--s3-addressing-style <STYLE>` — Select path-style or virtual-hosted-style S3 requests
+
+  Possible values: `path`, `virtual`
+
+- `--s3-anonymous` — Send unsigned requests without discovering credentials
+- `--s3-request-timeout <DURATION>` — Limit each S3 HTTP request
 - `--arrow-compression <ARROW_COMPRESSION>` — Arrow IPC compression codec
 
   Default value: `none`
@@ -204,9 +237,9 @@ Examples:
 
   Examples:
 
-      --parquet-bloom-all                                     # Bloom for low-cardinality columns
-      --parquet-bloom-all "fpp=0.001"                         # Tighter false positive rate
-      --parquet-bloom-all "ndv=10000"                         # Force bloom on ALL columns
+      --parquet-bloom-all  # Bloom for low-cardinality columns
+      --parquet-bloom-all "fpp=0.001"  # Tighter false positive rate
+      --parquet-bloom-all "ndv=10000"  # Force bloom on all columns
       --parquet-bloom-all --parquet-bloom-column-off user_id  # Exclude user_id
 - `--parquet-bloom-all-off` — Disable bloom filters for all columns.
 
@@ -222,7 +255,8 @@ Examples:
 
   Overrides --parquet-bloom-all-off for the specified columns.
 
-  WITHOUT explicit NDV: bloom filter depends on dictionary decision (see --parquet-bloom-all).
+  Without explicit NDV, the bloom filter depends on the dictionary decision.
+  See `--parquet-bloom-all`.
   WITH explicit NDV: bloom filter is FORCED ON regardless of dictionary encoding.
 
   Use explicit NDV to enable bloom filters on high-cardinality columns that won't
@@ -245,7 +279,8 @@ Examples:
 
       --parquet-bloom-column "region"                    # If region keeps dictionary
       --parquet-bloom-column "user.address"              # All leaves under user.address
-      --parquet-bloom-column "user_id:ndv=1000000"       # Force bloom on high-card column
+      --parquet-bloom-column "user_id:ndv=1000000"
+      # Force bloom on a high-cardinality column
       --parquet-bloom-column "user_id:fpp=0.001"         # Tighter FPP
 - `--parquet-bloom-column-off <COLUMN>` — Disable bloom filter for specific columns (repeatable).
 
@@ -260,11 +295,11 @@ Examples:
   Examples:
 
       --parquet-bloom-all --parquet-bloom-column-off user_id  # All except user_id
-      --parquet-bloom-column-off "user.address"               # Disable for all user.address leaves
+      --parquet-bloom-column-off "user.address"  # Disable all user.address leaves
       --parquet-bloom-column-off col1 --parquet-bloom-column-off col2  # Disable multiple
-- `--parquet-buffer-size <PARQUET_BUFFER_SIZE>` — I/O buffer size for Parquet writing (e.g., "32MB", "64MB", "1GB").
+- `--parquet-buffer-size <PARQUET_BUFFER_SIZE>` — Encoding buffer size for Parquet writing (e.g., "32MB", "64MB", "1GB").
 
-  Controls the size of the buffer used when writing encoded data to disk. Supports suffixes: B, KB, MB, GB, TB (or KiB, MiB, GiB, TiB for binary). Default: 32MB.
+  Controls the bytes buffered between Parquet encoding and the object upload. Supports suffixes: B, KB, MB, GB, TB (or KiB, MiB, GiB, TiB for binary). Default: 32MB.
 - `--parquet-dictionary-all-off` — Disable dictionary encoding globally for all Parquet columns.
 
   Dictionary encoding builds a dictionary of unique values and stores references to it,
@@ -272,7 +307,8 @@ Examples:
   columns use their data page encoding directly (see --parquet-encoding).
 
   DEFAULT BEHAVIOR (without this flag):
-  - Most primitive columns use "analyze" mode: cardinality analysis decides per-row-group
+  - Most primitive columns use "analyze" mode. Cardinality analysis
+    decides per row group.
     whether to use dictionary (disabled if >20% distinct values)
   - Floats use "always" mode: high cardinality makes analysis unhelpful
   - Nested columns (structs, lists, maps) use "always" mode: dictionary encoding is
@@ -293,7 +329,8 @@ Examples:
   NON-ANALYZABLE TYPES:
   Cardinality analysis only works on certain types. Non-analyzable types (nested types
   like structs/lists/maps, and floats due to high cardinality) automatically use "always"
-  mode even if you specify "analyze". Use dot notation for nested paths (e.g., "user.address").
+  mode even if you specify "analyze". Use dot notation for nested paths
+  (e.g., "user.address").
   This enables dictionary for all leaf columns under that path.
 
   BLOOM FILTER INTERACTION:
@@ -327,7 +364,8 @@ Examples:
 
   Examples:
 
-      --parquet-column-encoding id=delta-binary-packed      # Efficient for sorted integers
+      --parquet-column-encoding id=delta-binary-packed
+      # Efficient for sorted integers
       --parquet-column-encoding name=delta-byte-array       # Efficient for strings
       --parquet-column-encoding price=byte-stream-split     # Efficient for floats
 - `--parquet-column-encoding-threads <PARQUET_COLUMN_ENCODING_THREADS>` — Number of threads for CPU-bound parquet column encoding.
@@ -345,7 +383,7 @@ Examples:
   Controls backpressure between ingestion and encoding stages. Higher values allow more row groups to be assembled while encoders are busy.
 
   Default value: `4`
-- `--parquet-writing-queue-size <PARQUET_WRITING_QUEUE_SIZE>` — Queue size for encoded row groups waiting to be written to disk.
+- `--parquet-writing-queue-size <PARQUET_WRITING_QUEUE_SIZE>` — Queue size for encoded row groups waiting to be serialized to the output.
 
   Controls backpressure between encoding and I/O stages. Higher values allow more encoding to proceed while I/O is in progress.
 
@@ -401,9 +439,9 @@ Examples:
 
   Possible values: `plain`, `rle`, `delta-binary-packed`, `delta-length-byte-array`, `delta-byte-array`, `byte-stream-split`
 
-- `--parquet-io-threads <PARQUET_IO_THREADS>` — Number of threads for blocking parquet I/O operations.
+- `--parquet-writing-threads <PARQUET_WRITING_THREADS>` — Number of threads for blocking Parquet writer operations.
 
-  Controls the rayon thread pool size for file writes during parquet output. Typically needs fewer threads than encoding since I/O is less CPU-intensive. Defaults to 1.
+  Controls the runtime used to serialize Parquet row groups into the object upload. Typically needs fewer threads than column encoding. Defaults to 1.
 - `--parquet-row-group-concurrency <PARQUET_ROW_GROUP_CONCURRENCY>` — Maximum number of row groups that can be encoding concurrently.
 
   Controls how many row groups can be actively encoding at once. Higher values increase parallelism but use more memory. Each row group encodes its columns in parallel using --parquet-column-encoding-threads. Defaults to 4.
@@ -449,6 +487,102 @@ Examples:
 
   Stores the original Arrow schema in the Parquet file's key-value metadata. This enables exact schema round-tripping but adds overhead. Default: disabled (not needed for most use cases).
 - `--vortex-record-batch-size <VORTEX_RECORD_BATCH_SIZE>` — Vortex record batch size
+- `--bqs-session-project <PROJECT>` — Override the project that owns Storage Read sessions
+- `--bqs-quota-project <PROJECT>` — Override the project charged for API quota
+- `--bqs-endpoint <URL>` — Override the BigQuery Storage Read API endpoint
+- `--bqs-universe-domain <DOMAIN>` — Override the Google Cloud universe domain
+- `--bqs-row-restriction <GOOGLESQL>` — AND this GoogleSQL predicate with every pushed DataFusion predicate
+- `--bqs-max-stream-count <COUNT>` — Override the number of Storage Read streams requested from BigQuery
+- `--bqs-max-response-bytes <BYTES>` — Reject a serialized Storage Read response larger than this many bytes
+
+  Default value: `268435456`
+- `--bqs-arrow-wire-compression <bqs-arrow-wire-compression>` — Select native Arrow buffer compression on the wire
+
+  Default value: `none`
+
+  Possible values: `lz4`, `zstd`, `none`
+
+- `--bqs-response-compression <bqs-response-compression>` — Select whole-response compression on the wire
+
+  Default value: `none`
+
+  Possible values: `lz4`, `none`
+
+- `--bqs-picos-timestamp-precision <bqs-picos-timestamp-precision>` — Select how picosecond timestamps are represented in Arrow
+
+  Default value: `micros`
+
+  Possible values: `micros`, `nanos`, `picos`
+
+- `--bqs-read-idle-timeout <DURATION>` — Reconnect when an active ReadRows network wait remains idle this long
+
+  Default value: `60s`
+- `--bqs-read-retry-window <DURATION>` — Limit cumulative retry time for one ReadRows stream
+
+  Default value: `24h`
+- `--bqs-read-retry-initial-backoff <DURATION>` — Set the first ReadRows retry backoff
+
+  Default value: `100ms`
+- `--bqs-read-retry-max-backoff <DURATION>` — Cap ReadRows retry backoff
+
+  Default value: `60s`
+
+## `silk-chiffon detect`
+
+Detect the format of an input
+
+**Usage:** `silk-chiffon detect [OPTIONS] <INPUT>`
+
+###### **Arguments:**
+
+- `<INPUT>` — Local path or object-storage URL to detect
+
+###### **Options:**
+
+- `-f`, `--format <PRESENTATION>` — Output format (auto-detects based on TTY if not specified)
+
+  Default value: `auto`
+
+  Possible values:
+  - `auto`:
+    Auto-detect: JSON if stdout is not a TTY, otherwise text
+  - `text`:
+    Human-readable text output
+  - `json`:
+    JSON output
+
+- `--object-store-upload-part-size <PART_SIZE>` — Adaptive single-put threshold and multipart part size
+
+  Default value: `10MiB`
+- `--object-store-max-in-flight-parts <MAX_IN_FLIGHT_PARTS>` — Maximum multipart part requests in flight across the command
+
+  Default value: `8`
+- `--storage-max-retries <MAX_RETRIES>` — Maximum retries for one backend request
+
+  Default value: `10`
+- `--storage-retry-timeout <RETRY_TIMEOUT>` — Elapsed-time limit checked after each failed attempt, measured from the initial request
+
+  Default value: `3m`
+- `--storage-initial-backoff <INITIAL_BACKOFF>` — First delay before a retry
+
+  Default value: `100ms`
+- `--storage-max-backoff <MAX_BACKOFF>` — Maximum delay between retries
+
+  Default value: `15s`
+- `--storage-backoff-base <BACKOFF_BASE>` — Multiplier used by the backend retry policy
+
+  Default value: `2`
+- `--gcs-endpoint <URL>` — Override the Google Cloud Storage API endpoint
+- `--gcs-anonymous` — Send unsigned requests without discovering credentials
+- `--gcs-request-timeout <DURATION>` — Limit each Google Cloud Storage HTTP request
+- `--s3-region <REGION>` — Override the region discovered from the AWS environment
+- `--s3-endpoint <URL>` — Override the S3 API endpoint for an S3-compatible service
+- `--s3-addressing-style <STYLE>` — Select path-style or virtual-hosted-style S3 requests
+
+  Possible values: `path`, `virtual`
+
+- `--s3-anonymous` — Send unsigned requests without discovering credentials
+- `--s3-request-timeout <DURATION>` — Limit each S3 HTTP request
 
 ## `silk-chiffon inspect`
 
@@ -456,91 +590,33 @@ Inspect file metadata and structure.
 
 Examples:
 
-    # Identify format
-    silk-chiffon inspect identify data.parquet
-
     # Inspect Parquet file
     silk-chiffon inspect parquet data.parquet --pages
 
     # Inspect Arrow file
     silk-chiffon inspect arrow data.arrow --batches
 
-**Usage:** `silk-chiffon inspect <COMMAND>`
+**Usage:** `silk-chiffon inspect [COMMAND]`
 
 ###### **Subcommands:**
 
-- `identify` — Detect file format
-- `parquet` — Inspect a Parquet file
-- `arrow` — Inspect an Arrow IPC file
-- `vortex` — Inspect a Vortex file
-
-## `silk-chiffon inspect identify`
-
-Detect file format
-
-**Usage:** `silk-chiffon inspect identify [OPTIONS] <FILE>`
-
-###### **Arguments:**
-
-- `<FILE>` — Path to the file to identify
-
-###### **Options:**
-
-- `-f`, `--format <FORMAT>` — Output format (auto-detects based on TTY if not specified)
-
-  Default value: `auto`
-
-  Possible values:
-  - `auto`:
-    Auto-detect: JSON if stdout is not a TTY, otherwise text
-  - `text`:
-    Human-readable text output
-  - `json`:
-    JSON output
-
-## `silk-chiffon inspect parquet`
-
-Inspect a Parquet file
-
-**Usage:** `silk-chiffon inspect parquet [OPTIONS] <FILE>`
-
-###### **Arguments:**
-
-- `<FILE>` — Path to the Parquet file
-
-###### **Options:**
-
-- `-f`, `--format <FORMAT>` — Output format (auto-detects based on TTY if not specified)
-
-  Default value: `auto`
-
-  Possible values:
-  - `auto`:
-    Auto-detect: JSON if stdout is not a TTY, otherwise text
-  - `text`:
-    Human-readable text output
-  - `json`:
-    JSON output
-
-- `-g`, `--row-group <ROW_GROUP>` — Row group to display details for (default: 0)
-
-  Default value: `0`
-- `-p`, `--pages <PAGES>` — Show page details for columns (comma-separated, or omit value for all columns)
+- `arrow` — Inspect arrow file metadata and structure
+- `parquet` — Inspect parquet file metadata and structure
+- `vortex` — Inspect vortex file metadata and structure
 
 ## `silk-chiffon inspect arrow`
 
-Inspect an Arrow IPC file
+Inspect arrow file metadata and structure
 
-**Usage:** `silk-chiffon inspect arrow [OPTIONS] <FILE>`
+**Usage:** `silk-chiffon inspect arrow [OPTIONS] <INPUT>`
 
 ###### **Arguments:**
 
-- `<FILE>` — Path to the Arrow IPC file
+- `<INPUT>` — Local path or object-storage URL to inspect
 
 ###### **Options:**
 
-- `--batches` — Show per-record-batch details
-- `-f`, `--format <FORMAT>` — Output format (auto-detects based on TTY if not specified)
+- `-f`, `--format <PRESENTATION>` — Output format (auto-detects based on TTY if not specified)
 
   Default value: `auto`
 
@@ -552,34 +628,161 @@ Inspect an Arrow IPC file
   - `json`:
     JSON output
 
-- `--row-count` — Count total rows (requires reading entire file)
+- `--batches` — Show per-record-batch details
+- `--row-count` — Count total rows by reading every record batch
+- `--object-store-upload-part-size <PART_SIZE>` — Adaptive single-put threshold and multipart part size
 
-## `silk-chiffon inspect vortex`
+  Default value: `10MiB`
+- `--object-store-max-in-flight-parts <MAX_IN_FLIGHT_PARTS>` — Maximum multipart part requests in flight across the command
 
-Inspect a Vortex file
+  Default value: `8`
+- `--storage-max-retries <MAX_RETRIES>` — Maximum retries for one backend request
 
-**Usage:** `silk-chiffon inspect vortex [OPTIONS] <FILE>`
+  Default value: `10`
+- `--storage-retry-timeout <RETRY_TIMEOUT>` — Elapsed-time limit checked after each failed attempt, measured from the initial request
+
+  Default value: `3m`
+- `--storage-initial-backoff <INITIAL_BACKOFF>` — First delay before a retry
+
+  Default value: `100ms`
+- `--storage-max-backoff <MAX_BACKOFF>` — Maximum delay between retries
+
+  Default value: `15s`
+- `--storage-backoff-base <BACKOFF_BASE>` — Multiplier used by the backend retry policy
+
+  Default value: `2`
+- `--gcs-endpoint <URL>` — Override the Google Cloud Storage API endpoint
+- `--gcs-anonymous` — Send unsigned requests without discovering credentials
+- `--gcs-request-timeout <DURATION>` — Limit each Google Cloud Storage HTTP request
+- `--s3-region <REGION>` — Override the region discovered from the AWS environment
+- `--s3-endpoint <URL>` — Override the S3 API endpoint for an S3-compatible service
+- `--s3-addressing-style <STYLE>` — Select path-style or virtual-hosted-style S3 requests
+
+  Possible values: `path`, `virtual`
+
+- `--s3-anonymous` — Send unsigned requests without discovering credentials
+- `--s3-request-timeout <DURATION>` — Limit each S3 HTTP request
+
+## `silk-chiffon inspect parquet`
+
+Inspect parquet file metadata and structure
+
+**Usage:** `silk-chiffon inspect parquet [OPTIONS] <INPUT>`
 
 ###### **Arguments:**
 
-- `<FILE>` — Path to the Vortex file
+- `<INPUT>` — Local path or object-storage URL to inspect
 
 ###### **Options:**
+
+- `-f`, `--format <PRESENTATION>` — Output format (auto-detects based on TTY if not specified)
+
+  Default value: `auto`
+
+  Possible values:
+  - `auto`:
+    Auto-detect: JSON if stdout is not a TTY, otherwise text
+  - `text`:
+    Human-readable text output
+  - `json`:
+    JSON output
+
+- `-g`, `--row-group <ROW_GROUP>` — Row group to display details for.
+
+  Defaults to the first group when present.
+- `-p`, `--pages <PAGES>` — Show page details for columns (comma-separated, or omit value for all columns)
+- `--object-store-upload-part-size <PART_SIZE>` — Adaptive single-put threshold and multipart part size
+
+  Default value: `10MiB`
+- `--object-store-max-in-flight-parts <MAX_IN_FLIGHT_PARTS>` — Maximum multipart part requests in flight across the command
+
+  Default value: `8`
+- `--storage-max-retries <MAX_RETRIES>` — Maximum retries for one backend request
+
+  Default value: `10`
+- `--storage-retry-timeout <RETRY_TIMEOUT>` — Elapsed-time limit checked after each failed attempt, measured from the initial request
+
+  Default value: `3m`
+- `--storage-initial-backoff <INITIAL_BACKOFF>` — First delay before a retry
+
+  Default value: `100ms`
+- `--storage-max-backoff <MAX_BACKOFF>` — Maximum delay between retries
+
+  Default value: `15s`
+- `--storage-backoff-base <BACKOFF_BASE>` — Multiplier used by the backend retry policy
+
+  Default value: `2`
+- `--gcs-endpoint <URL>` — Override the Google Cloud Storage API endpoint
+- `--gcs-anonymous` — Send unsigned requests without discovering credentials
+- `--gcs-request-timeout <DURATION>` — Limit each Google Cloud Storage HTTP request
+- `--s3-region <REGION>` — Override the region discovered from the AWS environment
+- `--s3-endpoint <URL>` — Override the S3 API endpoint for an S3-compatible service
+- `--s3-addressing-style <STYLE>` — Select path-style or virtual-hosted-style S3 requests
+
+  Possible values: `path`, `virtual`
+
+- `--s3-anonymous` — Send unsigned requests without discovering credentials
+- `--s3-request-timeout <DURATION>` — Limit each S3 HTTP request
+
+## `silk-chiffon inspect vortex`
+
+Inspect vortex file metadata and structure
+
+**Usage:** `silk-chiffon inspect vortex [OPTIONS] <INPUT>`
+
+###### **Arguments:**
+
+- `<INPUT>` — Local path or object-storage URL to inspect
+
+###### **Options:**
+
+- `-f`, `--format <PRESENTATION>` — Output format (auto-detects based on TTY if not specified)
+
+  Default value: `auto`
+
+  Possible values:
+  - `auto`:
+    Auto-detect: JSON if stdout is not a TTY, otherwise text
+  - `text`:
+    Human-readable text output
+  - `json`:
+    JSON output
 
 - `--schema` — Show full schema details
 - `--stats` — Show per-column statistics
 - `--layout` — Show layout structure
-- `-f`, `--format <FORMAT>` — Output format (auto-detects based on TTY if not specified)
+- `--object-store-upload-part-size <PART_SIZE>` — Adaptive single-put threshold and multipart part size
 
-  Default value: `auto`
+  Default value: `10MiB`
+- `--object-store-max-in-flight-parts <MAX_IN_FLIGHT_PARTS>` — Maximum multipart part requests in flight across the command
 
-  Possible values:
-  - `auto`:
-    Auto-detect: JSON if stdout is not a TTY, otherwise text
-  - `text`:
-    Human-readable text output
-  - `json`:
-    JSON output
+  Default value: `8`
+- `--storage-max-retries <MAX_RETRIES>` — Maximum retries for one backend request
+
+  Default value: `10`
+- `--storage-retry-timeout <RETRY_TIMEOUT>` — Elapsed-time limit checked after each failed attempt, measured from the initial request
+
+  Default value: `3m`
+- `--storage-initial-backoff <INITIAL_BACKOFF>` — First delay before a retry
+
+  Default value: `100ms`
+- `--storage-max-backoff <MAX_BACKOFF>` — Maximum delay between retries
+
+  Default value: `15s`
+- `--storage-backoff-base <BACKOFF_BASE>` — Multiplier used by the backend retry policy
+
+  Default value: `2`
+- `--gcs-endpoint <URL>` — Override the Google Cloud Storage API endpoint
+- `--gcs-anonymous` — Send unsigned requests without discovering credentials
+- `--gcs-request-timeout <DURATION>` — Limit each Google Cloud Storage HTTP request
+- `--s3-region <REGION>` — Override the region discovered from the AWS environment
+- `--s3-endpoint <URL>` — Override the S3 API endpoint for an S3-compatible service
+- `--s3-addressing-style <STYLE>` — Select path-style or virtual-hosted-style S3 requests
+
+  Possible values: `path`, `virtual`
+
+- `--s3-anonymous` — Send unsigned requests without discovering credentials
+- `--s3-request-timeout <DURATION>` — Limit each S3 HTTP request
 
 ## `silk-chiffon completions`
 

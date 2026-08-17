@@ -2,7 +2,7 @@ use arrow::array::{Array, Int32Array, Int64Array, RecordBatch, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use assert_cmd::cargo;
 use datafusion::prelude::*;
-use silk_chiffon::utils::test_data::{TestBatch, TestExtract, TestFile};
+use silk_chiffon_test_support::{TestBatch, TestExtract, TestFile};
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -36,6 +36,24 @@ fn test_arrow_to_arrow() {
         TestExtract::string_all(&batches, "name"),
         vec!["a", "b", "c"]
     );
+}
+
+#[test]
+fn test_relative_output_paths_complete_for_all_formats() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    TestFile::write_arrow_batch(&input, &batch);
+
+    for format in ["arrow", "parquet", "vortex"] {
+        let output = format!("output.{format}");
+        cargo::cargo_bin_cmd!("silk-chiffon")
+            .current_dir(temp_dir.path())
+            .args(["transform", "--from", "input.arrow", "--to", &output])
+            .assert()
+            .success();
+        assert!(temp_dir.path().join(output).exists());
+    }
 }
 
 #[test]
@@ -81,9 +99,9 @@ fn test_merge_two_files() {
     cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
             "transform",
-            "--from-many",
+            "--from",
             input1.to_str().unwrap(),
-            "--from-many",
+            "--from",
             input2.to_str().unwrap(),
             "--to",
             output.to_str().unwrap(),
@@ -116,7 +134,7 @@ fn test_merge_with_glob() {
     cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
             "transform",
-            "--from-many",
+            "--from-pattern",
             glob_pattern.to_str().unwrap(),
             "--to",
             output.to_str().unwrap(),
@@ -128,6 +146,107 @@ fn test_merge_with_glob() {
     let mut ids = TestExtract::i32_all(&batches, "id");
     ids.sort();
     assert_eq!(ids, vec![1, 2, 3]);
+}
+
+#[test]
+fn test_merge_with_unicode_file_url_pattern() {
+    let temp_dir = TempDir::new().unwrap();
+    let input_dir = temp_dir.path().join("données");
+    std::fs::create_dir(&input_dir).unwrap();
+    let input1 = input_dir.join("entrée-1.arrow");
+    let input2 = input_dir.join("entrée-2.arrow");
+    let output = temp_dir.path().join("merged.arrow");
+
+    TestFile::write_arrow_batch(&input1, &TestBatch::simple_with(&[1], &["a"]));
+    TestFile::write_arrow_batch(&input2, &TestBatch::simple_with(&[2], &["b"]));
+
+    let pattern = url::Url::from_directory_path(&input_dir)
+        .unwrap()
+        .join("*.arrow")
+        .unwrap();
+    cargo::cargo_bin_cmd!("silk-chiffon")
+        .args([
+            "transform",
+            "--from-pattern",
+            pattern.as_str(),
+            "--to",
+            output.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let batches = TestFile::read_arrow(&output);
+    let mut ids = TestExtract::i32_all(&batches, "id");
+    ids.sort_unstable();
+    assert_eq!(ids, vec![1, 2]);
+}
+
+#[test]
+fn test_merge_with_repeatable_overlapping_patterns() {
+    let temp_dir = TempDir::new().unwrap();
+    let input1 = temp_dir.path().join("alpha.arrow");
+    let input2 = temp_dir.path().join("shared.arrow");
+    let input3 = temp_dir.path().join("zeta.arrow");
+    let output = temp_dir.path().join("merged.arrow");
+
+    TestFile::write_arrow_batch(&input1, &TestBatch::simple_with(&[1], &["a"]));
+    TestFile::write_arrow_batch(&input2, &TestBatch::simple_with(&[2], &["b"]));
+    TestFile::write_arrow_batch(&input3, &TestBatch::simple_with(&[3], &["c"]));
+
+    let first_pattern = temp_dir.path().join("a*.arrow");
+    let second_pattern = temp_dir.path().join("*.arrow");
+    cargo::cargo_bin_cmd!("silk-chiffon")
+        .args([
+            "transform",
+            "--from-pattern",
+            first_pattern.to_str().unwrap(),
+            "--from-pattern",
+            second_pattern.to_str().unwrap(),
+            "--to",
+            output.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let batches = TestFile::read_arrow(&output);
+    let mut ids = TestExtract::i32_all(&batches, "id");
+    ids.sort_unstable();
+    assert_eq!(ids, vec![1, 1, 2, 3]);
+}
+
+#[test]
+fn test_merge_combines_exact_and_pattern_inputs_without_cross_deduplication() {
+    let temp_dir = TempDir::new().unwrap();
+    let alpha = temp_dir.path().join("alpha.arrow");
+    let shared = temp_dir.path().join("shared.arrow");
+    let zeta = temp_dir.path().join("zeta.arrow");
+    let output = temp_dir.path().join("merged.arrow");
+
+    TestFile::write_arrow_batch(&alpha, &TestBatch::simple_with(&[1], &["a"]));
+    TestFile::write_arrow_batch(&shared, &TestBatch::simple_with(&[2], &["b"]));
+    TestFile::write_arrow_batch(&zeta, &TestBatch::simple_with(&[3], &["c"]));
+
+    let first_pattern = temp_dir.path().join("a*.arrow");
+    let second_pattern = temp_dir.path().join("*.arrow");
+    cargo::cargo_bin_cmd!("silk-chiffon")
+        .args([
+            "transform",
+            "--from",
+            shared.to_str().unwrap(),
+            "--from-pattern",
+            first_pattern.to_str().unwrap(),
+            "--from-pattern",
+            second_pattern.to_str().unwrap(),
+            "--to",
+            output.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let batches = TestFile::read_arrow(&output);
+    let mut ids = TestExtract::i32_all(&batches, "id");
+    ids.sort_unstable();
+    assert_eq!(ids, vec![1, 1, 2, 2, 3]);
 }
 
 #[test]
@@ -199,6 +318,58 @@ fn test_partition_to_parquet() {
 }
 
 #[test]
+fn test_nosort_multi_partition_to_vortex_round_trips_every_output() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let output_template = temp_dir.path().join("{{name}}.vortex");
+    let batch = TestBatch::simple_with(
+        &[1, 2, 3, 4, 5, 6],
+        &["alpha", "beta", "alpha", "beta", "gamma", "alpha"],
+    );
+    TestFile::write_arrow_batch(&input, &batch);
+
+    cargo::cargo_bin_cmd!("silk-chiffon")
+        .args([
+            "transform",
+            "--from",
+            input.to_str().unwrap(),
+            "--to-many",
+            output_template.to_str().unwrap(),
+            "--by",
+            "name",
+            "--partition-strategy",
+            "nosort-multi",
+            "--vortex-record-batch-size",
+            "2",
+        ])
+        .assert()
+        .success();
+
+    for (name, expected_ids) in [
+        ("alpha", vec![1, 3, 6]),
+        ("beta", vec![2, 4]),
+        ("gamma", vec![5]),
+    ] {
+        let vortex = temp_dir.path().join(format!("{name}.vortex"));
+        let arrow = temp_dir.path().join(format!("{name}.arrow"));
+        cargo::cargo_bin_cmd!("silk-chiffon")
+            .args([
+                "transform",
+                "--from",
+                vortex.to_str().unwrap(),
+                "--to",
+                arrow.to_str().unwrap(),
+            ])
+            .assert()
+            .success();
+        assert_eq!(
+            TestExtract::i32_all(&TestFile::read_arrow(&arrow), "id"),
+            expected_ids
+        );
+    }
+}
+
+#[test]
 fn test_merge_and_partition() {
     let temp_dir = TempDir::new().unwrap();
     let input1 = temp_dir.path().join("input1.arrow");
@@ -213,9 +384,9 @@ fn test_merge_and_partition() {
     cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
             "transform",
-            "--from-many",
+            "--from",
             input1.to_str().unwrap(),
-            "--from-many",
+            "--from",
             input2.to_str().unwrap(),
             "--to-many",
             output_template.to_str().unwrap(),
@@ -468,9 +639,9 @@ fn test_merge_and_sort() {
     cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
             "transform",
-            "--from-many",
+            "--from",
             input1.to_str().unwrap(),
-            "--from-many",
+            "--from",
             input2.to_str().unwrap(),
             "--to",
             output.to_str().unwrap(),
@@ -550,15 +721,18 @@ fn test_list_outputs_json() {
     // should have 2 output files (one for "a", one for "b")
     assert_eq!(files.len(), 2);
 
-    // each file should have path, row_count, and partition_values
+    // Each completed output reports locations, rows, and partition fields.
     for file in &files {
-        assert!(file.get("path").is_some());
-        assert!(file.get("row_count").is_some());
-        assert!(file.get("partition_values").is_some());
+        assert!(file.get("durable_locations").is_some());
+        assert!(file.get("rows_written").is_some());
+        assert!(file.get("partition_fields").is_some());
+        assert!(file.get("path").is_none());
+        assert!(file.get("row_count").is_none());
+        assert!(file.get("partition_values").is_none());
 
-        let partition_values = file.get("partition_values").unwrap().as_array().unwrap();
+        let partition_values = file.get("partition_fields").unwrap().as_array().unwrap();
         assert_eq!(partition_values.len(), 1);
-        assert_eq!(partition_values[0].get("column").unwrap(), "name");
+        assert_eq!(partition_values[0].get("field").unwrap(), "name");
     }
 }
 
@@ -1279,7 +1453,7 @@ fn test_nosort_evict_partitioned_output() {
     .unwrap();
     TestFile::write_arrow_batch(&input, &batch);
 
-    let template = output_dir.join("{{category}}.parquet");
+    let template = output_dir.join("{{category}}_{{file_number}}.parquet");
     cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
             "transform",
@@ -1298,15 +1472,14 @@ fn test_nosort_evict_partitioned_output() {
         .assert()
         .success();
 
-    // with max_open=2 and 3 partitions, at least one eviction happens
-    // first files: a.parquet, b.parquet; then c triggers eviction
-    assert!(output_dir.join("a.parquet").exists());
-    assert!(output_dir.join("b.parquet").exists());
-    assert!(output_dir.join("c.parquet").exists());
+    assert!(output_dir.join("a_0.parquet").exists());
+    assert!(output_dir.join("b_0.parquet").exists());
+    assert!(output_dir.join("c_0.parquet").exists());
 
     // a reappears after eviction, so a_1.parquet should exist
     assert!(
         output_dir.join("a_1.parquet").exists(),
-        "evicted partition 'a' should reopen as a_1.parquet"
+        "the template should render the reopened partition's next file number"
     );
+    assert!(output_dir.join("b_1.parquet").exists());
 }

@@ -1,0 +1,28 @@
+[package]
+name = "silk-chiffon-inspection-output"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+publish = false
+repository.workspace = true
+rust-version.workspace = true
+description = "Shared inspection presentation for Silk Chiffon formats"
+
+[dependencies]
+anyhow.workspace = true
+arrow.workspace = true
+humansize = "^2.1.3"
+num-format = "^0.4.4"
+owo-colors = "^4.3.0"
+serde = { version = "^1.0.229", features = ["derive"] }
+silk-chiffon-storage = { path = "../silk-chiffon-storage", default-features = false }
+tabled = { version = "^0.21.0", features = ["ansi"] }
+
+[dev-dependencies]
+serde_json.workspace = true
+silk-chiffon-storage = { path = "../silk-chiffon-storage", default-features = false, features = ["local"] }
+
+[lints]
+workspace = true
