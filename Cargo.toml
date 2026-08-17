@@ -4,7 +4,6 @@ members = [
   "crates/silk-chiffon-format-arrow",
   "crates/silk-chiffon-format-parquet",
   "crates/silk-chiffon-format-vortex",
-  "crates/silk-chiffon-input-bigquery",
   "crates/silk-chiffon-inspection-output",
   "crates/silk-chiffon-storage",
   "crates/silk-chiffon-test-support",
@@ -81,7 +80,6 @@ silk-chiffon-core = { path = "crates/silk-chiffon-core" }
 silk-chiffon-format-arrow = { path = "crates/silk-chiffon-format-arrow" }
 silk-chiffon-format-parquet = { path = "crates/silk-chiffon-format-parquet" }
 silk-chiffon-format-vortex = { path = "crates/silk-chiffon-format-vortex" }
-silk-chiffon-input-bigquery = { path = "crates/silk-chiffon-input-bigquery", optional = true }
 silk-chiffon-inspection-output = { path = "crates/silk-chiffon-inspection-output" }
 silk-chiffon-storage = { path = "crates/silk-chiffon-storage", default-features = false }
 strum_macros = "^0.28.0"
@@ -99,9 +97,7 @@ chrono = "^0.4.45"
 chrono-tz = "^0.10.4"
 
 [features]
-default = ["local-bare-paths", "gcs", "s3", "bigquery"]
-bigquery = ["dep:silk-chiffon-input-bigquery"]
-bigquery-integration-tests = ["bigquery", "local-bare-paths", "silk-chiffon-input-bigquery/integration-test-support"]
+default = ["local-bare-paths"]
 gcs = ["silk-chiffon-storage/gcs"]
 local = ["silk-chiffon-storage/local"]
 local-bare-paths = ["local", "silk-chiffon-storage/local-bare-paths"]
@@ -112,30 +108,15 @@ docs = ["dep:clap-markdown"]
 
 [dev-dependencies]
 assert_cmd = "^2.2.2"
-axum = "^0.8.9"
 criterion = { version = "^0.8.2", features = ["html_reports"] }
-http = "^1.4.2"
-humantime.workspace = true
 parquet = { version = "^58.4.0", features = ["default", "async", "json", "arrow_canonical_extension_types"] }
 predicates = "^3.1.4"
-prost = "^0.14.4"
-prost-types = "^0.14.4"
 rand = "^0.10.2"
 silk-chiffon-test-support = { path = "crates/silk-chiffon-test-support" }
-tonic = { version = "^0.14.6", features = ["router"] }
-tonic-prost = "^0.14.6"
 
 [[bench]]
 name = "partitioning"
 harness = false
-
-[[test]]
-name = "bigquery_transform_integration"
-required-features = ["bigquery-integration-tests"]
-
-[[test]]
-name = "cloud_live_soak"
-required-features = ["bigquery", "gcs", "s3"]
 
 [[example]]
 name = "gen-docs"

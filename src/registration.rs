@@ -52,18 +52,6 @@ pub(crate) fn storage_registry() -> StorageRegistry {
         .expect("built-in storage backends must not conflict")
 }
 
-/// Builds the executable's feature-selected service inputs.
-pub(crate) fn service_input_definitions() -> Vec<ServiceInputDefinition> {
-    #[cfg(feature = "bigquery")]
-    {
-        vec![silk_chiffon_input_bigquery::definition()]
-    }
-    #[cfg(not(feature = "bigquery"))]
-    {
-        Vec::new()
-    }
-}
-
 pub(crate) enum InputSchemeOwner {
     FileInput,
     ServiceInput(usize),
@@ -471,7 +459,7 @@ impl ApplicationDefinition {
         Self::from_parts(
             format_registry(),
             storage_registry(),
-            service_input_definitions(),
+            Vec::new(),
             Vec::new(),
         )
         .expect("built-in application definitions must not conflict")

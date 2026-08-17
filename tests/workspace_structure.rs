@@ -83,36 +83,8 @@ fn workspace_contains_foundation_packages() {
     assert!(packages.contains_key("silk-chiffon-format-arrow"));
     assert!(packages.contains_key("silk-chiffon-format-parquet"));
     assert!(packages.contains_key("silk-chiffon-format-vortex"));
-    assert!(packages.contains_key("silk-chiffon-input-bigquery"));
     assert!(packages.contains_key("silk-chiffon-inspection-output"));
     assert!(packages.contains_key("silk-chiffon-test-support"));
-}
-
-#[test]
-fn root_defaults_compose_every_input_provider() {
-    let manifest = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
-        .expect("workspace manifest should be readable");
-
-    assert!(manifest.contains(r#"default = ["local-bare-paths", "gcs", "s3", "bigquery"]"#));
-    assert!(manifest.contains(r#"bigquery = ["dep:silk-chiffon-input-bigquery"]"#));
-}
-
-#[test]
-fn bigquery_input_dependencies_point_toward_foundation_crates() {
-    let packages = workspace_packages();
-    let connector = packages
-        .get("silk-chiffon-input-bigquery")
-        .expect("BigQuery input should be a workspace package");
-
-    assert!(connector.contains(&Dependency {
-        name: "silk-chiffon-core".to_owned(),
-        kind: None,
-    }));
-    assert!(connector.iter().all(|dependency| {
-        dependency.name != "silk_chiffon"
-            && dependency.name != "silk-chiffon-storage"
-            && !dependency.name.starts_with("silk-chiffon-format-")
-    }));
 }
 
 #[test]

@@ -170,27 +170,6 @@ fn registered_arguments_are_present_in_help_and_completions() {
     }
     #[cfg(not(feature = "s3"))]
     assert!(!help.contains("--s3-"));
-    #[cfg(feature = "bigquery")]
-    for option in [
-        "--bqs-session-project",
-        "--bqs-quota-project",
-        "--bqs-endpoint",
-        "--bqs-universe-domain",
-        "--bqs-row-restriction",
-        "--bqs-max-stream-count",
-        "--bqs-max-response-bytes",
-        "--bqs-arrow-wire-compression",
-        "--bqs-response-compression",
-        "--bqs-picos-timestamp-precision",
-        "--bqs-read-idle-timeout",
-        "--bqs-read-retry-window",
-        "--bqs-read-retry-initial-backoff",
-        "--bqs-read-retry-max-backoff",
-    ] {
-        assert!(help.contains(option));
-    }
-    #[cfg(not(feature = "bigquery"))]
-    assert!(!help.contains("--bqs-"));
 
     let mut completions = Vec::new();
     clap_complete::generate(
@@ -213,10 +192,6 @@ fn registered_arguments_are_present_in_help_and_completions() {
     assert!(completions.contains("--s3-endpoint"));
     #[cfg(not(feature = "s3"))]
     assert!(!completions.contains("--s3-"));
-    #[cfg(feature = "bigquery")]
-    assert!(completions.contains("--bqs-session-project"));
-    #[cfg(not(feature = "bigquery"))]
-    assert!(!completions.contains("--bqs-"));
 }
 
 #[cfg(feature = "local-bare-paths")]
