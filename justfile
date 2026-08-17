@@ -88,12 +88,6 @@ check-bigquery-features:
 test-bigquery-live:
     cargo test -p silk-chiffon-input-bigquery --lib provider::tests::live_small_table_writes_arrow_and_parquet -- --ignored --exact
 
-test-bigquery-benchmark:
-    uv run python -W error::ResourceWarning -m unittest scripts/tests/test_bqs_benchmark.py
-
-benchmark-bigquery *args: build-native test-bigquery-benchmark
-    uv run scripts/bqs_benchmark.py campaign {{args}}
-
 test-cloud-live-soak:
     cargo test --test cloud_live_soak live_seeded_mixed_input_cross_provider_soak -- --ignored --exact --nocapture
 

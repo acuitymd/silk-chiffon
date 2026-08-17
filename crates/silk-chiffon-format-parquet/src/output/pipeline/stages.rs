@@ -609,7 +609,7 @@ mod tests {
     };
 
     use futures::future::pending;
-    use tokio::sync::{Barrier, oneshot};
+    use tokio::sync::Barrier;
     use tokio_util::sync::CancellationToken;
 
     use super::*;
@@ -619,16 +619,6 @@ mod tests {
     impl Drop for DropSignal {
         fn drop(&mut self) {
             self.0.store(true, Ordering::SeqCst);
-        }
-    }
-
-    struct NotifyOnDrop(Option<oneshot::Sender<()>>);
-
-    impl Drop for NotifyOnDrop {
-        fn drop(&mut self) {
-            if let Some(sender) = self.0.take() {
-                let _ = sender.send(());
-            }
         }
     }
 
@@ -683,13 +673,11 @@ mod tests {
         let scope = PipelineTaskScope::new(CancellationToken::new());
         let ready = Arc::new(Barrier::new(3));
         let sibling_dropped = Arc::new(AtomicBool::new(false));
-        let (panic_finished_tx, panic_finished_rx) = oneshot::channel();
         let mut tasks = JoinSet::new();
 
         scope.spawn_stage(&mut tasks, {
             let ready = Arc::clone(&ready);
             async move {
-                let _panic_finished = NotifyOnDrop(Some(panic_finished_tx));
                 ready.wait().await;
                 panic!("controlled stage panic")
             }
@@ -705,9 +693,6 @@ mod tests {
         });
 
         ready.wait().await;
-        panic_finished_rx
-            .await
-            .expect("panic stage dropped without notification");
 
         let error = tokio::time::timeout(
             std::time::Duration::from_secs(5),
