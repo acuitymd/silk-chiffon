@@ -30,7 +30,7 @@ use silk_chiffon_core::{
     FormatRegistryError, FormatTransform, Identification, InputAccess, InspectionOutput,
     OutputSortColumn, RowCount, SinkFactoryContext, SinkResult, SortDirection, StreamBoundedness,
 };
-use silk_chiffon_storage::{LocationInput, StorageHandle, local};
+use silk_chiffon_storage::{Location, ResolvedLocation, StorageResolver};
 
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
 struct TestFormatArgs {
@@ -180,10 +180,10 @@ struct TestSinkFactory {
 
 #[async_trait]
 impl DataSinkFactory for TestSinkFactory {
-    async fn create(&self, handle: StorageHandle, _: SchemaRef) -> Result<Box<dyn DataSink>> {
+    async fn create(&self, location: ResolvedLocation, _: SchemaRef) -> Result<Box<dyn DataSink>> {
         self.created.fetch_add(1, Ordering::SeqCst);
         Ok(Box::new(TestSink {
-            output: handle.url().clone(),
+            output: location.url,
             created: Arc::clone(&self.created),
             workers: self.workers,
             thread_budget: self.thread_budget,
@@ -222,20 +222,20 @@ impl DataSink for TestSink {
     }
 }
 
-fn identifier(handle: &StorageHandle) -> FormatFuture<'_, Option<Identification>> {
+fn identifier(location: &ResolvedLocation) -> FormatFuture<'_, Option<Identification>> {
     Box::pin(async move {
-        Ok((handle.object_path().extension() == Some("test"))
+        Ok((location.path.extension() == Some("test"))
             .then(|| Identification::with_variant("test-stream")))
     })
 }
 
 fn source<'a>(
-    handle: &'a StorageHandle,
+    location: &'a ResolvedLocation,
     settings: &'a TestFormatArgs,
 ) -> FormatFuture<'a, Box<dyn DataSource>> {
     Box::pin(async move {
         Ok(Box::new(TestSource {
-            name: format!("{}:{}", handle.url(), settings.test_format_workers),
+            name: format!("{}:{}", location.url, settings.test_format_workers),
             schema: Arc::new(arrow::datatypes::Schema::empty()),
         }) as Box<dyn DataSource>)
     })
@@ -257,14 +257,13 @@ fn sink<'a>(
 }
 
 fn inspector<'a>(
-    handle: &'a StorageHandle,
+    location: &'a ResolvedLocation,
     settings: &'a TestInspectionArgs,
 ) -> FormatFuture<'a, InspectionOutput> {
     Box::pin(async move {
         Ok(InspectionOutput::Text(format!(
             "{} details={}",
-            handle.url(),
-            settings.test_format_details
+            location.url, settings.test_format_details
         )))
     })
 }
@@ -291,14 +290,14 @@ fn parse_transform(registry: &FormatRegistry, arguments: &[&str]) -> usize {
     let matches = command.try_get_matches_from(arguments).unwrap();
     let configured = registry.bind_transform_args(&matches).unwrap();
     let transform = configured.get("test").unwrap();
-    let handle = local_handle("input.test");
-    let source = futures::executor::block_on(transform.create_source(&handle)).unwrap();
+    let location = resolved_location("input.test");
+    let source = futures::executor::block_on(transform.create_source(&location)).unwrap();
     source.name().rsplit_once(':').unwrap().1.parse().unwrap()
 }
 
-fn local_handle(path: &str) -> StorageHandle {
-    let location = LocationInput::parse(path).unwrap();
-    local::session().unwrap().input_handle(&location).unwrap()
+fn resolved_location(path: &str) -> ResolvedLocation {
+    let location = Location::parse(path, std::env::current_dir().unwrap()).unwrap();
+    StorageResolver::new().resolve(&location).unwrap()
 }
 
 #[test]
@@ -351,14 +350,14 @@ fn inspection_args_are_scoped_to_the_typed_inspector_callback() {
         .try_get_matches_from(["inspect-test", "--test-format-details"])
         .unwrap();
     let configured = registration.bind_inspection_args(&matches).unwrap();
-    let handle = local_handle("input.test");
+    let location = resolved_location("input.test");
 
     assert_eq!(configured.format(), "test");
-    let output = futures::executor::block_on(configured.inspect(&handle)).unwrap();
+    let output = futures::executor::block_on(configured.inspect(&location)).unwrap();
 
     assert_eq!(
         output,
-        InspectionOutput::Text(format!("{} details=true", handle.url()))
+        InspectionOutput::Text(format!("{} details=true", location.url))
     );
 }
 
@@ -528,16 +527,16 @@ fn explicit_async_capability_outputs_preserve_typed_settings_and_context() {
     let configured = registry.bind_transform_args(&matches).unwrap();
     let registration = registry.get("test").unwrap();
     let transform = configured.get(registration.name()).unwrap();
-    let handle = local_handle("input.test");
+    let location = resolved_location("input.test");
 
-    let identified = futures::executor::block_on(registration.identify(&handle))
+    let identified = futures::executor::block_on(registration.identify(&location))
         .unwrap()
         .unwrap();
     assert_eq!(identified.format(), "test");
     assert_eq!(identified.variant(), Some("test-stream"));
 
-    let source = futures::executor::block_on(transform.create_source(&handle)).unwrap();
-    assert_eq!(source.name(), format!("{}:6", handle.url()));
+    let source = futures::executor::block_on(transform.create_source(&location)).unwrap();
+    assert_eq!(source.name(), format!("{}:6", location.url));
     assert!(
         futures::executor::block_on(source.schema())
             .unwrap()
@@ -558,17 +557,17 @@ fn explicit_async_capability_outputs_preserve_typed_settings_and_context() {
     let context = SinkFactoryContext::new(NonZeroUsize::new(2).unwrap(), false, vec![]);
     let factory = futures::executor::block_on(transform.create_sink_factory(&context)).unwrap();
     let schema = Arc::new(arrow::datatypes::Schema::empty());
-    let mut sink = futures::executor::block_on(factory.create(handle.clone(), schema)).unwrap();
+    let mut sink = futures::executor::block_on(factory.create(location.clone(), schema)).unwrap();
     let result = futures::executor::block_on(sink.finish()).unwrap();
     assert_eq!(
         result.files_written.as_slice(),
-        std::slice::from_ref(handle.url())
+        std::slice::from_ref(&location.url)
     );
     assert_eq!(result.rows_written, 9);
 }
 
 #[test]
-fn direct_stream_sources_do_not_require_storage_handles() {
+fn direct_stream_sources_do_not_require_storage_locations() {
     let source = DirectStreamSource {
         schema: Arc::new(arrow::datatypes::Schema::empty()),
         boundedness: StreamBoundedness::Infinite,
@@ -642,22 +641,19 @@ fn one_typed_sink_factory_shares_state_across_output_sinks() {
     );
     let factory = futures::executor::block_on(transform.create_sink_factory(&context)).unwrap();
     let schema = Arc::new(arrow::datatypes::Schema::empty());
-    let first_handle = local_handle("first.test");
-    let second_handle = local_handle("second.test");
+    let first_location = resolved_location("first.test");
+    let second_location = resolved_location("second.test");
 
     let mut first =
-        futures::executor::block_on(factory.create(first_handle.clone(), Arc::clone(&schema)))
+        futures::executor::block_on(factory.create(first_location.clone(), Arc::clone(&schema)))
             .unwrap();
     let mut second =
-        futures::executor::block_on(factory.create(second_handle.clone(), schema)).unwrap();
+        futures::executor::block_on(factory.create(second_location.clone(), schema)).unwrap();
     let first_result = futures::executor::block_on(first.finish()).unwrap();
     let second_result = futures::executor::block_on(second.finish()).unwrap();
 
-    assert_eq!(first_result.files_written, vec![first_handle.url().clone()]);
-    assert_eq!(
-        second_result.files_written,
-        vec![second_handle.url().clone()]
-    );
+    assert_eq!(first_result.files_written, vec![first_location.url]);
+    assert_eq!(second_result.files_written, vec![second_location.url]);
     let expected_rows = 6 + 3 + 1 + 2 + ("customer_id".len() + 1) + ("event_time".len() + 2);
     assert_eq!(first_result.rows_written, expected_rows as u64);
     assert_eq!(second_result.rows_written, expected_rows as u64);
@@ -675,9 +671,9 @@ fn unavailable_capabilities_return_structured_errors() {
         .unwrap();
     let configured = registry.bind_transform_args(&matches).unwrap();
     let transform = configured.get("empty").unwrap();
-    let handle = local_handle("input.test");
+    let location = resolved_location("input.test");
 
-    let error = futures::executor::block_on(transform.create_source(&handle))
+    let error = futures::executor::block_on(transform.create_source(&location))
         .err()
         .unwrap();
     assert!(matches!(

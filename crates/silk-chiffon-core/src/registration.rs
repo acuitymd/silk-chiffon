@@ -20,7 +20,7 @@ use std::{
 
 use anyhow::Result;
 use clap::{ArgMatches, Args, Command, FromArgMatches};
-use silk_chiffon_storage::StorageHandle;
+use silk_chiffon_storage::ResolvedLocation;
 use thiserror::Error;
 
 use crate::{DataSinkFactory, DataSource, InspectionOutput};
@@ -29,18 +29,19 @@ use crate::{DataSinkFactory, DataSource, InspectionOutput};
 pub type FormatFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
 
 /// Identifies a matching format without naming that format centrally.
-pub type Identifier = for<'a> fn(&'a StorageHandle) -> FormatFuture<'a, Option<Identification>>;
+pub type Identifier = for<'a> fn(&'a ResolvedLocation) -> FormatFuture<'a, Option<Identification>>;
 
 /// Creates a source from transform settings registered as `T`.
 pub type SourceFactory<T> =
-    for<'a> fn(&'a StorageHandle, &'a T) -> FormatFuture<'a, Box<dyn DataSource>>;
+    for<'a> fn(&'a ResolvedLocation, &'a T) -> FormatFuture<'a, Box<dyn DataSource>>;
 
 /// Creates a command-scoped sink factory from transform settings registered as `T`.
 pub type SinkFactory<T> =
     for<'a> fn(&'a SinkFactoryContext, &'a T) -> FormatFuture<'a, Box<dyn DataSinkFactory>>;
 
 /// Produces inspection output from inspection settings registered as `T`.
-pub type Inspector<T> = for<'a> fn(&'a StorageHandle, &'a T) -> FormatFuture<'a, InspectionOutput>;
+pub type Inspector<T> =
+    for<'a> fn(&'a ResolvedLocation, &'a T) -> FormatFuture<'a, InspectionOutput>;
 
 /// Format-neutral execution settings needed when configuring output sinks.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -335,7 +336,7 @@ impl FormatRegistration {
 
     pub async fn identify(
         &self,
-        handle: &StorageHandle,
+        location: &ResolvedLocation,
     ) -> Result<Option<IdentifiedFormat>, FormatInvocationError> {
         let identifier = self
             .identifier
@@ -344,7 +345,7 @@ impl FormatRegistration {
                 capability: FormatCapability::Identification,
             })?;
         let identification =
-            identifier(handle)
+            identifier(location)
                 .await
                 .map_err(|source| FormatInvocationError::CallbackFailed {
                     format: self.name,
@@ -393,7 +394,7 @@ impl ConfiguredInspection {
 
     pub async fn inspect(
         &self,
-        handle: &StorageHandle,
+        location: &ResolvedLocation,
     ) -> Result<InspectionOutput, FormatInvocationError> {
         let callbacks =
             self.callbacks
@@ -402,7 +403,7 @@ impl ConfiguredInspection {
                     format: self.format,
                     capability: FormatCapability::Inspection,
                 })?;
-        callbacks.inspect(self.format, handle).await
+        callbacks.inspect(self.format, location).await
     }
 }
 
@@ -618,7 +619,7 @@ impl ConfiguredFormat {
 
     pub async fn create_source(
         &self,
-        handle: &StorageHandle,
+        location: &ResolvedLocation,
     ) -> Result<Box<dyn DataSource>, FormatInvocationError> {
         let callbacks =
             self.callbacks
@@ -627,7 +628,7 @@ impl ConfiguredFormat {
                     format: self.format,
                     capability: FormatCapability::Source,
                 })?;
-        callbacks.create_source(self.format, handle).await
+        callbacks.create_source(self.format, location).await
     }
 
     pub async fn create_sink_factory(

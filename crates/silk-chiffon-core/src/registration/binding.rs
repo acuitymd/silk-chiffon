@@ -1,7 +1,7 @@
 use std::{future::Future, pin::Pin, sync::Arc};
 
 use clap::{ArgMatches, Args, Command, FromArgMatches};
-use silk_chiffon_storage::StorageHandle;
+use silk_chiffon_storage::ResolvedLocation;
 
 use super::{
     FormatCapability, FormatInvocationError, Inspector, SinkFactory, SinkFactoryContext,
@@ -83,7 +83,7 @@ pub(super) trait InvokeTransform: Send + Sync {
     fn create_source<'a>(
         &'a self,
         format: &'static str,
-        handle: &'a StorageHandle,
+        location: &'a ResolvedLocation,
     ) -> CallbackFuture<'a, Box<dyn DataSource>>;
 
     fn create_sink_factory<'a>(
@@ -159,7 +159,7 @@ where
     fn create_source<'a>(
         &'a self,
         format: &'static str,
-        handle: &'a StorageHandle,
+        location: &'a ResolvedLocation,
     ) -> CallbackFuture<'a, Box<dyn DataSource>> {
         let Some(source) = self.source else {
             return Box::pin(async move {
@@ -171,7 +171,7 @@ where
         };
 
         Box::pin(async move {
-            source(handle, &self.settings).await.map_err(|source| {
+            source(location, &self.settings).await.map_err(|source| {
                 FormatInvocationError::CallbackFailed {
                     format,
                     capability: FormatCapability::Source,
@@ -217,7 +217,7 @@ pub(super) trait InvokeInspection: Send + Sync {
     fn inspect<'a>(
         &'a self,
         format: &'static str,
-        handle: &'a StorageHandle,
+        location: &'a ResolvedLocation,
     ) -> CallbackFuture<'a, InspectionOutput>;
 }
 
@@ -260,10 +260,10 @@ where
     fn inspect<'a>(
         &'a self,
         format: &'static str,
-        handle: &'a StorageHandle,
+        location: &'a ResolvedLocation,
     ) -> CallbackFuture<'a, InspectionOutput> {
         Box::pin(async move {
-            (self.inspector)(handle, &self.settings)
+            (self.inspector)(location, &self.settings)
                 .await
                 .map_err(|source| FormatInvocationError::CallbackFailed {
                     format,
