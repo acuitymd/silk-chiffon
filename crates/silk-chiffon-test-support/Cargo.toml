@@ -13,17 +13,13 @@ description = "Development-only fixtures for Silk Chiffon"
 [dependencies]
 anyhow.workspace = true
 arrow = { workspace = true, features = ["ipc_compression"] }
-async-trait.workspace = true
-clap.workspace = true
 futures.workspace = true
-object_store.workspace = true
 parquet = { version = "^58.4.0", features = ["default", "async", "json", "arrow_canonical_extension_types"] }
 silk-chiffon-storage = { path = "../silk-chiffon-storage", default-features = false, features = ["local"] }
 tokio = { version = "^1.53.1", features = ["rt", "sync"] }
 url.workspace = true
 
 [dev-dependencies]
-bytes = "^1.12.1"
 tempfile = "^3.27.0"
 
 [lints]

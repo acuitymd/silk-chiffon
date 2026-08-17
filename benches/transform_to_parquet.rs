@@ -4,69 +4,33 @@
 
 use std::fs::File;
 use std::io::BufWriter;
-use std::num::NonZeroUsize;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use arrow::array::{Float64Array, Int32Array, Int64Array, StringArray, TimestampMicrosecondArray};
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::ipc::writer::FileWriter;
 use arrow::record_batch::RecordBatch;
-use clap::{Arg, Command};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
-use silk_chiffon_core::{DataSink, FormatRegistry, OpenSinkMode, SinkBindingConfig};
+use silk_chiffon::sinks::parquet::{AdaptiveParquetWriter, AdaptiveWriterConfig, ParquetRuntimes};
 use tempfile::TempDir;
 use tokio::runtime::Runtime;
 
 const DEFAULT_BUFFER_SIZE: usize = 8 * 1024 * 1024;
 
-async fn registered_sink(
-    path: &Path,
-    schema: Arc<Schema>,
-    row_group_size: usize,
-) -> Box<dyn DataSink> {
-    let registry = FormatRegistry::builder()
-        .register(silk_chiffon_format_parquet::definition())
-        .build()
-        .unwrap();
-    let row_group_size = row_group_size.to_string();
-    let matches = registry
-        .augment_transform_args(Command::new("benchmark").arg(Arg::new("sort_by").long("sort-by")))
-        .try_get_matches_from(["benchmark", "--parquet-row-group-size", &row_group_size])
-        .unwrap();
-    let bindings = registry.bind_transform(&matches).unwrap();
-    let binding = bindings
-        .get("parquet")
-        .unwrap()
-        .bind_sink(&SinkBindingConfig::new(
-            NonZeroUsize::new(4).unwrap(),
-            OpenSinkMode::OneAtATime,
-            Vec::new(),
-        ))
-        .await
-        .unwrap();
-    binding
-        .open_sink(
-            silk_chiffon_test_support::prepared_local_output(path),
-            schema,
-        )
-        .await
-        .unwrap()
-}
-
 #[derive(Clone, Copy, Debug)]
 enum WriterStrategy {
     Sequential,
-    Registered,
+    Adaptive,
 }
 
 impl std::fmt::Display for WriterStrategy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             WriterStrategy::Sequential => write!(f, "seq"),
-            WriterStrategy::Registered => write!(f, "registered"),
+            WriterStrategy::Adaptive => write!(f, "adaptive"),
         }
     }
 }
@@ -236,6 +200,8 @@ fn bench_transform(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let temp_dir = TempDir::new().unwrap();
 
+    let runtimes = Arc::new(ParquetRuntimes::try_default().unwrap());
+
     // pre-create all Arrow files
     println!("Creating Arrow test files...");
     let arrow_files: Vec<(Config, PathBuf)> = CONFIGS
@@ -257,13 +223,13 @@ fn bench_transform(c: &mut Criterion) {
         let total_bytes = row_size * config.rows as u64;
         group.throughput(Throughput::Bytes(total_bytes));
 
-        for strategy in [WriterStrategy::Sequential, WriterStrategy::Registered] {
+        for strategy in [WriterStrategy::Sequential, WriterStrategy::Adaptive] {
             let bench_id = BenchmarkId::new(format!("{}", strategy), format!("{}", config));
 
             group.bench_with_input(
                 bench_id,
-                &(arrow_path, config),
-                |b, (arrow_path, config)| {
+                &(arrow_path, config, &runtimes),
+                |b, (arrow_path, config, runtimes)| {
                     b.iter(|| {
                         // read Arrow file from disk each iteration
                         let file = File::open(arrow_path).unwrap();
@@ -292,22 +258,33 @@ fn bench_transform(c: &mut Criterion) {
                                 }
                                 writer.close().unwrap();
                             }
-                            WriterStrategy::Registered => rt.block_on(async {
-                                let mut writer = registered_sink(
-                                    &out_path,
-                                    Arc::clone(&schema),
-                                    config.row_group_size,
-                                )
-                                .await;
+                            WriterStrategy::Adaptive => rt.block_on(async {
+                                let writer_config = AdaptiveWriterConfig {
+                                    max_row_group_size: config.row_group_size,
+                                    max_row_group_concurrency: 4,
+                                    buffer_size: DEFAULT_BUFFER_SIZE,
+                                    ingestion_queue_size: 1,
+                                    encoding_queue_size: 4,
+                                    writing_queue_size: 4,
+                                    skip_arrow_metadata: true,
+                                    ..Default::default()
+                                };
+                                let mut writer = AdaptiveParquetWriter::new(
+                                    silk_chiffon_test_support::prepared_local_output(&out_path),
+                                    &schema,
+                                    props,
+                                    Arc::clone(runtimes),
+                                    writer_config,
+                                );
 
                                 // need to collect since FileReader isn't Send
                                 let file = File::open(arrow_path).unwrap();
                                 let reader =
                                     arrow::ipc::reader::FileReader::try_new(file, None).unwrap();
                                 for batch in reader {
-                                    writer.write_batch(batch.unwrap()).await.unwrap();
+                                    writer.write(batch.unwrap()).await.unwrap();
                                 }
-                                writer.finish().await.unwrap();
+                                writer.close().await.unwrap();
                             }),
                         }
                     });

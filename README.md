@@ -129,8 +129,6 @@ silk-chiffon inspect vortex data.vortex --stats  # schema and column statistics
 
 `detect` and each format-specific inspector can emit JSON with `--format json` for piping into other tools.
 
-Inspectors resolve inputs through the same storage registry as transforms, so an exact URL works whenever its storage backend is registered. Parquet inspection reads footer metadata by default. `--pages[=<columns>]` additionally reads the selected row group's page data one column chunk at a time; unknown columns and row groups are errors, and a column chunk larger than 512 MiB is rejected as a safety bound.
-
 ## Command reference
 
 `transform`, `detect`, and `inspect` carry more options than these examples show: compression levels, writer versions, dictionary control, partition strategies, and thread and queue tuning among them. The complete reference is in **[docs/CLI.md](docs/CLI.md)**, generated from the code. At the terminal, `silk-chiffon <command> --help` prints the same content.

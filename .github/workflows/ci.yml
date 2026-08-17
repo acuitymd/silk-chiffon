@@ -48,7 +48,7 @@ jobs:
         with:
           shared-key: "ci-ubuntu-latest"
 
-      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - run: cargo clippy --all-targets --all-features --locked -- -D warnings
 
   test:
     runs-on: ubuntu-latest
@@ -88,4 +88,4 @@ jobs:
         run: df -h
 
       - name: Run tests
-        run: cargo nextest run --workspace --all-features --locked
+        run: cargo nextest run --all-features --locked

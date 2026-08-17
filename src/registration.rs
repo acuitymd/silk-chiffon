@@ -18,9 +18,9 @@ use datafusion::{catalog::TableProvider, prelude::SessionContext};
 use object_store::ObjectStoreExt;
 use silk_chiffon_core::{
     DataSink, FormatDefinition, FormatFuture, FormatRegistry, InputDetection, InputLeaf,
-    InputVariant, InspectionDefinition, InspectionMode, InspectionOutput, ServiceInputBinding,
-    ServiceInputDefinition, ServiceOutputBinding, ServiceOutputDefinition, SinkBinding,
-    SinkBindingConfig, TransformDefinition,
+    InputVariant, InspectionDefinition, InspectionMode, InspectionOutput, OpenSinkMode,
+    OutputOrderingColumn, ServiceInputBinding, ServiceInputDefinition, ServiceOutputBinding,
+    ServiceOutputDefinition, SinkBinding, SinkBindingConfig, TransformDefinition,
 };
 use silk_chiffon_storage::{InputObject, StorageDirection, StorageHandle, StorageRegistry};
 use thiserror::Error;
@@ -29,18 +29,23 @@ use thiserror::Error;
 use silk_chiffon_storage::local;
 
 use crate::{
-    Cli, Command as RuntimeCommand, DetectArgs, DetectCommand, InspectCommand, InspectVortexArgs,
-    InspectionArgs, OutputFormat, TransformArgs, TransformCommand, VortexArgs,
-    inspection::vortex::VortexInspector,
-    sinks::vortex::{VortexSink, VortexSinkOptions},
-    sources::vortex as vortex_source,
+    AllColumnsBloomFilterConfig, BloomFilterConfig, Cli, Command as RuntimeCommand,
+    DEFAULT_BLOOM_FILTER_FPP, DetectArgs, DetectCommand, InspectCommand, InspectParquetArgs,
+    InspectVortexArgs, InspectionArgs, OutputFormat, ParquetArgs, SortColumn, SortSpec,
+    TransformArgs, TransformCommand, VortexArgs,
+    inspection::{inspectable::Inspectable, parquet::ParquetInspector, vortex::VortexInspector},
+    sinks::{
+        parquet::{ParquetRuntimes, ParquetSink, ParquetSinkOptions},
+        vortex::{VortexSink, VortexSinkOptions},
+    },
+    sources::{parquet as parquet_source, vortex as vortex_source},
 };
 
 /// Builds the executable's set of available data formats.
 pub fn format_registry() -> FormatRegistry {
     FormatRegistry::builder()
         .register(silk_chiffon_format_arrow::definition())
-        .register(silk_chiffon_format_parquet::definition())
+        .register(parquet_format())
         .register(vortex_format())
         .build()
         .expect("built-in format registrations must not conflict")
@@ -666,6 +671,23 @@ fn clap_error(error: impl std::fmt::Display) -> clap::Error {
     clap::Error::raw(clap::error::ErrorKind::ValueValidation, error.to_string())
 }
 
+fn parquet_format() -> FormatDefinition {
+    FormatDefinition::builder("parquet", "Parquet")
+        .extensions(["parquet"])
+        .detector(detect_parquet)
+        .detection_priority(0)
+        .transform(
+            TransformDefinition::with_args::<ParquetArgs>()
+                .input_provider(create_parquet_provider)
+                .sink(bind_parquet_sink)
+                .build(),
+        )
+        .inspection(InspectionDefinition::with_args::<InspectParquetArgs>(
+            inspect_parquet,
+        ))
+        .build()
+}
+
 fn vortex_format() -> FormatDefinition {
     FormatDefinition::builder("vortex", "Vortex")
         .extensions(["vortex"])
@@ -681,6 +703,30 @@ fn vortex_format() -> FormatDefinition {
             inspect_vortex,
         ))
         .build()
+}
+
+fn detect_parquet(object: &InputObject) -> FormatFuture<'_, InputDetection> {
+    Box::pin(async move {
+        const MAGIC: &[u8] = b"PAR1";
+        if object.metadata().size < 8 {
+            return Ok(InputDetection::Mismatch);
+        }
+        let handle = object.handle();
+        let size = object.metadata().size;
+        let magic = handle
+            .object_store()
+            .get_ranges(handle.object_path(), &[0..4, size - 4..size])
+            .await?;
+        let starts = magic[0].as_ref() == MAGIC;
+        let ends = magic[1].as_ref() == MAGIC;
+        Ok(match (starts, ends) {
+            (true, true) => InputDetection::Match(InputVariant::new()),
+            (true, false) => InputDetection::Malformed(anyhow!(
+                "Parquet input is missing its trailing magic marker"
+            )),
+            (false, true) | (false, false) => InputDetection::Mismatch,
+        })
+    })
 }
 
 fn detect_vortex(object: &InputObject) -> FormatFuture<'_, InputDetection> {
@@ -701,12 +747,36 @@ fn detect_vortex(object: &InputObject) -> FormatFuture<'_, InputDetection> {
     })
 }
 
+fn create_parquet_provider<'a>(
+    leaf: &'a InputLeaf,
+    session: &'a SessionContext,
+    _args: &'a ParquetArgs,
+) -> FormatFuture<'a, Arc<dyn TableProvider>> {
+    Box::pin(parquet_source::create_provider(leaf, session))
+}
+
 fn create_vortex_provider<'a>(
     leaf: &'a InputLeaf,
     session: &'a SessionContext,
     _args: &'a VortexArgs,
 ) -> FormatFuture<'a, Arc<dyn TableProvider>> {
     Box::pin(vortex_source::create_provider(leaf, session))
+}
+
+fn bind_parquet_sink<'a>(
+    context: &'a SinkBindingConfig,
+    args: &'a ParquetArgs,
+) -> FormatFuture<'a, Box<dyn SinkBinding>> {
+    Box::pin(async move {
+        let options = parquet_options(context, args)?;
+        let default_encoding_threads = context.thread_budget().get();
+        let runtimes = Arc::new(ParquetRuntimes::try_new(
+            args.parquet_column_encoding_threads
+                .unwrap_or(default_encoding_threads),
+            args.parquet_io_threads.unwrap_or(1),
+        )?);
+        Ok(Box::new(ParquetSinkBinding { options, runtimes }) as Box<dyn SinkBinding>)
+    })
 }
 
 fn bind_vortex_sink<'a>(
@@ -718,6 +788,144 @@ fn bind_vortex_sink<'a>(
         VortexSinkOptions::with_record_batch_size,
     );
     Box::pin(async move { Ok(Box::new(VortexSinkBinding { options }) as Box<dyn SinkBinding>) })
+}
+
+fn parquet_options(context: &SinkBindingConfig, args: &ParquetArgs) -> Result<ParquetSinkOptions> {
+    for disabled in &args.parquet_bloom_column_off {
+        if args
+            .parquet_bloom_column
+            .iter()
+            .any(|column| &column.name == disabled)
+        {
+            anyhow::bail!(
+                "column '{disabled}' specified in both --parquet-bloom-column-off and --parquet-bloom-column"
+            );
+        }
+    }
+    for disabled in &args.parquet_dictionary_column_off {
+        if args
+            .parquet_dictionary_column
+            .iter()
+            .any(|column| &column.name == disabled)
+        {
+            anyhow::bail!(
+                "column '{disabled}' specified in both --parquet-dictionary-column-off and --parquet-dictionary-column"
+            );
+        }
+    }
+
+    let all_enabled = if args.parquet_bloom_all_off {
+        None
+    } else {
+        args.parquet_bloom_all
+            .clone()
+            .or(Some(AllColumnsBloomFilterConfig {
+                fpp: DEFAULT_BLOOM_FILTER_FPP,
+                ndv: None,
+            }))
+    };
+    let bloom_filter = BloomFilterConfig::try_new(
+        all_enabled,
+        args.parquet_bloom_column.clone(),
+        args.parquet_bloom_column_off.clone(),
+    )?;
+    let sort_spec =
+        (args.parquet_sorted_metadata && !context.output_ordering().is_empty()).then(|| SortSpec {
+            columns: context
+                .output_ordering()
+                .iter()
+                .map(output_sort_column)
+                .collect(),
+        });
+
+    let mut options = ParquetSinkOptions::new()
+        .with_parquet_compression(args.parquet_compression, args.parquet_compression_level)?
+        .with_statistics(args.parquet_statistics)
+        .with_writer_version(args.parquet_writer_version)
+        .with_ingestion_queue_size(args.parquet_ingestion_queue_size)
+        .with_encoding_queue_size(args.parquet_encoding_queue_size)
+        .with_writing_queue_size(args.parquet_writing_queue_size)
+        .with_no_dictionary(args.parquet_dictionary_all_off)
+        .with_dictionary_configs(&args.parquet_dictionary_column)
+        .with_column_no_dictionary(args.parquet_dictionary_column_off.clone())
+        .with_encoding(args.parquet_encoding)
+        .with_column_encodings(args.parquet_column_encoding.clone())
+        .with_bloom_filters(bloom_filter)
+        .with_offset_index_enabled(args.parquet_offset_index)
+        .with_skip_arrow_metadata(!args.parquet_arrow_metadata)
+        .with_page_header_statistics(args.parquet_page_header_statistics)
+        .apply_if_some(
+            args.parquet_buffer_size,
+            ParquetSinkOptions::with_buffer_size,
+        )
+        .apply_if_some(
+            args.parquet_row_group_size,
+            ParquetSinkOptions::with_max_row_group_size,
+        )
+        .apply_if_some(
+            args.parquet_row_group_concurrency,
+            ParquetSinkOptions::with_max_row_group_concurrency,
+        )
+        .apply_if_some(
+            args.parquet_data_page_size,
+            ParquetSinkOptions::with_data_page_size_limit,
+        )
+        .apply_if_some(
+            args.parquet_data_page_row_limit,
+            ParquetSinkOptions::with_data_page_row_count_limit,
+        )
+        .apply_if_some(
+            args.parquet_dictionary_page_size,
+            ParquetSinkOptions::with_dictionary_page_size_limit,
+        )
+        .apply_if_some(
+            args.parquet_write_batch_size,
+            ParquetSinkOptions::with_write_batch_size,
+        )
+        .apply_if_some(sort_spec, ParquetSinkOptions::with_sort_spec);
+
+    if context.open_sink_mode() == OpenSinkMode::Multiple {
+        // Several open Parquet pipelines multiply their buffered row groups, so keep each
+        // pipeline single-slot.
+        options = options
+            .with_ingestion_queue_size(1)
+            .with_encoding_queue_size(1)
+            .with_writing_queue_size(1)
+            .with_max_row_group_concurrency(1);
+    }
+
+    Ok(options)
+}
+
+fn output_sort_column(column: &OutputOrderingColumn) -> SortColumn {
+    SortColumn {
+        name: column.name().to_owned(),
+        direction: match column.direction() {
+            silk_chiffon_core::SortDirection::Ascending => crate::SortDirection::Ascending,
+            silk_chiffon_core::SortDirection::Descending => crate::SortDirection::Descending,
+        },
+    }
+}
+
+struct ParquetSinkBinding {
+    options: ParquetSinkOptions,
+    runtimes: Arc<ParquetRuntimes>,
+}
+
+#[async_trait]
+impl SinkBinding for ParquetSinkBinding {
+    async fn open_sink(
+        &self,
+        handle: StorageHandle,
+        schema: SchemaRef,
+    ) -> Result<Box<dyn DataSink>> {
+        Ok(Box::new(ParquetSink::create(
+            handle,
+            &schema,
+            &self.options,
+            Arc::clone(&self.runtimes),
+        )?))
+    }
 }
 
 struct VortexSinkBinding {
@@ -733,6 +941,34 @@ impl SinkBinding for VortexSinkBinding {
     ) -> Result<Box<dyn DataSink>> {
         Ok(Box::new(VortexSink::create(handle, &schema, self.options)?))
     }
+}
+
+fn inspect_parquet<'a>(
+    object: &'a InputObject,
+    mode: InspectionMode,
+    args: &'a InspectParquetArgs,
+) -> FormatFuture<'a, InspectionOutput> {
+    Box::pin(async move {
+        let path = local_utf8_path(object.handle())?;
+        let inspector = ParquetInspector::open(&path).context("Failed to open Parquet file")?;
+        let columns = args.pages.as_ref().and_then(|columns| {
+            (!columns.is_empty()).then(|| columns.split(',').map(str::trim).collect::<Vec<_>>())
+        });
+        if mode == InspectionMode::Json {
+            let value = if args.pages.is_some() {
+                inspector.to_json_with_pages(columns.as_deref())
+            } else {
+                inspector.to_json()
+            };
+            return Ok(InspectionOutput::Json(value));
+        }
+        let mut output = Vec::new();
+        inspector.render_with_row_group(&mut output, args.row_group)?;
+        if args.pages.is_some() {
+            inspector.render_pages(&mut output, args.row_group, columns.as_deref())?;
+        }
+        Ok(InspectionOutput::Text(String::from_utf8(output)?))
+    })
 }
 
 fn inspect_vortex<'a>(
@@ -770,6 +1006,7 @@ fn local_utf8_path(handle: &StorageHandle) -> Result<Utf8PathBuf> {
 mod tests {
     use std::{
         collections::HashMap,
+        num::NonZeroUsize,
         sync::{
             Arc, LazyLock, Mutex,
             atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -779,7 +1016,7 @@ mod tests {
     use anyhow::Result;
     use arrow::array::RecordBatch;
     use bytes::Bytes;
-    use clap::{Args, CommandFactory};
+    use clap::{Args, CommandFactory, FromArgMatches};
     use datafusion::{
         catalog::{TableProvider, streaming::StreamingTable},
         datasource::MemTable,
@@ -793,19 +1030,20 @@ mod tests {
     use futures::{StreamExt, future::BoxFuture};
     use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory, path::Path as ObjectPath};
     use silk_chiffon_core::{
-        DataSink, FormatDefinition, FormatFuture, FormatRegistry, InputLeaf,
-        ServiceInputDefinition, ServiceOutputDefinition, SinkBinding, TransformDefinition,
+        DataSink, FormatDefinition, FormatFuture, FormatRegistry, InputLeaf, OpenSinkMode,
+        ServiceInputDefinition, ServiceOutputDefinition, SinkBinding, SinkBindingConfig,
+        TransformDefinition,
     };
     use silk_chiffon_storage::{
         OutputPreparation, StorageAccess, StorageBackend, StorageHandle, StorageRegistry,
     };
     use url::Url;
 
-    use super::{ApplicationAssemblyError, ApplicationDefinition, storage_registry};
-    use crate::{CliSchema, Command};
-    use silk_chiffon_test_support::{
-        TestBatch, TestExtract, TestFile, parquet::read_entire_file, prepared_local_output,
+    use super::{
+        ApplicationAssemblyError, ApplicationDefinition, parquet_options, storage_registry,
     };
+    use crate::{CliSchema, Command, ParquetArgs};
+    use silk_chiffon_test_support::{TestBatch, TestExtract, TestFile, prepared_local_output};
     static SINK_BINDINGS: AtomicUsize = AtomicUsize::new(0);
     static SERVICE_INPUT_REFERENCES: Mutex<Vec<String>> = Mutex::new(Vec::new());
     static SERVICE_OUTPUT_RESULT: Mutex<Option<(String, usize)>> = Mutex::new(None);
@@ -1259,7 +1497,7 @@ mod tests {
         ApplicationDefinition::from_parts(
             FormatRegistry::builder()
                 .register(silk_chiffon_format_arrow::definition())
-                .register(silk_chiffon_format_parquet::definition())
+                .register(super::parquet_format())
                 .register(super::vortex_format())
                 .build()
                 .unwrap(),
@@ -1513,82 +1751,6 @@ mod tests {
             TestExtract::i32_all(&TestFile::read_arrow(&downloaded), "id"),
             [1, 2, 3]
         );
-    }
-
-    #[tokio::test]
-    async fn remote_parquet_input_and_output_exercise_the_registered_format_end_to_end() {
-        let input_root = "test-remote://coverage-parquet-input/";
-        let batch = TestBatch::simple_with(&[1, 2, 3, 4], &["a", "b", "b", "c"]);
-        put_remote_file(input_root, "input.parquet", file_bytes("parquet", &batch)).await;
-        let cli = test_cli(
-            remote_application_definition(),
-            &[
-                "silk-chiffon",
-                "transform",
-                "--from",
-                "test-remote://coverage-parquet-input/input.parquet",
-                "--to",
-                "test-remote://coverage-parquet-output/output.parquet",
-                "--query",
-                "SELECT id, name FROM data WHERE id >= 2",
-                "--sort-by",
-                "id:desc",
-                "--parquet-row-group-size",
-                "2",
-                "--parquet-row-group-concurrency",
-                "2",
-                "--parquet-ingestion-queue-size",
-                "1",
-                "--parquet-encoding-queue-size",
-                "1",
-                "--parquet-writing-queue-size",
-                "1",
-                "--parquet-buffer-size",
-                "1B",
-                "--parquet-compression",
-                "zstd",
-                "--parquet-writer-version",
-                "v2",
-                "--parquet-dictionary-column",
-                "name:analyze",
-                "--parquet-bloom-column",
-                "id:ndv=4",
-            ],
-        );
-        let Command::Transform(command) = cli.command else {
-            panic!("expected transform command");
-        };
-
-        crate::commands::transform::run(command).await.unwrap();
-
-        let bytes = remote_store("test-remote://coverage-parquet-output/")
-            .get(&ObjectPath::from("output.parquet"))
-            .await
-            .unwrap()
-            .bytes()
-            .await
-            .unwrap();
-        let directory = tempfile::tempdir().unwrap();
-        let downloaded = directory.path().join("output.parquet");
-        std::fs::write(&downloaded, bytes).unwrap();
-        let batches = TestFile::read_parquet(&downloaded);
-        assert_eq!(TestExtract::i32_all(&batches, "id"), [4, 3, 2]);
-        assert_eq!(TestExtract::string_all(&batches, "name"), ["c", "b", "b"]);
-        let contents = read_entire_file(&downloaded).unwrap();
-        assert_eq!(
-            contents
-                .row_groups
-                .iter()
-                .map(|row_group| row_group.num_rows)
-                .collect::<Vec<_>>(),
-            [2, 1]
-        );
-        assert_eq!(
-            contents.compression_used,
-            ["ZSTD(ZstdLevel(1))".to_owned()].into()
-        );
-        assert!(!contents.column("name").unwrap().has_dictionary);
-        assert!(contents.column("id").unwrap().has_bloom_filter);
     }
 
     #[tokio::test]
@@ -2374,5 +2536,33 @@ mod tests {
             ])
             .unwrap_err();
         assert_eq!(output_error.kind(), clap::error::ErrorKind::InvalidValue);
+    }
+
+    #[test]
+    fn concurrent_sinks_use_single_slot_parquet_pipelines() {
+        let matches = ApplicationDefinition::new()
+            .command(CliSchema::command())
+            .try_get_matches_from([
+                "silk-chiffon",
+                "transform",
+                "--from",
+                "input.arrow",
+                "--to",
+                "output.parquet",
+            ])
+            .unwrap();
+        let (_, matches) = matches.subcommand().unwrap();
+        let args = ParquetArgs::from_arg_matches(matches).unwrap();
+        let context = SinkBindingConfig::new(
+            NonZeroUsize::new(4).unwrap(),
+            OpenSinkMode::Multiple,
+            Vec::new(),
+        );
+        let options = parquet_options(&context, &args).unwrap();
+
+        assert_eq!(options.ingestion_queue_size, Some(1));
+        assert_eq!(options.encoding_queue_size, Some(1));
+        assert_eq!(options.writing_queue_size, Some(1));
+        assert_eq!(options.max_row_group_concurrency, Some(1));
     }
 }

@@ -1,17 +1,10 @@
 //! Schema compatibility used by concrete file formats.
 
-use anyhow::{Result, bail};
 use arrow::datatypes::{DataType, Field, Schema};
 
 enum Comparison<'a> {
     Field(&'a Field, &'a Field),
     DataType(&'a DataType, &'a DataType),
-}
-
-#[derive(Clone, Copy)]
-enum Nullability {
-    Exact,
-    ActualMayRefine,
 }
 
 /// Reports whether two schemas have the same recursive structure after metadata is removed.
@@ -20,14 +13,6 @@ enum Nullability {
 /// files. Field order, names, nullability, and data types remain strict so the result never implies
 /// coercion or reordering; only schema and field metadata are outside the compatibility contract.
 pub fn schemas_match_ignoring_metadata(left: &Schema, right: &Schema) -> bool {
-    schemas_have_compatible_structure(left, right, Nullability::Exact)
-}
-
-fn schemas_have_compatible_structure(
-    left: &Schema,
-    right: &Schema,
-    nullability: Nullability,
-) -> bool {
     if left.fields().len() != right.fields().len() {
         return false;
     }
@@ -43,11 +28,7 @@ fn schemas_have_compatible_structure(
     while let Some(comparison) = pending.pop() {
         match comparison {
             Comparison::Field(left, right) => {
-                let nullability_matches = match nullability {
-                    Nullability::Exact => left.is_nullable() == right.is_nullable(),
-                    Nullability::ActualMayRefine => left.is_nullable() || !right.is_nullable(),
-                };
-                if left.name() != right.name() || !nullability_matches {
+                if left.name() != right.name() || left.is_nullable() != right.is_nullable() {
                     return false;
                 }
                 pending.push(Comparison::DataType(left.data_type(), right.data_type()));
@@ -116,16 +97,4 @@ fn schemas_have_compatible_structure(
     }
 
     true
-}
-
-/// Rejects structural schema changes before a sink hands work to codec tasks.
-///
-/// Metadata may vary, and a batch may refine nullable fields to non-nullable
-/// fields. Codecs still rely on field names, order, and types matching the
-/// schema used to create the sink.
-pub fn validate_batch_schema(expected: &Schema, actual: &Schema) -> Result<()> {
-    if schemas_have_compatible_structure(expected, actual, Nullability::ActualMayRefine) {
-        return Ok(());
-    }
-    bail!("record batch schema does not match sink schema: expected {expected:?}, got {actual:?}")
 }

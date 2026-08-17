@@ -10,7 +10,7 @@ use arrow::{
 use async_trait::async_trait;
 use datafusion::execution::SendableRecordBatchStream;
 use futures::stream::StreamExt;
-use silk_chiffon_core::{DataSink, SinkBinding, SinkCompletion, validate_batch_schema};
+use silk_chiffon_core::{DataSink, SinkBinding, SinkCompletion};
 use silk_chiffon_storage::{ObjectUpload, ObjectUploadTask, StorageHandle};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -66,7 +66,6 @@ enum WriteOutcome {
 }
 
 pub(crate) struct Sink {
-    schema: SchemaRef,
     tx: Option<mpsc::Sender<RecordBatch>>,
     task: Option<ObjectUploadTask<WriteOutcome>>,
 }
@@ -84,7 +83,6 @@ impl Sink {
         let mut upload = ObjectUpload::new(handle);
         let writer = upload.blocking_writer()?;
 
-        let sink_schema = Arc::clone(schema);
         let schema = Arc::clone(schema);
         let task = ObjectUploadTask::spawn("Arrow writer", upload, move |cancellation| {
             tokio::task::spawn_blocking(move || {
@@ -101,7 +99,6 @@ impl Sink {
         });
 
         Ok(Self {
-            schema: sink_schema,
             tx: Some(tx),
             task: Some(task),
         })
@@ -202,7 +199,6 @@ impl DataSink for Sink {
     }
 
     async fn write_batch(&mut self, batch: RecordBatch) -> Result<()> {
-        validate_batch_schema(&self.schema, batch.schema_ref())?;
         let tx = self.tx.as_ref().context("sink already finished")?;
         tx.send(batch).await.context("writer task died")?;
         Ok(())

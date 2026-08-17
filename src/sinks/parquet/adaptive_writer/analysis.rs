@@ -15,10 +15,8 @@ use datafusion::prelude::{SessionConfig, SessionContext, col};
 use tokio::sync::mpsc;
 use tokio_util::task::AbortOnDropHandle;
 
-use crate::output::{
-    analysis_provider::ChannelTableProvider,
-    pipeline::{PipelineTaskScope, encoding::is_analyzable},
-};
+use crate::sinks::parquet::adaptive_writer::{PipelineTaskScope, encoding::is_analyzable};
+use crate::utils::channel_stream_provider::ChannelTableProvider;
 
 #[derive(Debug, Clone)]
 pub struct ColumnAnalysis {

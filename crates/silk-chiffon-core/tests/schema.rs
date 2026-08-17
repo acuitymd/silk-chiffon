@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use arrow::datatypes::{DataType, Field, Schema, UnionFields, UnionMode};
-use silk_chiffon_core::{schemas_match_ignoring_metadata, validate_batch_schema};
+use silk_chiffon_core::schemas_match_ignoring_metadata;
 
 fn nested_schema(child_name: &str, metadata: &str) -> Schema {
     Schema::new_with_metadata(
@@ -33,40 +33,6 @@ fn schema_comparison_remains_strict_about_structure() {
         &nested_schema("left", "same"),
         &nested_schema("right", "same"),
     ));
-}
-
-#[test]
-fn batch_schema_validation_accepts_metadata_but_rejects_structural_changes() {
-    validate_batch_schema(
-        &nested_schema("item", "left"),
-        &nested_schema("item", "right"),
-    )
-    .unwrap();
-
-    let error = validate_batch_schema(
-        &nested_schema("expected", "same"),
-        &nested_schema("actual", "same"),
-    )
-    .unwrap_err();
-    assert!(error.to_string().contains("does not match sink schema"));
-}
-
-#[test]
-fn batch_schema_validation_allows_batch_level_nullability_refinement() {
-    let expected = Schema::new(vec![Field::new("value", DataType::Utf8, true)]);
-    let actual = Schema::new(vec![Field::new("value", DataType::Utf8, false)]);
-
-    validate_batch_schema(&expected, &actual).unwrap();
-    assert!(!schemas_match_ignoring_metadata(&expected, &actual));
-}
-
-#[test]
-fn batch_schema_validation_rejects_weaker_nullability() {
-    let expected = Schema::new(vec![Field::new("value", DataType::Utf8, false)]);
-    let actual = Schema::new(vec![Field::new("value", DataType::Utf8, true)]);
-
-    let error = validate_batch_schema(&expected, &actual).unwrap_err();
-    assert!(error.to_string().contains("does not match sink schema"));
 }
 
 #[test]

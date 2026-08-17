@@ -1,17 +1,18 @@
 use std::{
-    collections::HashMap,
+    fmt, io,
     num::NonZeroUsize,
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
 
 use arrow::{
-    array::{Int32Array, Int64Array, RecordBatch, StringArray},
+    array::{Int32Array, RecordBatch, StringArray},
     datatypes::{DataType, Field, Schema},
 };
+use async_trait::async_trait;
 use clap::Command;
 use datafusion::{
     catalog::{TableProvider, streaming::StreamingTable},
@@ -22,10 +23,15 @@ use datafusion::{
         streaming::PartitionStream,
     },
 };
-use futures::StreamExt;
-use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory};
+use futures::{StreamExt, stream::BoxStream};
+use object_store::{
+    CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
+    ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload, PutResult, memory::InMemory,
+    path::Path as ObjectPath,
+};
 use silk_chiffon::sinks::{
     data_sink::DataSink,
+    parquet::{ParquetRuntimes, ParquetSink, ParquetSinkOptions},
     vortex::{VortexSink, VortexSinkOptions},
 };
 use silk_chiffon_core::{FormatRegistry, InputSources, OpenSinkMode, Pipeline, SinkBindingConfig};
@@ -33,12 +39,9 @@ use silk_chiffon_storage::{
     ExistingOutput, LocationInput, OutputPreparation, StorageAccess, StorageBackend, StorageHandle,
     StorageRegistry, StorageSession,
 };
-use silk_chiffon_test_support::controlled_upload::{
-    ControlledUploadStore, controlled_upload_lock, controlled_upload_storage,
-    controlled_upload_storage_with, controlled_upload_store,
-};
 
-type TrackingStore = ControlledUploadStore;
+static TRACKING_STORE: OnceLock<Arc<TrackingStore>> = OnceLock::new();
+static TRACKING_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 const SOURCE_BATCH_LIMIT: usize = 1_000_000;
 
@@ -60,33 +63,6 @@ async fn registered_arrow_sink(
     let sink_binding = binding
         .bind_sink(&SinkBindingConfig::new(
             NonZeroUsize::new(1).unwrap(),
-            OpenSinkMode::OneAtATime,
-            Vec::new(),
-        ))
-        .await
-        .unwrap();
-    sink_binding.open_sink(handle, schema).await.unwrap()
-}
-
-async fn registered_parquet_sink(
-    handle: StorageHandle,
-    schema: arrow::datatypes::SchemaRef,
-    arguments: &[&str],
-) -> Box<dyn DataSink> {
-    let registry = FormatRegistry::builder()
-        .register(silk_chiffon_format_parquet::definition())
-        .build()
-        .unwrap();
-    let matches = registry
-        .augment_transform_args(Command::new("test").arg(clap::Arg::new("sort_by").long("sort-by")))
-        .try_get_matches_from(std::iter::once("test").chain(arguments.iter().copied()))
-        .unwrap();
-    let bindings = registry.bind_transform(&matches).unwrap();
-    let sink_binding = bindings
-        .get("parquet")
-        .unwrap()
-        .bind_sink(&SinkBindingConfig::new(
-            NonZeroUsize::new(2).unwrap(),
             OpenSinkMode::OneAtATime,
             Vec::new(),
         ))
@@ -216,12 +192,196 @@ impl PartitionStream for StructuredServicePartition {
     }
 }
 
+#[derive(Debug)]
+struct TrackingStore {
+    inner: InMemory,
+    multipart_starts: AtomicUsize,
+    active_parts: AtomicUsize,
+    aborts: AtomicUsize,
+    block_parts: AtomicBool,
+    fail_next_abort: AtomicBool,
+    fail_next_complete: AtomicBool,
+    fail_next_part: AtomicBool,
+    part_started: tokio::sync::Notify,
+}
+
+impl TrackingStore {
+    fn new() -> Self {
+        Self {
+            inner: InMemory::new(),
+            multipart_starts: AtomicUsize::new(0),
+            active_parts: AtomicUsize::new(0),
+            aborts: AtomicUsize::new(0),
+            block_parts: AtomicBool::new(false),
+            fail_next_abort: AtomicBool::new(false),
+            fail_next_complete: AtomicBool::new(false),
+            fail_next_part: AtomicBool::new(false),
+            part_started: tokio::sync::Notify::new(),
+        }
+    }
+}
+
+impl fmt::Display for TrackingStore {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("TrackingStore")
+    }
+}
+
+#[async_trait]
+impl ObjectStore for TrackingStore {
+    async fn put_opts(
+        &self,
+        location: &ObjectPath,
+        payload: PutPayload,
+        options: PutOptions,
+    ) -> object_store::Result<PutResult> {
+        self.inner.put_opts(location, payload, options).await
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        location: &ObjectPath,
+        options: PutMultipartOptions,
+    ) -> object_store::Result<Box<dyn MultipartUpload>> {
+        self.multipart_starts.fetch_add(1, Ordering::SeqCst);
+        Ok(Box::new(TrackingMultipart {
+            inner: self.inner.put_multipart_opts(location, options).await?,
+            store: tracking_store(),
+        }))
+    }
+
+    async fn get_opts(
+        &self,
+        location: &ObjectPath,
+        options: GetOptions,
+    ) -> object_store::Result<GetResult> {
+        self.inner.get_opts(location, options).await
+    }
+
+    fn delete_stream(
+        &self,
+        locations: BoxStream<'static, object_store::Result<ObjectPath>>,
+    ) -> BoxStream<'static, object_store::Result<ObjectPath>> {
+        self.inner.delete_stream(locations)
+    }
+
+    fn list(
+        &self,
+        prefix: Option<&ObjectPath>,
+    ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+        self.inner.list(prefix)
+    }
+
+    async fn list_with_delimiter(
+        &self,
+        prefix: Option<&ObjectPath>,
+    ) -> object_store::Result<ListResult> {
+        self.inner.list_with_delimiter(prefix).await
+    }
+
+    async fn copy_opts(
+        &self,
+        from: &ObjectPath,
+        to: &ObjectPath,
+        options: CopyOptions,
+    ) -> object_store::Result<()> {
+        self.inner.copy_opts(from, to, options).await
+    }
+}
+
+#[derive(Debug)]
+struct TrackingMultipart {
+    inner: Box<dyn MultipartUpload>,
+    store: Arc<TrackingStore>,
+}
+
+struct ActivePart(Arc<TrackingStore>);
+
+impl Drop for ActivePart {
+    fn drop(&mut self) {
+        self.0.active_parts.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+struct BlockParts(Arc<TrackingStore>);
+
+impl BlockParts {
+    fn new(store: Arc<TrackingStore>) -> Self {
+        store.block_parts.store(true, Ordering::SeqCst);
+        Self(store)
+    }
+}
+
+impl Drop for BlockParts {
+    fn drop(&mut self) {
+        self.0.block_parts.store(false, Ordering::SeqCst);
+        self.0.part_started.notify_waiters();
+    }
+}
+
+#[async_trait]
+impl MultipartUpload for TrackingMultipart {
+    fn put_part(&mut self, payload: PutPayload) -> object_store::UploadPart {
+        let part = self.inner.put_part(payload);
+        let store = Arc::clone(&self.store);
+        Box::pin(async move {
+            store.active_parts.fetch_add(1, Ordering::SeqCst);
+            store.part_started.notify_waiters();
+            let _active = ActivePart(Arc::clone(&store));
+            while store.block_parts.load(Ordering::SeqCst) {
+                store.part_started.notified().await;
+            }
+            if store.fail_next_part.swap(false, Ordering::SeqCst) {
+                return Err(object_store::Error::Generic {
+                    store: "tracking",
+                    source: Box::new(io::Error::other("controlled part failure")),
+                });
+            }
+            part.await
+        })
+    }
+
+    async fn complete(&mut self) -> object_store::Result<PutResult> {
+        if self.store.fail_next_complete.swap(false, Ordering::SeqCst) {
+            return Err(object_store::Error::Generic {
+                store: "tracking",
+                source: Box::new(io::Error::other("controlled complete failure")),
+            });
+        }
+        self.inner.complete().await
+    }
+
+    async fn abort(&mut self) -> object_store::Result<()> {
+        self.store.aborts.fetch_add(1, Ordering::SeqCst);
+        self.inner.abort().await?;
+        if self.store.fail_next_abort.swap(false, Ordering::SeqCst) {
+            return Err(object_store::Error::Generic {
+                store: "tracking",
+                source: Box::new(io::Error::other("controlled abort failure")),
+            });
+        }
+        Ok(())
+    }
+}
+
+fn tracking_store() -> Arc<TrackingStore> {
+    Arc::clone(TRACKING_STORE.get_or_init(|| Arc::new(TrackingStore::new())))
+}
+
 fn memory_store(
     _store_url: &url::Url,
     _settings: &(),
     _retry: Option<&silk_chiffon_storage::RetryConfig>,
 ) -> anyhow::Result<Arc<dyn ObjectStore>> {
     Ok(Arc::new(InMemory::new()))
+}
+
+fn tracked_store(
+    _store_url: &url::Url,
+    _settings: &(),
+    _retry: Option<&silk_chiffon_storage::RetryConfig>,
+) -> anyhow::Result<Arc<dyn ObjectStore>> {
+    Ok(tracking_store())
 }
 
 fn storage() -> StorageSession {
@@ -243,6 +403,32 @@ fn storage() -> StorageSession {
             "output-test",
             "--object-store-upload-part-size",
             "64",
+            "--object-store-max-in-flight-parts",
+            "2",
+        ])
+        .unwrap();
+    registry.create_session(&matches).unwrap()
+}
+
+fn tracking_storage() -> StorageSession {
+    let backend = StorageBackend::without_args()
+        .name("tracking")
+        .schemes(["tracking"])
+        .access(StorageAccess::ReadWrite)
+        .allow_any_location()
+        .object_store_creator(tracked_store)
+        .build()
+        .unwrap();
+    let registry = StorageRegistry::builder()
+        .register(backend)
+        .build()
+        .unwrap();
+    let command = registry.augment_args(Command::new("output-test"));
+    let matches = command
+        .try_get_matches_from([
+            "output-test",
+            "--object-store-upload-part-size",
+            "1",
             "--object-store-max-in-flight-parts",
             "2",
         ])
@@ -327,9 +513,9 @@ async fn drive_to_active_part(
     handle: &StorageHandle,
     store: &TrackingStore,
 ) {
-    let active_before = store.active_parts();
+    let active_before = store.active_parts.load(Ordering::SeqCst);
     for _ in 0..64 {
-        if store.active_parts() > active_before {
+        if store.active_parts.load(Ordering::SeqCst) > active_before {
             break;
         }
 
@@ -338,7 +524,7 @@ async fn drive_to_active_part(
         tokio::select! {
             result = &mut write => result.unwrap(),
             result = tokio::time::timeout(Duration::from_secs(5), async {
-                while store.active_parts() == active_before {
+                while store.active_parts.load(Ordering::SeqCst) == active_before {
                     tokio::task::yield_now().await;
                 }
             }) => {
@@ -352,10 +538,11 @@ async fn drive_to_active_part(
             }
         }
     }
-    tokio::time::timeout(
-        Duration::from_secs(5),
-        store.wait_for_more_active_parts(active_before),
-    )
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while store.active_parts.load(Ordering::SeqCst) == active_before {
+            store.part_started.notified().await;
+        }
+    })
     .await
     .unwrap_or_else(|_| {
         panic!(
@@ -366,10 +553,11 @@ async fn drive_to_active_part(
 }
 
 async fn wait_for_multipart_cleanup(store: &TrackingStore, active_before: usize) {
-    tokio::time::timeout(
-        Duration::from_secs(5),
-        store.wait_for_active_parts(active_before),
-    )
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while store.active_parts.load(Ordering::SeqCst) != active_before {
+            tokio::task::yield_now().await;
+        }
+    })
     .await
     .expect("multipart part remained active after cleanup");
 }
@@ -411,9 +599,9 @@ async fn assert_abort_cleans_multipart(
     handle: &StorageHandle,
     store: &TrackingStore,
 ) {
-    let starts_before = store.multipart_starts();
-    let aborts_before = store.aborts();
-    let active_before = store.active_parts();
+    let starts_before = store.multipart_starts.load(Ordering::SeqCst);
+    let aborts_before = store.aborts.load(Ordering::SeqCst);
+    let active_before = store.active_parts.load(Ordering::SeqCst);
     drive_to_active_part(sink.as_mut(), handle, store).await;
 
     tokio::time::timeout(Duration::from_secs(5), sink.abort())
@@ -422,11 +610,11 @@ async fn assert_abort_cleans_multipart(
         .unwrap();
 
     assert_eq!(
-        store.aborts() - aborts_before,
-        store.multipart_starts() - starts_before
+        store.aborts.load(Ordering::SeqCst) - aborts_before,
+        store.multipart_starts.load(Ordering::SeqCst) - starts_before
     );
     wait_for_multipart_cleanup(store, active_before).await;
-    assert_eq!(store.active_parts(), active_before);
+    assert_eq!(store.active_parts.load(Ordering::SeqCst), active_before);
     assert!(matches!(
         store.head(handle.object_path()).await,
         Err(object_store::Error::NotFound { .. })
@@ -438,9 +626,9 @@ async fn assert_abort_reports_cleanup_failure(
     handle: &StorageHandle,
     store: &TrackingStore,
 ) {
-    let active_before = store.active_parts();
+    let active_before = store.active_parts.load(Ordering::SeqCst);
     drive_to_active_part(sink.as_mut(), handle, store).await;
-    store.fail_next_abort();
+    store.fail_next_abort.store(true, Ordering::SeqCst);
 
     let error = tokio::time::timeout(Duration::from_secs(5), sink.abort())
         .await
@@ -463,13 +651,13 @@ async fn assert_drop_cleans_multipart(
     handle: &StorageHandle,
     store: &TrackingStore,
 ) {
-    let aborts_before = store.aborts();
-    let active_before = store.active_parts();
+    let aborts_before = store.aborts.load(Ordering::SeqCst);
+    let active_before = store.active_parts.load(Ordering::SeqCst);
     drive_to_active_part(sink.as_mut(), handle, store).await;
     drop(sink);
 
     tokio::time::timeout(Duration::from_secs(5), async {
-        while store.aborts() == aborts_before {
+        while store.aborts.load(Ordering::SeqCst) == aborts_before {
             tokio::task::yield_now().await;
         }
     })
@@ -487,8 +675,8 @@ async fn assert_cancelled_finish_cleans_multipart(
     handle: &StorageHandle,
     store: &TrackingStore,
 ) {
-    let aborts_before = store.aborts();
-    let active_before = store.active_parts();
+    let aborts_before = store.aborts.load(Ordering::SeqCst);
+    let active_before = store.active_parts.load(Ordering::SeqCst);
     drive_to_active_part(sink.as_mut(), handle, store).await;
 
     let mut finish = tokio::spawn(sink.finish());
@@ -503,7 +691,7 @@ async fn assert_cancelled_finish_cleans_multipart(
     assert!(finish.await.unwrap_err().is_cancelled());
 
     tokio::time::timeout(Duration::from_secs(5), async {
-        while store.aborts() == aborts_before {
+        while store.aborts.load(Ordering::SeqCst) == aborts_before {
             tokio::task::yield_now().await;
         }
     })
@@ -521,9 +709,9 @@ async fn assert_finish_failure_cleans_multipart(
     handle: &StorageHandle,
     store: &TrackingStore,
 ) {
-    let aborts_before = store.aborts();
+    let aborts_before = store.aborts.load(Ordering::SeqCst);
     sink.write_batch(batch()).await.unwrap();
-    store.fail_next_complete();
+    store.fail_next_complete.store(true, Ordering::SeqCst);
 
     let error = tokio::time::timeout(Duration::from_secs(5), sink.finish())
         .await
@@ -534,29 +722,9 @@ async fn assert_finish_failure_cleans_multipart(
         error.to_string().contains("controlled complete failure"),
         "{error:#}"
     );
-    assert_eq!(store.aborts(), aborts_before + 1);
+    assert_eq!(store.aborts.load(Ordering::SeqCst), aborts_before + 1);
     assert!(matches!(
         store.head(handle.object_path()).await,
-        Err(object_store::Error::NotFound { .. })
-    ));
-}
-
-async fn assert_controlled_write_failure(
-    mut sink: Box<dyn DataSink>,
-    handle: &StorageHandle,
-    expected: &str,
-) {
-    let error = match sink.write_batch(batch()).await {
-        Ok(()) => sink.finish().await.unwrap_err(),
-        Err(error) => {
-            let _ = sink.abort().await;
-            error
-        }
-    };
-
-    assert!(format!("{error:#}").contains(expected), "{error:#}");
-    assert!(matches!(
-        handle.object_store().head(handle.object_path()).await,
         Err(object_store::Error::NotFound { .. })
     ));
 }
@@ -615,106 +783,17 @@ async fn parquet_sink_writes_a_memory_object() {
     let storage = storage();
     let handle = prepared_handle(&storage, "memory://bucket/output.parquet").await;
     let batch = batch();
-    let mut sink = registered_parquet_sink(handle.clone(), batch.schema(), &[]).await;
+    let mut sink = ParquetSink::create(
+        handle.clone(),
+        &batch.schema(),
+        &ParquetSinkOptions::new(),
+        Arc::new(ParquetRuntimes::try_new(2, 1).unwrap()),
+    )
+    .unwrap();
 
     sink.write_batch(batch).await.unwrap();
-    let completion = sink.finish().await.unwrap();
+    let completion = Box::new(sink).finish().await.unwrap();
     assert_durable(completion, &handle).await;
-}
-
-async fn assert_schema_mismatch_is_rejected_before_encoding(
-    mut sink: Box<dyn DataSink>,
-    handle: &StorageHandle,
-) {
-    let actual_schema = Arc::new(Schema::new(vec![
-        Field::new("id", DataType::Int64, false),
-        Field::new("name", DataType::Utf8, false),
-    ]));
-    let mismatched = RecordBatch::try_new(
-        actual_schema,
-        vec![
-            Arc::new(Int64Array::from(vec![1, 2, 3])),
-            Arc::new(StringArray::from(vec!["a", "b", "c"])),
-        ],
-    )
-    .unwrap();
-
-    let error = sink.write_batch(mismatched).await.unwrap_err();
-
-    assert!(
-        format!("{error:#}").contains("schema"),
-        "unexpected error: {error:#}"
-    );
-    sink.abort().await.unwrap();
-    assert!(matches!(
-        handle.object_store().head(handle.object_path()).await,
-        Err(object_store::Error::NotFound { .. })
-    ));
-}
-
-#[tokio::test]
-async fn every_format_rejects_schema_mismatch_before_encoding() {
-    let storage = storage();
-    let schema = batch().schema();
-
-    let arrow_handle = prepared_handle(&storage, "memory://bucket/schema-mismatch.arrow").await;
-    let arrow = registered_arrow_sink(arrow_handle.clone(), Arc::clone(&schema), &[]).await;
-    assert_schema_mismatch_is_rejected_before_encoding(arrow, &arrow_handle).await;
-
-    let parquet_handle = prepared_handle(&storage, "memory://bucket/schema-mismatch.parquet").await;
-    let parquet = registered_parquet_sink(parquet_handle.clone(), Arc::clone(&schema), &[]).await;
-    assert_schema_mismatch_is_rejected_before_encoding(parquet, &parquet_handle).await;
-
-    let vortex_handle = prepared_handle(&storage, "memory://bucket/schema-mismatch.vortex").await;
-    let vortex =
-        VortexSink::create(vortex_handle.clone(), &schema, VortexSinkOptions::new()).unwrap();
-    assert_schema_mismatch_is_rejected_before_encoding(Box::new(vortex), &vortex_handle).await;
-}
-
-#[tokio::test]
-async fn every_format_accepts_metadata_only_schema_differences() {
-    let storage = storage();
-    let expected_schema = batch().schema();
-    let actual_schema = Arc::new(Schema::new_with_metadata(
-        vec![
-            Field::new("id", DataType::Int32, false).with_metadata(HashMap::from([(
-                "field-source".to_owned(),
-                "batch".to_owned(),
-            )])),
-            Field::new("name", DataType::Utf8, false),
-        ],
-        HashMap::from([("schema-source".to_owned(), "batch".to_owned())]),
-    ));
-    let metadata_batch = RecordBatch::try_new(
-        actual_schema,
-        vec![
-            Arc::new(Int32Array::from(vec![1, 2, 3])),
-            Arc::new(StringArray::from(vec!["a", "b", "c"])),
-        ],
-    )
-    .unwrap();
-
-    let arrow_handle = prepared_handle(&storage, "memory://bucket/metadata.arrow").await;
-    let mut arrow =
-        registered_arrow_sink(arrow_handle.clone(), Arc::clone(&expected_schema), &[]).await;
-    arrow.write_batch(metadata_batch.clone()).await.unwrap();
-    assert_durable(arrow.finish().await.unwrap(), &arrow_handle).await;
-
-    let parquet_handle = prepared_handle(&storage, "memory://bucket/metadata.parquet").await;
-    let mut parquet =
-        registered_parquet_sink(parquet_handle.clone(), Arc::clone(&expected_schema), &[]).await;
-    parquet.write_batch(metadata_batch.clone()).await.unwrap();
-    assert_durable(parquet.finish().await.unwrap(), &parquet_handle).await;
-
-    let vortex_handle = prepared_handle(&storage, "memory://bucket/metadata.vortex").await;
-    let mut vortex = VortexSink::create(
-        vortex_handle.clone(),
-        &expected_schema,
-        VortexSinkOptions::new(),
-    )
-    .unwrap();
-    vortex.write_batch(metadata_batch).await.unwrap();
-    assert_durable(Box::new(vortex).finish().await.unwrap(), &vortex_handle).await;
 }
 
 #[tokio::test]
@@ -730,127 +809,12 @@ async fn vortex_sink_writes_a_memory_object() {
     assert_durable(completion, &handle).await;
 }
 
-#[tokio::test]
-async fn every_format_reports_single_put_failures_without_durable_outputs() {
-    let _lock = controlled_upload_lock().await;
-    let storage = controlled_upload_storage_with(1024 * 1024, 2);
-    let store = controlled_upload_store();
-    let multipart_starts = store.multipart_starts();
-
-    let arrow_handle = prepared_handle(&storage, "tracking://bucket/put-error.arrow").await;
-    let arrow = registered_arrow_sink(arrow_handle.clone(), batch().schema(), &[]).await;
-    store.fail_next_put();
-    assert_controlled_write_failure(arrow, &arrow_handle, "controlled put failure").await;
-
-    let parquet_handle = prepared_handle(&storage, "tracking://bucket/put-error.parquet").await;
-    let parquet = registered_parquet_sink(parquet_handle.clone(), batch().schema(), &[]).await;
-    store.fail_next_put();
-    assert_controlled_write_failure(parquet, &parquet_handle, "controlled put failure").await;
-
-    let vortex_handle = prepared_handle(&storage, "tracking://bucket/put-error.vortex").await;
-    let vortex = VortexSink::create(
-        vortex_handle.clone(),
-        &batch().schema(),
-        VortexSinkOptions::new(),
-    )
-    .unwrap();
-    store.fail_next_put();
-    assert_controlled_write_failure(Box::new(vortex), &vortex_handle, "controlled put failure")
-        .await;
-
-    assert_eq!(store.multipart_starts(), multipart_starts);
-}
-
-#[tokio::test]
-async fn every_format_reports_multipart_start_failures_without_durable_outputs() {
-    let _lock = controlled_upload_lock().await;
-    let storage = controlled_upload_storage();
-    let store = controlled_upload_store();
-
-    let arrow_handle = prepared_handle(&storage, "tracking://bucket/start-error.arrow").await;
-    let arrow = registered_arrow_sink(
-        arrow_handle.clone(),
-        batch().schema(),
-        &["--arrow-record-batch-size", "1"],
-    )
-    .await;
-    store.fail_next_multipart_start();
-    assert_controlled_write_failure(arrow, &arrow_handle, "controlled multipart-start failure")
-        .await;
-
-    let parquet_handle = prepared_handle(&storage, "tracking://bucket/start-error.parquet").await;
-    let parquet = registered_parquet_sink(
-        parquet_handle.clone(),
-        batch().schema(),
-        &[
-            "--parquet-row-group-size",
-            "1",
-            "--parquet-buffer-size",
-            "1B",
-        ],
-    )
-    .await;
-    store.fail_next_multipart_start();
-    assert_controlled_write_failure(
-        parquet,
-        &parquet_handle,
-        "controlled multipart-start failure",
-    )
-    .await;
-
-    let vortex_handle = prepared_handle(&storage, "tracking://bucket/start-error.vortex").await;
-    let vortex = VortexSink::create(
-        vortex_handle.clone(),
-        &batch().schema(),
-        VortexSinkOptions::new().with_record_batch_size(1),
-    )
-    .unwrap();
-    store.fail_next_multipart_start();
-    assert_controlled_write_failure(
-        Box::new(vortex),
-        &vortex_handle,
-        "controlled multipart-start failure",
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn parquet_late_part_failure_cancels_the_entire_pipeline() {
-    let _lock = controlled_upload_lock().await;
-    let storage = controlled_upload_storage();
-    let store = controlled_upload_store();
-    let handle = prepared_handle(&storage, "tracking://bucket/later-part-error.parquet").await;
-    let sink = registered_parquet_sink(
-        handle.clone(),
-        batch().schema(),
-        &[
-            "--parquet-row-group-size",
-            "1",
-            "--parquet-buffer-size",
-            "1B",
-            "--parquet-ingestion-queue-size",
-            "1",
-            "--parquet-encoding-queue-size",
-            "1",
-            "--parquet-writing-queue-size",
-            "1",
-            "--parquet-row-group-concurrency",
-            "2",
-        ],
-    )
-    .await;
-    store.fail_part_after(4);
-
-    assert_controlled_write_failure(sink, &handle, "controlled part failure").await;
-    assert_eq!(store.active_parts(), 0);
-}
-
-async fn assert_sink_failure_cancels_every_datafusion_source_task(
-    mut sink: Box<dyn DataSink>,
-    handle: &StorageHandle,
-    store: &Arc<TrackingStore>,
-    expected_write_error: &str,
-) {
+#[tokio::test(flavor = "multi_thread")]
+async fn real_sink_failure_cancels_every_datafusion_source_task() {
+    let _lock = TRACKING_TEST_LOCK.lock().await;
+    let storage = tracking_storage();
+    let store = tracking_store();
+    let handle = prepared_handle(&storage, "tracking://bucket/source-cancellation.arrow").await;
     let batch = batch();
     let source_states = vec![
         Arc::new(SourceTaskState::new()),
@@ -864,7 +828,18 @@ async fn assert_sink_failure_cancels_every_datafusion_source_task(
             .collect(),
     )
     .await;
-    let blocked_parts = store.block_parts();
+    let mut sink = registered_arrow_sink(
+        handle.clone(),
+        batch.schema(),
+        &[
+            "--arrow-record-batch-size",
+            "1",
+            "--arrow-writing-queue-size",
+            "1",
+        ],
+    )
+    .await;
+    let blocked_parts = BlockParts::new(Arc::clone(&store));
     let write_error = {
         let write = sink.write_stream(stream);
         tokio::pin!(write);
@@ -873,17 +848,14 @@ async fn assert_sink_failure_cancels_every_datafusion_source_task(
             () = wait_for_sources_started(&source_states) => {}
             result = &mut write => panic!("sink stopped before every source started: {result:?}"),
         }
-        store.fail_next_part();
+        store.fail_next_part.store(true, Ordering::SeqCst);
         drop(blocked_parts);
         tokio::time::timeout(Duration::from_secs(5), &mut write)
             .await
             .expect("sink failure did not stop stream consumption")
             .unwrap_err()
     };
-    assert!(
-        write_error.to_string().contains(expected_write_error),
-        "{write_error:#}"
-    );
+    assert!(write_error.to_string().contains("writer task died"));
     wait_for_sources_stopped(&source_states).await;
     for state in &source_states {
         assert!(state.started.load(Ordering::SeqCst));
@@ -903,70 +875,6 @@ async fn assert_sink_failure_cancels_every_datafusion_source_task(
         store.head(handle.object_path()).await,
         Err(object_store::Error::NotFound { .. })
     ));
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn arrow_sink_failure_cancels_every_datafusion_source_task() {
-    let _lock = controlled_upload_lock().await;
-    let storage = controlled_upload_storage();
-    let store = controlled_upload_store();
-    let handle = prepared_handle(&storage, "tracking://bucket/source-cancellation.arrow").await;
-    let sink = registered_arrow_sink(
-        handle.clone(),
-        batch().schema(),
-        &[
-            "--arrow-record-batch-size",
-            "1",
-            "--arrow-writing-queue-size",
-            "1",
-        ],
-    )
-    .await;
-
-    assert_sink_failure_cancels_every_datafusion_source_task(
-        sink,
-        &handle,
-        &store,
-        "writer task died",
-    )
-    .await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn parquet_sink_failure_cancels_every_datafusion_source_task() {
-    let _lock = controlled_upload_lock().await;
-    let storage = controlled_upload_storage();
-    let store = controlled_upload_store();
-    let handle = prepared_handle(&storage, "tracking://bucket/source-cancellation.parquet").await;
-    let sink = registered_parquet_sink(
-        handle.clone(),
-        batch().schema(),
-        &[
-            "--parquet-row-group-size",
-            "1",
-            "--parquet-buffer-size",
-            "1B",
-            "--parquet-ingestion-queue-size",
-            "1",
-            "--parquet-encoding-queue-size",
-            "1",
-            "--parquet-writing-queue-size",
-            "1",
-            "--parquet-row-group-concurrency",
-            "1",
-            "--parquet-dictionary-column",
-            "name:analyze",
-        ],
-    )
-    .await;
-
-    assert_sink_failure_cancels_every_datafusion_source_task(
-        sink,
-        &handle,
-        &store,
-        "Parquet pipeline closed",
-    )
-    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1093,11 +1001,11 @@ async fn draining_a_finite_source_records_normal_completion() {
 
 #[tokio::test]
 async fn arrow_abort_cancels_a_backpressured_multipart_upload() {
-    let _lock = controlled_upload_lock().await;
-    let storage = controlled_upload_storage();
-    let store = controlled_upload_store();
+    let _lock = TRACKING_TEST_LOCK.lock().await;
+    let storage = tracking_storage();
+    let store = tracking_store();
     let batch = batch();
-    let _blocked = store.block_parts();
+    let _blocked = BlockParts::new(Arc::clone(&store));
 
     let arrow_handle = prepared_handle(&storage, "tracking://bucket/output.arrow").await;
     let arrow = registered_arrow_sink(
@@ -1111,36 +1019,36 @@ async fn arrow_abort_cancels_a_backpressured_multipart_upload() {
 
 #[tokio::test]
 async fn parquet_abort_cancels_a_backpressured_multipart_upload() {
-    let _lock = controlled_upload_lock().await;
-    let storage = controlled_upload_storage();
-    let store = controlled_upload_store();
+    let _lock = TRACKING_TEST_LOCK.lock().await;
+    let storage = tracking_storage();
+    let store = tracking_store();
     let batch = batch();
-    let _blocked = store.block_parts();
+    let _blocked = BlockParts::new(Arc::clone(&store));
 
     let parquet_handle = prepared_handle(&storage, "tracking://bucket/output.parquet").await;
-    let parquet = registered_parquet_sink(
+    let runtimes = Arc::new(ParquetRuntimes::try_new(2, 1).unwrap());
+    let runtimes_released = Arc::downgrade(&runtimes);
+    let parquet = ParquetSink::create(
         parquet_handle.clone(),
-        batch.schema(),
-        &[
-            "--parquet-row-group-size",
-            "1",
-            "--parquet-buffer-size",
-            "1B",
-            "--parquet-dictionary-column",
-            "name:analyze",
-        ],
+        &batch.schema(),
+        &ParquetSinkOptions::new()
+            .with_max_row_group_size(1)
+            .with_buffer_size(1)
+            .with_column_dictionary_analyze(vec!["name".to_string()]),
+        runtimes,
     )
-    .await;
-    assert_abort_cleans_multipart(parquet, &parquet_handle, &store).await;
+    .unwrap();
+    assert_abort_cleans_multipart(Box::new(parquet), &parquet_handle, &store).await;
+    assert!(runtimes_released.upgrade().is_none());
 }
 
 #[tokio::test]
 async fn vortex_abort_cancels_a_backpressured_multipart_upload() {
-    let _lock = controlled_upload_lock().await;
-    let storage = controlled_upload_storage();
-    let store = controlled_upload_store();
+    let _lock = TRACKING_TEST_LOCK.lock().await;
+    let storage = tracking_storage();
+    let store = tracking_store();
     let batch = batch();
-    let _blocked = store.block_parts();
+    let _blocked = BlockParts::new(Arc::clone(&store));
 
     let vortex_handle = prepared_handle(&storage, "tracking://bucket/output.vortex").await;
     let vortex = VortexSink::create(
@@ -1154,11 +1062,11 @@ async fn vortex_abort_cancels_a_backpressured_multipart_upload() {
 
 #[tokio::test]
 async fn arrow_drop_fallback_cancels_a_backpressured_upload() {
-    let _lock = controlled_upload_lock().await;
-    let storage = controlled_upload_storage();
-    let store = controlled_upload_store();
+    let _lock = TRACKING_TEST_LOCK.lock().await;
+    let storage = tracking_storage();
+    let store = tracking_store();
     let batch = batch();
-    let _blocked = store.block_parts();
+    let _blocked = BlockParts::new(Arc::clone(&store));
 
     let arrow_handle = prepared_handle(&storage, "tracking://bucket/drop.arrow").await;
     let arrow = registered_arrow_sink(
@@ -1172,35 +1080,41 @@ async fn arrow_drop_fallback_cancels_a_backpressured_upload() {
 
 #[tokio::test]
 async fn parquet_drop_fallback_cancels_a_backpressured_upload() {
-    let _lock = controlled_upload_lock().await;
-    let storage = controlled_upload_storage();
-    let store = controlled_upload_store();
+    let _lock = TRACKING_TEST_LOCK.lock().await;
+    let storage = tracking_storage();
+    let store = tracking_store();
     let batch = batch();
-    let _blocked = store.block_parts();
+    let _blocked = BlockParts::new(Arc::clone(&store));
     let parquet_handle = prepared_handle(&storage, "tracking://bucket/drop.parquet").await;
-    let parquet = registered_parquet_sink(
+    let runtimes = Arc::new(ParquetRuntimes::try_new(2, 1).unwrap());
+    let runtimes_released = Arc::downgrade(&runtimes);
+    let parquet = ParquetSink::create(
         parquet_handle.clone(),
-        batch.schema(),
-        &[
-            "--parquet-row-group-size",
-            "1",
-            "--parquet-buffer-size",
-            "1B",
-            "--parquet-dictionary-column",
-            "name:analyze",
-        ],
+        &batch.schema(),
+        &ParquetSinkOptions::new()
+            .with_max_row_group_size(1)
+            .with_buffer_size(1)
+            .with_column_dictionary_analyze(vec!["name".to_string()]),
+        runtimes,
     )
-    .await;
-    assert_drop_cleans_multipart(parquet, &parquet_handle, &store).await;
+    .unwrap();
+    assert_drop_cleans_multipart(Box::new(parquet), &parquet_handle, &store).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while runtimes_released.upgrade().is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("Parquet tasks retained their dedicated runtimes after drop");
 }
 
 #[tokio::test]
 async fn vortex_drop_fallback_cancels_a_backpressured_upload() {
-    let _lock = controlled_upload_lock().await;
-    let storage = controlled_upload_storage();
-    let store = controlled_upload_store();
+    let _lock = TRACKING_TEST_LOCK.lock().await;
+    let storage = tracking_storage();
+    let store = tracking_store();
     let batch = batch();
-    let _blocked = store.block_parts();
+    let _blocked = BlockParts::new(Arc::clone(&store));
     let vortex_handle = prepared_handle(&storage, "tracking://bucket/drop.vortex").await;
     let vortex = VortexSink::create(
         vortex_handle.clone(),
@@ -1213,12 +1127,12 @@ async fn vortex_drop_fallback_cancels_a_backpressured_upload() {
 
 #[tokio::test]
 async fn arrow_cancelled_finish_cleans_a_backpressured_upload() {
-    let _lock = controlled_upload_lock().await;
-    let storage = controlled_upload_storage();
-    let store = controlled_upload_store();
+    let _lock = TRACKING_TEST_LOCK.lock().await;
+    let storage = tracking_storage();
+    let store = tracking_store();
     let schema = batch().schema();
     let schema_released = Arc::downgrade(&schema);
-    let _blocked = store.block_parts();
+    let _blocked = BlockParts::new(Arc::clone(&store));
     let handle = prepared_handle(&storage, "tracking://bucket/cancel-finish.arrow").await;
     let sink = registered_arrow_sink(
         handle.clone(),
@@ -1234,50 +1148,51 @@ async fn arrow_cancelled_finish_cleans_a_backpressured_upload() {
 
 #[tokio::test]
 async fn parquet_cancelled_finish_cleans_pipeline_and_upload() {
-    let _lock = controlled_upload_lock().await;
-    let storage = controlled_upload_storage();
-    let store = controlled_upload_store();
+    let _lock = TRACKING_TEST_LOCK.lock().await;
+    let storage = tracking_storage();
+    let store = tracking_store();
     let schema = batch().schema();
     let schema_released = Arc::downgrade(&schema);
-    let _blocked = store.block_parts();
+    let _blocked = BlockParts::new(Arc::clone(&store));
     let handle = prepared_handle(&storage, "tracking://bucket/cancel-finish.parquet").await;
-    let sink = registered_parquet_sink(
+    let runtimes = Arc::new(ParquetRuntimes::try_new(2, 1).unwrap());
+    let runtimes_released = Arc::downgrade(&runtimes);
+    let sink = ParquetSink::create(
         handle.clone(),
-        Arc::clone(&schema),
-        &[
-            "--parquet-row-group-size",
-            "1",
-            "--parquet-buffer-size",
-            "1B",
-            "--parquet-ingestion-queue-size",
-            "1",
-            "--parquet-encoding-queue-size",
-            "1",
-            "--parquet-writing-queue-size",
-            "1",
-            "--parquet-dictionary-column",
-            "name:analyze",
-        ],
+        &schema,
+        &ParquetSinkOptions::new()
+            .with_max_row_group_size(1)
+            .with_buffer_size(1)
+            .with_ingestion_queue_size(1)
+            .with_encoding_queue_size(1)
+            .with_writing_queue_size(1)
+            .with_column_dictionary_analyze(vec!["name".to_string()]),
+        runtimes,
     )
-    .await;
+    .unwrap();
     drop(schema);
 
-    assert_cancelled_finish_cleans_multipart(sink, &handle, &store).await;
+    assert_cancelled_finish_cleans_multipart(Box::new(sink), &handle, &store).await;
     wait_for_resource_release(
         &schema_released,
         "cancelled Parquet finish retained its task tree",
+    )
+    .await;
+    wait_for_resource_release(
+        &runtimes_released,
+        "cancelled Parquet finish retained its dedicated runtimes",
     )
     .await;
 }
 
 #[tokio::test]
 async fn vortex_cancelled_finish_cleans_a_backpressured_upload() {
-    let _lock = controlled_upload_lock().await;
-    let storage = controlled_upload_storage();
-    let store = controlled_upload_store();
+    let _lock = TRACKING_TEST_LOCK.lock().await;
+    let storage = tracking_storage();
+    let store = tracking_store();
     let schema = batch().schema();
     let schema_released = Arc::downgrade(&schema);
-    let _blocked = store.block_parts();
+    let _blocked = BlockParts::new(Arc::clone(&store));
     let handle = prepared_handle(&storage, "tracking://bucket/cancel-finish.vortex").await;
     let sink = VortexSink::create(
         handle.clone(),
@@ -1297,11 +1212,11 @@ async fn vortex_cancelled_finish_cleans_a_backpressured_upload() {
 
 #[tokio::test]
 async fn format_aborts_report_multipart_cleanup_failures() {
-    let _lock = controlled_upload_lock().await;
-    let storage = controlled_upload_storage();
-    let store = controlled_upload_store();
+    let _lock = TRACKING_TEST_LOCK.lock().await;
+    let storage = tracking_storage();
+    let store = tracking_store();
     let batch = batch();
-    let _blocked = store.block_parts();
+    let _blocked = BlockParts::new(Arc::clone(&store));
 
     let arrow_handle = prepared_handle(&storage, "tracking://bucket/abort-error.arrow").await;
     let arrow = registered_arrow_sink(
@@ -1313,18 +1228,16 @@ async fn format_aborts_report_multipart_cleanup_failures() {
     assert_abort_reports_cleanup_failure(arrow, &arrow_handle, &store).await;
 
     let parquet_handle = prepared_handle(&storage, "tracking://bucket/abort-error.parquet").await;
-    let parquet = registered_parquet_sink(
+    let parquet = ParquetSink::create(
         parquet_handle.clone(),
-        batch.schema(),
-        &[
-            "--parquet-row-group-size",
-            "1",
-            "--parquet-buffer-size",
-            "1B",
-        ],
+        &batch.schema(),
+        &ParquetSinkOptions::new()
+            .with_max_row_group_size(1)
+            .with_buffer_size(1),
+        Arc::new(ParquetRuntimes::try_new(2, 1).unwrap()),
     )
-    .await;
-    assert_abort_reports_cleanup_failure(parquet, &parquet_handle, &store).await;
+    .unwrap();
+    assert_abort_reports_cleanup_failure(Box::new(parquet), &parquet_handle, &store).await;
 
     let vortex_handle = prepared_handle(&storage, "tracking://bucket/abort-error.vortex").await;
     let vortex = VortexSink::create(
@@ -1338,32 +1251,27 @@ async fn format_aborts_report_multipart_cleanup_failures() {
 
 #[tokio::test]
 async fn parquet_upload_failure_cancels_all_pipeline_channels() {
-    let _lock = controlled_upload_lock().await;
-    let storage = controlled_upload_storage();
-    let store = controlled_upload_store();
+    let _lock = TRACKING_TEST_LOCK.lock().await;
+    let storage = tracking_storage();
+    let store = tracking_store();
     let handle = prepared_handle(&storage, "tracking://bucket/part-error.parquet").await;
-    let mut sink = registered_parquet_sink(
+    let runtimes = Arc::new(ParquetRuntimes::try_new(1, 1).unwrap());
+    let runtimes_released = Arc::downgrade(&runtimes);
+    let mut sink = ParquetSink::create(
         handle.clone(),
-        batch().schema(),
-        &[
-            "--parquet-row-group-size",
-            "1",
-            "--parquet-buffer-size",
-            "1B",
-            "--parquet-ingestion-queue-size",
-            "1",
-            "--parquet-encoding-queue-size",
-            "1",
-            "--parquet-writing-queue-size",
-            "1",
-            "--parquet-row-group-concurrency",
-            "1",
-            "--parquet-dictionary-column",
-            "name:analyze",
-        ],
+        &batch().schema(),
+        &ParquetSinkOptions::new()
+            .with_max_row_group_size(1)
+            .with_buffer_size(1)
+            .with_ingestion_queue_size(1)
+            .with_encoding_queue_size(1)
+            .with_writing_queue_size(1)
+            .with_max_row_group_concurrency(1)
+            .with_column_dictionary_analyze(vec!["name".to_string()]),
+        runtimes,
     )
-    .await;
-    store.fail_next_part();
+    .unwrap();
+    store.fail_next_part.store(true, Ordering::SeqCst);
 
     let write_error = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -1375,11 +1283,11 @@ async fn parquet_upload_failure_cancels_all_pipeline_channels() {
     .await
     .expect("Parquet ingestion remained blocked after the upload failed");
     assert!(
-        write_error.to_string().contains("Parquet pipeline closed"),
+        write_error.to_string().contains("writer pipeline closed"),
         "{write_error:#}"
     );
 
-    let abort_error = tokio::time::timeout(Duration::from_secs(5), sink.abort())
+    let abort_error = tokio::time::timeout(Duration::from_secs(5), Box::new(sink).abort())
         .await
         .expect("Parquet cleanup remained blocked after the upload failed")
         .unwrap_err();
@@ -1387,7 +1295,8 @@ async fn parquet_upload_failure_cancels_all_pipeline_channels() {
         format!("{abort_error:#}").contains("controlled part failure"),
         "{abort_error:#}"
     );
-    assert_eq!(store.active_parts(), 0);
+    assert_eq!(store.active_parts.load(Ordering::SeqCst), 0);
+    assert!(runtimes_released.upgrade().is_none());
     assert!(matches!(
         store.head(handle.object_path()).await,
         Err(object_store::Error::NotFound { .. })
@@ -1396,9 +1305,9 @@ async fn parquet_upload_failure_cancels_all_pipeline_channels() {
 
 #[tokio::test]
 async fn format_finish_failures_abort_multipart_uploads() {
-    let _lock = controlled_upload_lock().await;
-    let storage = controlled_upload_storage();
-    let store = controlled_upload_store();
+    let _lock = TRACKING_TEST_LOCK.lock().await;
+    let storage = tracking_storage();
+    let store = tracking_store();
     let batch = batch();
     let failed_arrow_handle =
         prepared_handle(&storage, "tracking://bucket/failed-output.arrow").await;
@@ -1412,18 +1321,21 @@ async fn format_finish_failures_abort_multipart_uploads() {
 
     let failed_parquet_handle =
         prepared_handle(&storage, "tracking://bucket/failed-output.parquet").await;
-    let failed_parquet = registered_parquet_sink(
+    let failed_parquet = ParquetSink::create(
         failed_parquet_handle.clone(),
-        batch.schema(),
-        &[
-            "--parquet-row-group-size",
-            "1",
-            "--parquet-buffer-size",
-            "1B",
-        ],
+        &batch.schema(),
+        &ParquetSinkOptions::new()
+            .with_max_row_group_size(1)
+            .with_buffer_size(1),
+        Arc::new(ParquetRuntimes::try_new(2, 1).unwrap()),
+    )
+    .unwrap();
+    assert_finish_failure_cleans_multipart(
+        Box::new(failed_parquet),
+        &failed_parquet_handle,
+        &store,
     )
     .await;
-    assert_finish_failure_cleans_multipart(failed_parquet, &failed_parquet_handle, &store).await;
 
     let failed_vortex_handle =
         prepared_handle(&storage, "tracking://bucket/failed-output.vortex").await;

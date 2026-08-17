@@ -1,16 +1,23 @@
-//! Pipeline tasks for Parquet output.
+//! Pipeline tasks for the adaptive Parquet writer.
 //!
 //! ## Pipeline Architecture
 //!
 //! ```text
-//! Pipeline scope         Encoding runtime       Writing runtime
+//! Main Runtime              CpuRuntime              IoRuntime
 //!      │                        │                       │
-//!      ├─► ingestion task      │                       │
+//!      ├─► ingestion_task       │                       │
 //!      │        │               │                       │
-//!      ├─► encoder coordinator ├─► encoding tasks       │
+//!      │   tokio::mpsc          │                       │
 //!      │        │               │                       │
-//!      └─► writer task ────────────────────────────────►│
-//!                                                       └─► upload bridge
+//!      ├─► encoder_coordinator ─┼─► encode tasks        │
+//!      │   (FuturesOrdered)     │   (CPU work inline)   │
+//!      │        │               │        │              │
+//!      │   tokio::mpsc          │        │              │
+//!      │        ◄───────────────┼────────┘              │
+//!      │        │                                       │
+//!      └─► writer_task ─────────────────────────────────┼─► I/O tasks
+//!               │                                       │   (upload bridge)
+//!               └───────────────────────────────────────┘
 //! ```
 //!
 //! ## Stages
@@ -21,17 +28,15 @@
 //!    - **Pass-through**: Simple accumulation with `BatchCoalescer`.
 //!    - **Analyze**: Streams to background analysis for `dictionary: auto` columns.
 //!
-//! 3. **Encoder Coordinator** (1 task): Uses `FuturesOrdered` to spawn tasks on
-//!    the encoding runtime, up to `max_row_group_concurrency`. Results remain
-//!    ordered.
+//! 3. **Encoder Coordinator** (1 task): Uses `FuturesOrdered` to spawn encoding tasks
+//!    on `CpuRuntime` (up to `max_row_group_concurrency`). Results come out in order.
 //!
-//! 4. **Writing** (1 task): Receives encoded row groups in order and feeds the
-//!    object-upload bridge.
+//! 4. **Writing** (1 task): Receives encoded row groups in order and feeds the object-upload
+//!    bridge via `IoRuntime`.
 //!
-//! Every stage and nested task is spawned through one pipeline scope. The scope
-//! applies the operation's cancellation token to stages, tracks work on the
-//! dedicated runtimes, and waits for that work before the pipeline task releases
-//! those runtimes.
+//! Every stage and nested task is spawned through one pipeline scope. The scope applies the
+//! operation's cancellation token to stages, tracks work on the dedicated runtimes, and waits for
+//! that work before the pipeline task releases those runtimes.
 
 use std::collections::HashMap;
 use std::io::BufWriter;
@@ -60,16 +65,16 @@ use tokio::task::JoinSet;
 
 use super::PipelineTaskScope;
 use super::analysis::{ColumnAnalysis, RowGroupAnalysisState};
-use super::config::{ColumnPolicies, PipelineConfig};
+use super::config::{AdaptiveWriterConfig, ResolvedColumnConfigs};
 use super::encoding::build_row_group_properties;
-use crate::output::OutputRuntimes;
+use crate::sinks::parquet::pools::ParquetRuntimes;
 
 pub(super) struct PipelineSetup {
     pub(super) writer: BlockingObjectUploadWriter,
     pub(super) schema: SchemaRef,
     pub(super) base_props: WriterProperties,
-    pub(super) runtimes: Arc<OutputRuntimes>,
-    pub(super) config: PipelineConfig,
+    pub(super) runtimes: Arc<ParquetRuntimes>,
+    pub(super) config: AdaptiveWriterConfig,
     pub(super) ingestion_rx: mpsc::Receiver<RecordBatch>,
     pub(super) scope: PipelineTaskScope,
 }
@@ -151,39 +156,33 @@ pub(super) async fn run_pipeline(setup: PipelineSetup) -> Result<u64> {
         ),
     );
 
-    let encoding_handle = runtimes.encoding().clone();
+    // encoder coordinator on main runtime (spawns to CpuRuntime)
+    let cpu_handle = runtimes.cpu.handle().clone();
     scope.spawn_stage(
         &mut pipeline_tasks,
         encoder_coordinator(
             encoding_rx,
             writing_tx,
-            encoding_handle,
+            cpu_handle,
             max_row_group_concurrency,
             scope.clone(),
         ),
     );
 
-    let writing_handle = runtimes.writing().clone();
+    // writer task on main runtime (spawns I/O to IoRuntime)
+    let io_handle = runtimes.io.handle().clone();
     scope.spawn_stage(
         &mut pipeline_tasks,
         writer_task(
             writing_rx,
             file_writer,
-            writing_handle,
+            io_handle,
             Arc::clone(&total_rows),
             scope.clone(),
         ),
     );
 
-    settle_pipeline_tasks(&scope, &mut pipeline_tasks).await?;
-    Ok(total_rows.load(Ordering::SeqCst))
-}
-
-pub(super) async fn settle_pipeline_tasks(
-    scope: &PipelineTaskScope,
-    pipeline_tasks: &mut JoinSet<Result<()>>,
-) -> Result<()> {
-    let mut errors = Vec::new();
+    let mut errors: Vec<anyhow::Error> = Vec::new();
     while let Some(result) = pipeline_tasks.join_next().await {
         match result {
             Err(e) if e.is_panic() => {
@@ -210,7 +209,7 @@ pub(super) async fn settle_pipeline_tasks(
     }
 
     let result = match errors.len() {
-        0 => Ok(()),
+        0 => Ok(total_rows.load(Ordering::SeqCst)),
         1 => Err(errors.pop().unwrap()),
         _ => Err(anyhow!(
             "pipeline failed with {} errors:\n{}",
@@ -232,10 +231,10 @@ async fn ingestion_task(
     schema: SchemaRef,
     parquet_schema: SchemaDescPtr,
     base_props: WriterPropertiesPtr,
-    config: PipelineConfig,
+    config: AdaptiveWriterConfig,
     scope: PipelineTaskScope,
 ) -> Result<()> {
-    let resolved = ColumnPolicies::resolve(&schema, &config);
+    let resolved = ResolvedColumnConfigs::resolve(&schema, &config);
     let columns_to_analyze = resolved.columns_needing_analysis();
 
     if columns_to_analyze.is_empty() {
@@ -271,8 +270,8 @@ async fn ingestion_task_passthrough(
     schema: SchemaRef,
     parquet_schema: SchemaDescPtr,
     base_props: WriterPropertiesPtr,
-    config: PipelineConfig,
-    resolved: ColumnPolicies,
+    config: AdaptiveWriterConfig,
+    resolved: ResolvedColumnConfigs,
 ) -> Result<()> {
     let mut coalescer = BatchCoalescer::new(Arc::clone(&schema), config.max_row_group_size);
     let empty_analysis: HashMap<String, ColumnAnalysis> = HashMap::new();
@@ -383,8 +382,8 @@ async fn ingestion_task_analyze(
     schema: SchemaRef,
     parquet_schema: SchemaDescPtr,
     base_props: WriterPropertiesPtr,
-    config: PipelineConfig,
-    resolved: ColumnPolicies,
+    config: AdaptiveWriterConfig,
+    resolved: ResolvedColumnConfigs,
     scope: PipelineTaskScope,
 ) -> Result<()> {
     let columns_to_analyze = resolved.columns_needing_analysis();
@@ -456,7 +455,7 @@ async fn ingestion_task_analyze(
 async fn encoder_coordinator(
     mut work_rx: mpsc::Receiver<RowGroupWork>,
     writing_tx: mpsc::Sender<EncodedRowGroup>,
-    encoding_handle: Handle,
+    cpu_handle: Handle,
     max_concurrent: usize,
     scope: PipelineTaskScope,
 ) -> Result<()> {
@@ -469,13 +468,13 @@ async fn encoder_coordinator(
             work = work_rx.recv(), if !input_done && pending.len() < max_concurrent => {
                 match work {
                     Some(work) => {
-                        let handle = encoding_handle.clone();
+                        let handle = cpu_handle.clone();
                         let nested_scope = scope.clone();
                         let task = scope.spawn_on(
                             async move {
                                 encode_row_group(work, handle, nested_scope).await
                             },
-                            &encoding_handle,
+                            &cpu_handle,
                         );
                         pending.push_back(task);
                     }
@@ -504,7 +503,7 @@ async fn encoder_coordinator(
 async fn writer_task(
     mut encoded_rx: mpsc::Receiver<EncodedRowGroup>,
     file_writer: SerializedFileWriter<BufWriter<BlockingObjectUploadWriter>>,
-    writing_handle: Handle,
+    io_handle: Handle,
     total_rows: Arc<AtomicU64>,
     scope: PipelineTaskScope,
 ) -> Result<()> {
@@ -512,13 +511,13 @@ async fn writer_task(
 
     while let Some(rg) = encoded_rx.recv().await {
         total_rows.fetch_add(rg.num_rows as u64, Ordering::Relaxed);
-        fw = write_row_group(&writing_handle, fw, rg, &scope).await?;
+        fw = write_row_group(&io_handle, fw, rg, &scope).await?;
     }
 
     scope
         .spawn_on(
             async move { fw.close().map_err(|e| anyhow!(e)) },
-            &writing_handle,
+            &io_handle,
         )
         .await
         .context("file close task failed")??;
@@ -527,7 +526,7 @@ async fn writer_task(
 }
 
 async fn write_row_group(
-    writing_handle: &Handle,
+    io_handle: &Handle,
     fw: SerializedFileWriter<BufWriter<BlockingObjectUploadWriter>>,
     rg: EncodedRowGroup,
     scope: &PipelineTaskScope,
@@ -543,7 +542,7 @@ async fn write_row_group(
                 row_group.close()?;
                 Ok(fw)
             },
-            writing_handle,
+            io_handle,
         )
         .await
         .context("row group write task failed")?
@@ -551,7 +550,7 @@ async fn write_row_group(
 
 async fn encode_row_group(
     work: RowGroupWork,
-    encoding_handle: Handle,
+    cpu_handle: Handle,
     scope: PipelineTaskScope,
 ) -> Result<EncodedRowGroup> {
     let num_rows = work.batch.num_rows();
@@ -586,7 +585,7 @@ async fn encode_row_group(
                 let chunk = writer.close().map_err(|e| anyhow!(e))?;
                 Ok::<_, anyhow::Error>((col_idx, chunk))
             },
-            &encoding_handle,
+            &cpu_handle,
         );
     }
 
@@ -599,106 +598,4 @@ async fn encode_row_group(
     let chunks = indexed_chunks.into_iter().map(|(_, chunk)| chunk).collect();
 
     Ok(EncodedRowGroup { chunks, num_rows })
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    };
-
-    use futures::future::pending;
-    use tokio::sync::Barrier;
-    use tokio_util::sync::CancellationToken;
-
-    use super::*;
-
-    struct DropSignal(Arc<AtomicBool>);
-
-    impl Drop for DropSignal {
-        fn drop(&mut self) {
-            self.0.store(true, Ordering::SeqCst);
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn stage_failure_cancels_siblings_and_awaits_nested_tasks() {
-        let scope = PipelineTaskScope::new(CancellationToken::new());
-        let ready = Arc::new(Barrier::new(2));
-        let sibling_dropped = Arc::new(AtomicBool::new(false));
-        let nested_dropped = Arc::new(AtomicBool::new(false));
-        let mut tasks = JoinSet::new();
-
-        scope.spawn_stage(&mut tasks, {
-            let ready = Arc::clone(&ready);
-            async move {
-                ready.wait().await;
-                anyhow::bail!("controlled stage failure")
-            }
-        });
-        scope.spawn_stage(&mut tasks, {
-            let nested_scope = scope.clone();
-            let ready = Arc::clone(&ready);
-            let sibling_dropped = Arc::clone(&sibling_dropped);
-            let nested_dropped = Arc::clone(&nested_dropped);
-            async move {
-                let _sibling = DropSignal(sibling_dropped);
-                let _nested = nested_scope.spawn(async move {
-                    let _nested = DropSignal(nested_dropped);
-                    pending::<()>().await;
-                });
-                ready.wait().await;
-                pending::<Result<()>>().await
-            }
-        });
-
-        let error = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            settle_pipeline_tasks(&scope, &mut tasks),
-        )
-        .await
-        .expect("pipeline settlement timed out")
-        .unwrap_err();
-
-        assert!(error.to_string().contains("controlled stage failure"));
-        assert!(sibling_dropped.load(Ordering::SeqCst));
-        assert!(nested_dropped.load(Ordering::SeqCst));
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn stage_panic_cancels_and_awaits_its_sibling() {
-        let scope = PipelineTaskScope::new(CancellationToken::new());
-        let ready = Arc::new(Barrier::new(2));
-        let sibling_dropped = Arc::new(AtomicBool::new(false));
-        let mut tasks = JoinSet::new();
-
-        scope.spawn_stage(&mut tasks, {
-            let ready = Arc::clone(&ready);
-            async move {
-                ready.wait().await;
-                panic!("controlled stage panic")
-            }
-        });
-        scope.spawn_stage(&mut tasks, {
-            let ready = Arc::clone(&ready);
-            let sibling_dropped = Arc::clone(&sibling_dropped);
-            async move {
-                let _sibling = DropSignal(sibling_dropped);
-                ready.wait().await;
-                pending::<Result<()>>().await
-            }
-        });
-
-        let error = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            settle_pipeline_tasks(&scope, &mut tasks),
-        )
-        .await
-        .expect("pipeline settlement timed out")
-        .unwrap_err();
-
-        assert!(error.to_string().contains("task panicked"));
-        assert!(sibling_dropped.load(Ordering::SeqCst));
-    }
 }

@@ -1,4 +1,5 @@
 pub mod data_sink;
+pub mod parquet;
 pub mod vortex;
 
 use std::fmt;

@@ -1,28 +1,21 @@
-//! Command-scoped Parquet output binding and per-object sinks.
-//!
-//! One binding shares independent encoding and writing runtimes across its
-//! sinks. Each sink owns its bounded pipeline and storage upload together so
-//! finish, abort, and drop cannot detach codec work from upload cleanup.
+mod adaptive_writer;
+pub mod pools;
+mod writer_trait;
 
-mod analysis_provider;
-mod pipeline;
-mod runtime;
+pub use adaptive_writer::{AdaptiveParquetWriter, AdaptiveWriterConfig};
+pub use pools::ParquetRuntimes;
+pub use writer_trait::ParquetWriter;
 
-use pipeline::PipelineConfig;
-use runtime::OutputRuntimes;
-
-/// Default bytes buffered between encoding and the object upload.
-const DEFAULT_BUFFER_SIZE: usize = 32 * 1024 * 1024;
-const DEFAULT_MAX_ROW_GROUP_SIZE: usize = 1_048_576;
-const DEFAULT_WRITE_BATCH_SIZE: usize = 8192;
-/// DuckDB's maximum uncompressed page size.
-const DEFAULT_DATA_PAGE_SIZE_LIMIT: usize = 100 * 1024 * 1024;
-/// DuckDB's maximum uncompressed dictionary page size.
-const DEFAULT_DICTIONARY_PAGE_SIZE_LIMIT: usize = 1024 * 1024 * 1024;
+/// Default buffer size for parquet file I/O.
+pub const DEFAULT_BUFFER_SIZE: usize = 32 * 1024 * 1024; // 32MiB
+pub const DEFAULT_MAX_ROW_GROUP_SIZE: usize = 1_048_576;
+pub const DEFAULT_WRITE_BATCH_SIZE: usize = 8192;
+pub const DEFAULT_DATA_PAGE_SIZE_LIMIT: usize = 100 * 1024 * 1024; // 100MiB (DuckDB MAX_UNCOMPRESSED_PAGE_SIZE)
+pub const DEFAULT_DICTIONARY_PAGE_SIZE_LIMIT: usize = 1024 * 1024 * 1024; // 1GiB (DuckDB MAX_UNCOMPRESSED_DICT_PAGE_SIZE)
 const PARQUET_CREATED_BY: &str = "silk-chiffon";
 
 use parquet::{
-    basic::Compression as CompressionCodec,
+    basic::Compression,
     file::{
         metadata::{KeyValue, SortingColumn},
         properties::{WriterProperties, WriterPropertiesBuilder},
@@ -32,22 +25,19 @@ use parquet::{
 use std::{collections::HashMap, sync::Arc};
 
 use anyhow::{Result, anyhow};
-use apply_if::ApplyIf;
 use arrow::{
     array::RecordBatch,
     datatypes::{DataType, SchemaRef},
 };
 use async_trait::async_trait;
-use silk_chiffon_storage::{ObjectUploadTask, StorageHandle};
-use tokio::sync::mpsc;
+use silk_chiffon_storage::StorageHandle;
 
 use crate::{
-    BloomFilterPolicy, ColumnEncoding, Compression, DictionaryMode, DictionaryPolicy, Encoding,
-    Statistics, WriterVersion,
-};
-use silk_chiffon_core::{
-    DataSink, OpenSinkMode, OutputOrderingColumn, SinkBinding, SinkBindingConfig, SinkCompletion,
-    SortDirection, validate_batch_schema,
+    BloomFilterConfig, ColumnDictionaryConfig, ColumnEncodingConfig, DictionaryMode,
+    ParquetCompression, ParquetEncoding, ParquetStatistics, ParquetWriterVersion, SortDirection,
+    SortSpec,
+    sinks::data_sink::{DataSink, SinkCompletion},
+    utils::memory::estimate_row_bytes,
 };
 
 /// Options for configuring Parquet file output.
@@ -55,7 +45,7 @@ use silk_chiffon_core::{
 /// Column paths use dot notation with prefix matching. For example, "user" matches
 /// all columns under the user struct (user.name, user.address.city, etc.).
 #[derive(Clone)]
-pub struct OutputConfig {
+pub struct ParquetSinkOptions {
     /// Rows per row group.
     pub max_row_group_size: usize,
     pub max_row_group_concurrency: Option<usize>,
@@ -64,10 +54,10 @@ pub struct OutputConfig {
     pub ingestion_queue_size: Option<usize>,
     pub encoding_queue_size: Option<usize>,
     pub writing_queue_size: Option<usize>,
-    pub output_ordering: Vec<OutputOrderingColumn>,
-    pub compression: CompressionCodec,
-    pub bloom_filters: BloomFilterPolicy,
-    pub statistics: Statistics,
+    pub sort_spec: SortSpec,
+    pub compression: Compression,
+    pub bloom_filters: BloomFilterConfig,
+    pub statistics: ParquetStatistics,
     /// Disable dictionary encoding globally.
     pub no_dictionary: bool,
     /// Columns to always attempt dictionary encoding (dot-separated paths).
@@ -77,9 +67,9 @@ pub struct OutputConfig {
     pub column_dictionary_analyze: Vec<String>,
     /// Columns to disable dictionary encoding for (dot-separated paths).
     pub column_no_dictionary: Vec<String>,
-    pub writer_version: WriterVersion,
-    pub encoding: Option<Encoding>,
-    pub column_encodings: Vec<ColumnEncoding>,
+    pub writer_version: ParquetWriterVersion,
+    pub encoding: Option<ParquetEncoding>,
+    pub column_encodings: Vec<ColumnEncodingConfig>,
     /// Pre-computed NDV per column for bloom filter sizing.
     /// Keys are column names, or dot-separated paths for nested columns.
     pub ndv_map: HashMap<String, u64>,
@@ -95,15 +85,16 @@ pub struct OutputConfig {
     pub offset_index_enabled: bool,
     pub skip_arrow_metadata: bool,
     pub page_header_statistics: bool,
+    pub memory_budget: Option<usize>,
 }
 
-impl Default for OutputConfig {
+impl Default for ParquetSinkOptions {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl OutputConfig {
+impl ParquetSinkOptions {
     pub fn new() -> Self {
         Self {
             max_row_group_size: DEFAULT_MAX_ROW_GROUP_SIZE,
@@ -112,15 +103,15 @@ impl OutputConfig {
             ingestion_queue_size: None,
             encoding_queue_size: None,
             writing_queue_size: None,
-            output_ordering: Vec::new(),
-            compression: CompressionCodec::UNCOMPRESSED,
-            bloom_filters: BloomFilterPolicy::default(),
-            statistics: Statistics::default(),
+            sort_spec: SortSpec::default(),
+            compression: Compression::UNCOMPRESSED,
+            bloom_filters: BloomFilterConfig::default(),
+            statistics: ParquetStatistics::default(),
             no_dictionary: false,
             column_dictionary_always: Vec::new(),
             column_dictionary_analyze: Vec::new(),
             column_no_dictionary: Vec::new(),
-            writer_version: WriterVersion::default(),
+            writer_version: ParquetWriterVersion::default(),
             encoding: None,
             column_encodings: Vec::new(),
             ndv_map: HashMap::new(),
@@ -132,6 +123,7 @@ impl OutputConfig {
             offset_index_enabled: false,
             skip_arrow_metadata: true,
             page_header_statistics: false,
+            memory_budget: None,
         }
     }
 
@@ -165,32 +157,32 @@ impl OutputConfig {
         self
     }
 
-    pub fn with_output_ordering(mut self, output_ordering: Vec<OutputOrderingColumn>) -> Self {
-        self.output_ordering = output_ordering;
+    pub fn with_sort_spec(mut self, sort_spec: SortSpec) -> Self {
+        self.sort_spec = sort_spec;
         self
     }
 
-    pub fn with_compression(mut self, compression: CompressionCodec) -> Self {
+    pub fn with_compression(mut self, compression: Compression) -> Self {
         self.compression = compression;
         self
     }
 
-    /// Resolve a `Compression` enum + optional level into the low-level
+    /// Resolve a `ParquetCompression` enum + optional level into the low-level
     /// `Compression` type and set it on this options struct.
-    fn with_compression_and_level(
+    pub fn with_parquet_compression(
         self,
-        compression: Compression,
+        compression: ParquetCompression,
         level: Option<i32>,
     ) -> anyhow::Result<Self> {
         Ok(self.with_compression(compression.to_compression(level)?))
     }
 
-    pub fn with_bloom_filters(mut self, bloom_filters: BloomFilterPolicy) -> Self {
+    pub fn with_bloom_filters(mut self, bloom_filters: BloomFilterConfig) -> Self {
         self.bloom_filters = bloom_filters;
         self
     }
 
-    pub fn with_statistics(mut self, statistics: Statistics) -> Self {
+    pub fn with_statistics(mut self, statistics: ParquetStatistics) -> Self {
         self.statistics = statistics;
         self
     }
@@ -200,14 +192,12 @@ impl OutputConfig {
         self
     }
 
-    #[cfg(test)]
-    fn with_column_dictionary_always(mut self, columns: Vec<String>) -> Self {
+    pub fn with_column_dictionary_always(mut self, columns: Vec<String>) -> Self {
         self.column_dictionary_always = columns;
         self
     }
 
-    #[cfg(test)]
-    fn with_column_dictionary_analyze(mut self, columns: Vec<String>) -> Self {
+    pub fn with_column_dictionary_analyze(mut self, columns: Vec<String>) -> Self {
         self.column_dictionary_analyze = columns;
         self
     }
@@ -217,9 +207,9 @@ impl OutputConfig {
         self
     }
 
-    /// Apply dictionary configuration from CLI-style `DictionaryPolicy` entries,
+    /// Apply dictionary configuration from CLI-style `ColumnDictionaryConfig` entries,
     /// splitting them into always/analyze lists internally.
-    pub fn with_dictionary_configs(mut self, configs: &[DictionaryPolicy]) -> Self {
+    pub fn with_dictionary_configs(mut self, configs: &[ColumnDictionaryConfig]) -> Self {
         let mut always = Vec::new();
         let mut analyze = Vec::new();
         for config in configs {
@@ -233,35 +223,32 @@ impl OutputConfig {
         self
     }
 
-    pub fn with_writer_version(mut self, writer_version: WriterVersion) -> Self {
+    pub fn with_writer_version(mut self, writer_version: ParquetWriterVersion) -> Self {
         self.writer_version = writer_version;
         self
     }
 
-    pub fn with_encoding(mut self, encoding: Option<Encoding>) -> Self {
+    pub fn with_encoding(mut self, encoding: Option<ParquetEncoding>) -> Self {
         self.encoding = encoding;
         self
     }
 
-    pub fn with_column_encodings(mut self, column_encodings: Vec<ColumnEncoding>) -> Self {
+    pub fn with_column_encodings(mut self, column_encodings: Vec<ColumnEncodingConfig>) -> Self {
         self.column_encodings = column_encodings;
         self
     }
 
-    #[cfg(test)]
-    fn with_metadata_value(mut self, key: String, value: Option<String>) -> Self {
+    pub fn with_metadata_value(mut self, key: String, value: Option<String>) -> Self {
         self.metadata.insert(key, value);
         self
     }
 
-    #[cfg(test)]
-    fn with_metadata(mut self, metadata: HashMap<String, Option<String>>) -> Self {
+    pub fn with_metadata(mut self, metadata: HashMap<String, Option<String>>) -> Self {
         self.metadata = metadata;
         self
     }
 
-    #[cfg(test)]
-    fn with_ndv_map(mut self, ndv_map: HashMap<String, u64>) -> Self {
+    pub fn with_ndv_map(mut self, ndv_map: HashMap<String, u64>) -> Self {
         self.ndv_map = ndv_map;
         self
     }
@@ -300,12 +287,19 @@ impl OutputConfig {
         self.page_header_statistics = enabled;
         self
     }
+
+    pub fn with_memory_budget(mut self, budget: Option<usize>) -> Self {
+        self.memory_budget = budget;
+        self
+    }
 }
 
-pub struct Sink {
-    schema: SchemaRef,
-    ingestion_sender: Option<mpsc::Sender<RecordBatch>>,
-    task: Option<ObjectUploadTask<u64>>,
+struct ParquetSinkInner {
+    writer: Option<Box<dyn ParquetWriter>>,
+}
+
+pub struct ParquetSink {
+    inner: ParquetSinkInner,
 }
 
 fn column_path_from_dot_notation(name: &str) -> ColumnPath {
@@ -321,23 +315,50 @@ const DEFAULT_ENCODING: usize = 4;
 const DEFAULT_WRITING: usize = 4;
 const DEFAULT_CONCURRENCY: usize = 4;
 
-fn resolve_queue_sizes(options: &OutputConfig) -> (usize, usize, usize, usize) {
-    (
-        options.ingestion_queue_size.unwrap_or(DEFAULT_INGESTION),
-        options.encoding_queue_size.unwrap_or(DEFAULT_ENCODING),
-        options.writing_queue_size.unwrap_or(DEFAULT_WRITING),
-        options
-            .max_row_group_concurrency
-            .unwrap_or(DEFAULT_CONCURRENCY),
-    )
+fn resolve_parquet_queue_sizes(
+    options: &ParquetSinkOptions,
+    schema: &SchemaRef,
+) -> (usize, usize, usize, usize) {
+    if options.memory_budget.is_none() {
+        return (
+            options.ingestion_queue_size.unwrap_or(DEFAULT_INGESTION),
+            options.encoding_queue_size.unwrap_or(DEFAULT_ENCODING),
+            options.writing_queue_size.unwrap_or(DEFAULT_WRITING),
+            options
+                .max_row_group_concurrency
+                .unwrap_or(DEFAULT_CONCURRENCY),
+        );
+    }
+
+    let budget = options.memory_budget.unwrap();
+    let row_bytes = estimate_row_bytes(schema).max(1);
+    let row_group_bytes = options.max_row_group_size.saturating_mul(row_bytes);
+    let available = budget.saturating_sub(options.buffer_size);
+    let total_slots = available
+        .checked_div(row_group_bytes)
+        .unwrap_or(DEFAULT_CONCURRENCY + DEFAULT_ENCODING + DEFAULT_WRITING);
+
+    // distribute: ~40% concurrency, ~25% encoding queue, ~25% writing queue, ingestion stays 1
+    let concurrency = options
+        .max_row_group_concurrency
+        .unwrap_or((total_slots * 40 / 100).max(1));
+    let encoding = options
+        .encoding_queue_size
+        .unwrap_or((total_slots * 25 / 100).max(1));
+    let writing = options
+        .writing_queue_size
+        .unwrap_or((total_slots * 25 / 100).max(1));
+    let ingestion = options.ingestion_queue_size.unwrap_or(DEFAULT_INGESTION);
+
+    (ingestion, encoding, writing, concurrency)
 }
 
-impl Sink {
-    fn create(
+impl ParquetSink {
+    pub fn create(
         handle: StorageHandle,
         schema: &SchemaRef,
-        options: &OutputConfig,
-        runtimes: Arc<OutputRuntimes>,
+        options: &ParquetSinkOptions,
+        runtimes: Arc<ParquetRuntimes>,
     ) -> Result<Self> {
         let mut writer_builder = WriterProperties::builder()
             .set_created_by(PARQUET_CREATED_BY.to_string())
@@ -376,8 +397,7 @@ impl Sink {
             &options.column_encodings,
         );
 
-        writer_builder =
-            Self::apply_sort_metadata(&options.output_ordering, writer_builder, schema)?;
+        writer_builder = Self::apply_sort_metadata(&options.sort_spec, writer_builder, schema)?;
 
         if !options.metadata.is_empty() {
             let key_values: Vec<KeyValue> = options
@@ -398,9 +418,9 @@ impl Sink {
             encoding_queue_size,
             writing_queue_size,
             max_row_group_concurrency,
-        ) = resolve_queue_sizes(options);
+        ) = resolve_parquet_queue_sizes(options, schema);
 
-        let config = PipelineConfig {
+        let config = AdaptiveWriterConfig {
             max_row_group_size: options.max_row_group_size,
             max_row_group_concurrency,
             buffer_size: options.buffer_size,
@@ -420,13 +440,14 @@ impl Sink {
             },
             ndv_map: options.ndv_map.clone(),
         };
-        let (ingestion_sender, task) =
-            pipeline::start_pipeline(handle, schema, props, runtimes, config);
+        let writer: Box<dyn ParquetWriter> = Box::new(AdaptiveParquetWriter::new(
+            handle, schema, props, runtimes, config,
+        ));
 
         Ok(Self {
-            schema: Arc::clone(schema),
-            ingestion_sender: Some(ingestion_sender),
-            task: Some(task),
+            inner: ParquetSinkInner {
+                writer: Some(writer),
+            },
         })
     }
 
@@ -472,7 +493,7 @@ impl Sink {
 
     fn validate_column_encodings(
         schema: &SchemaRef,
-        column_encodings: &[ColumnEncoding],
+        column_encodings: &[ColumnEncodingConfig],
     ) -> Result<()> {
         for col_encoding in column_encodings {
             let data_type =
@@ -520,9 +541,9 @@ impl Sink {
     fn apply_encodings(
         mut builder: WriterPropertiesBuilder,
         schema: &SchemaRef,
-        writer_version: WriterVersion,
-        default_encoding: &Option<Encoding>,
-        column_encodings: &[ColumnEncoding],
+        writer_version: ParquetWriterVersion,
+        default_encoding: &Option<ParquetEncoding>,
+        column_encodings: &[ColumnEncodingConfig],
     ) -> WriterPropertiesBuilder {
         if let Some(encoding) = default_encoding {
             builder = builder.set_encoding((*encoding).into());
@@ -530,7 +551,7 @@ impl Sink {
 
         // only apply automatic type-based encodings for V2
         // V1 uses PLAIN for maximum compatibility (matches DuckDB behavior)
-        if writer_version == WriterVersion::V2 {
+        if writer_version == ParquetWriterVersion::V2 {
             for field in schema.fields() {
                 let col_path = ColumnPath::from(field.name().as_str());
                 let encoding = Self::resolve_v2_encoding_overridess(field.data_type());
@@ -548,10 +569,10 @@ impl Sink {
         builder
     }
 
-    fn resolve_v2_encoding_overridess(data_type: &DataType) -> Option<Encoding> {
+    fn resolve_v2_encoding_overridess(data_type: &DataType) -> Option<ParquetEncoding> {
         match data_type {
-            DataType::Boolean => Some(Encoding::Plain),
-            DataType::Float32 | DataType::Float64 => Some(Encoding::ByteStreamSplit),
+            DataType::Boolean => Some(ParquetEncoding::Plain),
+            DataType::Float32 | DataType::Float64 => Some(ParquetEncoding::ByteStreamSplit),
             DataType::Int8
             | DataType::Int16
             | DataType::Int32
@@ -559,34 +580,34 @@ impl Sink {
             | DataType::UInt8
             | DataType::UInt16
             | DataType::UInt32
-            | DataType::UInt64 => Some(Encoding::DeltaBinaryPacked),
+            | DataType::UInt64 => Some(ParquetEncoding::DeltaBinaryPacked),
             DataType::Utf8
             | DataType::LargeUtf8
             | DataType::Utf8View
             | DataType::Binary
             | DataType::LargeBinary
-            | DataType::BinaryView => Some(Encoding::DeltaLengthByteArray),
+            | DataType::BinaryView => Some(ParquetEncoding::DeltaLengthByteArray),
             _ => None,
         }
     }
 
     fn apply_sort_metadata(
-        output_ordering: &[OutputOrderingColumn],
+        sort_spec: &SortSpec,
         builder: WriterPropertiesBuilder,
         schema: &SchemaRef,
     ) -> Result<WriterPropertiesBuilder> {
-        if output_ordering.is_empty() {
+        if sort_spec.is_empty() {
             return Ok(builder);
         }
 
         let mut sorting_columns = Vec::new();
 
-        for sort_col in output_ordering {
+        for sort_col in &sort_spec.columns {
             let column_idx = schema
-                .index_of(sort_col.name())
-                .map_err(|_| anyhow!("Sort column '{}' not found in schema", sort_col.name()))?;
+                .index_of(&sort_col.name)
+                .map_err(|_| anyhow!("Sort column '{}' not found in schema", sort_col.name))?;
 
-            let descending = sort_col.direction() == SortDirection::Descending;
+            let descending = sort_col.direction == SortDirection::Descending;
 
             sorting_columns.push(SortingColumn {
                 column_idx: i32::try_from(column_idx)
@@ -601,190 +622,36 @@ impl Sink {
 }
 
 #[async_trait]
-impl DataSink for Sink {
+impl DataSink for ParquetSink {
     async fn write_batch(&mut self, batch: RecordBatch) -> Result<()> {
-        validate_batch_schema(&self.schema, batch.schema_ref())?;
-        let sender = self
-            .ingestion_sender
-            .as_ref()
-            .ok_or_else(|| anyhow!("sink already finished"))?;
-        let cancellation = self
-            .task
-            .as_ref()
-            .ok_or_else(|| anyhow!("sink already finished"))?
-            .cancellation();
-        tokio::select! {
-            biased;
-            _ = cancellation.cancelled() => {
-                Err(anyhow!("batch send failed: Parquet pipeline closed"))
-            }
-            result = sender.send(batch) => {
-                result.map_err(|_| anyhow!("batch send failed: Parquet pipeline closed"))
-            }
-        }
+        let writer = self
+            .inner
+            .writer
+            .as_mut()
+            .ok_or_else(|| anyhow!("Writer already closed"))?;
+
+        writer.write(batch).await?;
+        Ok(())
     }
 
     async fn finish(mut self: Box<Self>) -> Result<SinkCompletion> {
-        self.ingestion_sender.take();
-        let task = self
-            .task
+        let writer = self
+            .inner
+            .writer
             .take()
-            .ok_or_else(|| anyhow!("sink already finished"))?;
-        let (rows_written, url) = task.finish().await?;
+            .ok_or_else(|| anyhow!("Writer already closed"))?;
+
+        let (rows_written, url) = writer.close().await?;
 
         Ok(SinkCompletion::new(url, [], rows_written))
     }
 
     async fn abort(mut self: Box<Self>) -> Result<()> {
-        if let Some(task) = &self.task {
-            task.cancellation().cancel();
-        }
-        self.ingestion_sender.take();
-        match self.task.take() {
-            Some(task) => task.abort().await,
+        let writer = self.inner.writer.take();
+        match writer {
+            Some(writer) => writer.cancel().await,
             None => Ok(()),
         }
-    }
-}
-
-impl Drop for Sink {
-    fn drop(&mut self) {
-        if let Some(task) = &self.task {
-            task.cancellation().cancel();
-        }
-        self.ingestion_sender.take();
-    }
-}
-
-pub(crate) async fn bind(
-    context: &SinkBindingConfig,
-    args: &crate::TransformArgs,
-) -> Result<Box<dyn SinkBinding>> {
-    let options = options(context, args)?;
-    let runtimes = Arc::new(OutputRuntimes::try_new(
-        args.parquet_column_encoding_threads
-            .unwrap_or(context.thread_budget().get()),
-        args.parquet_writing_threads.unwrap_or(1),
-    )?);
-    Ok(Box::new(OutputBinding { options, runtimes }))
-}
-
-fn options(context: &SinkBindingConfig, args: &crate::TransformArgs) -> Result<OutputConfig> {
-    for disabled in &args.parquet_bloom_column_off {
-        if args
-            .parquet_bloom_column
-            .iter()
-            .any(|column| &column.name == disabled)
-        {
-            anyhow::bail!(
-                "column '{disabled}' specified in both --parquet-bloom-column-off and --parquet-bloom-column"
-            );
-        }
-    }
-    for disabled in &args.parquet_dictionary_column_off {
-        if args
-            .parquet_dictionary_column
-            .iter()
-            .any(|column| &column.name == disabled)
-        {
-            anyhow::bail!(
-                "column '{disabled}' specified in both --parquet-dictionary-column-off and --parquet-dictionary-column"
-            );
-        }
-    }
-
-    let all_enabled = if args.parquet_bloom_all_off {
-        None
-    } else {
-        args.parquet_bloom_all
-            .clone()
-            .or(Some(crate::DefaultBloomFilterPolicy {
-                fpp: crate::DEFAULT_BLOOM_FILTER_FPP,
-                ndv: None,
-            }))
-    };
-    let bloom_filters = crate::BloomFilterPolicy::try_new(
-        all_enabled,
-        args.parquet_bloom_column.clone(),
-        args.parquet_bloom_column_off.clone(),
-    )?;
-    let output_ordering = if args.parquet_sorted_metadata {
-        context.output_ordering().to_vec()
-    } else {
-        Vec::new()
-    };
-
-    let mut options = OutputConfig::new()
-        .with_compression_and_level(args.parquet_compression, args.parquet_compression_level)?
-        .with_statistics(args.parquet_statistics)
-        .with_writer_version(args.parquet_writer_version)
-        .with_ingestion_queue_size(args.parquet_ingestion_queue_size)
-        .with_encoding_queue_size(args.parquet_encoding_queue_size)
-        .with_writing_queue_size(args.parquet_writing_queue_size)
-        .with_no_dictionary(args.parquet_dictionary_all_off)
-        .with_dictionary_configs(&args.parquet_dictionary_column)
-        .with_column_no_dictionary(args.parquet_dictionary_column_off.clone())
-        .with_encoding(args.parquet_encoding)
-        .with_column_encodings(args.parquet_column_encoding.clone())
-        .with_bloom_filters(bloom_filters)
-        .with_offset_index_enabled(args.parquet_offset_index)
-        .with_skip_arrow_metadata(!args.parquet_arrow_metadata)
-        .with_page_header_statistics(args.parquet_page_header_statistics)
-        .apply_if_some(args.parquet_buffer_size, OutputConfig::with_buffer_size)
-        .apply_if_some(
-            args.parquet_row_group_size,
-            OutputConfig::with_max_row_group_size,
-        )
-        .apply_if_some(
-            args.parquet_row_group_concurrency,
-            OutputConfig::with_max_row_group_concurrency,
-        )
-        .apply_if_some(
-            args.parquet_data_page_size,
-            OutputConfig::with_data_page_size_limit,
-        )
-        .apply_if_some(
-            args.parquet_data_page_row_limit,
-            OutputConfig::with_data_page_row_count_limit,
-        )
-        .apply_if_some(
-            args.parquet_dictionary_page_size,
-            OutputConfig::with_dictionary_page_size_limit,
-        )
-        .apply_if_some(
-            args.parquet_write_batch_size,
-            OutputConfig::with_write_batch_size,
-        )
-        .with_output_ordering(output_ordering);
-
-    if context.open_sink_mode() == OpenSinkMode::Multiple {
-        options = options
-            .with_ingestion_queue_size(1)
-            .with_encoding_queue_size(1)
-            .with_writing_queue_size(1)
-            .with_max_row_group_concurrency(1);
-    }
-    Ok(options)
-}
-
-struct OutputBinding {
-    options: OutputConfig,
-    runtimes: Arc<OutputRuntimes>,
-}
-
-#[async_trait]
-impl SinkBinding for OutputBinding {
-    async fn open_sink(
-        &self,
-        handle: StorageHandle,
-        schema: SchemaRef,
-    ) -> Result<Box<dyn DataSink>> {
-        Ok(Box::new(Sink::create(
-            handle,
-            &schema,
-            &self.options,
-            Arc::clone(&self.runtimes),
-        )?))
     }
 }
 
@@ -793,48 +660,24 @@ mod tests {
     use super::*;
 
     use crate::{
-        BloomFilterSettings, ColumnBloomFilterPolicy, DefaultBloomFilterPolicy,
-        inspection::Inspector,
+        AllColumnsBloomFilterConfig, ColumnBloomFilterConfig, ColumnSpecificBloomFilterConfig,
+        SortColumn, SortDirection, inspection::parquet::ParquetInspector,
+        utils::parquet_inspection::read_entire_parquet_file,
     };
-    use silk_chiffon_core::{OutputOrderingColumn, SortDirection};
-    use silk_chiffon_test_support::{
-        TestExtract, batch as test_data, parquet::read_entire_file as read_entire_parquet_file,
-        prepared_local_output, verify,
-    };
+    use silk_chiffon_test_support::{batch as test_data, prepared_local_output, verify};
 
     use camino::Utf8Path;
     use tempfile::tempdir;
 
-    fn test_runtimes() -> Arc<OutputRuntimes> {
-        Arc::new(OutputRuntimes::try_new(2, 1).unwrap())
+    fn test_runtimes() -> Arc<ParquetRuntimes> {
+        Arc::new(ParquetRuntimes::try_new(2, 1).unwrap())
     }
 
-    fn bloom_all(fpp: f64, ndv: Option<u64>) -> BloomFilterPolicy {
-        BloomFilterPolicy::try_new(
-            Some(DefaultBloomFilterPolicy { fpp, ndv }),
-            Vec::new(),
-            Vec::new(),
-        )
-        .unwrap()
+    fn inspect(path: &std::path::Path) -> ParquetInspector {
+        ParquetInspector::open(Utf8Path::from_path(path).unwrap()).unwrap()
     }
 
-    fn bloom_column(name: &str, fpp: f64, ndv: Option<u64>) -> BloomFilterPolicy {
-        BloomFilterPolicy::try_new(
-            None,
-            vec![ColumnBloomFilterPolicy {
-                name: name.to_owned(),
-                config: BloomFilterSettings { fpp, ndv },
-            }],
-            Vec::new(),
-        )
-        .unwrap()
-    }
-
-    fn inspect(path: &std::path::Path) -> Inspector {
-        Inspector::open(Utf8Path::from_path(path).unwrap()).unwrap()
-    }
-
-    fn assert_has_dictionary(inspector: &Inspector, col_name: &str) {
+    fn assert_has_dictionary(inspector: &ParquetInspector, col_name: &str) {
         let col = inspector.column(col_name).unwrap_or_else(|| {
             let available: Vec<_> = inspector.row_groups()[0]
                 .columns
@@ -853,7 +696,7 @@ mod tests {
         );
     }
 
-    fn assert_no_dictionary(inspector: &Inspector, col_name: &str) {
+    fn assert_no_dictionary(inspector: &ParquetInspector, col_name: &str) {
         let col = inspector.column(col_name).unwrap_or_else(|| {
             let available: Vec<_> = inspector.row_groups()[0]
                 .columns
@@ -872,7 +715,7 @@ mod tests {
         );
     }
 
-    fn assert_has_bloom_filter(inspector: &Inspector, col_name: &str) {
+    fn assert_has_bloom_filter(inspector: &ParquetInspector, col_name: &str) {
         let col = inspector.column(col_name).unwrap_or_else(|| {
             let available: Vec<_> = inspector.row_groups()[0]
                 .columns
@@ -892,7 +735,7 @@ mod tests {
     }
 
     #[allow(dead_code)]
-    fn assert_no_bloom_filter(inspector: &Inspector, col_name: &str) {
+    fn assert_no_bloom_filter(inspector: &ParquetInspector, col_name: &str) {
         let col = inspector.column(col_name).unwrap_or_else(|| {
             let available: Vec<_> = inspector.row_groups()[0]
                 .columns
@@ -912,7 +755,7 @@ mod tests {
     }
 
     #[allow(dead_code)]
-    fn assert_has_encoding(inspector: &Inspector, col_name: &str, encoding: &str) {
+    fn assert_has_encoding(inspector: &ParquetInspector, col_name: &str, encoding: &str) {
         let col = inspector.column(col_name).unwrap_or_else(|| {
             let available: Vec<_> = inspector.row_groups()[0]
                 .columns
@@ -934,7 +777,7 @@ mod tests {
     }
 
     #[allow(dead_code)]
-    fn assert_no_encoding(inspector: &Inspector, col_name: &str, encoding: &str) {
+    fn assert_no_encoding(inspector: &ParquetInspector, col_name: &str, encoding: &str) {
         let col = inspector.column(col_name).unwrap_or_else(|| {
             let available: Vec<_> = inspector.row_groups()[0]
                 .columns
@@ -955,7 +798,7 @@ mod tests {
         );
     }
 
-    mod sink_tests {
+    mod parquet_sink_tests {
         use std::fs::File;
 
         use super::*;
@@ -965,7 +808,6 @@ mod tests {
         use arrow::datatypes::Field;
         use parquet::arrow::ArrowWriter;
         use parquet::file::reader::FileReader;
-        use rand::{RngExt, SeedableRng, rngs::SmallRng};
 
         #[tokio::test(flavor = "multi_thread")]
         async fn test_sink_writes_single_batch_with_single_row_group() {
@@ -976,10 +818,10 @@ mod tests {
             let batch =
                 test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["a", "b", "c"]);
 
-            let mut sink = Sink::create(
+            let mut sink = ParquetSink::create(
                 prepared_local_output(&output_path),
                 &schema,
-                &OutputConfig::new(),
+                &ParquetSinkOptions::new(),
                 test_runtimes(),
             )
             .unwrap();
@@ -1010,10 +852,10 @@ mod tests {
             let batch =
                 test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["a", "b", "c"]);
 
-            let mut sink = Sink::create(
+            let mut sink = ParquetSink::create(
                 prepared_local_output(&output_path),
                 &schema,
-                &OutputConfig::new(),
+                &ParquetSinkOptions::new(),
                 test_runtimes(),
             )
             .unwrap();
@@ -1040,10 +882,10 @@ mod tests {
             let batch1 = test_data::create_batch_with_ids_and_names(&schema, &[1, 2], &["a", "b"]);
             let batch2 = test_data::create_batch_with_ids_and_names(&schema, &[3, 4], &["c", "d"]);
 
-            let mut sink = Sink::create(
+            let mut sink = ParquetSink::create(
                 prepared_local_output(&output_path),
                 &schema,
-                &OutputConfig::new(),
+                &ParquetSinkOptions::new(),
                 test_runtimes(),
             )
             .unwrap();
@@ -1072,10 +914,10 @@ mod tests {
             let batch2 = test_data::create_batch_with_ids_and_names(&schema, &[3, 4], &["c", "d"]);
             let batch3 = test_data::create_batch_with_ids_and_names(&schema, &[5], &["e"]);
 
-            let mut sink = Sink::create(
+            let mut sink = ParquetSink::create(
                 prepared_local_output(&output_path),
                 &schema,
-                &OutputConfig::new().with_max_row_group_size(3),
+                &ParquetSinkOptions::new().with_max_row_group_size(3),
                 test_runtimes(),
             )
             .unwrap();
@@ -1095,121 +937,13 @@ mod tests {
         }
 
         #[tokio::test(flavor = "multi_thread")]
-        async fn row_group_limit_splits_batches_at_every_boundary() {
-            let temp_dir = tempdir().unwrap();
-            let output_path = temp_dir.path().join("row-groups.parquet");
-            let schema = test_data::simple_schema();
-            let batches = [
-                test_data::create_batch_with_ids_and_names(&schema, &[], &[]),
-                test_data::create_batch_with_ids_and_names(&schema, &[0, 1], &["a", "b"]),
-                test_data::create_batch_with_ids_and_names(
-                    &schema,
-                    &[2, 3, 4, 5, 6, 7, 8],
-                    &["c", "d", "e", "f", "g", "h", "i"],
-                ),
-                test_data::create_batch_with_ids_and_names(&schema, &[9], &["j"]),
-            ];
-            let mut sink = Sink::create(
-                prepared_local_output(&output_path),
-                &schema,
-                &OutputConfig::new()
-                    .with_max_row_group_size(3)
-                    .with_max_row_group_concurrency(2)
-                    .with_ingestion_queue_size(1)
-                    .with_encoding_queue_size(1)
-                    .with_writing_queue_size(1),
-                test_runtimes(),
-            )
-            .unwrap();
-
-            for batch in batches {
-                sink.write_batch(batch).await.unwrap();
-            }
-            let completion = Box::new(sink).finish().await.unwrap();
-
-            assert_eq!(completion.rows_written(), 10);
-            let file = read_entire_parquet_file(&output_path).unwrap();
-            assert_eq!(
-                file.row_groups
-                    .iter()
-                    .map(|row_group| row_group.num_rows)
-                    .collect::<Vec<_>>(),
-                [3, 3, 3, 1]
-            );
-            let batches = verify::read_parquet_file(&output_path).unwrap();
-            verify::assert_id_name_batch_data_matches(
-                &batches[0],
-                &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
-                &["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"],
-            );
-        }
-
-        #[tokio::test(flavor = "multi_thread")]
-        async fn seeded_batch_shapes_preserve_rows_under_maximum_concurrency() {
-            let temp_dir = tempdir().unwrap();
-            let output_path = temp_dir.path().join("seeded-row-groups.parquet");
-            let schema = test_data::simple_schema();
-            let mut rng = SmallRng::seed_from_u64(0x5eed_cafe);
-            let mut expected_ids = Vec::new();
-            let mut sink = Sink::create(
-                prepared_local_output(&output_path),
-                &schema,
-                &OutputConfig::new()
-                    .with_max_row_group_size(17)
-                    .with_max_row_group_concurrency(4)
-                    .with_ingestion_queue_size(1)
-                    .with_encoding_queue_size(1)
-                    .with_writing_queue_size(1),
-                test_runtimes(),
-            )
-            .unwrap();
-
-            for _ in 0..64 {
-                let batch_size = rng.random_range(0..=40);
-                let ids = (i32::try_from(expected_ids.len()).unwrap()..)
-                    .take(batch_size)
-                    .collect::<Vec<_>>();
-                let names = ids
-                    .iter()
-                    .map(|id| format!("value-{id}"))
-                    .collect::<Vec<_>>();
-                let name_refs = names.iter().map(String::as_str).collect::<Vec<_>>();
-                sink.write_batch(test_data::create_batch_with_ids_and_names(
-                    &schema, &ids, &name_refs,
-                ))
-                .await
-                .unwrap();
-                expected_ids.extend(ids);
-            }
-            let completion = Box::new(sink).finish().await.unwrap();
-
-            assert_eq!(completion.rows_written(), expected_ids.len() as u64);
-            let file = read_entire_parquet_file(&output_path).unwrap();
-            assert!(
-                file.row_groups
-                    .iter()
-                    .all(|row_group| row_group.num_rows <= 17)
-            );
-            assert!(
-                file.row_groups
-                    .iter()
-                    .take(file.row_groups.len().saturating_sub(1))
-                    .all(|row_group| row_group.num_rows == 17)
-            );
-            assert_eq!(
-                TestExtract::i32_all(&verify::read_parquet_file(&output_path).unwrap(), "id"),
-                expected_ids
-            );
-        }
-
-        #[tokio::test(flavor = "multi_thread")]
         async fn test_sink_with_compression() {
             for compression in [
-                CompressionCodec::ZSTD(Default::default()),
-                CompressionCodec::SNAPPY,
-                CompressionCodec::GZIP(Default::default()),
-                CompressionCodec::BROTLI(Default::default()),
-                CompressionCodec::LZ4_RAW,
+                Compression::ZSTD(Default::default()),
+                Compression::SNAPPY,
+                Compression::GZIP(Default::default()),
+                Compression::BROTLI(Default::default()),
+                Compression::LZ4_RAW,
             ] {
                 let temp_dir = tempdir().unwrap();
                 let output_path = temp_dir.path().join("output.parquet");
@@ -1241,10 +975,10 @@ mod tests {
                     ],
                 );
 
-                let mut compressed_sink = Sink::create(
+                let mut compressed_sink = ParquetSink::create(
                     prepared_local_output(&output_path),
                     &schema,
-                    &OutputConfig::new().with_compression(compression),
+                    &ParquetSinkOptions::new().with_compression(compression),
                     test_runtimes(),
                 )
                 .unwrap();
@@ -1265,10 +999,10 @@ mod tests {
 
             let schema = test_data::simple_schema();
 
-            let sink = Sink::create(
+            let sink = ParquetSink::create(
                 prepared_local_output(&output_path),
                 &schema,
-                &OutputConfig::new(),
+                &ParquetSinkOptions::new(),
                 test_runtimes(),
             )
             .unwrap();
@@ -1307,10 +1041,10 @@ mod tests {
                 .await
                 .unwrap();
 
-            let mut sink = Sink::create(
+            let mut sink = ParquetSink::create(
                 prepared_local_output(&output_path),
                 &schema,
-                &OutputConfig::new(),
+                &ParquetSinkOptions::new(),
                 test_runtimes(),
             )
             .unwrap();
@@ -1332,12 +1066,17 @@ mod tests {
             let batch =
                 test_data::create_batch_with_ids_and_names(&schema, &[3, 1, 2], &["c", "a", "b"]);
 
-            let output_ordering = vec![OutputOrderingColumn::new("id", SortDirection::Ascending)];
+            let sort_spec = SortSpec {
+                columns: vec![SortColumn {
+                    name: "id".to_string(),
+                    direction: SortDirection::Ascending,
+                }],
+            };
 
-            let mut sink = Sink::create(
+            let mut sink = ParquetSink::create(
                 prepared_local_output(&output_path),
                 &schema,
-                &OutputConfig::new().with_output_ordering(output_ordering),
+                &ParquetSinkOptions::new().with_sort_spec(sort_spec),
                 test_runtimes(),
             )
             .unwrap();
@@ -1358,10 +1097,12 @@ mod tests {
             let batch =
                 test_data::create_batch_with_ids_and_names(&schema, &[3, 1, 2], &["c", "a", "b"]);
 
-            let mut sink = Sink::create(
+            let sort_spec = SortSpec { columns: vec![] };
+
+            let mut sink = ParquetSink::create(
                 prepared_local_output(&output_path),
                 &schema,
-                &OutputConfig::new(),
+                &ParquetSinkOptions::new().with_sort_spec(sort_spec),
                 test_runtimes(),
             )
             .unwrap();
@@ -1382,11 +1123,11 @@ mod tests {
             let batch =
                 test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["a", "b", "c"]);
 
-            let bloom_filters = BloomFilterPolicy::default();
+            let bloom_filters = BloomFilterConfig::default();
 
-            let options = OutputConfig::new().with_bloom_filters(bloom_filters);
+            let options = ParquetSinkOptions::new().with_bloom_filters(bloom_filters);
 
-            let mut sink = Sink::create(
+            let mut sink = ParquetSink::create(
                 prepared_local_output(&output_path),
                 &schema,
                 &options,
@@ -1412,13 +1153,19 @@ mod tests {
             let batch =
                 test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["a", "b", "c"]);
 
-            // Without an explicit NDV, bloom filters follow the dictionary decision.
+            // with adaptive encoding, bloom filters are conditional on dictionary
             // specify NDV to force unconditional bloom filter enablement
-            let bloom_filters = bloom_all(0.01, Some(3));
+            let bloom_filters = BloomFilterConfig::builder()
+                .all_enabled(AllColumnsBloomFilterConfig {
+                    fpp: 0.01,
+                    ndv: Some(3),
+                })
+                .build()
+                .unwrap();
 
-            let options = OutputConfig::new().with_bloom_filters(bloom_filters);
+            let options = ParquetSinkOptions::new().with_bloom_filters(bloom_filters);
 
-            let mut sink = Sink::create(
+            let mut sink = ParquetSink::create(
                 prepared_local_output(&output_path),
                 &schema,
                 &options,
@@ -1445,11 +1192,20 @@ mod tests {
                 test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["a", "b", "c"]);
 
             // specify NDV to force unconditional bloom filter enablement for id column only
-            let bloom_filters = bloom_column("id", 0.05, Some(3));
+            let bloom_filters = BloomFilterConfig::builder()
+                .enable_column(ColumnSpecificBloomFilterConfig {
+                    name: "id".to_string(),
+                    config: ColumnBloomFilterConfig {
+                        fpp: 0.05,
+                        ndv: Some(3),
+                    },
+                })
+                .build()
+                .unwrap();
 
-            let options = OutputConfig::new().with_bloom_filters(bloom_filters);
+            let options = ParquetSinkOptions::new().with_bloom_filters(bloom_filters);
 
-            let mut sink = Sink::create(
+            let mut sink = ParquetSink::create(
                 prepared_local_output(&output_path),
                 &schema,
                 &options,
@@ -1476,19 +1232,18 @@ mod tests {
                 test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["a", "b", "c"]);
 
             // specify NDV to force unconditional bloom filter enablement, but disable id
-            let bloom_filters = BloomFilterPolicy::try_new(
-                Some(DefaultBloomFilterPolicy {
+            let bloom_filters = BloomFilterConfig::builder()
+                .all_enabled(AllColumnsBloomFilterConfig {
                     fpp: 0.01,
                     ndv: Some(3),
-                }),
-                Vec::new(),
-                vec!["id".to_owned()],
-            )
-            .unwrap();
+                })
+                .disable_column("id")
+                .build()
+                .unwrap();
 
-            let options = OutputConfig::new().with_bloom_filters(bloom_filters);
+            let options = ParquetSinkOptions::new().with_bloom_filters(bloom_filters);
 
-            let mut sink = Sink::create(
+            let mut sink = ParquetSink::create(
                 prepared_local_output(&output_path),
                 &schema,
                 &options,
@@ -1523,10 +1278,10 @@ mod tests {
                 &["a", "b", "c", "d", "e"],
             );
 
-            let mut sink = Sink::create(
+            let mut sink = ParquetSink::create(
                 prepared_local_output(&output_path),
                 &schema,
-                &OutputConfig::new().with_no_dictionary(true),
+                &ParquetSinkOptions::new().with_no_dictionary(true),
                 test_runtimes(),
             )
             .unwrap();
@@ -1544,7 +1299,7 @@ mod tests {
             let output_path = temp_dir.path().join("output.parquet");
 
             let schema = test_data::simple_schema();
-            // Repeated values keep the dictionary below the cardinality threshold.
+            // use repeated values to ensure low cardinality (adaptive encoder keeps dictionary)
             // 2 unique values in 100 rows = 2% cardinality, well below the 20% threshold
             let ids: Vec<i32> = (0..100).map(|i| i % 2).collect();
             let names: Vec<&str> = (0..100)
@@ -1552,10 +1307,10 @@ mod tests {
                 .collect();
             let batch = test_data::create_batch_with_ids_and_names(&schema, &ids, &names);
 
-            let mut sink = Sink::create(
+            let mut sink = ParquetSink::create(
                 prepared_local_output(&output_path),
                 &schema,
-                &OutputConfig::new().with_no_dictionary(false),
+                &ParquetSinkOptions::new().with_no_dictionary(false),
                 test_runtimes(),
             )
             .unwrap();
@@ -1569,7 +1324,11 @@ mod tests {
 
         #[tokio::test(flavor = "multi_thread")]
         async fn test_sink_with_statistics_options() {
-            for statistics in [Statistics::None, Statistics::Chunk, Statistics::Page] {
+            for statistics in [
+                ParquetStatistics::None,
+                ParquetStatistics::Chunk,
+                ParquetStatistics::Page,
+            ] {
                 let temp_dir = tempdir().unwrap();
                 let output_path = temp_dir.path().join("output.parquet");
 
@@ -1580,10 +1339,10 @@ mod tests {
                     &["a", "b", "c"],
                 );
 
-                let mut sink = Sink::create(
+                let mut sink = ParquetSink::create(
                     prepared_local_output(&output_path),
                     &schema,
-                    &OutputConfig::new().with_statistics(statistics),
+                    &ParquetSinkOptions::new().with_statistics(statistics),
                     test_runtimes(),
                 )
                 .unwrap();
@@ -1594,19 +1353,19 @@ mod tests {
                 let file = read_entire_parquet_file(&output_path).unwrap();
 
                 match statistics {
-                    Statistics::None => {
+                    ParquetStatistics::None => {
                         assert!(
                             file.row_groups[0].columns[0].statistics.is_none(),
                             "statistics should be none for None"
                         );
                     }
-                    Statistics::Chunk => {
+                    ParquetStatistics::Chunk => {
                         assert!(
                             file.row_groups[0].columns[0].statistics.is_some(),
                             "statistics should be some for Chunk"
                         );
                     }
-                    Statistics::Page => {
+                    ParquetStatistics::Page => {
                         assert!(
                             file.row_groups[0].columns[0].statistics.is_some(),
                             "statistics should be some for Page"
@@ -1618,7 +1377,7 @@ mod tests {
 
         #[tokio::test(flavor = "multi_thread")]
         async fn test_sink_with_writer_versions() {
-            for version in [WriterVersion::V1, WriterVersion::V2] {
+            for version in [ParquetWriterVersion::V1, ParquetWriterVersion::V2] {
                 let temp_dir = tempdir().unwrap();
                 let output_path = temp_dir.path().join("output.parquet");
 
@@ -1629,10 +1388,10 @@ mod tests {
                     &["a", "b", "c"],
                 );
 
-                let mut sink = Sink::create(
+                let mut sink = ParquetSink::create(
                     prepared_local_output(&output_path),
                     &schema,
-                    &OutputConfig::new().with_writer_version(version),
+                    &ParquetSinkOptions::new().with_writer_version(version),
                     test_runtimes(),
                 )
                 .unwrap();
@@ -1652,15 +1411,17 @@ mod tests {
 
             let schema = test_data::simple_schema();
 
-            let output_ordering = vec![OutputOrderingColumn::new(
-                "nonexistent_column",
-                SortDirection::Ascending,
-            )];
+            let sort_spec = SortSpec {
+                columns: vec![SortColumn {
+                    name: "nonexistent_column".to_string(),
+                    direction: SortDirection::Ascending,
+                }],
+            };
 
-            let result = Sink::create(
+            let result = ParquetSink::create(
                 prepared_local_output(&output_path),
                 &schema,
-                &OutputConfig::new().with_output_ordering(output_ordering),
+                &ParquetSinkOptions::new().with_sort_spec(sort_spec),
                 test_runtimes(),
             );
 
@@ -1672,7 +1433,7 @@ mod tests {
         #[tokio::test(flavor = "multi_thread")]
         async fn test_sink_bloom_filter_without_ndv() {
             // tests bloom filter enablement without explicit NDV
-            // Without an explicit NDV, bloom filters require the dictionary to be kept.
+            // with adaptive encoding, bloom filters require dictionary to be kept
             // so we use low-cardinality data to ensure dictionary stays enabled
             let temp_dir = tempdir().unwrap();
             let output_path = temp_dir.path().join("output.parquet");
@@ -1685,11 +1446,20 @@ mod tests {
                 .collect();
             let batch = test_data::create_batch_with_ids_and_names(&schema, &ids, &names);
 
-            let bloom_filters = bloom_column("id", 0.05, None);
+            let bloom_filters = BloomFilterConfig::builder()
+                .enable_column(ColumnSpecificBloomFilterConfig {
+                    name: "id".to_string(),
+                    config: ColumnBloomFilterConfig {
+                        fpp: 0.05,
+                        ndv: None, // no explicit NDV, relies on dictionary decision
+                    },
+                })
+                .build()
+                .unwrap();
 
-            let options = OutputConfig::new().with_bloom_filters(bloom_filters);
+            let options = ParquetSinkOptions::new().with_bloom_filters(bloom_filters);
 
-            let mut sink = Sink::create(
+            let mut sink = ParquetSink::create(
                 prepared_local_output(&output_path),
                 &schema,
                 &options,
@@ -1714,11 +1484,17 @@ mod tests {
             let batch =
                 test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["a", "b", "c"]);
 
-            let bloom_filters = bloom_all(0.01, Some(5000));
+            let bloom_filters = BloomFilterConfig::builder()
+                .all_enabled(AllColumnsBloomFilterConfig {
+                    fpp: 0.01,
+                    ndv: Some(5000),
+                })
+                .build()
+                .unwrap();
 
-            let options = OutputConfig::new().with_bloom_filters(bloom_filters);
+            let options = ParquetSinkOptions::new().with_bloom_filters(bloom_filters);
 
-            let mut sink = Sink::create(
+            let mut sink = ParquetSink::create(
                 prepared_local_output(&output_path),
                 &schema,
                 &options,
@@ -1744,16 +1520,25 @@ mod tests {
             let batch =
                 test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["a", "b", "c"]);
 
-            let bloom_filters = bloom_column("id", 0.01, Some(10000));
+            let bloom_filters = BloomFilterConfig::builder()
+                .enable_column(ColumnSpecificBloomFilterConfig {
+                    name: "id".to_string(),
+                    config: ColumnBloomFilterConfig {
+                        fpp: 0.01,
+                        ndv: Some(10000),
+                    },
+                })
+                .build()
+                .unwrap();
 
             let mut ndv_map = HashMap::new();
             ndv_map.insert("id".to_string(), 500);
 
-            let options = OutputConfig::new()
+            let options = ParquetSinkOptions::new()
                 .with_bloom_filters(bloom_filters)
                 .with_ndv_map(ndv_map);
 
-            let mut sink = Sink::create(
+            let mut sink = ParquetSink::create(
                 prepared_local_output(&output_path),
                 &schema,
                 &options,
@@ -1780,17 +1565,26 @@ mod tests {
                 test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["a", "b", "c"]);
 
             // bloom filter WITHOUT explicit NDV - should use ndv_map
-            let bloom_filters = bloom_column("id", 0.01, None);
+            let bloom_filters = BloomFilterConfig::builder()
+                .enable_column(ColumnSpecificBloomFilterConfig {
+                    name: "id".to_string(),
+                    config: ColumnBloomFilterConfig {
+                        fpp: 0.01,
+                        ndv: None, // no explicit NDV
+                    },
+                })
+                .build()
+                .unwrap();
 
             // provide NDV via ndv_map instead
             let mut ndv_map = HashMap::new();
             ndv_map.insert("id".to_string(), 1000);
 
-            let options = OutputConfig::new()
+            let options = ParquetSinkOptions::new()
                 .with_bloom_filters(bloom_filters)
                 .with_ndv_map(ndv_map);
 
-            let mut sink = Sink::create(
+            let mut sink = ParquetSink::create(
                 prepared_local_output(&output_path),
                 &schema,
                 &options,
@@ -1816,15 +1610,23 @@ mod tests {
             let batch =
                 test_data::create_batch_with_ids_and_names(&schema, &[3, 1, 2], &["c", "a", "b"]);
 
-            let output_ordering = vec![
-                OutputOrderingColumn::new("name", SortDirection::Ascending),
-                OutputOrderingColumn::new("id", SortDirection::Descending),
-            ];
+            let sort_spec = SortSpec {
+                columns: vec![
+                    SortColumn {
+                        name: "name".to_string(),
+                        direction: SortDirection::Ascending,
+                    },
+                    SortColumn {
+                        name: "id".to_string(),
+                        direction: SortDirection::Descending,
+                    },
+                ],
+            };
 
-            let mut sink = Sink::create(
+            let mut sink = ParquetSink::create(
                 prepared_local_output(&output_path),
                 &schema,
-                &OutputConfig::new().with_output_ordering(output_ordering),
+                &ParquetSinkOptions::new().with_sort_spec(sort_spec),
                 test_runtimes(),
             )
             .unwrap();
@@ -1851,9 +1653,10 @@ mod tests {
                 .collect();
             let batch = test_data::create_batch_with_ids_and_names(&schema, &ids, &names);
 
-            let options = OutputConfig::new().with_column_dictionary_always(vec!["id".to_string()]);
+            let options =
+                ParquetSinkOptions::new().with_column_dictionary_always(vec!["id".to_string()]);
 
-            let mut sink = Sink::create(
+            let mut sink = ParquetSink::create(
                 prepared_local_output(&output_path),
                 &schema,
                 &options,
@@ -1876,13 +1679,22 @@ mod tests {
             let batch =
                 test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["a", "b", "c"]);
 
-            let bloom_filters = bloom_column("id", 0.01, Some(100));
+            let bloom_filters = BloomFilterConfig::builder()
+                .enable_column(ColumnSpecificBloomFilterConfig {
+                    name: "id".to_string(),
+                    config: ColumnBloomFilterConfig {
+                        fpp: 0.01,
+                        ndv: Some(100),
+                    },
+                })
+                .build()
+                .unwrap();
 
-            let options = OutputConfig::new()
+            let options = ParquetSinkOptions::new()
                 .with_bloom_filters(bloom_filters)
                 .with_no_dictionary(true);
 
-            let mut sink = Sink::create(
+            let mut sink = ParquetSink::create(
                 prepared_local_output(&output_path),
                 &schema,
                 &options,
@@ -1907,17 +1719,26 @@ mod tests {
             let batch =
                 test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["a", "b", "c"]);
 
-            let bloom_filters = bloom_column("id", 0.01, None);
+            let bloom_filters = BloomFilterConfig::builder()
+                .enable_column(ColumnSpecificBloomFilterConfig {
+                    name: "id".to_string(),
+                    config: ColumnBloomFilterConfig {
+                        fpp: 0.01,
+                        ndv: None,
+                    },
+                })
+                .build()
+                .unwrap();
 
             let mut ndv_map = HashMap::new();
             ndv_map.insert("id".to_string(), 100);
 
-            let options = OutputConfig::new()
+            let options = ParquetSinkOptions::new()
                 .with_bloom_filters(bloom_filters)
                 .with_ndv_map(ndv_map)
                 .with_no_dictionary(true);
 
-            let mut sink = Sink::create(
+            let mut sink = ParquetSink::create(
                 prepared_local_output(&output_path),
                 &schema,
                 &options,
@@ -1943,9 +1764,9 @@ mod tests {
             let batch = test_data::create_batch_with_ids_and_names(&schema, &ids, &names);
 
             let options =
-                OutputConfig::new().with_column_dictionary_analyze(vec!["id".to_string()]);
+                ParquetSinkOptions::new().with_column_dictionary_analyze(vec!["id".to_string()]);
 
-            let mut sink = Sink::create(
+            let mut sink = ParquetSink::create(
                 prepared_local_output(&output_path),
                 &schema,
                 &options,
@@ -1970,9 +1791,9 @@ mod tests {
             let batch = test_data::create_batch_with_ids_and_names(&schema, &ids, &names);
 
             let options =
-                OutputConfig::new().with_column_dictionary_analyze(vec!["id".to_string()]);
+                ParquetSinkOptions::new().with_column_dictionary_analyze(vec!["id".to_string()]);
 
-            let mut sink = Sink::create(
+            let mut sink = ParquetSink::create(
                 prepared_local_output(&output_path),
                 &schema,
                 &options,
@@ -1996,13 +1817,22 @@ mod tests {
             let names: Vec<&str> = (0..100).map(|_| "test").collect();
             let batch = test_data::create_batch_with_ids_and_names(&schema, &ids, &names);
 
-            let bloom_filters = bloom_column("id", 0.01, None);
+            let bloom_filters = BloomFilterConfig::builder()
+                .enable_column(ColumnSpecificBloomFilterConfig {
+                    name: "id".to_string(),
+                    config: ColumnBloomFilterConfig {
+                        fpp: 0.01,
+                        ndv: None,
+                    },
+                })
+                .build()
+                .unwrap();
 
-            let options = OutputConfig::new()
+            let options = ParquetSinkOptions::new()
                 .with_bloom_filters(bloom_filters)
                 .with_column_dictionary_analyze(vec!["id".to_string()]);
 
-            let mut sink = Sink::create(
+            let mut sink = ParquetSink::create(
                 prepared_local_output(&output_path),
                 &schema,
                 &options,
@@ -2028,13 +1858,22 @@ mod tests {
             let names: Vec<&str> = (0..1000).map(|_| "test").collect();
             let batch = test_data::create_batch_with_ids_and_names(&schema, &ids, &names);
 
-            let bloom_filters = bloom_column("id", 0.01, None);
+            let bloom_filters = BloomFilterConfig::builder()
+                .enable_column(ColumnSpecificBloomFilterConfig {
+                    name: "id".to_string(),
+                    config: ColumnBloomFilterConfig {
+                        fpp: 0.01,
+                        ndv: None,
+                    },
+                })
+                .build()
+                .unwrap();
 
-            let options = OutputConfig::new()
+            let options = ParquetSinkOptions::new()
                 .with_bloom_filters(bloom_filters)
                 .with_column_dictionary_analyze(vec!["id".to_string()]);
 
-            let mut sink = Sink::create(
+            let mut sink = ParquetSink::create(
                 prepared_local_output(&output_path),
                 &schema,
                 &options,
@@ -2063,11 +1902,11 @@ mod tests {
                 .collect();
             let batch = test_data::create_batch_with_ids_and_names(&schema, &ids, &names);
 
-            let options = OutputConfig::new()
+            let options = ParquetSinkOptions::new()
                 .with_column_dictionary_always(vec!["id".to_string()])
                 .with_column_dictionary_analyze(vec!["name".to_string()]);
 
-            let mut sink = Sink::create(
+            let mut sink = ParquetSink::create(
                 prepared_local_output(&output_path),
                 &schema,
                 &options,
@@ -2111,9 +1950,9 @@ mod tests {
 
             // use "Always" mode since nested types can't be analyzed
             let options =
-                OutputConfig::new().with_column_dictionary_always(vec!["col".to_string()]);
+                ParquetSinkOptions::new().with_column_dictionary_always(vec!["col".to_string()]);
 
-            let mut sink = Sink::create(
+            let mut sink = ParquetSink::create(
                 prepared_local_output(&output_path),
                 &schema,
                 &options,
@@ -2176,9 +2015,9 @@ mod tests {
             metadata.insert("custom_key".to_string(), Some("custom_value".to_string()));
             metadata.insert("another_key".to_string(), None);
 
-            let options = OutputConfig::new().with_metadata(metadata);
+            let options = ParquetSinkOptions::new().with_metadata(metadata);
 
-            let mut sink = Sink::create(
+            let mut sink = ParquetSink::create(
                 prepared_local_output(&output_path),
                 &schema,
                 &options,
@@ -2222,11 +2061,11 @@ mod tests {
 
             // configure with small row group size to force multiple row groups
             // and dictionary_analyze for our column
-            let options = OutputConfig::new()
+            let options = ParquetSinkOptions::new()
                 .with_max_row_group_size(100)
                 .with_column_dictionary_analyze(vec!["col".to_string()]);
 
-            let mut sink = Sink::create(
+            let mut sink = ParquetSink::create(
                 prepared_local_output(&output_path),
                 &schema,
                 &options,
@@ -2280,56 +2119,64 @@ mod tests {
         }
     }
 
-    mod output_config_tests {
+    mod options_builder_tests {
         use super::*;
 
         #[test]
         fn test_default_options() {
-            let options = OutputConfig::default();
+            let options = ParquetSinkOptions::default();
             assert_eq!(options.max_row_group_size, DEFAULT_MAX_ROW_GROUP_SIZE);
-            assert!(matches!(
-                options.compression,
-                CompressionCodec::UNCOMPRESSED
-            ));
+            assert!(matches!(options.compression, Compression::UNCOMPRESSED));
             assert!(!options.bloom_filters.is_configured());
-            assert!(matches!(options.statistics, Statistics::Chunk));
+            assert!(matches!(options.statistics, ParquetStatistics::Chunk));
             assert!(!options.no_dictionary);
-            assert!(matches!(options.writer_version, WriterVersion::V2));
+            assert!(matches!(options.writer_version, ParquetWriterVersion::V2));
             assert!(options.metadata.is_empty());
         }
 
         #[test]
-        fn test_config_composition() {
+        fn test_builder_pattern() {
             let mut metadata = HashMap::new();
             metadata.insert("test".to_string(), Some("value".to_string()));
 
-            let output_ordering = vec![OutputOrderingColumn::new("id", SortDirection::Ascending)];
+            let sort_spec = SortSpec {
+                columns: vec![SortColumn {
+                    name: "id".to_string(),
+                    direction: SortDirection::Ascending,
+                }],
+            };
 
-            let bloom_filters = bloom_all(0.01, None);
+            let bloom_filters = BloomFilterConfig::builder()
+                .all_enabled(AllColumnsBloomFilterConfig {
+                    fpp: 0.01,
+                    ndv: None,
+                })
+                .build()
+                .unwrap();
 
-            let options = OutputConfig::new()
+            let options = ParquetSinkOptions::new()
                 .with_max_row_group_size(5000)
-                .with_output_ordering(output_ordering.clone())
-                .with_compression(CompressionCodec::ZSTD(Default::default()))
+                .with_sort_spec(sort_spec.clone())
+                .with_compression(Compression::ZSTD(Default::default()))
                 .with_bloom_filters(bloom_filters)
-                .with_statistics(Statistics::None)
+                .with_statistics(ParquetStatistics::None)
                 .with_no_dictionary(true)
-                .with_writer_version(WriterVersion::V1)
+                .with_writer_version(ParquetWriterVersion::V1)
                 .with_metadata(metadata.clone());
 
             assert_eq!(options.max_row_group_size, 5000);
-            assert_eq!(options.output_ordering.len(), 1);
-            assert!(matches!(options.compression, CompressionCodec::ZSTD(_)));
+            assert_eq!(options.sort_spec.columns.len(), 1);
+            assert!(matches!(options.compression, Compression::ZSTD(_)));
             assert!(options.bloom_filters.is_configured());
-            assert!(matches!(options.statistics, Statistics::None));
+            assert!(matches!(options.statistics, ParquetStatistics::None));
             assert!(options.no_dictionary);
-            assert!(matches!(options.writer_version, WriterVersion::V1));
+            assert!(matches!(options.writer_version, ParquetWriterVersion::V1));
             assert_eq!(options.metadata, metadata);
         }
 
         #[test]
         fn test_metadata_value() {
-            let options = OutputConfig::new()
+            let options = ParquetSinkOptions::new()
                 .with_metadata_value("key1".to_string(), Some("val1".to_string()))
                 .with_metadata_value("key2".to_string(), Some("val2".to_string()));
 
@@ -2350,37 +2197,90 @@ mod tests {
             metadata.insert("key1".to_string(), Some("val1".to_string()));
             metadata.insert("key2".to_string(), Some("val2".to_string()));
 
-            let options = OutputConfig::new().with_metadata(metadata.clone());
+            let options = ParquetSinkOptions::new().with_metadata(metadata.clone());
 
             assert_eq!(options.metadata, metadata);
         }
 
         #[test]
         fn test_encoding_options() {
-            let options = OutputConfig::new()
-                .with_encoding(Some(Encoding::DeltaBinaryPacked))
-                .with_column_encodings(vec![ColumnEncoding {
+            let options = ParquetSinkOptions::new()
+                .with_encoding(Some(ParquetEncoding::DeltaBinaryPacked))
+                .with_column_encodings(vec![ColumnEncodingConfig {
                     name: "name".to_string(),
-                    encoding: Encoding::DeltaByteArray,
+                    encoding: ParquetEncoding::DeltaByteArray,
                 }]);
 
-            assert_eq!(options.encoding, Some(Encoding::DeltaBinaryPacked));
+            assert_eq!(options.encoding, Some(ParquetEncoding::DeltaBinaryPacked));
             assert_eq!(options.column_encodings.len(), 1);
             assert_eq!(options.column_encodings[0].name, "name");
             assert_eq!(
                 options.column_encodings[0].encoding,
-                Encoding::DeltaByteArray
+                ParquetEncoding::DeltaByteArray
             );
         }
 
         #[test]
-        fn default_queue_sizes_are_explicit() {
-            let options = OutputConfig::new();
-            let (ing, enc, wrt, conc) = resolve_queue_sizes(&options);
+        fn test_no_budget_uses_defaults() {
+            use arrow::datatypes::{Field, Schema};
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("a", DataType::Int32, false),
+                Field::new("b", DataType::Int32, false),
+            ]));
+            let options = ParquetSinkOptions::new();
+            let (ing, enc, wrt, conc) = resolve_parquet_queue_sizes(&options, &schema);
             assert_eq!(ing, 1);
             assert_eq!(enc, 4);
             assert_eq!(wrt, 4);
             assert_eq!(conc, 4);
+        }
+
+        #[test]
+        fn test_budget_derives_sizes() {
+            use arrow::datatypes::{Field, Schema};
+            // 2 × Int32 = 8 bytes/row, row_group = 1M rows = 8MB per row group
+            // budget 100MB - 32MB buffer = 68MB available, 68/8 = 8 slots
+            // concurrency = 8*40/100 = 3, encoding = 8*25/100 = 2, writing = 2
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("a", DataType::Int32, false),
+                Field::new("b", DataType::Int32, false),
+            ]));
+            let options = ParquetSinkOptions::new().with_memory_budget(Some(100 * 1024 * 1024));
+            let (ing, enc, wrt, conc) = resolve_parquet_queue_sizes(&options, &schema);
+            assert_eq!(ing, 1);
+            assert!(enc >= 1);
+            assert!(wrt >= 1);
+            assert!(conc >= 1);
+            // with 8 total slots: conc=3, enc=2, wrt=2
+            assert_eq!(conc, 3);
+            assert_eq!(enc, 2);
+            assert_eq!(wrt, 2);
+        }
+
+        #[test]
+        fn test_explicit_overrides_budget() {
+            use arrow::datatypes::{Field, Schema};
+            let schema = Arc::new(Schema::new(vec![Field::new("a", DataType::Int32, false)]));
+            let options = ParquetSinkOptions::new()
+                .with_memory_budget(Some(100 * 1024 * 1024))
+                .with_encoding_queue_size(10)
+                .with_max_row_group_concurrency(7);
+            let (_, enc, _, conc) = resolve_parquet_queue_sizes(&options, &schema);
+            assert_eq!(enc, 10);
+            assert_eq!(conc, 7);
+        }
+
+        #[test]
+        fn test_tiny_budget_uses_minimums() {
+            use arrow::datatypes::{Field, Schema};
+            let schema = Arc::new(Schema::new(vec![Field::new("a", DataType::Int32, false)]));
+            // budget smaller than buffer_size → 0 available → 0 slots → all minimums (1)
+            let options = ParquetSinkOptions::new().with_memory_budget(Some(1024));
+            let (ing, enc, wrt, conc) = resolve_parquet_queue_sizes(&options, &schema);
+            assert_eq!(ing, 1);
+            assert_eq!(enc, 1);
+            assert_eq!(wrt, 1);
+            assert_eq!(conc, 1);
         }
     }
 
@@ -2393,7 +2293,7 @@ mod tests {
         use super::*;
         use std::sync::Arc;
 
-        use crate::{ColumnEncoding, Encoding};
+        use crate::{ColumnEncodingConfig, ParquetEncoding};
 
         #[tokio::test(flavor = "multi_thread")]
         async fn test_sink_with_default_encoding() {
@@ -2404,10 +2304,10 @@ mod tests {
             let batch =
                 test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["a", "b", "c"]);
 
-            let mut sink = Sink::create(
+            let mut sink = ParquetSink::create(
                 prepared_local_output(&output_path),
                 &schema,
-                &OutputConfig::new().with_encoding(Some(Encoding::Plain)),
+                &ParquetSinkOptions::new().with_encoding(Some(ParquetEncoding::Plain)),
                 test_runtimes(),
             )
             .unwrap();
@@ -2431,12 +2331,12 @@ mod tests {
             let batch =
                 test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["a", "b", "c"]);
 
-            let mut sink = Sink::create(
+            let mut sink = ParquetSink::create(
                 prepared_local_output(&output_path),
                 &schema,
-                &OutputConfig::new().with_column_encodings(vec![ColumnEncoding {
+                &ParquetSinkOptions::new().with_column_encodings(vec![ColumnEncodingConfig {
                     name: "id".to_string(),
-                    encoding: Encoding::DeltaBinaryPacked,
+                    encoding: ParquetEncoding::DeltaBinaryPacked,
                 }]),
                 test_runtimes(),
             )
@@ -2461,17 +2361,17 @@ mod tests {
             let batch =
                 test_data::create_batch_with_ids_and_names(&schema, &[1, 2, 3], &["a", "b", "c"]);
 
-            let mut sink = Sink::create(
+            let mut sink = ParquetSink::create(
                 prepared_local_output(&output_path),
                 &schema,
-                &OutputConfig::new().with_column_encodings(vec![
-                    ColumnEncoding {
+                &ParquetSinkOptions::new().with_column_encodings(vec![
+                    ColumnEncodingConfig {
                         name: "id".to_string(),
-                        encoding: Encoding::DeltaBinaryPacked,
+                        encoding: ParquetEncoding::DeltaBinaryPacked,
                     },
-                    ColumnEncoding {
+                    ColumnEncodingConfig {
                         name: "name".to_string(),
-                        encoding: Encoding::DeltaByteArray,
+                        encoding: ParquetEncoding::DeltaByteArray,
                     },
                 ]),
                 test_runtimes(),
@@ -2510,12 +2410,12 @@ mod tests {
                 RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(outer_array)]).unwrap();
 
             // use nested column path for encoding
-            let mut sink = Sink::create(
+            let mut sink = ParquetSink::create(
                 prepared_local_output(&output_path),
                 &schema,
-                &OutputConfig::new().with_column_encodings(vec![ColumnEncoding {
+                &ParquetSinkOptions::new().with_column_encodings(vec![ColumnEncodingConfig {
                     name: "outer.inner".to_string(),
-                    encoding: Encoding::DeltaBinaryPacked,
+                    encoding: ParquetEncoding::DeltaBinaryPacked,
                 }]),
                 test_runtimes(),
             )
@@ -2547,10 +2447,10 @@ mod tests {
             let batch =
                 RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(outer_array)]).unwrap();
 
-            let options =
-                OutputConfig::new().with_column_dictionary_always(vec!["outer.inner".to_string()]);
+            let options = ParquetSinkOptions::new()
+                .with_column_dictionary_always(vec!["outer.inner".to_string()]);
 
-            let mut sink = Sink::create(
+            let mut sink = ParquetSink::create(
                 prepared_local_output(&output_path),
                 &schema,
                 &options,
@@ -2566,6 +2466,10 @@ mod tests {
 
         #[tokio::test(flavor = "multi_thread")]
         async fn test_nested_column_bloom_filter_dot_notation() {
+            use crate::{
+                BloomFilterConfig, ColumnBloomFilterConfig, ColumnSpecificBloomFilterConfig,
+            };
+
             let temp_dir = tempdir().unwrap();
             let output_path = temp_dir.path().join("output.parquet");
 
@@ -2583,11 +2487,20 @@ mod tests {
             let batch =
                 RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(outer_array)]).unwrap();
 
-            let bloom_config = bloom_column("outer.inner", 0.01, Some(100));
+            let bloom_config = BloomFilterConfig::builder()
+                .enable_column(ColumnSpecificBloomFilterConfig {
+                    name: "outer.inner".to_string(),
+                    config: ColumnBloomFilterConfig {
+                        fpp: 0.01,
+                        ndv: Some(100),
+                    },
+                })
+                .build()
+                .unwrap();
 
-            let options = OutputConfig::new().with_bloom_filters(bloom_config);
+            let options = ParquetSinkOptions::new().with_bloom_filters(bloom_config);
 
-            let mut sink = Sink::create(
+            let mut sink = ParquetSink::create(
                 prepared_local_output(&output_path),
                 &schema,
                 &options,
@@ -2620,10 +2533,10 @@ mod tests {
             let batch =
                 RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(outer_array)]).unwrap();
 
-            let options =
-                OutputConfig::new().with_column_no_dictionary(vec!["outer.inner".to_string()]);
+            let options = ParquetSinkOptions::new()
+                .with_column_no_dictionary(vec!["outer.inner".to_string()]);
 
-            let mut sink = Sink::create(
+            let mut sink = ParquetSink::create(
                 prepared_local_output(&output_path),
                 &schema,
                 &options,
@@ -2640,7 +2553,7 @@ mod tests {
         #[test]
         fn test_resolve_column_type_top_level() {
             let schema = test_data::simple_schema();
-            let data_type = Sink::resolve_column_type(&schema, "id");
+            let data_type = ParquetSink::resolve_column_type(&schema, "id");
             assert_eq!(data_type, Some(arrow::datatypes::DataType::Int32));
         }
 
@@ -2654,14 +2567,14 @@ mod tests {
             );
             let schema = Arc::new(arrow::datatypes::Schema::new(vec![outer_field]));
 
-            let data_type = Sink::resolve_column_type(&schema, "outer.inner");
+            let data_type = ParquetSink::resolve_column_type(&schema, "outer.inner");
             assert_eq!(data_type, Some(arrow::datatypes::DataType::Int64));
         }
 
         #[test]
         fn test_resolve_column_type_not_found() {
             let schema = test_data::simple_schema();
-            let data_type = Sink::resolve_column_type(&schema, "nonexistent");
+            let data_type = ParquetSink::resolve_column_type(&schema, "nonexistent");
             assert_eq!(data_type, None);
         }
 
@@ -2675,7 +2588,7 @@ mod tests {
             );
             let schema = Arc::new(arrow::datatypes::Schema::new(vec![outer_field]));
 
-            let data_type = Sink::resolve_column_type(&schema, "outer.nonexistent");
+            let data_type = ParquetSink::resolve_column_type(&schema, "outer.nonexistent");
             assert_eq!(data_type, None);
         }
 
@@ -2685,11 +2598,11 @@ mod tests {
             let output_path = temp_dir.path().join("output.parquet");
             let schema = test_data::simple_schema();
 
-            let options = OutputConfig::new()
+            let options = ParquetSinkOptions::new()
                 .with_column_dictionary_always(vec!["name".to_string()])
                 .with_column_no_dictionary(vec!["name".to_string()]);
 
-            let result = Sink::create(
+            let result = ParquetSink::create(
                 prepared_local_output(&output_path),
                 &schema,
                 &options,
@@ -2713,7 +2626,7 @@ mod tests {
         use super::*;
         use arrow::array::{BooleanArray, Float32Array, Float64Array, Int64Array};
         use arrow::datatypes::Field;
-        use parquet::basic::Encoding as ParquetEncoding;
+        use parquet::basic::Encoding;
 
         fn numeric_schema() -> SchemaRef {
             Arc::new(arrow::datatypes::Schema::new(vec![
@@ -2739,7 +2652,7 @@ mod tests {
             .unwrap()
         }
 
-        fn get_column_encodings(path: &Path) -> HashMap<String, Vec<ParquetEncoding>> {
+        fn get_column_encodings(path: &Path) -> HashMap<String, Vec<Encoding>> {
             let file = read_entire_parquet_file(path).unwrap();
             file.row_groups[0]
                 .columns
@@ -2756,11 +2669,11 @@ mod tests {
             let schema = numeric_schema();
             let batch = create_numeric_batch(&schema);
 
-            let options = OutputConfig::new()
-                .with_writer_version(WriterVersion::V2)
+            let options = ParquetSinkOptions::new()
+                .with_writer_version(ParquetWriterVersion::V2)
                 .with_no_dictionary(true); // disable dict to see the fallback encoding
 
-            let mut sink = Sink::create(
+            let mut sink = ParquetSink::create(
                 prepared_local_output(&output_path),
                 &schema,
                 &options,
@@ -2772,12 +2685,12 @@ mod tests {
 
             let encodings = get_column_encodings(&output_path);
             assert!(
-                encodings["float_col"].contains(&ParquetEncoding::BYTE_STREAM_SPLIT),
+                encodings["float_col"].contains(&Encoding::BYTE_STREAM_SPLIT),
                 "float_col should use BYTE_STREAM_SPLIT, got {:?}",
                 encodings["float_col"]
             );
             assert!(
-                encodings["double_col"].contains(&ParquetEncoding::BYTE_STREAM_SPLIT),
+                encodings["double_col"].contains(&Encoding::BYTE_STREAM_SPLIT),
                 "double_col should use BYTE_STREAM_SPLIT, got {:?}",
                 encodings["double_col"]
             );
@@ -2791,11 +2704,11 @@ mod tests {
             let schema = numeric_schema();
             let batch = create_numeric_batch(&schema);
 
-            let options = OutputConfig::new()
-                .with_writer_version(WriterVersion::V2)
+            let options = ParquetSinkOptions::new()
+                .with_writer_version(ParquetWriterVersion::V2)
                 .with_no_dictionary(true);
 
-            let mut sink = Sink::create(
+            let mut sink = ParquetSink::create(
                 prepared_local_output(&output_path),
                 &schema,
                 &options,
@@ -2807,7 +2720,7 @@ mod tests {
 
             let encodings = get_column_encodings(&output_path);
             assert!(
-                encodings["int_col"].contains(&ParquetEncoding::DELTA_BINARY_PACKED),
+                encodings["int_col"].contains(&Encoding::DELTA_BINARY_PACKED),
                 "int_col should use DELTA_BINARY_PACKED, got {:?}",
                 encodings["int_col"]
             );
@@ -2822,11 +2735,11 @@ mod tests {
             let batch = create_numeric_batch(&schema);
 
             // disable dictionary to isolate encoding behavior from dictionary decisions
-            let options = OutputConfig::new()
-                .with_writer_version(WriterVersion::V2)
+            let options = ParquetSinkOptions::new()
+                .with_writer_version(ParquetWriterVersion::V2)
                 .with_no_dictionary(true);
 
-            let mut sink = Sink::create(
+            let mut sink = ParquetSink::create(
                 prepared_local_output(&output_path),
                 &schema,
                 &options,
@@ -2840,7 +2753,7 @@ mod tests {
             // booleans should use PLAIN for data encoding
             // (RLE may still appear for definition/repetition levels)
             assert!(
-                encodings["bool_col"].contains(&ParquetEncoding::PLAIN),
+                encodings["bool_col"].contains(&Encoding::PLAIN),
                 "bool_col should use PLAIN, got {:?}",
                 encodings["bool_col"]
             );
@@ -2854,11 +2767,11 @@ mod tests {
             let schema = numeric_schema();
             let batch = create_numeric_batch(&schema);
 
-            let options = OutputConfig::new()
-                .with_writer_version(WriterVersion::V2)
+            let options = ParquetSinkOptions::new()
+                .with_writer_version(ParquetWriterVersion::V2)
                 .with_no_dictionary(true);
 
-            let mut sink = Sink::create(
+            let mut sink = ParquetSink::create(
                 prepared_local_output(&output_path),
                 &schema,
                 &options,
@@ -2871,11 +2784,11 @@ mod tests {
             let encodings = get_column_encodings(&output_path);
 
             assert!(
-                encodings["float_col"].contains(&ParquetEncoding::BYTE_STREAM_SPLIT),
+                encodings["float_col"].contains(&Encoding::BYTE_STREAM_SPLIT),
                 "float_col should use BYTE_STREAM_SPLIT"
             );
             assert!(
-                encodings["int_col"].contains(&ParquetEncoding::DELTA_BINARY_PACKED),
+                encodings["int_col"].contains(&Encoding::DELTA_BINARY_PACKED),
                 "int_col should use DELTA_BINARY_PACKED"
             );
         }
@@ -2888,11 +2801,11 @@ mod tests {
             let schema = numeric_schema();
             let batch = create_numeric_batch(&schema);
 
-            let options = OutputConfig::new()
-                .with_writer_version(WriterVersion::V1)
+            let options = ParquetSinkOptions::new()
+                .with_writer_version(ParquetWriterVersion::V1)
                 .with_no_dictionary(true);
 
-            let mut sink = Sink::create(
+            let mut sink = ParquetSink::create(
                 prepared_local_output(&output_path),
                 &schema,
                 &options,
@@ -2905,19 +2818,19 @@ mod tests {
             let encodings = get_column_encodings(&output_path);
 
             assert!(
-                !encodings["float_col"].contains(&ParquetEncoding::BYTE_STREAM_SPLIT),
+                !encodings["float_col"].contains(&Encoding::BYTE_STREAM_SPLIT),
                 "V1 float_col should NOT use BYTE_STREAM_SPLIT"
             );
             assert!(
-                !encodings["int_col"].contains(&ParquetEncoding::DELTA_BINARY_PACKED),
+                !encodings["int_col"].contains(&Encoding::DELTA_BINARY_PACKED),
                 "V1 int_col should NOT use DELTA_BINARY_PACKED"
             );
             assert!(
-                encodings["float_col"].contains(&ParquetEncoding::PLAIN),
+                encodings["float_col"].contains(&Encoding::PLAIN),
                 "V1 float_col should use PLAIN"
             );
             assert!(
-                encodings["int_col"].contains(&ParquetEncoding::PLAIN),
+                encodings["int_col"].contains(&Encoding::PLAIN),
                 "V1 int_col should use PLAIN"
             );
         }
@@ -2930,15 +2843,15 @@ mod tests {
             let schema = numeric_schema();
             let batch = create_numeric_batch(&schema);
 
-            let options = OutputConfig::new()
-                .with_writer_version(WriterVersion::V2)
+            let options = ParquetSinkOptions::new()
+                .with_writer_version(ParquetWriterVersion::V2)
                 .with_no_dictionary(true)
-                .with_column_encodings(vec![ColumnEncoding {
+                .with_column_encodings(vec![ColumnEncodingConfig {
                     name: "float_col".to_string(),
-                    encoding: Encoding::Plain,
+                    encoding: ParquetEncoding::Plain,
                 }]);
 
-            let mut sink = Sink::create(
+            let mut sink = ParquetSink::create(
                 prepared_local_output(&output_path),
                 &schema,
                 &options,
@@ -2950,15 +2863,15 @@ mod tests {
 
             let encodings = get_column_encodings(&output_path);
             assert!(
-                encodings["float_col"].contains(&ParquetEncoding::PLAIN),
+                encodings["float_col"].contains(&Encoding::PLAIN),
                 "float_col should use PLAIN (user override)"
             );
             assert!(
-                !encodings["float_col"].contains(&ParquetEncoding::BYTE_STREAM_SPLIT),
+                !encodings["float_col"].contains(&Encoding::BYTE_STREAM_SPLIT),
                 "float_col should NOT use BYTE_STREAM_SPLIT when overridden"
             );
             assert!(
-                encodings["double_col"].contains(&ParquetEncoding::BYTE_STREAM_SPLIT),
+                encodings["double_col"].contains(&Encoding::BYTE_STREAM_SPLIT),
                 "double_col should use BYTE_STREAM_SPLIT"
             );
         }
@@ -2979,15 +2892,15 @@ mod tests {
             )
             .unwrap();
 
-            let options = OutputConfig::new()
-                .with_writer_version(WriterVersion::V1)
+            let options = ParquetSinkOptions::new()
+                .with_writer_version(ParquetWriterVersion::V1)
                 .with_no_dictionary(true)
-                .with_column_encodings(vec![ColumnEncoding {
+                .with_column_encodings(vec![ColumnEncodingConfig {
                     name: "int_col".to_string(),
-                    encoding: Encoding::DeltaBinaryPacked,
+                    encoding: ParquetEncoding::DeltaBinaryPacked,
                 }]);
 
-            let mut sink = Sink::create(
+            let mut sink = ParquetSink::create(
                 prepared_local_output(&output_path),
                 &schema,
                 &options,
@@ -2999,7 +2912,7 @@ mod tests {
 
             let encodings = get_column_encodings(&output_path);
             assert!(
-                encodings["int_col"].contains(&ParquetEncoding::DELTA_BINARY_PACKED),
+                encodings["int_col"].contains(&Encoding::DELTA_BINARY_PACKED),
                 "int_col should use DELTA_BINARY_PACKED with V1 writer"
             );
         }
@@ -3020,15 +2933,15 @@ mod tests {
             )
             .unwrap();
 
-            let options = OutputConfig::new()
-                .with_writer_version(WriterVersion::V1)
+            let options = ParquetSinkOptions::new()
+                .with_writer_version(ParquetWriterVersion::V1)
                 .with_no_dictionary(true)
-                .with_column_encodings(vec![ColumnEncoding {
+                .with_column_encodings(vec![ColumnEncodingConfig {
                     name: "float_col".to_string(),
-                    encoding: Encoding::ByteStreamSplit,
+                    encoding: ParquetEncoding::ByteStreamSplit,
                 }]);
 
-            let mut sink = Sink::create(
+            let mut sink = ParquetSink::create(
                 prepared_local_output(&output_path),
                 &schema,
                 &options,
@@ -3040,7 +2953,7 @@ mod tests {
 
             let encodings = get_column_encodings(&output_path);
             assert!(
-                encodings["float_col"].contains(&ParquetEncoding::BYTE_STREAM_SPLIT),
+                encodings["float_col"].contains(&Encoding::BYTE_STREAM_SPLIT),
                 "float_col should use BYTE_STREAM_SPLIT with V1 writer"
             );
         }
@@ -3063,15 +2976,15 @@ mod tests {
             )
             .unwrap();
 
-            let options = OutputConfig::new()
-                .with_writer_version(WriterVersion::V1)
+            let options = ParquetSinkOptions::new()
+                .with_writer_version(ParquetWriterVersion::V1)
                 .with_no_dictionary(true)
-                .with_column_encodings(vec![ColumnEncoding {
+                .with_column_encodings(vec![ColumnEncodingConfig {
                     name: "str_col".to_string(),
-                    encoding: Encoding::DeltaLengthByteArray,
+                    encoding: ParquetEncoding::DeltaLengthByteArray,
                 }]);
 
-            let mut sink = Sink::create(
+            let mut sink = ParquetSink::create(
                 prepared_local_output(&output_path),
                 &schema,
                 &options,
@@ -3083,7 +2996,7 @@ mod tests {
 
             let encodings = get_column_encodings(&output_path);
             assert!(
-                encodings["str_col"].contains(&ParquetEncoding::DELTA_LENGTH_BYTE_ARRAY),
+                encodings["str_col"].contains(&Encoding::DELTA_LENGTH_BYTE_ARRAY),
                 "str_col should use DELTA_LENGTH_BYTE_ARRAY with V1 writer"
             );
         }
@@ -3110,15 +3023,15 @@ mod tests {
             )
             .unwrap();
 
-            let options = OutputConfig::new()
-                .with_writer_version(WriterVersion::V1)
+            let options = ParquetSinkOptions::new()
+                .with_writer_version(ParquetWriterVersion::V1)
                 .with_no_dictionary(true)
-                .with_column_encodings(vec![ColumnEncoding {
+                .with_column_encodings(vec![ColumnEncodingConfig {
                     name: "str_col".to_string(),
-                    encoding: Encoding::DeltaByteArray,
+                    encoding: ParquetEncoding::DeltaByteArray,
                 }]);
 
-            let mut sink = Sink::create(
+            let mut sink = ParquetSink::create(
                 prepared_local_output(&output_path),
                 &schema,
                 &options,
@@ -3130,7 +3043,7 @@ mod tests {
 
             let encodings = get_column_encodings(&output_path);
             assert!(
-                encodings["str_col"].contains(&ParquetEncoding::DELTA_BYTE_ARRAY),
+                encodings["str_col"].contains(&Encoding::DELTA_BYTE_ARRAY),
                 "str_col should use DELTA_BYTE_ARRAY with V1 writer"
             );
         }

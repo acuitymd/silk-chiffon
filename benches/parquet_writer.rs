@@ -1,17 +1,16 @@
 //! Benchmarks for parquet writing performance.
 
-use std::{num::NonZeroUsize, path::Path, sync::Arc};
+use std::sync::Arc;
 
 use arrow::array::{Float64Array, Int32Array, Int64Array, StringArray, TimestampMicrosecondArray};
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use std::hint::black_box;
 
-use clap::{Arg, Command};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
-use silk_chiffon_core::{DataSink, FormatRegistry, OpenSinkMode, SinkBindingConfig};
+use silk_chiffon::sinks::parquet::{AdaptiveParquetWriter, AdaptiveWriterConfig, ParquetRuntimes};
 
 use tempfile::tempdir;
 use tokio::runtime::Runtime;
@@ -97,42 +96,8 @@ const CONFIGS: &[Config] = &[
     },
 ];
 
-// DataFusion's default batch size.
+/// Realistic batch size from DataSource (DataFusion default)
 const INPUT_BATCH_SIZE: usize = 8192;
-
-async fn registered_sink(
-    path: &Path,
-    schema: Arc<Schema>,
-    row_group_size: usize,
-) -> Box<dyn DataSink> {
-    let registry = FormatRegistry::builder()
-        .register(silk_chiffon_format_parquet::definition())
-        .build()
-        .unwrap();
-    let row_group_size = row_group_size.to_string();
-    let matches = registry
-        .augment_transform_args(Command::new("benchmark").arg(Arg::new("sort_by").long("sort-by")))
-        .try_get_matches_from(["benchmark", "--parquet-row-group-size", &row_group_size])
-        .unwrap();
-    let bindings = registry.bind_transform(&matches).unwrap();
-    let binding = bindings
-        .get("parquet")
-        .unwrap()
-        .bind_sink(&SinkBindingConfig::new(
-            NonZeroUsize::new(4).unwrap(),
-            OpenSinkMode::OneAtATime,
-            Vec::new(),
-        ))
-        .await
-        .unwrap();
-    binding
-        .open_sink(
-            silk_chiffon_test_support::prepared_local_output(path),
-            schema,
-        )
-        .await
-        .unwrap()
-}
 
 fn create_schema(num_columns: usize) -> Arc<Schema> {
     let mut fields = Vec::with_capacity(num_columns);
@@ -286,9 +251,11 @@ fn bench_sequential(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_registered(c: &mut Criterion) {
+fn bench_adaptive(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("registered");
+    let mut group = c.benchmark_group("adaptive");
+
+    let runtimes = Arc::new(ParquetRuntimes::try_default().unwrap());
 
     for config in CONFIGS {
         let schema = create_schema(config.cols);
@@ -298,22 +265,40 @@ fn bench_registered(c: &mut Criterion) {
         group.throughput(Throughput::Bytes(size));
         group.bench_with_input(
             BenchmarkId::from_parameter(config),
-            &(&schema, &template, config),
-            |b, (schema, template, config)| {
+            &(&schema, &template, config, &runtimes),
+            |b, (schema, template, config, runtimes)| {
                 b.iter(|| {
                     rt.block_on(async {
                         let temp_dir = tempdir().unwrap();
                         let path = temp_dir.path().join("test.parquet");
-                        let mut writer =
-                            registered_sink(&path, Arc::clone(schema), config.row_group_size).await;
+                        let props = WriterProperties::builder().build();
+
+                        let writer_config = AdaptiveWriterConfig {
+                            max_row_group_size: config.row_group_size,
+                            max_row_group_concurrency: 4,
+                            buffer_size: 8 * 1024 * 1024,
+                            ingestion_queue_size: 1,
+                            encoding_queue_size: 4,
+                            writing_queue_size: 4,
+                            skip_arrow_metadata: true,
+                            ..Default::default()
+                        };
+
+                        let mut writer = AdaptiveParquetWriter::new(
+                            silk_chiffon_test_support::prepared_local_output(&path),
+                            schema,
+                            props,
+                            Arc::clone(runtimes),
+                            writer_config,
+                        );
 
                         for batch in black_box(BatchIterator {
                             template,
                             remaining: config.rows,
                         }) {
-                            writer.write_batch(batch).await.unwrap();
+                            writer.write(batch).await.unwrap();
                         }
-                        writer.finish().await.unwrap();
+                        writer.close().await.unwrap();
                     });
                 });
             },
@@ -323,5 +308,5 @@ fn bench_registered(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_sequential, bench_registered);
+criterion_group!(benches, bench_sequential, bench_adaptive);
 criterion_main!(benches);

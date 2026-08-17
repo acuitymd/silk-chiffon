@@ -208,8 +208,8 @@ Examples:
   Examples:
 
       --parquet-bloom-all  # Bloom for low-cardinality columns
-      --parquet-bloom-all "fpp=0.001"  # Tighter false positive rate
-      --parquet-bloom-all "ndv=10000"  # Force bloom on all columns
+      --parquet-bloom-all "fpp=0.001"                         # Tighter false positive rate
+      --parquet-bloom-all "ndv=10000"                         # Force bloom on ALL columns
       --parquet-bloom-all --parquet-bloom-column-off user_id  # Exclude user_id
 - `--parquet-bloom-all-off` — Disable bloom filters for all columns.
 
@@ -225,8 +225,7 @@ Examples:
 
   Overrides --parquet-bloom-all-off for the specified columns.
 
-  Without explicit NDV, the bloom filter depends on the dictionary decision.
-  See `--parquet-bloom-all`.
+  WITHOUT explicit NDV: bloom filter depends on dictionary decision (see --parquet-bloom-all).
   WITH explicit NDV: bloom filter is FORCED ON regardless of dictionary encoding.
 
   Use explicit NDV to enable bloom filters on high-cardinality columns that won't
@@ -249,8 +248,7 @@ Examples:
 
       --parquet-bloom-column "region"                    # If region keeps dictionary
       --parquet-bloom-column "user.address"              # All leaves under user.address
-      --parquet-bloom-column "user_id:ndv=1000000"
-      # Force bloom on a high-cardinality column
+      --parquet-bloom-column "user_id:ndv=1000000"       # Force bloom on high-card column
       --parquet-bloom-column "user_id:fpp=0.001"         # Tighter FPP
 - `--parquet-bloom-column-off <COLUMN>` — Disable bloom filter for specific columns (repeatable).
 
@@ -277,8 +275,7 @@ Examples:
   columns use their data page encoding directly (see --parquet-encoding).
 
   DEFAULT BEHAVIOR (without this flag):
-  - Most primitive columns use "analyze" mode. Cardinality analysis
-    decides per row group.
+  - Most primitive columns use "analyze" mode: cardinality analysis decides per-row-group
     whether to use dictionary (disabled if >20% distinct values)
   - Floats use "always" mode: high cardinality makes analysis unhelpful
   - Nested columns (structs, lists, maps) use "always" mode: dictionary encoding is
@@ -334,8 +331,7 @@ Examples:
 
   Examples:
 
-      --parquet-column-encoding id=delta-binary-packed
-      # Efficient for sorted integers
+      --parquet-column-encoding id=delta-binary-packed      # Efficient for sorted integers
       --parquet-column-encoding name=delta-byte-array       # Efficient for strings
       --parquet-column-encoding price=byte-stream-split     # Efficient for floats
 - `--parquet-column-encoding-threads <PARQUET_COLUMN_ENCODING_THREADS>` — Number of threads for CPU-bound parquet column encoding.
@@ -409,7 +405,7 @@ Examples:
 
   Possible values: `plain`, `rle`, `delta-binary-packed`, `delta-length-byte-array`, `delta-byte-array`, `byte-stream-split`
 
-- `--parquet-writing-threads <PARQUET_WRITING_THREADS>` — Number of threads for blocking Parquet writer operations.
+- `--parquet-io-threads <PARQUET_IO_THREADS>` — Number of threads for blocking Parquet writer operations.
 
   Controls the runtime used to serialize Parquet row groups into the object upload. Typically needs fewer threads than column encoding. Defaults to 1.
 - `--parquet-row-group-concurrency <PARQUET_ROW_GROUP_CONCURRENCY>` — Maximum number of row groups that can be encoding concurrently.
@@ -566,9 +562,9 @@ Inspect parquet file metadata and structure
   - `json`:
     JSON output
 
-- `-g`, `--row-group <ROW_GROUP>` — Row group to display details for.
+- `-g`, `--row-group <ROW_GROUP>` — Row group to display details for (default: 0)
 
-  Defaults to the first group when present.
+  Default value: `0`
 - `-p`, `--pages <PAGES>` — Show page details for columns (comma-separated, or omit value for all columns)
 - `--object-store-upload-part-size <PART_SIZE>` — Adaptive single-put threshold and multipart part size
 

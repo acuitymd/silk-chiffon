@@ -500,13 +500,11 @@ async fn exact_patterns_bypass_listing_and_globs_use_complete_literal_prefixes()
         storage.expand_input_pattern(&active).await.unwrap().len(),
         1
     );
-    let (heads, listing_prefixes) = {
-        let observations = OBSERVATIONS.lock().unwrap();
-        (observations.heads, observations.listing_prefixes.clone())
-    };
-    assert_eq!(heads, 1);
-    assert_eq!(listing_prefixes, [Some("data".to_owned())]);
+    let observations = OBSERVATIONS.lock().unwrap();
+    assert_eq!(observations.heads, 1);
+    assert_eq!(observations.listing_prefixes, [Some("data".to_owned())]);
 
+    drop(observations);
     let no_literal_prefix = LocationPattern::parse("mem://bucket/*.arrow").unwrap();
     assert!(
         storage

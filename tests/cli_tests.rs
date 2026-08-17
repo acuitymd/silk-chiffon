@@ -1,12 +1,12 @@
 use assert_cmd::cargo;
+use camino::Utf8Path;
 use predicates::prelude::*;
-use silk_chiffon_test_support::{
-    TestBatch, TestFile, parquet::ParquetContents, parquet::read_entire_file as read_parquet,
-};
+use silk_chiffon::inspection::parquet::ParquetInspector;
+use silk_chiffon_test_support::{TestBatch, TestFile};
 use tempfile::TempDir;
 
-fn inspect(path: &std::path::Path) -> ParquetContents {
-    read_parquet(path).unwrap()
+fn inspect(path: &std::path::Path) -> ParquetInspector {
+    ParquetInspector::open(Utf8Path::from_path(path).unwrap()).unwrap()
 }
 
 #[test]

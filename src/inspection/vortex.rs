@@ -1,8 +1,6 @@
 //! Vortex file inspection.
 
-#[cfg(test)]
-use std::fs::File;
-use std::{io::Write, sync::Arc};
+use std::{collections::HashMap, fs::File, io::Write, sync::Arc};
 
 use camino::{Utf8Path, Utf8PathBuf};
 
@@ -15,17 +13,15 @@ use vortex::arrow::ToArrowType;
 use vortex::file::{OpenOptionsSessionExt, SegmentSpec};
 use vortex::session::VortexSession;
 
-#[cfg(test)]
 use crate::inspection::magic::magic_bytes_match_start;
 
 use tabled::Tabled;
 
-use silk_chiffon_inspection_output::{
-    dim, format_bytes, format_number, header, label, render_schema_fields,
-    render_schema_fields_detailed, rounded_table, schema_json as schema_to_json, value,
+use crate::inspection::{
+    inspectable::{Inspectable, format_bytes, format_number, render_schema_fields, schema_to_json},
+    style::{dim, header, label, rounded_table, value},
 };
 
-#[cfg(test)]
 const VORTEX_MAGIC: &[u8] = b"VTXF";
 
 /// Row for segment table display.
@@ -51,17 +47,6 @@ pub struct VortexInspector {
 }
 
 impl VortexInspector {
-    pub(crate) fn render_schema(&self, out: &mut dyn Write) -> Result<()> {
-        writeln!(
-            out,
-            "\n{} ({} columns):",
-            header("Schema"),
-            value(self.schema.fields().len())
-        )?;
-        writeln!(out)?;
-        render_schema_fields_detailed(&self.schema, out)
-    }
-
     pub fn open_file(path: &Utf8Path) -> Result<Self> {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
@@ -180,24 +165,29 @@ impl VortexInspector {
     }
 }
 
-impl VortexInspector {
-    #[cfg(test)]
+impl Inspectable for VortexInspector {
     fn is_format(path: &Utf8Path) -> Result<bool> {
         let mut file = File::open(path)?;
         magic_bytes_match_start(&mut file, VORTEX_MAGIC)
     }
 
-    #[cfg(test)]
     fn format_name(&self) -> &str {
         "Vortex (file)"
     }
 
-    #[cfg(test)]
+    fn schema(&self) -> &SchemaRef {
+        &self.schema
+    }
+
     fn row_count(&self) -> Option<u64> {
         Some(self.num_rows)
     }
 
-    pub(crate) fn render_default(&self, out: &mut dyn Write) -> Result<()> {
+    fn custom_metadata(&self) -> Option<&HashMap<String, String>> {
+        None
+    }
+
+    fn render_default(&self, out: &mut dyn Write) -> Result<()> {
         writeln!(
             out,
             "{} {}",
@@ -238,7 +228,7 @@ impl VortexInspector {
         Ok(())
     }
 
-    pub(crate) fn to_json(&self) -> Value {
+    fn to_json(&self) -> Value {
         let stats_json: Option<Vec<Value>> = self.file_stats.as_ref().map(|stats| {
             stats
                 .iter()

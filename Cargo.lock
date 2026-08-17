@@ -4344,7 +4344,6 @@ dependencies = [
  "async-trait",
  "bytes",
  "camino",
- "chrono",
  "clap",
  "datafusion",
  "datafusion-datasource",
@@ -4382,7 +4381,6 @@ dependencies = [
  "serde",
  "serde_json",
  "silk-chiffon-core",
- "silk-chiffon-inspection-output",
  "silk-chiffon-storage",
  "silk-chiffon-test-support",
  "tabled",
@@ -4390,56 +4388,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "url",
-]
-
-[[package]]
-name = "silk-chiffon-format-parquet"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "apply_if",
- "arrow",
- "async-stream",
- "async-trait",
- "bytes",
- "bytesize",
- "camino",
- "chrono",
- "clap",
- "criterion",
- "datafusion",
- "futures",
- "num-format",
- "object_store",
- "owo-colors",
- "parquet",
- "rand 0.10.2",
- "serde",
- "serde_json",
- "silk-chiffon-core",
- "silk-chiffon-inspection-output",
- "silk-chiffon-storage",
- "silk-chiffon-test-support",
- "tabled",
- "tempfile",
- "tokio",
- "tokio-util",
- "url",
-]
-
-[[package]]
-name = "silk-chiffon-inspection-output"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arrow",
- "humansize",
- "num-format",
- "owo-colors",
- "serde",
- "serde_json",
- "silk-chiffon-storage",
- "tabled",
 ]
 
 [[package]]
@@ -4469,11 +4417,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arrow",
- "async-trait",
- "bytes",
- "clap",
  "futures",
- "object_store",
  "parquet",
  "silk-chiffon-storage",
  "tempfile",
@@ -4489,6 +4433,7 @@ dependencies = [
  "apply_if",
  "arrow",
  "assert_cmd",
+ "async-stream",
  "async-trait",
  "bytes",
  "bytesize",
@@ -4506,6 +4451,7 @@ dependencies = [
  "lru",
  "mimalloc",
  "minijinja",
+ "num-format",
  "object_store",
  "owo-colors",
  "parking_lot",
@@ -4517,8 +4463,6 @@ dependencies = [
  "serde_json",
  "silk-chiffon-core",
  "silk-chiffon-format-arrow",
- "silk-chiffon-format-parquet",
- "silk-chiffon-inspection-output",
  "silk-chiffon-storage",
  "silk-chiffon-test-support",
  "strum_macros",
