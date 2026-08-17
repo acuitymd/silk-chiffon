@@ -6,7 +6,7 @@ use silk_chiffon::{
     SortSpec,
 };
 use silk_chiffon_core::QueryDialect;
-use silk_chiffon_test_support::{TestBatch, TestExtract, TestFile};
+use silk_chiffon_test_support::{TestBatch, TestExtract, TestFile, prepared_local_output};
 use std::ffi::OsString;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -1557,6 +1557,11 @@ async fn arrow_stream_checks_each_file_schema_before_yielding_its_first_batch() 
 
 #[tokio::test]
 async fn empty_vortex_files_still_participate_in_leaf_schema_validation() {
+    use silk_chiffon::sinks::{
+        data_sink::DataSink,
+        vortex::{VortexSink, VortexSinkOptions},
+    };
+
     let temp_dir = TempDir::new().unwrap();
     let mismatched = temp_dir.path().join("a.vortex");
     let representative = temp_dir.path().join("z.vortex");
@@ -1566,18 +1571,22 @@ async fn empty_vortex_files_still_participate_in_leaf_schema_validation() {
         DataType::Int32,
         false,
     )]));
-    let bytes = silk_chiffon_test_support::vortex::write_batches(&mismatched_schema, Vec::new())
-        .await
-        .unwrap();
-    std::fs::write(&mismatched, bytes).unwrap();
-    let representative_batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
-    let bytes = silk_chiffon_test_support::vortex::write_batches(
-        &representative_batch.schema(),
-        vec![representative_batch],
+    let sink = VortexSink::create(
+        prepared_local_output(&mismatched),
+        &mismatched_schema,
+        VortexSinkOptions::new(),
     )
-    .await
     .unwrap();
-    std::fs::write(&representative, bytes).unwrap();
+    Box::new(sink).finish().await.unwrap();
+    let representative_batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    let mut sink = VortexSink::create(
+        prepared_local_output(&representative),
+        &representative_batch.schema(),
+        VortexSinkOptions::new(),
+    )
+    .unwrap();
+    sink.write_batch(representative_batch).await.unwrap();
+    Box::new(sink).finish().await.unwrap();
 
     let error = run_transform(TestTransformCommand {
         patterns: vec![format!("{}/*.vortex", temp_dir.path().display())],

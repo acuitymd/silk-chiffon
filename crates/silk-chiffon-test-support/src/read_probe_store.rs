@@ -25,7 +25,6 @@ use object_store::{
 pub struct ReadProbeStore {
     inner: InMemory,
     ranges: Mutex<Vec<GetRange>>,
-    head_requests: AtomicUsize,
     fail_reads: AtomicBool,
     active_reads: AtomicUsize,
     max_active_reads: AtomicUsize,
@@ -37,7 +36,6 @@ impl ReadProbeStore {
         Self {
             inner: InMemory::new(),
             ranges: Mutex::new(Vec::new()),
-            head_requests: AtomicUsize::new(0),
             fail_reads: AtomicBool::new(false),
             active_reads: AtomicUsize::new(0),
             max_active_reads: AtomicUsize::new(0),
@@ -47,7 +45,6 @@ impl ReadProbeStore {
     /// Clears observations and disables injected failures without deleting objects.
     pub fn reset_observation(&self) {
         self.ranges.lock().unwrap().clear();
-        self.head_requests.store(0, Ordering::SeqCst);
         self.fail_reads.store(false, Ordering::SeqCst);
         self.active_reads.store(0, Ordering::SeqCst);
         self.max_active_reads.store(0, Ordering::SeqCst);
@@ -56,11 +53,6 @@ impl ReadProbeStore {
     /// Returns every non-HEAD range requested since the last reset.
     pub fn ranges(&self) -> Vec<GetRange> {
         self.ranges.lock().unwrap().clone()
-    }
-
-    /// Returns the number of metadata-only requests since the last reset.
-    pub fn head_requests(&self) -> usize {
-        self.head_requests.load(Ordering::SeqCst)
     }
 
     /// Makes subsequent non-HEAD reads fail until observations are reset.
@@ -125,9 +117,7 @@ impl ObjectStore for ReadProbeStore {
         options: GetOptions,
     ) -> object_store::Result<GetResult> {
         let _active = self.observe_active_read();
-        if options.head {
-            self.head_requests.fetch_add(1, Ordering::SeqCst);
-        } else {
+        if !options.head {
             if self.fail_reads.load(Ordering::SeqCst) {
                 return Err(probe_error("controlled object-store read failure"));
             }
@@ -187,10 +177,6 @@ mod tests {
 
         assert_eq!(store.get_range(&path, 1..4).await.unwrap(), "bcd");
         assert_eq!(store.ranges(), [GetRange::Bounded(1..4)]);
-        assert_eq!(store.head_requests(), 0);
-
-        store.head(&path).await.unwrap();
-        assert_eq!(store.head_requests(), 1);
 
         let error = store.get(&path).await.unwrap_err();
         assert!(error.to_string().contains("unbounded object read"));

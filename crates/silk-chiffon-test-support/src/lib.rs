@@ -1,8 +1,7 @@
 //! Internal fixtures shared by Silk Chiffon's tests and benchmarks.
 //!
-//! This crate is development-only. It deliberately knows concrete Arrow,
-//! Parquet, and Vortex encodings so runtime crates do not carry fixture
-//! behavior.
+//! This crate is development-only. It deliberately knows concrete Arrow and Parquet encodings so
+//! runtime crates do not carry fixture behavior.
 
 pub mod batch;
 pub mod controlled_upload;
@@ -12,7 +11,6 @@ pub mod output;
 pub mod parquet;
 pub mod read_probe_store;
 pub mod verify;
-pub mod vortex;
 
 pub use batch::{StructColumnBuilder, TestBatch, TestBatchBuilder};
 pub use extract::TestExtract;
@@ -185,17 +183,6 @@ mod tests {
         assert_eq!(read_batches.len(), 1);
         assert_eq!(read_batches[0].num_rows(), 3);
         assert_eq!(TestExtract::i32(&read_batches[0], "id"), vec![1, 2, 3]);
-    }
-
-    #[tokio::test]
-    async fn test_vortex_fixture_uses_the_upstream_writer() {
-        let batch = TestBatch::simple();
-        let bytes = vortex::write_batches(&batch.schema(), vec![batch])
-            .await
-            .unwrap();
-
-        assert_eq!(&bytes[..4], b"VTXF");
-        assert_eq!(&bytes[bytes.len() - 4..], b"VTXF");
     }
 
     #[test]

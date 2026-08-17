@@ -61,7 +61,6 @@ fn workspace_contains_foundation_packages() {
     assert!(packages.contains_key("silk-chiffon-storage"));
     assert!(packages.contains_key("silk-chiffon-format-arrow"));
     assert!(packages.contains_key("silk-chiffon-format-parquet"));
-    assert!(packages.contains_key("silk-chiffon-format-vortex"));
     assert!(packages.contains_key("silk-chiffon-inspection-output"));
     assert!(packages.contains_key("silk-chiffon-test-support"));
 }
@@ -161,37 +160,6 @@ fn parquet_and_inspection_output_dependencies_have_one_direction() {
 }
 
 #[test]
-fn vortex_dependencies_have_one_direction() {
-    let packages = workspace_packages();
-    let root = packages.get("silk_chiffon").unwrap();
-    let vortex = packages.get("silk-chiffon-format-vortex").unwrap();
-
-    assert!(root.contains(&Dependency {
-        name: "silk-chiffon-format-vortex".to_owned(),
-        kind: None,
-    }));
-    assert!(root.iter().all(|dependency| {
-        dependency.name != "vortex" && dependency.name != "vortex-datafusion"
-    }));
-    assert!(vortex.contains(&Dependency {
-        name: "silk-chiffon-core".to_owned(),
-        kind: None,
-    }));
-    assert!(vortex.contains(&Dependency {
-        name: "silk-chiffon-storage".to_owned(),
-        kind: None,
-    }));
-    assert!(vortex.contains(&Dependency {
-        name: "silk-chiffon-inspection-output".to_owned(),
-        kind: None,
-    }));
-    assert!(vortex.contains(&Dependency {
-        name: "silk-chiffon-test-support".to_owned(),
-        kind: Some("dev".to_owned()),
-    }));
-}
-
-#[test]
 fn root_no_longer_owns_arrow_ipc_or_shared_fixtures() {
     let root = env!("CARGO_MANIFEST_DIR");
     for relative in [
@@ -220,22 +188,6 @@ fn root_no_longer_owns_parquet_or_shared_inspection_output() {
         "src/inspection/style.rs",
         "src/utils/blocking.rs",
         "src/utils/parquet_inspection.rs",
-    ] {
-        assert!(
-            !std::path::Path::new(root).join(relative).exists(),
-            "obsolete root path remains: {relative}"
-        );
-    }
-}
-
-#[test]
-fn root_no_longer_owns_vortex() {
-    let root = env!("CARGO_MANIFEST_DIR");
-    for relative in [
-        "src/sources/vortex.rs",
-        "src/sinks/vortex.rs",
-        "src/inspection/vortex.rs",
-        "src/inspection/magic.rs",
     ] {
         assert!(
             !std::path::Path::new(root).join(relative).exists(),

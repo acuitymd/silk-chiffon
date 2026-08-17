@@ -4428,31 +4428,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "silk-chiffon-format-vortex"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arrow",
- "async-trait",
- "bytes",
- "clap",
- "datafusion",
- "futures",
- "object_store",
- "serde_json",
- "silk-chiffon-core",
- "silk-chiffon-inspection-output",
- "silk-chiffon-storage",
- "silk-chiffon-test-support",
- "tabled",
- "tempfile",
- "tokio",
- "url",
- "vortex",
- "vortex-datafusion",
-]
-
-[[package]]
 name = "silk-chiffon-inspection-output"
 version = "0.1.0"
 dependencies = [
@@ -4504,7 +4479,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "url",
- "vortex",
 ]
 
 [[package]]
@@ -4512,6 +4486,7 @@ name = "silk_chiffon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "apply_if",
  "arrow",
  "assert_cmd",
  "async-trait",
@@ -4543,7 +4518,6 @@ dependencies = [
  "silk-chiffon-core",
  "silk-chiffon-format-arrow",
  "silk-chiffon-format-parquet",
- "silk-chiffon-format-vortex",
  "silk-chiffon-inspection-output",
  "silk-chiffon-storage",
  "silk-chiffon-test-support",
@@ -4556,6 +4530,8 @@ dependencies = [
  "tokio-util",
  "url",
  "uuid",
+ "vortex",
+ "vortex-datafusion",
 ]
 
 [[package]]

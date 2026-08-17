@@ -1,7 +1,9 @@
 pub mod commands;
+pub mod inspection;
 pub mod operations;
 pub mod registration;
 pub mod sinks;
+pub mod sources;
 pub mod utils;
 
 use crate::utils::collections::{uniq, uniq_by};
@@ -813,6 +815,13 @@ struct TransformArgs {
     pub overwrite: bool,
 }
 
+#[derive(Args, Clone, Debug)]
+pub struct VortexArgs {
+    /// Vortex record batch size.
+    #[arg(long, help_heading = "Vortex Options")]
+    pub vortex_record_batch_size: Option<usize>,
+}
+
 /// Parsed transform arguments with command-scoped format bindings and storage state.
 pub struct TransformCommand {
     inputs: InputRequest,
@@ -1031,6 +1040,19 @@ impl DetectCommand {
     ) {
         (self.args, self.storage, self.formats)
     }
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct InspectVortexArgs {
+    /// Show full schema details
+    #[arg(long)]
+    pub schema: bool,
+    /// Show per-column statistics
+    #[arg(long)]
+    pub stats: bool,
+    /// Show layout structure
+    #[arg(long)]
+    pub layout: bool,
 }
 
 /// Output format for inspect commands

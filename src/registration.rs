@@ -2,26 +2,38 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     ffi::OsString,
     fmt,
+    sync::Arc,
 };
 
-use anyhow::Result;
+use ::arrow::datatypes::SchemaRef;
+use anyhow::{Context, Result, anyhow};
+use apply_if::ApplyIf;
+use async_trait::async_trait;
+use camino::Utf8PathBuf;
 use clap::{
     Args, Command as ClapCommand, CommandFactory, FromArgMatches,
     builder::{PossibleValue, PossibleValuesParser},
 };
+use datafusion::{catalog::TableProvider, prelude::SessionContext};
+use object_store::ObjectStoreExt;
 use silk_chiffon_core::{
-    FormatRegistry, InspectionMode, ServiceInputBinding, ServiceInputDefinition,
-    ServiceOutputBinding, ServiceOutputDefinition,
+    DataSink, FormatDefinition, FormatFuture, FormatRegistry, InputDetection, InputLeaf,
+    InputVariant, InspectionDefinition, InspectionMode, InspectionOutput, ServiceInputBinding,
+    ServiceInputDefinition, ServiceOutputBinding, ServiceOutputDefinition, SinkBinding,
+    SinkBindingConfig, TransformDefinition,
 };
-use silk_chiffon_storage::{StorageDirection, StorageRegistry};
+use silk_chiffon_storage::{InputObject, StorageDirection, StorageHandle, StorageRegistry};
 use thiserror::Error;
 
 #[cfg(feature = "local")]
 use silk_chiffon_storage::local;
 
 use crate::{
-    Cli, Command as RuntimeCommand, DetectArgs, DetectCommand, InspectCommand, InspectionArgs,
-    OutputFormat, TransformArgs, TransformCommand,
+    Cli, Command as RuntimeCommand, DetectArgs, DetectCommand, InspectCommand, InspectVortexArgs,
+    InspectionArgs, OutputFormat, TransformArgs, TransformCommand, VortexArgs,
+    inspection::vortex::VortexInspector,
+    sinks::vortex::{VortexSink, VortexSinkOptions},
+    sources::vortex as vortex_source,
 };
 
 /// Builds the executable's set of available data formats.
@@ -29,7 +41,7 @@ pub fn format_registry() -> FormatRegistry {
     FormatRegistry::builder()
         .register(silk_chiffon_format_arrow::definition())
         .register(silk_chiffon_format_parquet::definition())
-        .register(silk_chiffon_format_vortex::definition())
+        .register(vortex_format())
         .build()
         .expect("built-in format registrations must not conflict")
 }
@@ -654,6 +666,106 @@ fn clap_error(error: impl std::fmt::Display) -> clap::Error {
     clap::Error::raw(clap::error::ErrorKind::ValueValidation, error.to_string())
 }
 
+fn vortex_format() -> FormatDefinition {
+    FormatDefinition::builder("vortex", "Vortex")
+        .extensions(["vortex"])
+        .detector(detect_vortex)
+        .detection_priority(2)
+        .transform(
+            TransformDefinition::with_args::<VortexArgs>()
+                .input_provider(create_vortex_provider)
+                .sink(bind_vortex_sink)
+                .build(),
+        )
+        .inspection(InspectionDefinition::with_args::<InspectVortexArgs>(
+            inspect_vortex,
+        ))
+        .build()
+}
+
+fn detect_vortex(object: &InputObject) -> FormatFuture<'_, InputDetection> {
+    Box::pin(async move {
+        if object.metadata().size < 4 {
+            return Ok(InputDetection::Mismatch);
+        }
+        let handle = object.handle();
+        let magic = handle
+            .object_store()
+            .get_range(handle.object_path(), 0..4)
+            .await?;
+        Ok(if magic.as_ref() == b"VTXF" {
+            InputDetection::Match(InputVariant::named("file", "file"))
+        } else {
+            InputDetection::Mismatch
+        })
+    })
+}
+
+fn create_vortex_provider<'a>(
+    leaf: &'a InputLeaf,
+    session: &'a SessionContext,
+    _args: &'a VortexArgs,
+) -> FormatFuture<'a, Arc<dyn TableProvider>> {
+    Box::pin(vortex_source::create_provider(leaf, session))
+}
+
+fn bind_vortex_sink<'a>(
+    _context: &'a SinkBindingConfig,
+    args: &'a VortexArgs,
+) -> FormatFuture<'a, Box<dyn SinkBinding>> {
+    let options = VortexSinkOptions::new().apply_if_some(
+        args.vortex_record_batch_size,
+        VortexSinkOptions::with_record_batch_size,
+    );
+    Box::pin(async move { Ok(Box::new(VortexSinkBinding { options }) as Box<dyn SinkBinding>) })
+}
+
+struct VortexSinkBinding {
+    options: VortexSinkOptions,
+}
+
+#[async_trait]
+impl SinkBinding for VortexSinkBinding {
+    async fn open_sink(
+        &self,
+        handle: StorageHandle,
+        schema: SchemaRef,
+    ) -> Result<Box<dyn DataSink>> {
+        Ok(Box::new(VortexSink::create(handle, &schema, self.options)?))
+    }
+}
+
+fn inspect_vortex<'a>(
+    object: &'a InputObject,
+    mode: InspectionMode,
+    args: &'a InspectVortexArgs,
+) -> FormatFuture<'a, InspectionOutput> {
+    Box::pin(async move {
+        let path = local_utf8_path(object.handle())?;
+        let inspector = VortexInspector::open_file(&path).context("Failed to open Vortex file")?;
+        if mode == InspectionMode::Json {
+            return Ok(InspectionOutput::Json(inspector.to_json()));
+        }
+        let mut output = Vec::new();
+        inspector.render_default(&mut output)?;
+        if args.schema {
+            inspector.render_schema(&mut output)?;
+        }
+        if args.stats {
+            inspector.render_stats(&mut output)?;
+        }
+        if args.layout {
+            inspector.render_layout(&mut output)?;
+        }
+        Ok(InspectionOutput::Text(String::from_utf8(output)?))
+    })
+}
+
+fn local_utf8_path(handle: &StorageHandle) -> Result<Utf8PathBuf> {
+    Utf8PathBuf::from_path_buf(handle.local_path()?)
+        .map_err(|path| anyhow!("Local path is not valid UTF-8: {}", path.display()))
+}
+
 #[cfg(all(test, feature = "local-bare-paths"))]
 mod tests {
     use std::{
@@ -691,7 +803,9 @@ mod tests {
 
     use super::{ApplicationAssemblyError, ApplicationDefinition, storage_registry};
     use crate::{CliSchema, Command};
-    use silk_chiffon_test_support::{TestBatch, TestExtract, TestFile, parquet::read_entire_file};
+    use silk_chiffon_test_support::{
+        TestBatch, TestExtract, TestFile, parquet::read_entire_file, prepared_local_output,
+    };
     static SINK_BINDINGS: AtomicUsize = AtomicUsize::new(0);
     static SERVICE_INPUT_REFERENCES: Mutex<Vec<String>> = Mutex::new(Vec::new());
     static SERVICE_OUTPUT_RESULT: Mutex<Option<(String, usize)>> = Mutex::new(None);
@@ -860,9 +974,17 @@ mod tests {
     }
 
     async fn vortex_bytes(batch: RecordBatch) -> Vec<u8> {
-        silk_chiffon_test_support::vortex::write_batches(&batch.schema(), vec![batch])
-            .await
-            .unwrap()
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("input.vortex");
+        let mut sink = crate::sinks::vortex::VortexSink::create(
+            prepared_local_output(&path),
+            &batch.schema(),
+            crate::sinks::vortex::VortexSinkOptions::new(),
+        )
+        .unwrap();
+        sink.write_batch(batch).await.unwrap();
+        Box::new(sink).finish().await.unwrap();
+        std::fs::read(path).unwrap()
     }
 
     fn test_provider(batch: RecordBatch) -> Result<Arc<dyn TableProvider>> {
@@ -1138,7 +1260,7 @@ mod tests {
             FormatRegistry::builder()
                 .register(silk_chiffon_format_arrow::definition())
                 .register(silk_chiffon_format_parquet::definition())
-                .register(silk_chiffon_format_vortex::definition())
+                .register(super::vortex_format())
                 .build()
                 .unwrap(),
             remote_storage_registry(),
