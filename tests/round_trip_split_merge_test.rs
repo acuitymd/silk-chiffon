@@ -8,54 +8,25 @@
 //!
 //! Tests arrow, parquet, and vortex formats to ensure data survives a split + merge round trip.
 
-use std::num::NonZeroUsize;
 use std::ops::Range;
 use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{Date32Array, Int16Array, Int32Array, RecordBatch};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
-use clap::Command;
 use datafusion::{datasource::file_format::options::ArrowReadOptions, prelude::SessionContext};
 use rand::rngs::SmallRng;
 use rand::{Rng, RngExt, SeedableRng};
+use silk_chiffon::sinks::arrow::{ArrowSink, ArrowSinkOptions};
 use silk_chiffon::sinks::data_sink::DataSink;
 use silk_chiffon::sinks::parquet::ParquetSink;
 use silk_chiffon::sinks::parquet::ParquetSinkOptions;
 use silk_chiffon::sinks::parquet::pools::ParquetRuntimes;
 use silk_chiffon::sinks::vortex::{VortexSink, VortexSinkOptions};
-use silk_chiffon_core::{FormatRegistry, OpenSinkMode, SinkBindingConfig};
-use silk_chiffon_test_support::prepared_local_output;
 use tempfile::TempDir;
 
 const NUM_ROWS: usize = 10_000_000;
 const BATCH_SIZE: usize = 500_000;
-
-async fn registered_arrow_sink(path: &Path, schema: &SchemaRef) -> Box<dyn DataSink> {
-    let registry = FormatRegistry::builder()
-        .register(silk_chiffon_format_arrow::definition())
-        .build()
-        .unwrap();
-    let matches = registry
-        .augment_transform_args(Command::new("test"))
-        .try_get_matches_from(["test"])
-        .unwrap();
-    let bindings = registry.bind_transform(&matches).unwrap();
-    let sink_binding = bindings
-        .get("arrow")
-        .unwrap()
-        .bind_sink(&SinkBindingConfig::new(
-            NonZeroUsize::new(1).unwrap(),
-            OpenSinkMode::OneAtATime,
-            Vec::new(),
-        ))
-        .await
-        .unwrap();
-    sink_binding
-        .open_sink(prepared_local_output(path), Arc::clone(schema))
-        .await
-        .unwrap()
-}
 
 fn rand_i32(rng: &mut impl Rng, range: Range<i32>, null_pct: f64) -> Option<i32> {
     if rng.random_bool(null_pct) {
@@ -228,12 +199,19 @@ async fn write_test_data(path: &Path, schema: &SchemaRef, ext: &str) {
     // SmallRng is like 5x faster(!!) than the default RNG (ChaChaRng)
     let mut rng = SmallRng::from_rng(&mut rand::rng());
     let mut sink: Box<dyn DataSink> = match ext {
-        "arrow" => registered_arrow_sink(path, schema).await,
+        "arrow" => Box::new(
+            ArrowSink::create(
+                silk_chiffon::utils::test_helpers::prepared_local_output(path),
+                schema,
+                ArrowSinkOptions::default(),
+            )
+            .unwrap(),
+        ),
         "parquet" => {
             let runtimes = Arc::new(ParquetRuntimes::try_default().unwrap());
             Box::new(
                 ParquetSink::create(
-                    prepared_local_output(path),
+                    silk_chiffon::utils::test_helpers::prepared_local_output(path),
                     schema,
                     &ParquetSinkOptions::default(),
                     runtimes,
@@ -243,7 +221,7 @@ async fn write_test_data(path: &Path, schema: &SchemaRef, ext: &str) {
         }
         "vortex" => Box::new(
             VortexSink::create(
-                prepared_local_output(path),
+                silk_chiffon::utils::test_helpers::prepared_local_output(path),
                 schema,
                 VortexSinkOptions::default(),
             )

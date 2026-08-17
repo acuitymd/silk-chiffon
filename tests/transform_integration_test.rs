@@ -4,9 +4,12 @@ use camino::Utf8PathBuf;
 use silk_chiffon::{
     Cli, Command, ListOutputsFormat, PartitionStrategy, PoolReserveSpec, SortColumn, SortDirection,
     SortSpec,
+    utils::{
+        test_data::{TestBatch, TestFile},
+        test_helpers::prepared_local_output,
+    },
 };
 use silk_chiffon_core::QueryDialect;
-use silk_chiffon_test_support::{TestBatch, TestExtract, TestFile, prepared_local_output};
 use std::ffi::OsString;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -1393,7 +1396,10 @@ async fn arrow_stream_projection_and_limit_execute_in_the_custom_opener() {
 
     let batches = TestFile::read_arrow(&output);
     assert_eq!(batches[0].schema().fields().len(), 1);
-    assert_eq!(TestExtract::string_all(&batches, "name"), ["a", "b", "c"]);
+    assert_eq!(
+        silk_chiffon::utils::test_data::TestExtract::string_all(&batches, "name"),
+        ["a", "b", "c"]
+    );
 }
 
 #[tokio::test]
@@ -1418,7 +1424,10 @@ async fn arrow_stream_exact_statistics_count_every_zero_body_batch() {
     .unwrap();
 
     let batches = TestFile::read_arrow(&output);
-    assert_eq!(TestExtract::i64(&batches[0], "row_count"), [5]);
+    assert_eq!(
+        silk_chiffon::utils::test_data::TestExtract::i64(&batches[0], "row_count"),
+        [5]
+    );
 }
 
 #[tokio::test]
@@ -1451,7 +1460,8 @@ async fn multiple_arrow_streams_repartition_only_at_file_boundaries() {
     .await
     .unwrap();
 
-    let mut ids = TestExtract::i32_all(&TestFile::read_arrow(&output), "id");
+    let mut ids =
+        silk_chiffon::utils::test_data::TestExtract::i32_all(&TestFile::read_arrow(&output), "id");
     ids.sort_unstable();
     assert_eq!(ids, [1, 2, 3, 10, 11, 12]);
 }
@@ -1474,7 +1484,8 @@ async fn one_pattern_groups_arrow_file_and_stream_variants_separately() {
     .await
     .unwrap();
 
-    let mut ids = TestExtract::i32_all(&TestFile::read_arrow(&output), "id");
+    let mut ids =
+        silk_chiffon::utils::test_data::TestExtract::i32_all(&TestFile::read_arrow(&output), "id");
     ids.sort_unstable();
     assert_eq!(ids, [1, 2, 3, 4]);
 }
@@ -2028,9 +2039,10 @@ async fn different_input_leaves_union_reordered_and_missing_columns_by_name() {
     let mut rows = batches
         .iter()
         .flat_map(|batch| {
-            let ids = TestExtract::i32(batch, "id");
-            let left = TestExtract::string_nullable(batch, "left");
-            let right = TestExtract::string_nullable(batch, "right");
+            let ids = silk_chiffon::utils::test_data::TestExtract::i32(batch, "id");
+            let left = silk_chiffon::utils::test_data::TestExtract::string_nullable(batch, "left");
+            let right =
+                silk_chiffon::utils::test_data::TestExtract::string_nullable(batch, "right");
             ids.into_iter()
                 .zip(left)
                 .zip(right)

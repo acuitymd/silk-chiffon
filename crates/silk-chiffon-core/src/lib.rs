@@ -5,7 +5,6 @@ mod format;
 mod input_store;
 mod inspection;
 mod pipeline;
-mod schema;
 mod service_input;
 mod service_output;
 
@@ -26,7 +25,6 @@ pub use pipeline::{
     InputSources, Pipeline, PipelineExecution, PipelineExecutionStartError,
     PipelinePreparationError, PreparedPipeline, QueryDialect, SpillCompression,
 };
-pub use schema::schemas_match_ignoring_metadata;
 pub use service_input::{
     ServiceInputBinding, ServiceInputDefinition, ServiceInputDefinitionBuildError,
     ServiceInputDefinitionBuilder, ServiceInputProviderError, ServiceInputProviderFn,

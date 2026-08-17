@@ -32,7 +32,7 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use parquet::file::properties::WriterProperties;
-use silk_chiffon_storage::{ObjectUpload, ObjectUploadTask, StorageHandle};
+use silk_chiffon_storage::{ObjectUpload, StorageHandle};
 use tokio::{runtime::Handle, sync::mpsc, task::JoinSet};
 use tokio_util::{
     sync::CancellationToken,
@@ -42,12 +42,15 @@ use url::Url;
 
 pub use config::AdaptiveWriterConfig;
 
-use crate::sinks::parquet::{ParquetRuntimes, ParquetWriter};
+use crate::sinks::{
+    object_sink_task::ObjectSinkTask,
+    parquet::{ParquetRuntimes, ParquetWriter},
+};
 use pipeline::{PipelineSetup, run_pipeline};
 
 pub struct AdaptiveParquetWriter {
     ingestion_sender: Option<mpsc::Sender<RecordBatch>>,
-    task: Option<ObjectUploadTask<u64>>,
+    task: Option<ObjectSinkTask<u64>>,
 }
 
 #[derive(Clone)]
@@ -125,7 +128,7 @@ impl AdaptiveParquetWriter {
             .blocking_writer()
             .expect("a new object upload accepts one byte writer");
 
-        let task = ObjectUploadTask::spawn("Parquet writer", upload, {
+        let task = ObjectSinkTask::spawn("Parquet writer", upload, {
             let schema = Arc::clone(schema);
             move |cancellation| {
                 tokio::spawn(run_pipeline(PipelineSetup {
@@ -143,14 +146,6 @@ impl AdaptiveParquetWriter {
             ingestion_sender: Some(ingestion_tx),
             task: Some(task),
         }
-    }
-
-    fn stop_pipeline_input(&mut self) {
-        // Closing the channel looks like successful EOF, so publish cancellation first.
-        if let Some(task) = &self.task {
-            task.cancellation().cancel();
-        }
-        self.ingestion_sender.take();
     }
 
     pub async fn write(&mut self, batch: RecordBatch) -> Result<()> {
@@ -210,19 +205,13 @@ impl AdaptiveParquetWriter {
     }
 
     pub async fn cancel(mut self) -> Result<()> {
-        self.stop_pipeline_input();
+        self.ingestion_sender.take();
         let task = self.task.take().ok_or_else(|| anyhow!("already closed"))?;
         task.abort().await
     }
 
     pub fn blocking_cancel(self) -> Result<()> {
         crate::utils::blocking::block_on(self.cancel())
-    }
-}
-
-impl Drop for AdaptiveParquetWriter {
-    fn drop(&mut self) {
-        self.stop_pipeline_input();
     }
 }
 
@@ -266,9 +255,8 @@ mod tests {
 
     use crate::{
         AllColumnsBloomFilterConfig, BloomFilterConfigBuilder, ColumnBloomFilterConfig,
-        ColumnSpecificBloomFilterConfig,
+        ColumnSpecificBloomFilterConfig, utils::test_helpers::prepared_local_output,
     };
-    use silk_chiffon_test_support::prepared_local_output;
 
     fn test_runtimes() -> Arc<ParquetRuntimes> {
         Arc::new(ParquetRuntimes::try_new(2, 1).unwrap())

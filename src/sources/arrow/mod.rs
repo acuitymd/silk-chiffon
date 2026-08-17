@@ -4,7 +4,6 @@ use std::{
     sync::{Arc, Weak},
 };
 
-use crate::variant::IpcVariant;
 use anyhow::{Context, Result};
 use arrow::{
     buffer::Buffer,
@@ -40,25 +39,41 @@ use datafusion_datasource::{
 use futures::TryStreamExt;
 use object_store::{ObjectMeta, ObjectStore, ObjectStoreExt};
 use parking_lot::Mutex;
-use silk_chiffon_core::{
-    CanonicalInput, InputLeaf, file_table_provider, schemas_match_ignoring_metadata,
-};
+use silk_chiffon_core::{CanonicalInput, InputLeaf, InputVariant, file_table_provider};
 use tokio::sync::OnceCell;
 
+use crate::sources::file::structurally_equal;
+
 const SAMPLE_ROWS: usize = 100_000;
-pub(crate) const MAX_IPC_SAFETY_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_IPC_MESSAGE_BYTES: u64 = 512 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ArrowIpcVariant {
+    File,
+    Stream,
+}
+
+impl ArrowIpcVariant {
+    fn parse(variant: &InputVariant) -> Result<Self> {
+        match variant.name() {
+            Some("file") => Ok(Self::File),
+            Some("stream") => Ok(Self::Stream),
+            other => anyhow::bail!("unknown Arrow IPC input variant {other:?}"),
+        }
+    }
+}
 
 pub(crate) async fn create_provider(
     leaf: &InputLeaf,
     session: &SessionContext,
 ) -> Result<Arc<dyn TableProvider>> {
-    let variant = IpcVariant::parse(leaf.variant())?;
+    let variant = ArrowIpcVariant::parse(leaf.variant())?;
     let store_url = leaf.object_store_url().clone();
     let files = leaf.files().to_vec();
     let store = session.runtime_env().object_store(&store_url)?;
     let active_files = Arc::new(ActiveFiles::default());
     let memory_pool = Arc::clone(&session.runtime_env().memory_pool);
-    let format = Arc::new(IpcFileFormat {
+    let format = Arc::new(ArrowIpcFormat {
         variant,
         active_files,
         memory_pool: Arc::clone(&memory_pool),
@@ -71,7 +86,7 @@ pub(crate) async fn create_provider(
         .url()
         .as_str();
     let schema = match variant {
-        IpcVariant::File => {
+        ArrowIpcVariant::File => {
             let lease = format.active_files.lease(representative_meta);
             Ok::<_, datafusion::common::DataFusionError>(Arc::clone(
                 &lease
@@ -87,7 +102,7 @@ pub(crate) async fn create_provider(
                     .schema,
             ))
         }
-        IpcVariant::Stream => {
+        ArrowIpcVariant::Stream => {
             infer_stream_schema(&store, representative_meta, representative_url).await
         }
     }
@@ -126,14 +141,14 @@ pub(crate) async fn create_provider(
 }
 
 #[derive(Debug)]
-struct IpcFileFormat {
-    variant: IpcVariant,
+struct ArrowIpcFormat {
+    variant: ArrowIpcVariant,
     active_files: Arc<ActiveFiles>,
     memory_pool: Arc<dyn MemoryPool>,
 }
 
 #[async_trait]
-impl FileFormat for IpcFileFormat {
+impl FileFormat for ArrowIpcFormat {
     fn get_ext(&self) -> String {
         "arrow".to_owned()
     }
@@ -164,7 +179,7 @@ impl FileFormat for IpcFileFormat {
             internal_datafusion_err!("Arrow schema inference requires one object")
         })?;
         match self.variant {
-            IpcVariant::File => {
+            ArrowIpcVariant::File => {
                 let lease = self.active_files.lease(object);
                 let memory_pool = Arc::clone(&self.memory_pool);
                 let identity = object.location.to_string();
@@ -175,7 +190,7 @@ impl FileFormat for IpcFileFormat {
                         .schema,
                 ))
             }
-            IpcVariant::Stream => {
+            ArrowIpcVariant::Stream => {
                 let identity = object.location.to_string();
                 infer_stream_schema(store, object, &identity).await
             }
@@ -220,12 +235,12 @@ impl FileFormat for IpcFileFormat {
         _ordering: Option<LexRequirement>,
     ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
         Err(datafusion::common::DataFusionError::NotImplemented(
-            "IpcFileFormat is input-only".to_owned(),
+            "ArrowIpcFormat is input-only".to_owned(),
         ))
     }
 
     fn file_source(&self, table_schema: TableSchema) -> Arc<dyn FileSource> {
-        Arc::new(IpcFileSource {
+        Arc::new(ArrowIpcSource {
             variant: self.variant,
             table_schema: table_schema.clone(),
             projection: SplitProjection::unprojected(&table_schema),
@@ -237,8 +252,8 @@ impl FileFormat for IpcFileFormat {
 }
 
 #[derive(Clone)]
-struct IpcFileSource {
-    variant: IpcVariant,
+struct ArrowIpcSource {
+    variant: ArrowIpcVariant,
     table_schema: TableSchema,
     projection: SplitProjection,
     metrics: ExecutionPlanMetricsSet,
@@ -246,7 +261,7 @@ struct IpcFileSource {
     memory_pool: Arc<dyn MemoryPool>,
 }
 
-impl FileSource for IpcFileSource {
+impl FileSource for ArrowIpcSource {
     fn create_file_opener(
         &self,
         object_store: Arc<dyn ObjectStore>,
@@ -254,7 +269,7 @@ impl FileSource for IpcFileSource {
         _partition: usize,
     ) -> datafusion::common::Result<Arc<dyn FileOpener>> {
         let projection = Some(self.projection.file_indices.clone());
-        let opener: Arc<dyn FileOpener> = Arc::new(IpcFileOpener {
+        let opener: Arc<dyn FileOpener> = Arc::new(ArrowIpcOpener {
             variant: self.variant,
             object_store,
             projection,
@@ -299,8 +314,8 @@ impl FileSource for IpcFileSource {
 
     fn file_type(&self) -> &str {
         match self.variant {
-            IpcVariant::File => "arrow",
-            IpcVariant::Stream => "arrow_stream",
+            ArrowIpcVariant::File => "arrow",
+            ArrowIpcVariant::Stream => "arrow_stream",
         }
     }
 
@@ -312,15 +327,15 @@ impl FileSource for IpcFileSource {
         config: &FileScanConfig,
     ) -> datafusion::common::Result<Option<FileScanConfig>> {
         let file_groups = match self.variant {
-            IpcVariant::File => FileGroupPartitioner::new()
+            ArrowIpcVariant::File => FileGroupPartitioner::new()
                 .with_target_partitions(target_partitions)
                 .with_repartition_file_min_size(repartition_file_min_size)
                 .with_preserve_order_within_groups(output_ordering.is_some())
                 .repartition_file_groups(&config.file_groups),
-            IpcVariant::Stream if output_ordering.is_none() => {
+            ArrowIpcVariant::Stream if output_ordering.is_none() => {
                 repartition_whole_files(&config.file_groups, target_partitions)
             }
-            IpcVariant::Stream => None,
+            ArrowIpcVariant::Stream => None,
         };
         Ok(file_groups.map(|file_groups| {
             let mut config = config.clone();
@@ -330,7 +345,7 @@ impl FileSource for IpcFileSource {
     }
 
     fn supports_repartitioning(&self) -> bool {
-        self.variant == IpcVariant::File
+        self.variant == ArrowIpcVariant::File
     }
 }
 
@@ -376,8 +391,8 @@ fn repartition_whole_files(
     )
 }
 
-struct IpcFileOpener {
-    variant: IpcVariant,
+struct ArrowIpcOpener {
+    variant: ArrowIpcVariant,
     object_store: Arc<dyn ObjectStore>,
     projection: Option<Vec<usize>>,
     expected_schema: SchemaRef,
@@ -385,7 +400,7 @@ struct IpcFileOpener {
     memory_pool: Arc<dyn MemoryPool>,
 }
 
-impl FileOpener for IpcFileOpener {
+impl FileOpener for ArrowIpcOpener {
     fn open(&self, file: PartitionedFile) -> datafusion::common::Result<FileOpenFuture> {
         let canonical_url = file
             .extension::<CanonicalInput>()
@@ -401,7 +416,7 @@ impl FileOpener for IpcFileOpener {
         Ok(Box::pin(async move {
             let read_url = canonical_url.clone();
             let stream = match variant {
-                IpcVariant::File => {
+                ArrowIpcVariant::File => {
                     open_file(
                         store,
                         file,
@@ -413,7 +428,7 @@ impl FileOpener for IpcFileOpener {
                     )
                     .await
                 }
-                IpcVariant::Stream => {
+                ArrowIpcVariant::Stream => {
                     open_stream(
                         store,
                         file,
@@ -469,7 +484,7 @@ async fn open_file(
             })
             .await?,
     );
-    if !schemas_match_ignoring_metadata(&expected_schema, &layout.schema) {
+    if !structurally_equal(&expected_schema, &layout.schema) {
         return Err(datafusion::common::DataFusionError::Execution(format!(
             "Arrow input schema mismatch for {}: expected {expected_schema:?}, got {:?}",
             canonical_url, layout.schema
@@ -550,7 +565,7 @@ async fn open_stream(
             while !buffer.is_empty() {
                 let batch = decoder.decode(&mut buffer)?;
                 if !schema_checked && let Some(schema) = decoder.schema() {
-                    if !schemas_match_ignoring_metadata(&expected_schema, &schema) {
+                    if !structurally_equal(&expected_schema, &schema) {
                         Err(datafusion::common::DataFusionError::Execution(format!(
                             "Arrow input schema mismatch for {}: expected {expected_schema:?}, got {schema:?}",
                             canonical_url
@@ -582,15 +597,15 @@ async fn open_stream(
 }
 
 #[derive(Debug)]
-pub(crate) struct FileLayout {
-    pub(crate) schema: SchemaRef,
-    pub(crate) version: MetadataVersion,
-    pub(crate) dictionaries: Vec<Block>,
-    pub(crate) record_batches: Vec<Block>,
+struct FileLayout {
+    schema: SchemaRef,
+    version: MetadataVersion,
+    dictionaries: Vec<Block>,
+    record_batches: Vec<Block>,
     _reservation: MemoryReservation,
 }
 
-pub(crate) async fn read_file_layout(
+async fn read_file_layout(
     store: &Arc<dyn ObjectStore>,
     object: &ObjectMeta,
     memory_pool: Arc<dyn MemoryPool>,
@@ -619,11 +634,6 @@ pub(crate) async fn read_file_layout(
             identity
         )));
     }
-    if footer_len > MAX_IPC_SAFETY_BYTES {
-        return Err(datafusion::common::DataFusionError::Execution(format!(
-            "Arrow IPC footer exceeds the 512 MiB safety bound for {identity}"
-        )));
-    }
     let reservation = MemoryConsumer::new("Arrow IPC file layout").register(&memory_pool);
     reservation.try_resize(
         usize::try_from(footer_len)
@@ -636,7 +646,7 @@ pub(crate) async fn read_file_layout(
         )
         .await?;
     let footer = arrow::ipc::root_as_footer(&footer_bytes)
-        .map_err(|error| datafusion::common::DataFusionError::Execution(error.to_string()))?;
+        .map_err(|error| datafusion::common::DataFusionError::External(Box::new(error)))?;
     let schema =
         Arc::new(fb_to_schema(footer.schema().ok_or_else(|| {
             internal_datafusion_err!("Arrow IPC footer has no schema")
@@ -694,7 +704,7 @@ fn validate_blocks<'a>(
     Ok(())
 }
 
-pub(crate) async fn read_block(
+async fn read_block(
     store: &Arc<dyn ObjectStore>,
     location: &object_store::path::Path,
     block: &Block,
@@ -706,7 +716,7 @@ pub(crate) async fn read_block(
     Ok(store.get_range(location, start..start + length).await?)
 }
 
-pub(crate) fn block_size(block: &Block) -> datafusion::common::Result<usize> {
+fn block_size(block: &Block) -> datafusion::common::Result<usize> {
     let metadata = usize::try_from(block.metaDataLength())
         .map_err(|_| internal_datafusion_err!("Arrow IPC metadata length is negative"))?;
     let body = usize::try_from(block.bodyLength())
@@ -723,12 +733,12 @@ fn reserve_sample_block(
     let metadata =
         u64::try_from(block.metaDataLength()).context("Arrow IPC metadata length is negative")?;
     let body = u64::try_from(block.bodyLength()).context("Arrow IPC body length is negative")?;
+    if metadata > MAX_IPC_MESSAGE_BYTES || body > MAX_IPC_MESSAGE_BYTES {
+        return Ok(SampleReservation::SafetyBoundExceeded);
+    }
     let size = metadata
         .checked_add(body)
         .context("Arrow IPC sample block size overflow")?;
-    if size > MAX_IPC_SAFETY_BYTES {
-        return Ok(SampleReservation::SafetyBoundExceeded);
-    }
     reservation.try_resize(usize::try_from(size)?)?;
     Ok(SampleReservation::Reserved)
 }
@@ -741,7 +751,7 @@ async fn infer_stream_schema(
     let mut decoder = StreamDecoder::new();
     let mut offset = 0;
     loop {
-        match read_stream_message(store, object, offset, identity).await? {
+        match read_stream_message(store, object, offset, identity, false).await? {
             StreamMessageRead::Message(message) => {
                 offset = message.end;
                 let mut buffer = Buffer::from(message.bytes);
@@ -752,9 +762,7 @@ async fn infer_stream_schema(
             }
             StreamMessageRead::End => break,
             StreamMessageRead::SafetyBoundExceeded => {
-                return Err(datafusion::common::DataFusionError::Execution(format!(
-                    "Arrow IPC message exceeds the 512 MiB safety bound for {identity}"
-                )));
+                unreachable!("schema inference does not request the sampling bound")
             }
         }
     }
@@ -765,7 +773,7 @@ async fn infer_stream_schema(
 }
 
 async fn sample_statistics(
-    variant: IpcVariant,
+    variant: ArrowIpcVariant,
     store: &Arc<dyn ObjectStore>,
     representative_file: &PartitionedFile,
     schema: &SchemaRef,
@@ -788,7 +796,7 @@ async fn sample_statistics(
     let mut represented_encoded_bytes = 0u64;
     let mut reached_eof = true;
     match variant {
-        IpcVariant::File => {
+        ArrowIpcVariant::File => {
             let layout =
                 read_file_layout(store, representative, Arc::clone(&memory_pool), &identity)
                     .await?;
@@ -835,12 +843,14 @@ async fn sample_statistics(
                 }
             }
         }
-        IpcVariant::Stream => {
+        ArrowIpcVariant::Stream => {
             let mut decoder = StreamDecoder::new();
             let mut offset = 0;
             loop {
                 let message =
-                    match read_stream_message(store, representative, offset, &identity).await? {
+                    match read_stream_message(store, representative, offset, &identity, true)
+                        .await?
+                    {
                         StreamMessageRead::Message(message) => message,
                         StreamMessageRead::End => break,
                         StreamMessageRead::SafetyBoundExceeded => {
@@ -921,22 +931,23 @@ enum SampleStatistics {
     Unavailable,
 }
 
-pub(crate) struct StreamMessage {
-    pub(crate) bytes: Bytes,
-    pub(crate) end: u64,
+struct StreamMessage {
+    bytes: Bytes,
+    end: u64,
 }
 
-pub(crate) enum StreamMessageRead {
+enum StreamMessageRead {
     End,
     Message(StreamMessage),
     SafetyBoundExceeded,
 }
 
-pub(crate) async fn read_stream_message(
+async fn read_stream_message(
     store: &Arc<dyn ObjectStore>,
     object: &ObjectMeta,
     offset: u64,
     identity: &str,
+    bounded: bool,
 ) -> datafusion::common::Result<StreamMessageRead> {
     if offset == object.size {
         return Ok(StreamMessageRead::End);
@@ -989,14 +1000,14 @@ pub(crate) async fn read_stream_message(
             identity
         ));
     }
-    if metadata_len > MAX_IPC_SAFETY_BYTES {
+    if bounded && metadata_len > MAX_IPC_MESSAGE_BYTES {
         return Ok(StreamMessageRead::SafetyBoundExceeded);
     }
     let metadata = store
         .get_range(&object.location, metadata_start..metadata_end)
         .await?;
     let message = arrow::ipc::root_as_message(&metadata)
-        .map_err(|error| datafusion::common::DataFusionError::Execution(error.to_string()))?;
+        .map_err(|error| datafusion::common::DataFusionError::External(Box::new(error)))?;
     let body_len = u64::try_from(message.bodyLength())
         .map_err(|_| internal_datafusion_err!("Arrow IPC stream body length is negative"))?;
     let end = metadata_end
@@ -1008,7 +1019,7 @@ pub(crate) async fn read_stream_message(
             identity
         ));
     }
-    if end - offset > MAX_IPC_SAFETY_BYTES {
+    if bounded && body_len > MAX_IPC_MESSAGE_BYTES {
         return Ok(StreamMessageRead::SafetyBoundExceeded);
     }
     let bytes = store.get_range(&object.location, offset..end).await?;
@@ -1104,8 +1115,6 @@ impl ActiveFiles {
 
 #[cfg(test)]
 mod tests {
-    use std::{io, sync::Mutex as StdMutex};
-
     use arrow::{
         array::{Array, NullArray, StringArray, StringDictionaryBuilder},
         datatypes::{DataType, Field, Int32Type, Schema},
@@ -1116,108 +1125,10 @@ mod tests {
         execution::{memory_pool::GreedyMemoryPool, object_store::ObjectStoreUrl},
         physical_plan::metrics::ExecutionPlanMetricsSet,
     };
-    use futures::{StreamExt, stream, stream::BoxStream};
-    use object_store::{
-        Attributes, CopyOptions, GetOptions, GetRange, GetResult, GetResultPayload, ListResult,
-        MultipartUpload, ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload, PutResult,
-        Result as StoreResult, memory::InMemory, path::Path as ObjectPath,
-    };
-    use silk_chiffon_core::InputVariant;
+    use object_store::{ObjectStoreExt, memory::InMemory};
     use tokio::sync::Notify;
 
     use super::*;
-
-    #[derive(Debug)]
-    struct TrailerOnlyStore {
-        inner: InMemory,
-        object: ObjectMeta,
-        trailer: Bytes,
-        ranges: StdMutex<Vec<std::ops::Range<u64>>>,
-    }
-
-    impl fmt::Display for TrailerOnlyStore {
-        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            formatter.write_str("TrailerOnlyStore")
-        }
-    }
-
-    #[async_trait]
-    impl ObjectStore for TrailerOnlyStore {
-        async fn put_opts(
-            &self,
-            location: &ObjectPath,
-            payload: PutPayload,
-            options: PutOptions,
-        ) -> StoreResult<PutResult> {
-            self.inner.put_opts(location, payload, options).await
-        }
-
-        async fn put_multipart_opts(
-            &self,
-            location: &ObjectPath,
-            options: PutMultipartOptions,
-        ) -> StoreResult<Box<dyn MultipartUpload>> {
-            self.inner.put_multipart_opts(location, options).await
-        }
-
-        async fn get_opts(
-            &self,
-            location: &ObjectPath,
-            options: GetOptions,
-        ) -> StoreResult<GetResult> {
-            if location != &self.object.location {
-                return self.inner.get_opts(location, options).await;
-            }
-            let GetRange::Bounded(range) = options.range.unwrap() else {
-                return Err(object_store::Error::Generic {
-                    store: "trailer-only",
-                    source: Box::new(io::Error::other("expected one bounded range")),
-                });
-            };
-            self.ranges.lock().unwrap().push(range.clone());
-            if range != (self.object.size - 10..self.object.size) {
-                return Err(object_store::Error::Generic {
-                    store: "trailer-only",
-                    source: Box::new(io::Error::other("footer payload must not be read")),
-                });
-            }
-            Ok(GetResult {
-                payload: GetResultPayload::Stream(
-                    stream::once(std::future::ready(Ok(self.trailer.clone()))).boxed(),
-                ),
-                meta: self.object.clone(),
-                range,
-                attributes: Attributes::new(),
-            })
-        }
-
-        fn delete_stream(
-            &self,
-            locations: BoxStream<'static, StoreResult<ObjectPath>>,
-        ) -> BoxStream<'static, StoreResult<ObjectPath>> {
-            self.inner.delete_stream(locations)
-        }
-
-        fn list(&self, prefix: Option<&ObjectPath>) -> BoxStream<'static, StoreResult<ObjectMeta>> {
-            self.inner.list(prefix)
-        }
-
-        async fn list_with_delimiter(
-            &self,
-            prefix: Option<&ObjectPath>,
-        ) -> StoreResult<ListResult> {
-            self.inner.list_with_delimiter(prefix).await
-        }
-
-        async fn copy_opts(
-            &self,
-            from: &ObjectPath,
-            to: &ObjectPath,
-            options: CopyOptions,
-        ) -> StoreResult<()> {
-            self.inner.copy_opts(from, to, options).await
-        }
-    }
 
     fn batch(rows: usize) -> RecordBatch {
         RecordBatch::try_new(
@@ -1241,10 +1152,10 @@ mod tests {
         }
     }
 
-    fn source(variant: IpcVariant) -> IpcFileSource {
+    fn source(variant: ArrowIpcVariant) -> ArrowIpcSource {
         let schema = Arc::new(Schema::new(vec![Field::new("value", DataType::Null, true)]));
         let table_schema = TableSchema::new(schema, Vec::new());
-        IpcFileSource {
+        ArrowIpcSource {
             variant,
             table_schema: table_schema.clone(),
             projection: SplitProjection::unprojected(&table_schema),
@@ -1254,7 +1165,7 @@ mod tests {
         }
     }
 
-    fn scan_config(source: &IpcFileSource, files: Vec<PartitionedFile>) -> FileScanConfig {
+    fn scan_config(source: &ArrowIpcSource, files: Vec<PartitionedFile>) -> FileScanConfig {
         datafusion::datasource::physical_plan::FileScanConfigBuilder::new(
             ObjectStoreUrl::local_filesystem(),
             Arc::new(source.clone()),
@@ -1304,13 +1215,7 @@ mod tests {
     fn oversized_message_makes_sampling_unavailable_without_reserving_it() {
         let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(usize::MAX));
         let reservation = MemoryConsumer::new("test").register(&pool);
-        let metadata = MAX_IPC_SAFETY_BYTES / 2 + 1;
-        let body = MAX_IPC_SAFETY_BYTES / 2;
-        let block = Block::new(
-            0,
-            i32::try_from(metadata).unwrap(),
-            i64::try_from(body).unwrap(),
-        );
+        let block = Block::new(0, 0, i64::try_from(MAX_IPC_MESSAGE_BYTES + 1).unwrap());
         let outcome = reserve_sample_block(&reservation, &block).unwrap();
 
         assert_eq!(outcome, SampleReservation::SafetyBoundExceeded);
@@ -1319,7 +1224,7 @@ mod tests {
 
     #[test]
     fn arrow_variants_reject_unknown_detector_output() {
-        let error = IpcVariant::parse(&InputVariant::named("unknown", "unknown")).unwrap_err();
+        let error = ArrowIpcVariant::parse(&InputVariant::named("unknown")).unwrap_err();
 
         assert!(
             error
@@ -1330,8 +1235,8 @@ mod tests {
 
     #[tokio::test]
     async fn arrow_file_format_declares_its_input_contract() {
-        let format = IpcFileFormat {
-            variant: IpcVariant::File,
+        let format = ArrowIpcFormat {
+            variant: ArrowIpcVariant::File,
             active_files: Arc::new(ActiveFiles::default()),
             memory_pool: Arc::new(GreedyMemoryPool::new(usize::MAX)),
         };
@@ -1382,8 +1287,8 @@ mod tests {
 
     #[test]
     fn arrow_sources_distinguish_seekable_files_from_whole_streams() {
-        let file = source(IpcVariant::File);
-        let stream = source(IpcVariant::Stream);
+        let file = source(ArrowIpcVariant::File);
+        let stream = source(ArrowIpcVariant::Stream);
 
         assert_eq!(file.file_type(), "arrow");
         assert!(file.supports_repartitioning());
@@ -1422,7 +1327,7 @@ mod tests {
 
     #[test]
     fn stream_repartitioning_distributes_whole_files() {
-        let source = source(IpcVariant::Stream);
+        let source = source(ArrowIpcVariant::Stream);
         let files = (0..6)
             .map(|index| PartitionedFile::new(format!("{index}.arrow"), index + 1))
             .collect::<Vec<_>>();
@@ -1453,7 +1358,7 @@ mod tests {
 
     #[test]
     fn stream_repartitioning_preserves_required_order_and_existing_groups() {
-        let source = source(IpcVariant::Stream);
+        let source = source(ArrowIpcVariant::Stream);
         let files = (0..3)
             .map(|index| PartitionedFile::new(format!("{index}.arrow"), index + 1))
             .collect::<Vec<_>>();
@@ -1481,7 +1386,7 @@ mod tests {
 
     #[test]
     fn file_repartitioning_splits_seekable_inputs_into_byte_ranges() {
-        let source = source(IpcVariant::File);
+        let source = source(ArrowIpcVariant::File);
         let config = scan_config(
             &source,
             vec![PartitionedFile::new("large.arrow", 1_000_000)],
@@ -1524,7 +1429,7 @@ mod tests {
         let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(usize::MAX));
 
         let error = sample_statistics(
-            IpcVariant::Stream,
+            ArrowIpcVariant::Stream,
             &store,
             &PartitionedFile::new_from_meta(object.clone()),
             &batch.schema(),
@@ -1630,7 +1535,7 @@ mod tests {
         for (index, (bytes, expected)) in cases.into_iter().enumerate() {
             let location = format!("truncated-{index}.arrow");
             let (store, meta) = stored_bytes(&location, bytes).await;
-            let error = match read_stream_message(&store, &meta, 0, &location).await {
+            let error = match read_stream_message(&store, &meta, 0, &location, false).await {
                 Ok(_) => panic!("truncated message must fail"),
                 Err(error) => error,
             };
@@ -1656,14 +1561,14 @@ mod tests {
         }
         let (store, meta) = stored_bytes("complete.arrow", bytes.clone()).await;
         let StreamMessageRead::Message(schema) =
-            read_stream_message(&store, &meta, 0, "complete.arrow")
+            read_stream_message(&store, &meta, 0, "complete.arrow", false)
                 .await
                 .unwrap()
         else {
             panic!("the first stream message must contain the schema");
         };
         let StreamMessageRead::Message(record_batch) =
-            read_stream_message(&store, &meta, schema.end, "complete.arrow")
+            read_stream_message(&store, &meta, schema.end, "complete.arrow", false)
                 .await
                 .unwrap()
         else {
@@ -1672,7 +1577,9 @@ mod tests {
         bytes.truncate(usize::try_from(record_batch.end - 1).unwrap());
         let (store, meta) = stored_bytes("truncated-body.arrow", bytes).await;
         let error =
-            match read_stream_message(&store, &meta, schema.end, "truncated-body.arrow").await {
+            match read_stream_message(&store, &meta, schema.end, "truncated-body.arrow", false)
+                .await
+            {
                 Ok(_) => panic!("a truncated body must fail"),
                 Err(error) => error,
             };
@@ -1706,40 +1613,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn oversized_file_footers_stop_after_the_trailer_read() {
-        let footer_len = MAX_IPC_SAFETY_BYTES + 1;
-        let object = object("oversized-footer.arrow", footer_len + 10);
-        let trailer = [
-            u32::try_from(footer_len).unwrap().to_le_bytes().as_slice(),
-            b"ARROW1",
-        ]
-        .concat();
-        let store = Arc::new(TrailerOnlyStore {
-            inner: InMemory::new(),
-            object: object.clone(),
-            trailer: Bytes::from(trailer),
-            ranges: StdMutex::new(Vec::new()),
-        });
-        let object_store: Arc<dyn ObjectStore> = store.clone();
-        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(usize::MAX));
-
-        let error =
-            match read_file_layout(&object_store, &object, pool, "oversized-footer.arrow").await {
-                Ok(_) => panic!("an oversized footer must fail"),
-                Err(error) => error,
-            };
-
-        assert!(
-            error.to_string().contains("512 MiB safety bound"),
-            "{error}"
-        );
-        assert_eq!(
-            *store.ranges.lock().unwrap(),
-            [object.size - 10..object.size]
-        );
-    }
-
-    #[tokio::test]
     async fn completed_single_object_samples_are_exact_for_both_variants() {
         let batches = [batch(2), batch(3)];
         let schema = batches[0].schema();
@@ -1763,8 +1636,8 @@ mod tests {
         }
 
         for (variant, location, bytes) in [
-            (IpcVariant::File, "sample-file.arrow", file_bytes),
-            (IpcVariant::Stream, "sample-stream.arrow", stream_bytes),
+            (ArrowIpcVariant::File, "sample-file.arrow", file_bytes),
+            (ArrowIpcVariant::Stream, "sample-stream.arrow", stream_bytes),
         ] {
             let (store, meta) = stored_bytes(location, bytes).await;
             let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(usize::MAX));
@@ -1896,8 +1769,8 @@ mod tests {
         }
 
         for (variant, location, bytes) in [
-            (IpcVariant::File, "prefix-file.arrow", file_bytes),
-            (IpcVariant::Stream, "prefix-stream.arrow", stream_bytes),
+            (ArrowIpcVariant::File, "prefix-file.arrow", file_bytes),
+            (ArrowIpcVariant::Stream, "prefix-stream.arrow", stream_bytes),
         ] {
             let (store, meta) = stored_bytes(location, bytes).await;
             let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(usize::MAX));
@@ -1969,7 +1842,7 @@ mod tests {
         let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(usize::MAX));
 
         let statistics = sample_statistics(
-            IpcVariant::File,
+            ArrowIpcVariant::File,
             &store,
             &PartitionedFile::new_from_meta(meta.clone()),
             &schema,
@@ -2069,7 +1942,7 @@ mod tests {
         assert_eq!(values, ["alpha", "beta", "gamma", "delta"]);
 
         let statistics = sample_statistics(
-            IpcVariant::File,
+            ArrowIpcVariant::File,
             &store,
             &PartitionedFile::new_from_meta(meta.clone()),
             &schema,

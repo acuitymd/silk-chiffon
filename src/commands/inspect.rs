@@ -11,8 +11,8 @@ use crate::InspectCommand;
 pub async fn run(command: InspectCommand) -> Result<()> {
     let (file, mode, inspection, storage) = command.into_parts();
     let location = LocationInput::parse(file.as_str())?;
-    let object = storage.lookup_input(&location).await?;
-    let output = inspection.inspect(&object, mode).await?;
+    let handle = storage.input_handle(&location)?;
+    let output = inspection.inspect(&handle, mode).await?;
     let mut stdout = io::stdout().lock();
     match output {
         InspectionOutput::Text(text) => stdout.write_all(text.as_bytes())?,

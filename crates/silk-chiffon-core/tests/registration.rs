@@ -112,7 +112,7 @@ fn detect_test(object: &InputObject) -> FormatFuture<'_, InputDetection> {
     Box::pin(async move {
         Ok(
             if object.handle().object_path().extension() == Some("test") {
-                InputDetection::Match(InputVariant::named("test-stream", "test stream"))
+                InputDetection::Match(InputVariant::named("test-stream"))
             } else {
                 InputDetection::Mismatch
             },
@@ -170,7 +170,7 @@ fn bind_sink<'a>(
 }
 
 fn inspect<'a>(
-    object: &'a InputObject,
+    handle: &'a StorageHandle,
     mode: InspectionMode,
     settings: &'a InspectionArgs,
 ) -> FormatFuture<'a, InspectionOutput> {
@@ -178,7 +178,7 @@ fn inspect<'a>(
         Ok(match mode {
             InspectionMode::Text => InspectionOutput::Text(format!(
                 "{} details={}",
-                object.handle().url(),
+                handle.url(),
                 settings.test_details
             )),
             InspectionMode::Json => InspectionOutput::Json(serde_json::json!({
@@ -189,7 +189,7 @@ fn inspect<'a>(
 }
 
 fn test_format(name: &'static str) -> FormatDefinition {
-    FormatDefinition::builder(name, "Test format")
+    FormatDefinition::builder(name)
         .aliases(["t"])
         .extensions(["test"])
         .detector(detect_test)
@@ -235,13 +235,13 @@ fn bind_test_transform(
 
 #[test]
 fn definitions_keep_capabilities_independently_optional() {
-    let empty = FormatDefinition::builder("empty", "Empty").build();
+    let empty = FormatDefinition::builder("empty").build();
     assert!(!empty.has_detector());
     assert!(!empty.has_input_provider());
     assert!(!empty.has_sink());
     assert!(!empty.has_inspector());
 
-    let input_only = FormatDefinition::builder("input-only", "Input only")
+    let input_only = FormatDefinition::builder("input-only")
         .transform(
             TransformDefinition::with_args::<TestArgs>()
                 .input_provider(create_provider)
@@ -266,11 +266,7 @@ fn transform_arguments_remain_bound_to_typed_functions() {
 
     let bindings = bind_test_transform(&registry, &["test", "--test-workers", "9"]);
     let session = SessionContext::new();
-    let leaf = local_leaf(
-        &session,
-        ".test",
-        InputVariant::named("test-stream", "test stream"),
-    );
+    let leaf = local_leaf(&session, ".test", InputVariant::named("test-stream"));
     let provider = futures::executor::block_on(
         bindings
             .get("test")
@@ -302,29 +298,14 @@ fn inspection_arguments_and_mode_reach_the_inspector() {
         .try_get_matches_from(["inspect", "--test-details"])
         .unwrap();
     let binding = format.bind_inspection(&matches).unwrap();
-    let object = local_object(".test");
-    let output =
-        futures::executor::block_on(binding.inspect(&object, InspectionMode::Json)).unwrap();
+    let output = futures::executor::block_on(
+        binding.inspect(local_object(".test").handle(), InspectionMode::Json),
+    )
+    .unwrap();
     assert_eq!(
         output,
         InspectionOutput::Json(serde_json::json!({ "details": true }))
     );
-}
-
-#[test]
-fn display_names_do_not_change_canonical_variant_identity() {
-    use std::collections::HashSet;
-
-    let format = test_format("test");
-    assert_eq!(format.name(), "test");
-    assert_eq!(format.display_name(), "Test format");
-
-    let first = InputVariant::named("stream", "stream");
-    let second = InputVariant::named("stream", "streaming container");
-    assert_eq!(first, second);
-    assert_eq!(first.name(), Some("stream"));
-    assert_eq!(second.display_name(), Some("streaming container"));
-    assert_eq!(HashSet::from([first, second]).len(), 1);
 }
 
 #[test]
@@ -345,17 +326,9 @@ fn names_aliases_and_extensions_are_case_insensitive() {
 #[test]
 fn duplicate_claims_report_every_format() {
     let names = FormatRegistry::builder()
-        .register(FormatDefinition::builder("dup", "Duplicate").build())
-        .register(
-            FormatDefinition::builder("two", "Two")
-                .aliases(["DUP"])
-                .build(),
-        )
-        .register(
-            FormatDefinition::builder("three", "Three")
-                .aliases(["dup"])
-                .build(),
-        )
+        .register(FormatDefinition::builder("dup").build())
+        .register(FormatDefinition::builder("two").aliases(["DUP"]).build())
+        .register(FormatDefinition::builder("three").aliases(["dup"]).build())
         .build();
     assert!(matches!(
         names,
@@ -365,17 +338,17 @@ fn duplicate_claims_report_every_format() {
 
     let extensions = FormatRegistry::builder()
         .register(
-            FormatDefinition::builder("one", "One")
+            FormatDefinition::builder("one")
                 .extensions(["same"])
                 .build(),
         )
         .register(
-            FormatDefinition::builder("two", "Two")
+            FormatDefinition::builder("two")
                 .extensions([".SAME"])
                 .build(),
         )
         .register(
-            FormatDefinition::builder("three", "Three")
+            FormatDefinition::builder("three")
                 .extensions(["same"])
                 .build(),
         )
@@ -388,17 +361,17 @@ fn duplicate_claims_report_every_format() {
 
     let arguments = FormatRegistry::builder()
         .register(
-            FormatDefinition::builder("one", "One")
+            FormatDefinition::builder("one")
                 .transform(TransformDefinition::with_args::<SharedArgs>().build())
                 .build(),
         )
         .register(
-            FormatDefinition::builder("two", "Two")
+            FormatDefinition::builder("two")
                 .transform(TransformDefinition::with_args::<SharedArgs>().build())
                 .build(),
         )
         .register(
-            FormatDefinition::builder("three", "Three")
+            FormatDefinition::builder("three")
                 .transform(TransformDefinition::with_args::<SharedArgs>().build())
                 .build(),
         )
@@ -418,19 +391,19 @@ fn detected_name(detected: Option<DetectedFormat>) -> Option<&'static str> {
 fn detection_uses_priority_then_registration_order() {
     let registry = FormatRegistry::builder()
         .register(
-            FormatDefinition::builder("late", "Late")
+            FormatDefinition::builder("late")
                 .detector(detect_test)
                 .detection_priority(10)
                 .build(),
         )
         .register(
-            FormatDefinition::builder("first", "First")
+            FormatDefinition::builder("first")
                 .detector(detect_test)
                 .detection_priority(1)
                 .build(),
         )
         .register(
-            FormatDefinition::builder("second", "Second")
+            FormatDefinition::builder("second")
                 .detector(detect_test)
                 .detection_priority(1)
                 .build(),
@@ -450,14 +423,14 @@ fn detection_tries_the_case_insensitive_extension_owner_first() {
     };
     let registry = FormatRegistry::builder()
         .register(
-            FormatDefinition::builder("priority", "Priority")
+            FormatDefinition::builder("priority")
                 .detector(detect_any)
                 .detection_priority(0)
                 .transform(transform())
                 .build(),
         )
         .register(
-            FormatDefinition::builder("preferred", "Preferred")
+            FormatDefinition::builder("preferred")
                 .extensions(["preferred"])
                 .detector(detect_any)
                 .detection_priority(10)
@@ -483,7 +456,7 @@ fn detection_tries_the_case_insensitive_extension_owner_first() {
 fn transform_detection_skips_formats_without_input_providers() {
     let registry = FormatRegistry::builder()
         .register(
-            FormatDefinition::builder("sink-only", "Sink only")
+            FormatDefinition::builder("sink-only")
                 .extensions(["test"])
                 .detector(detect_any)
                 .detection_priority(0)
@@ -495,7 +468,7 @@ fn transform_detection_skips_formats_without_input_providers() {
                 .build(),
         )
         .register(
-            FormatDefinition::builder("input", "Input")
+            FormatDefinition::builder("input")
                 .detector(detect_any)
                 .detection_priority(10)
                 .transform(
@@ -580,7 +553,7 @@ fn an_open_sink_can_be_consumed_by_abort() {
 fn unavailable_capabilities_return_structured_errors() {
     let registry = FormatRegistry::builder()
         .register(
-            FormatDefinition::builder("empty", "Empty")
+            FormatDefinition::builder("empty")
                 .transform(TransformDefinition::without_args().build())
                 .build(),
         )

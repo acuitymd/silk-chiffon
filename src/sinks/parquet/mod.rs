@@ -661,10 +661,11 @@ mod tests {
 
     use crate::{
         AllColumnsBloomFilterConfig, ColumnBloomFilterConfig, ColumnSpecificBloomFilterConfig,
-        SortColumn, SortDirection, inspection::parquet::ParquetInspector,
+        SortColumn, SortDirection,
+        inspection::parquet::ParquetInspector,
         utils::parquet_inspection::read_entire_parquet_file,
+        utils::test_helpers::{prepared_local_output, test_data, verify},
     };
-    use silk_chiffon_test_support::{batch as test_data, prepared_local_output, verify};
 
     use camino::Utf8Path;
     use tempfile::tempdir;

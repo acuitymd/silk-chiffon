@@ -1,6 +1,5 @@
 use std::{
     fmt, io,
-    num::NonZeroUsize,
     sync::{
         Arc, OnceLock,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -30,11 +29,12 @@ use object_store::{
     path::Path as ObjectPath,
 };
 use silk_chiffon::sinks::{
+    arrow::{ArrowSink, ArrowSinkOptions},
     data_sink::DataSink,
     parquet::{ParquetRuntimes, ParquetSink, ParquetSinkOptions},
     vortex::{VortexSink, VortexSinkOptions},
 };
-use silk_chiffon_core::{FormatRegistry, InputSources, OpenSinkMode, Pipeline, SinkBindingConfig};
+use silk_chiffon_core::{InputSources, Pipeline};
 use silk_chiffon_storage::{
     ExistingOutput, LocationInput, OutputPreparation, StorageAccess, StorageBackend, StorageHandle,
     StorageRegistry, StorageSession,
@@ -44,32 +44,6 @@ static TRACKING_STORE: OnceLock<Arc<TrackingStore>> = OnceLock::new();
 static TRACKING_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 const SOURCE_BATCH_LIMIT: usize = 1_000_000;
-
-async fn registered_arrow_sink(
-    handle: StorageHandle,
-    schema: arrow::datatypes::SchemaRef,
-    arguments: &[&str],
-) -> Box<dyn DataSink> {
-    let registry = FormatRegistry::builder()
-        .register(silk_chiffon_format_arrow::definition())
-        .build()
-        .unwrap();
-    let matches = registry
-        .augment_transform_args(Command::new("test"))
-        .try_get_matches_from(std::iter::once("test").chain(arguments.iter().copied()))
-        .unwrap();
-    let bindings = registry.bind_transform(&matches).unwrap();
-    let binding = bindings.get("arrow").unwrap();
-    let sink_binding = binding
-        .bind_sink(&SinkBindingConfig::new(
-            NonZeroUsize::new(1).unwrap(),
-            OpenSinkMode::OneAtATime,
-            Vec::new(),
-        ))
-        .await
-        .unwrap();
-    sink_binding.open_sink(handle, schema).await.unwrap()
-}
 
 #[derive(Clone, Debug)]
 enum SourceTaskExit {
@@ -734,48 +708,12 @@ async fn arrow_sink_writes_a_memory_object() {
     let storage = storage();
     let handle = prepared_handle(&storage, "memory://bucket/output.arrow").await;
     let batch = batch();
-    let mut sink = registered_arrow_sink(handle.clone(), batch.schema(), &[]).await;
+    let mut sink =
+        ArrowSink::create(handle.clone(), &batch.schema(), ArrowSinkOptions::new()).unwrap();
 
     sink.write_batch(batch).await.unwrap();
-    let completion = sink.finish().await.unwrap();
+    let completion = Box::new(sink).finish().await.unwrap();
     assert_durable(completion, &handle).await;
-}
-
-#[tokio::test]
-async fn arrow_stream_sink_writes_a_readable_memory_object() {
-    let storage = storage();
-    let handle = prepared_handle(&storage, "memory://bucket/output.arrows").await;
-    let batch = batch();
-    let expected_rows = batch.num_rows();
-    let mut sink = registered_arrow_sink(
-        handle.clone(),
-        batch.schema(),
-        &["--arrow-format", "stream"],
-    )
-    .await;
-
-    sink.write_batch(batch).await.unwrap();
-    let completion = sink.finish().await.unwrap();
-    assert_eq!(
-        completion.rows_written(),
-        u64::try_from(expected_rows).unwrap()
-    );
-    let bytes = handle
-        .object_store()
-        .get(handle.object_path())
-        .await
-        .unwrap()
-        .bytes()
-        .await
-        .unwrap();
-    let batches = arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(bytes), None)
-        .unwrap()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-    assert_eq!(
-        batches.iter().map(RecordBatch::num_rows).sum::<usize>(),
-        expected_rows
-    );
 }
 
 #[tokio::test]
@@ -828,17 +766,14 @@ async fn real_sink_failure_cancels_every_datafusion_source_task() {
             .collect(),
     )
     .await;
-    let mut sink = registered_arrow_sink(
+    let mut sink = ArrowSink::create(
         handle.clone(),
-        batch.schema(),
-        &[
-            "--arrow-record-batch-size",
-            "1",
-            "--arrow-writing-queue-size",
-            "1",
-        ],
+        &batch.schema(),
+        ArrowSinkOptions::new()
+            .with_record_batch_size(1)
+            .with_queue_depth(1),
     )
-    .await;
+    .unwrap();
     let blocked_parts = BlockParts::new(Arc::clone(&store));
     let write_error = {
         let write = sink.write_stream(stream);
@@ -863,7 +798,7 @@ async fn real_sink_failure_cancels_every_datafusion_source_task() {
         assert!(state.batches_sent.load(Ordering::SeqCst) < SOURCE_BATCH_LIMIT);
     }
 
-    let cleanup_error = tokio::time::timeout(Duration::from_secs(5), sink.abort())
+    let cleanup_error = tokio::time::timeout(Duration::from_secs(5), Box::new(sink).abort())
         .await
         .expect("sink cleanup remained blocked after source cancellation")
         .unwrap_err();
@@ -900,17 +835,14 @@ async fn source_failure_cancels_its_active_sibling() {
         ],
     )
     .await;
-    let mut sink = registered_arrow_sink(
+    let mut sink = ArrowSink::create(
         handle.clone(),
-        batch.schema(),
-        &[
-            "--arrow-record-batch-size",
-            "1",
-            "--arrow-writing-queue-size",
-            "1",
-        ],
+        &batch.schema(),
+        ArrowSinkOptions::new()
+            .with_record_batch_size(1)
+            .with_queue_depth(1),
     )
-    .await;
+    .unwrap();
     let write_error = {
         let write = sink.write_stream(stream);
         tokio::pin!(write);
@@ -933,7 +865,7 @@ async fn source_failure_cancels_its_active_sibling() {
     wait_for_sources_stopped(&source_states).await;
     assert!(!failing_state.cancelled.load(Ordering::SeqCst));
     assert!(sibling_state.cancelled.load(Ordering::SeqCst));
-    sink.abort().await.unwrap();
+    Box::new(sink).abort().await.unwrap();
     assert!(matches!(
         handle.object_store().head(handle.object_path()).await,
         Err(object_store::Error::NotFound { .. })
@@ -1008,13 +940,13 @@ async fn arrow_abort_cancels_a_backpressured_multipart_upload() {
     let _blocked = BlockParts::new(Arc::clone(&store));
 
     let arrow_handle = prepared_handle(&storage, "tracking://bucket/output.arrow").await;
-    let arrow = registered_arrow_sink(
+    let arrow = ArrowSink::create(
         arrow_handle.clone(),
-        batch.schema(),
-        &["--arrow-record-batch-size", "1"],
+        &batch.schema(),
+        ArrowSinkOptions::new().with_record_batch_size(1),
     )
-    .await;
-    assert_abort_cleans_multipart(arrow, &arrow_handle, &store).await;
+    .unwrap();
+    assert_abort_cleans_multipart(Box::new(arrow), &arrow_handle, &store).await;
 }
 
 #[tokio::test]
@@ -1069,13 +1001,13 @@ async fn arrow_drop_fallback_cancels_a_backpressured_upload() {
     let _blocked = BlockParts::new(Arc::clone(&store));
 
     let arrow_handle = prepared_handle(&storage, "tracking://bucket/drop.arrow").await;
-    let arrow = registered_arrow_sink(
+    let arrow = ArrowSink::create(
         arrow_handle.clone(),
-        batch.schema(),
-        &["--arrow-record-batch-size", "1"],
+        &batch.schema(),
+        ArrowSinkOptions::new().with_record_batch_size(1),
     )
-    .await;
-    assert_drop_cleans_multipart(arrow, &arrow_handle, &store).await;
+    .unwrap();
+    assert_drop_cleans_multipart(Box::new(arrow), &arrow_handle, &store).await;
 }
 
 #[tokio::test]
@@ -1134,15 +1066,15 @@ async fn arrow_cancelled_finish_cleans_a_backpressured_upload() {
     let schema_released = Arc::downgrade(&schema);
     let _blocked = BlockParts::new(Arc::clone(&store));
     let handle = prepared_handle(&storage, "tracking://bucket/cancel-finish.arrow").await;
-    let sink = registered_arrow_sink(
+    let sink = ArrowSink::create(
         handle.clone(),
-        Arc::clone(&schema),
-        &["--arrow-record-batch-size", "1"],
+        &schema,
+        ArrowSinkOptions::new().with_record_batch_size(1),
     )
-    .await;
+    .unwrap();
     drop(schema);
 
-    assert_cancelled_finish_cleans_multipart(sink, &handle, &store).await;
+    assert_cancelled_finish_cleans_multipart(Box::new(sink), &handle, &store).await;
     wait_for_resource_release(&schema_released, "cancelled Arrow finish retained its task").await;
 }
 
@@ -1219,13 +1151,13 @@ async fn format_aborts_report_multipart_cleanup_failures() {
     let _blocked = BlockParts::new(Arc::clone(&store));
 
     let arrow_handle = prepared_handle(&storage, "tracking://bucket/abort-error.arrow").await;
-    let arrow = registered_arrow_sink(
+    let arrow = ArrowSink::create(
         arrow_handle.clone(),
-        batch.schema(),
-        &["--arrow-record-batch-size", "1"],
+        &batch.schema(),
+        ArrowSinkOptions::new().with_record_batch_size(1),
     )
-    .await;
-    assert_abort_reports_cleanup_failure(arrow, &arrow_handle, &store).await;
+    .unwrap();
+    assert_abort_reports_cleanup_failure(Box::new(arrow), &arrow_handle, &store).await;
 
     let parquet_handle = prepared_handle(&storage, "tracking://bucket/abort-error.parquet").await;
     let parquet = ParquetSink::create(
@@ -1311,13 +1243,14 @@ async fn format_finish_failures_abort_multipart_uploads() {
     let batch = batch();
     let failed_arrow_handle =
         prepared_handle(&storage, "tracking://bucket/failed-output.arrow").await;
-    let failed_arrow = registered_arrow_sink(
+    let failed_arrow = ArrowSink::create(
         failed_arrow_handle.clone(),
-        batch.schema(),
-        &["--arrow-record-batch-size", "1"],
+        &batch.schema(),
+        ArrowSinkOptions::new().with_record_batch_size(1),
     )
-    .await;
-    assert_finish_failure_cleans_multipart(failed_arrow, &failed_arrow_handle, &store).await;
+    .unwrap();
+    assert_finish_failure_cleans_multipart(Box::new(failed_arrow), &failed_arrow_handle, &store)
+        .await;
 
     let failed_parquet_handle =
         prepared_handle(&storage, "tracking://bucket/failed-output.parquet").await;

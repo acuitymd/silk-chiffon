@@ -530,7 +530,7 @@ Inspect arrow file metadata and structure
     JSON output
 
 - `--batches` — Show per-record-batch details
-- `--row-count` — Count total rows by reading every record batch
+- `--row-count` — Count total rows (requires reading entire file)
 - `--object-store-upload-part-size <PART_SIZE>` — Adaptive single-put threshold and multipart part size
 
   Default value: `10MiB`

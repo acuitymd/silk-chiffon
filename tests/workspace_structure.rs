@@ -6,13 +6,7 @@ use std::{
 
 use serde_json::Value;
 
-#[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
-struct Dependency {
-    name: String,
-    kind: Option<String>,
-}
-
-fn workspace_packages() -> BTreeMap<String, BTreeSet<Dependency>> {
+fn workspace_packages() -> BTreeMap<String, BTreeSet<String>> {
     let output = Command::new(env!("CARGO"))
         .args(["metadata", "--format-version", "1", "--no-deps", "--locked"])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
@@ -39,12 +33,11 @@ fn workspace_packages() -> BTreeMap<String, BTreeSet<Dependency>> {
                 .as_array()
                 .expect("package dependencies should be an array")
                 .iter()
-                .map(|dependency| Dependency {
-                    name: dependency["name"]
+                .map(|dependency| {
+                    dependency["name"]
                         .as_str()
                         .expect("dependency name should be a string")
-                        .to_owned(),
-                    kind: dependency["kind"].as_str().map(str::to_owned),
+                        .to_owned()
                 })
                 .collect();
             (name, dependencies)
@@ -59,8 +52,6 @@ fn workspace_contains_foundation_packages() {
     assert!(packages.contains_key("silk_chiffon"));
     assert!(packages.contains_key("silk-chiffon-core"));
     assert!(packages.contains_key("silk-chiffon-storage"));
-    assert!(packages.contains_key("silk-chiffon-format-arrow"));
-    assert!(packages.contains_key("silk-chiffon-test-support"));
 }
 
 #[test]
@@ -87,60 +78,8 @@ fn foundation_packages_do_not_depend_on_format_packages() {
         assert!(
             dependencies
                 .iter()
-                .all(|dependency| !dependency.name.starts_with("silk-chiffon-format-")),
+                .all(|dependency| !dependency.starts_with("silk-chiffon-format-")),
             "{package} must not depend on a concrete format package"
-        );
-    }
-}
-
-#[test]
-fn arrow_and_test_support_dependencies_have_one_direction() {
-    let packages = workspace_packages();
-    let root = packages.get("silk_chiffon").unwrap();
-    let arrow = packages.get("silk-chiffon-format-arrow").unwrap();
-    let support = packages.get("silk-chiffon-test-support").unwrap();
-
-    assert!(root.contains(&Dependency {
-        name: "silk-chiffon-format-arrow".to_owned(),
-        kind: None,
-    }));
-    assert!(root.contains(&Dependency {
-        name: "silk-chiffon-test-support".to_owned(),
-        kind: Some("dev".to_owned()),
-    }));
-    assert!(arrow.contains(&Dependency {
-        name: "silk-chiffon-core".to_owned(),
-        kind: None,
-    }));
-    assert!(arrow.contains(&Dependency {
-        name: "silk-chiffon-storage".to_owned(),
-        kind: None,
-    }));
-    assert!(arrow.contains(&Dependency {
-        name: "silk-chiffon-test-support".to_owned(),
-        kind: Some("dev".to_owned()),
-    }));
-    assert!(support.iter().all(|dependency| {
-        dependency.name != "silk_chiffon"
-            && dependency.name != "silk-chiffon-core"
-            && !dependency.name.starts_with("silk-chiffon-format-")
-    }));
-}
-
-#[test]
-fn root_no_longer_owns_arrow_ipc_or_shared_fixtures() {
-    let root = env!("CARGO_MANIFEST_DIR");
-    for relative in [
-        "src/sources/arrow",
-        "src/sinks/arrow.rs",
-        "src/inspection/arrow.rs",
-        "src/sinks/object_sink_task.rs",
-        "src/utils/test_data.rs",
-        "src/utils/test_helpers.rs",
-    ] {
-        assert!(
-            !std::path::Path::new(root).join(relative).exists(),
-            "obsolete root path remains: {relative}"
         );
     }
 }

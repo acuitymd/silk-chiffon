@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use arrow::datatypes::SchemaRef;
+use arrow::datatypes::{DataType, Field, SchemaRef};
 use datafusion::{
     common::Statistics,
     datasource::{file_format::FileFormat, listing::PartitionedFile},
@@ -12,9 +12,7 @@ use datafusion::{
     prelude::SessionContext,
 };
 use futures::{StreamExt, TryStreamExt};
-use silk_chiffon_core::{
-    CanonicalInput, InputLeaf, file_table_provider, schemas_match_ignoring_metadata,
-};
+use silk_chiffon_core::{CanonicalInput, InputLeaf, file_table_provider};
 
 pub(crate) async fn native_file_provider(
     leaf: &InputLeaf,
@@ -82,7 +80,7 @@ pub(crate) async fn native_file_provider(
                             "while validating the schema of {canonical_url}: {source}"
                         ))
                     })?;
-                if !schemas_match_ignoring_metadata(&schema, &physical_schema) {
+                if !structurally_equal(&schema, &physical_schema) {
                     return Err(datafusion::common::DataFusionError::Execution(format!(
                         "input {canonical_url} schema does not match leaf schema: expected {schema:?}, got {physical_schema:?}"
                     )));
@@ -153,7 +151,7 @@ impl PhysicalExprAdapterFactory for StrictPhysicalExprAdapterFactory {
         logical_file_schema: SchemaRef,
         physical_file_schema: SchemaRef,
     ) -> datafusion::common::Result<Arc<dyn PhysicalExprAdapter>> {
-        if !schemas_match_ignoring_metadata(&logical_file_schema, &physical_file_schema) {
+        if !structurally_equal(&logical_file_schema, &physical_file_schema) {
             return Err(datafusion::common::DataFusionError::Execution(format!(
                 "input file schema does not match leaf schema: expected {logical_file_schema:?}, got {physical_file_schema:?}"
             )));
@@ -162,13 +160,169 @@ impl PhysicalExprAdapterFactory for StrictPhysicalExprAdapterFactory {
     }
 }
 
+pub(crate) fn structurally_equal(left: &SchemaRef, right: &SchemaRef) -> bool {
+    left.fields().len() == right.fields().len()
+        && left
+            .fields()
+            .iter()
+            .zip(right.fields())
+            .all(|(left, right)| stripped_field(left) == stripped_field(right))
+}
+
+fn stripped_field(field: &Field) -> Field {
+    Field::new(
+        field.name(),
+        stripped_data_type(field.data_type()),
+        field.is_nullable(),
+    )
+}
+
+fn stripped_data_type(data_type: &DataType) -> DataType {
+    match data_type {
+        DataType::List(field) => DataType::List(Arc::new(stripped_field(field))),
+        DataType::ListView(field) => DataType::ListView(Arc::new(stripped_field(field))),
+        DataType::FixedSizeList(field, size) => {
+            DataType::FixedSizeList(Arc::new(stripped_field(field)), *size)
+        }
+        DataType::LargeList(field) => DataType::LargeList(Arc::new(stripped_field(field))),
+        DataType::LargeListView(field) => DataType::LargeListView(Arc::new(stripped_field(field))),
+        DataType::Struct(fields) => DataType::Struct(
+            fields
+                .iter()
+                .map(|field| Arc::new(stripped_field(field)))
+                .collect(),
+        ),
+        DataType::Map(field, sorted) => DataType::Map(Arc::new(stripped_field(field)), *sorted),
+        DataType::Dictionary(key, value) => DataType::Dictionary(
+            Box::new(stripped_data_type(key)),
+            Box::new(stripped_data_type(value)),
+        ),
+        DataType::RunEndEncoded(run_ends, values) => DataType::RunEndEncoded(
+            Arc::new(stripped_field(run_ends)),
+            Arc::new(stripped_field(values)),
+        ),
+        DataType::Union(fields, mode) => DataType::Union(
+            fields
+                .iter()
+                .map(|(id, field)| (id, Arc::new(stripped_field(field))))
+                .collect(),
+            *mode,
+        ),
+        other => other.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use arrow::datatypes::{DataType, Field, Schema};
+    use std::collections::HashMap;
+
+    use arrow::datatypes::{Schema, UnionFields, UnionMode};
     use datafusion::physical_expr::{PhysicalSortExpr, expressions::Column};
     use object_store::ObjectMeta;
 
     use super::*;
+
+    #[test]
+    fn structural_comparison_ignores_metadata_but_not_nested_names() {
+        let nested = |name: &str, metadata: &[(&str, &str)]| {
+            let child = Field::new(name, DataType::Int64, true).with_metadata(
+                metadata
+                    .iter()
+                    .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+                    .collect::<HashMap<_, _>>(),
+            );
+            Arc::new(Schema::new(vec![Field::new(
+                "outer",
+                DataType::Struct(vec![Arc::new(child)].into()),
+                false,
+            )]))
+        };
+        assert!(structurally_equal(
+            &nested("value", &[("a", "one")]),
+            &nested("value", &[("a", "two")])
+        ));
+        assert!(!structurally_equal(
+            &nested("left", &[]),
+            &nested("right", &[])
+        ));
+    }
+
+    #[test]
+    fn structural_comparison_ignores_metadata_inside_dictionaries() {
+        let dictionary = |metadata: &[(&str, &str)]| {
+            let value = DataType::List(Arc::new(
+                Field::new("item", DataType::Utf8, true).with_metadata(
+                    metadata
+                        .iter()
+                        .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+                        .collect(),
+                ),
+            ));
+            Arc::new(Schema::new(vec![Field::new(
+                "dictionary",
+                DataType::Dictionary(Box::new(DataType::Int32), Box::new(value)),
+                true,
+            )]))
+        };
+
+        assert!(structurally_equal(
+            &dictionary(&[("source", "left")]),
+            &dictionary(&[("source", "right")])
+        ));
+    }
+
+    #[test]
+    fn structural_comparison_strips_metadata_from_every_nested_container() {
+        let child = |value: &str| {
+            Arc::new(
+                Field::new("item", DataType::Utf8, true)
+                    .with_metadata(HashMap::from([("source".to_owned(), value.to_owned())])),
+            )
+        };
+        let run_ends = Arc::new(Field::new("run_ends", DataType::Int32, false));
+        let variants = [
+            (
+                DataType::ListView(child("left")),
+                DataType::ListView(child("right")),
+            ),
+            (
+                DataType::FixedSizeList(child("left"), 4),
+                DataType::FixedSizeList(child("right"), 4),
+            ),
+            (
+                DataType::LargeList(child("left")),
+                DataType::LargeList(child("right")),
+            ),
+            (
+                DataType::LargeListView(child("left")),
+                DataType::LargeListView(child("right")),
+            ),
+            (
+                DataType::Map(child("left"), false),
+                DataType::Map(child("right"), false),
+            ),
+            (
+                DataType::RunEndEncoded(Arc::clone(&run_ends), child("left")),
+                DataType::RunEndEncoded(Arc::clone(&run_ends), child("right")),
+            ),
+            (
+                DataType::Union(
+                    UnionFields::try_new(vec![0], vec![child("left").as_ref().clone()]).unwrap(),
+                    UnionMode::Sparse,
+                ),
+                DataType::Union(
+                    UnionFields::try_new(vec![0], vec![child("right").as_ref().clone()]).unwrap(),
+                    UnionMode::Sparse,
+                ),
+            ),
+        ];
+
+        for (left, right) in variants {
+            let left = Arc::new(Schema::new(vec![Field::new("outer", left, true)]));
+            let right = Arc::new(Schema::new(vec![Field::new("outer", right, true)]));
+            assert!(structurally_equal(&left, &right));
+        }
+    }
 
     #[test]
     fn strict_adapter_rejects_a_structurally_different_file_schema() {

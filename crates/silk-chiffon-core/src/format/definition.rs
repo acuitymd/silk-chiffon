@@ -5,20 +5,14 @@
 //! them. See the [`super`] module for the complete lifecycle.
 
 use std::{
-    collections::HashMap,
-    fmt,
-    future::Future,
-    hash::{Hash, Hasher},
-    marker::PhantomData,
-    num::NonZeroUsize,
-    pin::Pin,
+    collections::HashMap, fmt, future::Future, marker::PhantomData, num::NonZeroUsize, pin::Pin,
     sync::Arc,
 };
 
 use anyhow::Result;
 use clap::{ArgMatches, Args, Command, FromArgMatches};
 use datafusion::{catalog::TableProvider, prelude::SessionContext};
-use silk_chiffon_storage::InputObject;
+use silk_chiffon_storage::{InputObject, StorageHandle};
 use thiserror::Error;
 
 use super::binding;
@@ -52,7 +46,7 @@ pub type SinkBinderFn<T> =
 
 /// Inspects one input using typed inspection settings and the host-selected output mode.
 pub type InspectorFn<T> =
-    for<'a> fn(&'a InputObject, InspectionMode, &'a T) -> FormatFuture<'a, InspectionOutput>;
+    for<'a> fn(&'a StorageHandle, InspectionMode, &'a T) -> FormatFuture<'a, InspectionOutput>;
 
 /// Host-owned execution settings used to bind a format's output behavior.
 ///
@@ -150,15 +144,9 @@ pub enum InspectionMode {
 }
 
 /// A format-specific container variant identified before leaf construction.
-///
-/// Named variants carry a canonical identifier for grouping and dispatch plus a
-/// human-readable name for presentation. Equality and hashing deliberately use
-/// only the canonical identifier, so presentation changes cannot split an input
-/// group. Unnamed variants represent formats with no container distinction.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
 pub struct InputVariant {
     name: Option<String>,
-    display_name: Option<String>,
 }
 
 impl InputVariant {
@@ -167,36 +155,16 @@ impl InputVariant {
         Self::default()
     }
 
-    /// Describes a variant with its canonical identifier and display name.
-    pub fn named(name: impl Into<String>, display_name: impl Into<String>) -> Self {
+    /// Describes a recognized container variant.
+    pub fn named(name: impl Into<String>) -> Self {
         Self {
             name: Some(name.into()),
-            display_name: Some(display_name.into()),
         }
     }
 
-    /// Returns the canonical variant identifier, when one exists.
+    /// Returns the container variant name, when the format distinguishes one.
     pub fn name(&self) -> Option<&str> {
         self.name.as_deref()
-    }
-
-    /// Returns the human-readable variant name when the format distinguishes one.
-    pub fn display_name(&self) -> Option<&str> {
-        self.display_name.as_deref()
-    }
-}
-
-impl PartialEq for InputVariant {
-    fn eq(&self, other: &Self) -> bool {
-        self.name == other.name
-    }
-}
-
-impl Eq for InputVariant {}
-
-impl Hash for InputVariant {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.name.hash(state);
     }
 }
 
@@ -211,11 +179,10 @@ pub enum InputDetection {
     Malformed(anyhow::Error),
 }
 
-/// A detection result paired with canonical and presentation metadata.
+/// A detection result paired with its definition's canonical name.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DetectedFormat {
     format: &'static str,
-    display_name: &'static str,
     variant: InputVariant,
 }
 
@@ -225,19 +192,9 @@ impl DetectedFormat {
         self.format
     }
 
-    /// Returns the format's human-readable display name.
-    pub fn display_name(&self) -> &'static str {
-        self.display_name
-    }
-
     /// Returns the format-specific variant reported by its detector.
     pub fn variant(&self) -> Option<&str> {
         self.variant.name()
-    }
-
-    /// Returns the human-readable variant name, when one was detected.
-    pub fn variant_display_name(&self) -> Option<&str> {
-        self.variant.display_name()
     }
 
     /// Returns the bound container variant.
@@ -405,7 +362,6 @@ impl InspectionDefinition {
 #[derive(Clone)]
 pub struct FormatDefinition {
     pub(super) name: &'static str,
-    pub(super) display_name: &'static str,
     pub(super) aliases: Vec<&'static str>,
     pub(super) extensions: Vec<&'static str>,
     pub(super) detection_priority: usize,
@@ -415,12 +371,11 @@ pub struct FormatDefinition {
 }
 
 impl FormatDefinition {
-    /// Starts a definition with its canonical identifier and display name.
-    pub fn builder(name: &'static str, display_name: &'static str) -> FormatDefinitionBuilder {
+    /// Starts a definition with its canonical registry name.
+    pub fn builder(name: &'static str) -> FormatDefinitionBuilder {
         FormatDefinitionBuilder {
             definition: Self {
                 name,
-                display_name,
                 aliases: Vec::new(),
                 extensions: Vec::new(),
                 detection_priority: usize::MAX,
@@ -434,11 +389,6 @@ impl FormatDefinition {
     /// Returns the canonical registry name.
     pub fn name(&self) -> &'static str {
         self.name
-    }
-
-    /// Returns the human-readable format name used in presentation.
-    pub fn display_name(&self) -> &'static str {
-        self.display_name
     }
 
     /// Returns alternate names accepted anywhere the registry accepts a format name.
@@ -494,7 +444,6 @@ impl FormatDefinition {
             InputDetection::Mismatch => Ok(None),
             InputDetection::Match(variant) => Ok(Some(DetectedFormat {
                 format: self.name,
-                display_name: self.display_name,
                 variant,
             })),
             InputDetection::Malformed(source) => Err(FormatOperationError::MalformedInput {
@@ -542,7 +491,7 @@ impl InspectionBinding {
     /// Inspects one input using the arguments retained by this binding.
     pub async fn inspect(
         &self,
-        object: &InputObject,
+        handle: &StorageHandle,
         mode: InspectionMode,
     ) -> Result<InspectionOutput, FormatOperationError> {
         let binding = self
@@ -552,7 +501,7 @@ impl InspectionBinding {
                 format: self.format,
                 operation: FormatOperation::Inspection,
             })?;
-        binding.inspect(self.format, object, mode).await
+        binding.inspect(self.format, handle, mode).await
     }
 }
 

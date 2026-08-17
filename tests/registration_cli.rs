@@ -1,11 +1,11 @@
 use clap::CommandFactory;
+#[cfg(feature = "local-bare-paths")]
+use silk_chiffon::utils::test_data::{TestBatch, TestFile};
 use silk_chiffon::{Cli, Command, registration};
 #[cfg(feature = "local-bare-paths")]
 use silk_chiffon_core::{InspectionMode, InspectionOutput};
 #[cfg(feature = "local-bare-paths")]
 use silk_chiffon_storage::LocationInput;
-#[cfg(feature = "local-bare-paths")]
-use silk_chiffon_test_support::{TestBatch, TestFile};
 
 #[test]
 fn executable_registers_formats_and_the_available_storage() {
@@ -275,14 +275,13 @@ async fn composed_inspection_invokes_the_bound_registration() {
     let Command::Inspect(command) = cli.command else {
         panic!("expected inspect command");
     };
-    let object = command
+    let handle = command
         .storage()
-        .lookup_input(&LocationInput::parse(input.to_str().unwrap()).unwrap())
-        .await
+        .input_handle(&LocationInput::parse(input.to_str().unwrap()).unwrap())
         .unwrap();
     let output = command
         .inspection()
-        .inspect(&object, InspectionMode::Json)
+        .inspect(&handle, InspectionMode::Json)
         .await
         .unwrap();
     let InspectionOutput::Json(output) = output else {
