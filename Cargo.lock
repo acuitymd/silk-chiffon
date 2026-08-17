@@ -3957,18 +3957,6 @@ dependencies = [
 [[package]]
 name = "silk-chiffon-core"
 version = "0.1.0"
-dependencies = [
- "anyhow",
- "arrow",
- "async-trait",
- "clap",
- "datafusion",
- "futures",
- "serde_json",
- "silk-chiffon-storage",
- "thiserror",
- "url",
-]
 
 [[package]]
 name = "silk-chiffon-storage"

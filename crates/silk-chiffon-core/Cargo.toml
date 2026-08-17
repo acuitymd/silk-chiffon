@@ -10,20 +10,5 @@ repository.workspace = true
 rust-version.workspace = true
 description = "Format-independent processing for Silk Chiffon"
 
-[dependencies]
-anyhow.workspace = true
-arrow.workspace = true
-async-trait.workspace = true
-clap.workspace = true
-datafusion.workspace = true
-futures.workspace = true
-serde_json.workspace = true
-silk-chiffon-storage = { path = "../silk-chiffon-storage", default-features = false }
-thiserror.workspace = true
-url.workspace = true
-
-[dev-dependencies]
-silk-chiffon-storage = { path = "../silk-chiffon-storage", features = ["local"] }
-
 [lints]
 workspace = true
