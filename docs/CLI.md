@@ -53,7 +53,6 @@ Examples:
 
 - `--from <FROM>` — Exact input reference. May be specified multiple times
 - `--from-pattern <FROM_PATTERN>` — File location pattern. May be specified multiple times
-- `--allow-unmatched-patterns` — Allow an individual file location pattern to match no files
 - `--input-format <INPUT_FORMAT>` — Override file input format detection
 
   Possible values: `arrow`, `parquet`, `vortex`

@@ -19,8 +19,6 @@ local-bare-paths = ["local"]
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
-futures.workspace = true
-glob.workspace = true
 humantime.workspace = true
 object_store = { workspace = true, features = ["cloud"] }
 parking_lot.workspace = true
@@ -28,8 +26,8 @@ thiserror.workspace = true
 url.workspace = true
 
 [dev-dependencies]
-async-trait.workspace = true
 bytes = "^1.12.1"
+futures = "^0.3.33"
 tempfile = "^3.27.0"
 tokio = { version = "^1.53.1", features = ["macros", "rt-multi-thread"] }
 

@@ -4361,11 +4361,9 @@ name = "silk-chiffon-storage"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-trait",
  "bytes",
  "clap",
  "futures",
- "glob",
  "humantime",
  "object_store",
  "parking_lot",
@@ -4395,6 +4393,7 @@ dependencies = [
  "criterion",
  "datafusion",
  "futures",
+ "glob",
  "humansize",
  "lru",
  "mimalloc",

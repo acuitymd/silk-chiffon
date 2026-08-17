@@ -1812,42 +1812,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn service_input_satisfies_nonempty_when_an_allowed_file_pattern_is_unmatched() {
-        SERVICE_OUTPUT_RESULT.lock().unwrap().take();
-        let directory = tempfile::tempdir().unwrap();
-        let missing = directory.path().join("missing-*.arrow");
-        let definition = application_definition_with_services(
-            FormatRegistry::builder().build().unwrap(),
-            vec![test_service_input("test-input", "test-input")],
-            vec![test_service_output("test-output", "test-output")],
-        );
-        let cli = test_cli(
-            definition,
-            &[
-                "silk-chiffon",
-                "transform",
-                "--from",
-                "test-input://source",
-                "--from-pattern",
-                missing.to_str().unwrap(),
-                "--allow-unmatched-patterns",
-                "--to",
-                "test-output://result",
-            ],
-        );
-        let Command::Transform(command) = cli.command else {
-            panic!("expected transform command");
-        };
-
-        crate::commands::transform::run(command).await.unwrap();
-
-        assert_eq!(
-            SERVICE_OUTPUT_RESULT.lock().unwrap().as_ref(),
-            Some(&("test-output://result".to_owned(), 3))
-        );
-    }
-
-    #[tokio::test]
     async fn service_outputs_reject_partition_templates() {
         let directory = tempfile::tempdir().unwrap();
         let input = directory.path().join("input.arrow");

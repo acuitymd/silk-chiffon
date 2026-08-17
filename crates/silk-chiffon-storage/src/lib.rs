@@ -37,28 +37,23 @@
 //! # }
 //! ```
 
-#[cfg(not(unix))]
-compile_error!("silk-chiffon-storage supports Unix targets only");
-
 pub mod backend;
 pub mod error;
 pub mod handle;
 pub mod local;
 pub mod location;
-pub mod pattern;
 pub mod registry;
 pub mod retry;
 pub mod session;
 
 pub use backend::{
-    BareLocationMapper, BarePatternMapper, LocationValidator, ObjectStoreCreatorFn, StorageAccess,
-    StorageBackend, StorageBackendBuildError, StorageBackendBuilder, StorageDirection,
+    BareLocationMapper, ObjectPathMapper, ObjectStoreCreatorFn, StorageAccess, StorageBackend,
+    StorageBackendBuildError, StorageBackendBuilder, StorageDirection,
 };
 pub use error::StorageError;
 pub use handle::{StorageHandle, ensure_output_absent, validate_input};
 pub use location::{Location, LocationInput};
 pub use object_store::RetryConfig;
-pub use pattern::LocationPattern;
 pub use registry::{StorageRegistry, StorageRegistryBuilder, StorageRegistryError};
 pub use retry::{RetryArgs, RetryConfigurationError};
 pub use session::{StorageSession, StorageSessionCreationError};

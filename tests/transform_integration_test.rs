@@ -16,7 +16,6 @@ struct TestTransformCommand {
     from: Option<String>,
     exact_references: Vec<String>,
     patterns: Vec<String>,
-    allow_unmatched_patterns: bool,
     input_format: Option<String>,
     output_format: Option<String>,
     to: Option<String>,
@@ -73,9 +72,6 @@ async fn run_transform(command: TestTransformCommand) -> anyhow::Result<()> {
     }
     for pattern in command.patterns {
         push_value!("--from-pattern", pattern);
-    }
-    if command.allow_unmatched_patterns {
-        arguments.push(OsString::from("--allow-unmatched-patterns"));
     }
     if let Some(format) = command.input_format {
         push_value!("--input-format", format);
@@ -711,92 +707,6 @@ async fn test_transform_from_pattern_empty_glob() {
             .to_string()
             .contains("matched no locations")
     );
-}
-
-#[tokio::test]
-async fn test_transform_combines_exact_input_with_an_allowed_unmatched_pattern() {
-    let temp_dir = TempDir::new().unwrap();
-    let input = temp_dir.path().join("input.arrow");
-    let output = temp_dir.path().join("output.arrow");
-    TestFile::write_arrow_batch(&input, &TestBatch::simple_with(&[1, 2], &["a", "b"]));
-
-    run_transform(TestTransformCommand {
-        exact_references: vec![input.to_string_lossy().into_owned()],
-        patterns: vec![
-            temp_dir
-                .path()
-                .join("missing-*.arrow")
-                .to_string_lossy()
-                .into_owned(),
-        ],
-        allow_unmatched_patterns: true,
-        to: Some(output.to_string_lossy().into_owned()),
-        ..transform_defaults()
-    })
-    .await
-    .unwrap();
-
-    assert!(output.exists());
-}
-
-#[tokio::test]
-async fn test_transform_rejects_an_unmatched_pattern_even_with_an_exact_input_by_default() {
-    let temp_dir = TempDir::new().unwrap();
-    let input = temp_dir.path().join("input.arrow");
-    TestFile::write_arrow_batch(&input, &TestBatch::simple_with(&[1, 2], &["a", "b"]));
-
-    let result = run_transform(TestTransformCommand {
-        exact_references: vec![input.to_string_lossy().into_owned()],
-        patterns: vec![
-            temp_dir
-                .path()
-                .join("missing-*.arrow")
-                .to_string_lossy()
-                .into_owned(),
-        ],
-        to: Some(
-            temp_dir
-                .path()
-                .join("output.arrow")
-                .to_string_lossy()
-                .into_owned(),
-        ),
-        ..transform_defaults()
-    })
-    .await;
-
-    assert!(
-        result
-            .unwrap_err()
-            .to_string()
-            .contains("matched no locations")
-    );
-}
-
-#[tokio::test]
-async fn test_transform_rejects_an_allowed_unmatched_pattern_without_another_source() {
-    let temp_dir = TempDir::new().unwrap();
-    let result = run_transform(TestTransformCommand {
-        patterns: vec![
-            temp_dir
-                .path()
-                .join("missing-*.arrow")
-                .to_string_lossy()
-                .into_owned(),
-        ],
-        allow_unmatched_patterns: true,
-        to: Some(
-            temp_dir
-                .path()
-                .join("output.arrow")
-                .to_string_lossy()
-                .into_owned(),
-        ),
-        ..transform_defaults()
-    })
-    .await;
-
-    assert!(result.unwrap_err().to_string().contains("no input sources"));
 }
 
 #[tokio::test]

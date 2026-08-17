@@ -89,7 +89,7 @@ fn composed_cli_rejects_an_unregistered_format() {
 }
 
 #[test]
-fn transform_cli_combines_repeatable_exact_references_and_patterns() {
+fn transform_cli_separates_repeatable_exact_references_from_patterns() {
     Cli::try_parse_from([
         "silk-chiffon",
         "transform",
@@ -114,7 +114,7 @@ fn transform_cli_combines_repeatable_exact_references_and_patterns() {
     ])
     .unwrap();
 
-    Cli::try_parse_from([
+    let mixed = Cli::try_parse_from([
         "silk-chiffon",
         "transform",
         "--from",
@@ -124,25 +124,8 @@ fn transform_cli_combines_repeatable_exact_references_and_patterns() {
         "--to",
         "output.arrow",
     ])
-    .unwrap();
-}
-
-#[test]
-fn allow_unmatched_patterns_requires_a_pattern_operand() {
-    let error = Cli::try_parse_from([
-        "silk-chiffon",
-        "transform",
-        "--from",
-        "one.arrow",
-        "--allow-unmatched-patterns",
-        "--to",
-        "output.arrow",
-    ])
     .unwrap_err();
-    assert_eq!(
-        error.kind(),
-        clap::error::ErrorKind::MissingRequiredArgument
-    );
+    assert_eq!(mixed.kind(), clap::error::ErrorKind::ArgumentConflict);
 }
 
 #[test]

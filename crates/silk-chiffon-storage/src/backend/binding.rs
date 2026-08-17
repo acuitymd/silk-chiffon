@@ -45,14 +45,14 @@
 //! callbacks. The backend crate continues to use ordinary Rust types on both sides of its contract.
 
 use clap::{ArgMatches, Command};
-use object_store::{ObjectStore, RetryConfig};
+use object_store::{ObjectStore, RetryConfig, path::Path as ObjectPath};
 use url::Url;
 
 use super::{
-    BareLocationMapper, BarePatternMapper, CliArgumentKey, LocationValidator, ObjectStoreCreatorFn,
-    StorageAccess, StorageDirection,
+    BareLocationMapper, CliArgumentKey, ObjectPathMapper, ObjectStoreCreatorFn, StorageAccess,
+    StorageDirection,
 };
-use crate::{Location, LocationPattern};
+use crate::Location;
 
 /// Definition-time behavior shared by storage backends with different settings types.
 pub(super) trait BackendDefinition: Send + Sync {
@@ -83,9 +83,7 @@ pub(crate) trait BackendBinding: Send + Sync {
 
     fn map_bare_location(&self, input: &str) -> Option<anyhow::Result<Location>>;
 
-    fn map_bare_pattern(&self, input: &str) -> Option<anyhow::Result<LocationPattern>>;
-
-    fn validate_location(&self, location: &Location) -> anyhow::Result<()>;
+    fn map_object_path(&self, location: &Location) -> anyhow::Result<ObjectPath>;
 
     fn create_object_store(
         &self,
@@ -100,8 +98,7 @@ pub(super) struct TypedBackendDefinition<T> {
     pub(super) schemes: Box<[&'static str]>,
     pub(super) access: StorageAccess,
     pub(super) bare_location_mapper: Option<BareLocationMapper<T>>,
-    pub(super) bare_pattern_mapper: Option<BarePatternMapper<T>>,
-    pub(super) location_validator: LocationValidator<T>,
+    pub(super) object_path_mapper: ObjectPathMapper<T>,
     pub(super) object_store_creator: ObjectStoreCreatorFn<T>,
     pub(super) uses_shared_retries: bool,
     pub(super) cli_argument_keys: Box<[CliArgumentKey]>,
@@ -147,8 +144,7 @@ where
             access: self.access,
             settings: (self.parse_args)(matches)?,
             bare_location_mapper: self.bare_location_mapper,
-            bare_pattern_mapper: self.bare_pattern_mapper,
-            location_validator: self.location_validator,
+            object_path_mapper: self.object_path_mapper,
             object_store_creator: self.object_store_creator,
             uses_shared_retries: self.uses_shared_retries,
         }))
@@ -161,8 +157,7 @@ struct TypedBackendBinding<T> {
     access: StorageAccess,
     settings: T,
     bare_location_mapper: Option<BareLocationMapper<T>>,
-    bare_pattern_mapper: Option<BarePatternMapper<T>>,
-    location_validator: LocationValidator<T>,
+    object_path_mapper: ObjectPathMapper<T>,
     object_store_creator: ObjectStoreCreatorFn<T>,
     uses_shared_retries: bool,
 }
@@ -188,13 +183,8 @@ where
             .map(|mapper| mapper(input, &self.settings))
     }
 
-    fn map_bare_pattern(&self, input: &str) -> Option<anyhow::Result<LocationPattern>> {
-        self.bare_pattern_mapper
-            .map(|mapper| mapper(input, &self.settings))
-    }
-
-    fn validate_location(&self, location: &Location) -> anyhow::Result<()> {
-        (self.location_validator)(location, &self.settings)
+    fn map_object_path(&self, location: &Location) -> anyhow::Result<ObjectPath> {
+        (self.object_path_mapper)(location, &self.settings)
     }
 
     fn create_object_store(

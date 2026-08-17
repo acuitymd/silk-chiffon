@@ -7,10 +7,10 @@ use std::{
 };
 
 use clap::{Args, Command};
-use object_store::{ObjectStore, memory::InMemory};
+use object_store::{ObjectStore, memory::InMemory, path::Path as ObjectPath};
 use silk_chiffon_storage::{
-    Location, LocationInput, LocationPattern, RetryConfig, RetryConfigurationError, StorageAccess,
-    StorageBackend, StorageBackendBuildError, StorageDirection, StorageError, StorageRegistry,
+    Location, LocationInput, RetryConfig, RetryConfigurationError, StorageAccess, StorageBackend,
+    StorageBackendBuildError, StorageDirection, StorageError, StorageRegistry,
     StorageRegistryError, StorageSession,
 };
 use url::Url;
@@ -18,8 +18,8 @@ use url::Url;
 static LAST_LABEL: Mutex<Option<String>> = Mutex::new(None);
 static LAST_BARE_LOCATION: Mutex<Option<String>> = Mutex::new(None);
 static LAST_RETRY_COUNT: Mutex<Option<usize>> = Mutex::new(None);
-static READ_ONLY_LOCATION_VALIDATIONS: AtomicUsize = AtomicUsize::new(0);
-static LOCATION_VALIDATIONS: AtomicUsize = AtomicUsize::new(0);
+static READ_ONLY_PATH_MAPPINGS: AtomicUsize = AtomicUsize::new(0);
+static OBJECT_PATH_MAPPINGS: AtomicUsize = AtomicUsize::new(0);
 static OBJECT_STORE_CREATIONS: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Args, Clone)]
@@ -166,9 +166,9 @@ struct SharedRetryCollisionArgs {
     storage_max_retries: bool,
 }
 
-fn validate_memory_location(_location: &Location, settings: &MemoryArgs) -> anyhow::Result<()> {
+fn memory_object_path(location: &Location, settings: &MemoryArgs) -> anyhow::Result<ObjectPath> {
     *LAST_LABEL.lock().unwrap() = Some(settings.label.clone());
-    Ok(())
+    Ok(ObjectPath::from_url_path(location.url().path())?)
 }
 
 fn map_memory_bare_location(input: &str, settings: &MemoryArgs) -> anyhow::Result<Location> {
@@ -191,17 +191,13 @@ fn map_mismatched_bare_location(_input: &str, _settings: &()) -> anyhow::Result<
     Ok(Location::parse_url("other://bucket/object")?)
 }
 
-fn map_bare_pattern(input: &str, _settings: &()) -> anyhow::Result<LocationPattern> {
-    Ok(LocationPattern::parse_url(format!("mem://bucket/{input}"))?)
+fn object_path<T>(location: &Location, _settings: &T) -> anyhow::Result<ObjectPath> {
+    Ok(ObjectPath::from_url_path(location.url().path())?)
 }
 
-fn validate_location<T>(_location: &Location, _settings: &T) -> anyhow::Result<()> {
-    Ok(())
-}
-
-fn counted_location_validator(location: &Location, settings: &()) -> anyhow::Result<()> {
-    LOCATION_VALIDATIONS.fetch_add(1, Ordering::SeqCst);
-    validate_location(location, settings)
+fn counted_object_path(location: &Location, settings: &()) -> anyhow::Result<ObjectPath> {
+    OBJECT_PATH_MAPPINGS.fetch_add(1, Ordering::SeqCst);
+    object_path(location, settings)
 }
 
 fn retry_object_store(
@@ -222,13 +218,13 @@ fn counted_object_store(
     Ok(Arc::new(InMemory::new()))
 }
 
-fn read_only_location_validator(location: &Location, _settings: &()) -> anyhow::Result<()> {
-    READ_ONLY_LOCATION_VALIDATIONS.fetch_add(1, Ordering::SeqCst);
-    validate_location(location, &())
+fn read_only_object_path(location: &Location, _settings: &()) -> anyhow::Result<ObjectPath> {
+    READ_ONLY_PATH_MAPPINGS.fetch_add(1, Ordering::SeqCst);
+    object_path(location, &())
 }
 
-fn failing_location_validator(_location: &Location, _settings: &()) -> anyhow::Result<()> {
-    anyhow::bail!("backend-specific location-validation failure")
+fn failing_object_path(_location: &Location, _settings: &()) -> anyhow::Result<ObjectPath> {
+    anyhow::bail!("backend-specific object-path failure")
 }
 
 fn failing_bare_location(_input: &str, _settings: &()) -> anyhow::Result<Location> {
@@ -256,7 +252,7 @@ fn unit_backend(name: &'static str, scheme: &'static str) -> StorageBackend {
         .name(name)
         .schemes([scheme])
         .access(StorageAccess::ReadWrite)
-        .location_validator(validate_location)
+        .object_path_mapper(object_path)
         .object_store_creator(in_memory_object_store)
         .build()
         .unwrap()
@@ -293,7 +289,7 @@ fn backend_build_validates_the_complete_definition() {
     let missing_name = StorageBackend::without_args()
         .schemes(["mem"])
         .access(StorageAccess::ReadWrite)
-        .location_validator(validate_location)
+        .object_path_mapper(object_path)
         .object_store_creator(in_memory_object_store)
         .build();
     assert!(matches!(
@@ -306,7 +302,7 @@ fn backend_build_validates_the_complete_definition() {
             .name(name)
             .schemes(["mem"])
             .access(StorageAccess::ReadWrite)
-            .location_validator(validate_location)
+            .object_path_mapper(object_path)
             .object_store_creator(in_memory_object_store)
             .build();
         assert!(matches!(
@@ -318,7 +314,7 @@ fn backend_build_validates_the_complete_definition() {
     let missing_schemes = StorageBackend::without_args()
         .name("memory")
         .access(StorageAccess::ReadWrite)
-        .location_validator(validate_location)
+        .object_path_mapper(object_path)
         .object_store_creator(in_memory_object_store)
         .build();
     assert!(matches!(
@@ -331,7 +327,7 @@ fn backend_build_validates_the_complete_definition() {
             .name("memory")
             .schemes([scheme])
             .access(StorageAccess::ReadWrite)
-            .location_validator(validate_location)
+            .object_path_mapper(object_path)
             .object_store_creator(in_memory_object_store)
             .build();
         assert!(matches!(
@@ -344,7 +340,7 @@ fn backend_build_validates_the_complete_definition() {
         .name("memory")
         .schemes(["mem", "mem"])
         .access(StorageAccess::ReadWrite)
-        .location_validator(validate_location)
+        .object_path_mapper(object_path)
         .object_store_creator(in_memory_object_store)
         .build();
     assert!(matches!(
@@ -355,7 +351,7 @@ fn backend_build_validates_the_complete_definition() {
     let missing_access = StorageBackend::without_args()
         .name("memory")
         .schemes(["mem"])
-        .location_validator(validate_location)
+        .object_path_mapper(object_path)
         .object_store_creator(in_memory_object_store)
         .build();
     assert!(matches!(
@@ -363,48 +359,26 @@ fn backend_build_validates_the_complete_definition() {
         Err(StorageBackendBuildError::MissingAccess)
     ));
 
-    let missing_location_validator = StorageBackend::without_args()
+    let missing_path_mapper = StorageBackend::without_args()
         .name("memory")
         .schemes(["mem"])
         .access(StorageAccess::ReadWrite)
         .object_store_creator(in_memory_object_store)
         .build();
     assert!(matches!(
-        missing_location_validator,
-        Err(StorageBackendBuildError::MissingLocationValidator)
+        missing_path_mapper,
+        Err(StorageBackendBuildError::MissingObjectPathMapper)
     ));
-
-    StorageBackend::without_args()
-        .name("memory")
-        .schemes(["mem"])
-        .access(StorageAccess::ReadWrite)
-        .allow_any_location()
-        .object_store_creator(in_memory_object_store)
-        .build()
-        .unwrap();
 
     let missing_store_creator = StorageBackend::without_args()
         .name("memory")
         .schemes(["mem"])
         .access(StorageAccess::ReadWrite)
-        .location_validator(validate_location)
+        .object_path_mapper(object_path)
         .build();
     assert!(matches!(
         missing_store_creator,
         Err(StorageBackendBuildError::MissingObjectStoreCreator)
-    ));
-
-    let bare_pattern_without_bare_location = StorageBackend::without_args()
-        .name("memory")
-        .schemes(["mem"])
-        .access(StorageAccess::ReadWrite)
-        .bare_pattern_mapper(map_bare_pattern)
-        .location_validator(validate_location)
-        .object_store_creator(in_memory_object_store)
-        .build();
-    assert!(matches!(
-        bare_pattern_without_bare_location,
-        Err(StorageBackendBuildError::BarePatternMapperWithoutBareLocationMapper)
     ));
 }
 
@@ -419,8 +393,8 @@ fn backend_builder_setters_replace_earlier_values() {
         .access(StorageAccess::WriteOnly)
         .bare_location_mapper(map_first_bare_location)
         .bare_location_mapper(map_second_bare_location)
-        .location_validator(failing_location_validator)
-        .location_validator(validate_location)
+        .object_path_mapper(failing_object_path)
+        .object_path_mapper(object_path)
         .object_store_creator(failing_object_store)
         .object_store_creator(in_memory_object_store)
         .shared_retries()
@@ -449,7 +423,7 @@ fn registered_arguments_bind_typed_settings_and_create_handles_for_claimed_schem
         .name("memory")
         .schemes(["mem", "memory"])
         .access(StorageAccess::ReadWrite)
-        .location_validator(validate_memory_location)
+        .object_path_mapper(memory_object_path)
         .object_store_creator(in_memory_object_store)
         .bare_location_mapper(map_memory_bare_location)
         .build()
@@ -551,7 +525,7 @@ fn registry_rejects_duplicate_cli_ids_long_options_and_short_options() {
                 .name("first")
                 .schemes(["first"])
                 .access(StorageAccess::ReadOnly)
-                .location_validator(validate_location)
+                .object_path_mapper(object_path)
                 .object_store_creator(in_memory_object_store)
                 .build()
                 .unwrap(),
@@ -561,7 +535,7 @@ fn registry_rejects_duplicate_cli_ids_long_options_and_short_options() {
                 .name("second")
                 .schemes(["second"])
                 .access(StorageAccess::ReadOnly)
-                .location_validator(validate_location)
+                .object_path_mapper(object_path)
                 .object_store_creator(in_memory_object_store)
                 .build()
                 .unwrap(),
@@ -582,7 +556,7 @@ fn registry_rejects_duplicate_cli_ids_long_options_and_short_options() {
                 .name("first")
                 .schemes(["first"])
                 .access(StorageAccess::ReadOnly)
-                .location_validator(validate_location)
+                .object_path_mapper(object_path)
                 .object_store_creator(in_memory_object_store)
                 .build()
                 .unwrap(),
@@ -592,7 +566,7 @@ fn registry_rejects_duplicate_cli_ids_long_options_and_short_options() {
                 .name("second")
                 .schemes(["second"])
                 .access(StorageAccess::ReadOnly)
-                .location_validator(validate_location)
+                .object_path_mapper(object_path)
                 .object_store_creator(in_memory_object_store)
                 .build()
                 .unwrap(),
@@ -602,7 +576,7 @@ fn registry_rejects_duplicate_cli_ids_long_options_and_short_options() {
                 .name("third")
                 .schemes(["third"])
                 .access(StorageAccess::ReadOnly)
-                .location_validator(validate_location)
+                .object_path_mapper(object_path)
                 .object_store_creator(in_memory_object_store)
                 .build()
                 .unwrap(),
@@ -623,7 +597,7 @@ fn registry_rejects_duplicate_cli_ids_long_options_and_short_options() {
                 .name("first")
                 .schemes(["first"])
                 .access(StorageAccess::ReadOnly)
-                .location_validator(validate_location)
+                .object_path_mapper(object_path)
                 .object_store_creator(in_memory_object_store)
                 .build()
                 .unwrap(),
@@ -633,7 +607,7 @@ fn registry_rejects_duplicate_cli_ids_long_options_and_short_options() {
                 .name("second")
                 .schemes(["second"])
                 .access(StorageAccess::ReadOnly)
-                .location_validator(validate_location)
+                .object_path_mapper(object_path)
                 .object_store_creator(in_memory_object_store)
                 .build()
                 .unwrap(),
@@ -654,7 +628,7 @@ fn registry_rejects_duplicate_cli_ids_long_options_and_short_options() {
                 .name("memory")
                 .schemes(["mem"])
                 .access(StorageAccess::ReadOnly)
-                .location_validator(validate_location)
+                .object_path_mapper(object_path)
                 .object_store_creator(in_memory_object_store)
                 .shared_retries()
                 .build()
@@ -677,7 +651,7 @@ fn backend_build_rejects_duplicate_cli_aliases() {
         .name("memory")
         .schemes(["mem"])
         .access(StorageAccess::ReadOnly)
-        .location_validator(validate_location)
+        .object_path_mapper(object_path)
         .object_store_creator(in_memory_object_store)
         .build();
     assert!(matches!(
@@ -690,7 +664,7 @@ fn backend_build_rejects_duplicate_cli_aliases() {
         .name("memory")
         .schemes(["mem"])
         .access(StorageAccess::ReadOnly)
-        .location_validator(validate_location)
+        .object_path_mapper(object_path)
         .object_store_creator(in_memory_object_store)
         .build();
     assert!(matches!(
@@ -703,7 +677,7 @@ fn backend_build_rejects_duplicate_cli_aliases() {
         .name("memory")
         .schemes(["mem"])
         .access(StorageAccess::ReadOnly)
-        .location_validator(validate_location)
+        .object_path_mapper(object_path)
         .object_store_creator(in_memory_object_store)
         .build();
     assert!(matches!(
@@ -715,7 +689,7 @@ fn backend_build_rejects_duplicate_cli_aliases() {
         .name("memory")
         .schemes(["mem"])
         .access(StorageAccess::ReadOnly)
-        .location_validator(validate_location)
+        .object_path_mapper(object_path)
         .object_store_creator(in_memory_object_store)
         .build();
     assert!(matches!(
@@ -728,7 +702,7 @@ fn backend_build_rejects_duplicate_cli_aliases() {
         .name("memory")
         .schemes(["mem"])
         .access(StorageAccess::ReadOnly)
-        .location_validator(validate_location)
+        .object_path_mapper(object_path)
         .object_store_creator(in_memory_object_store)
         .build();
     assert!(matches!(
@@ -745,7 +719,7 @@ fn registry_rejects_cli_alias_collisions_across_backends() {
                 .name("first")
                 .schemes(["first"])
                 .access(StorageAccess::ReadOnly)
-                .location_validator(validate_location)
+                .object_path_mapper(object_path)
                 .object_store_creator(in_memory_object_store)
                 .build()
                 .unwrap(),
@@ -755,7 +729,7 @@ fn registry_rejects_cli_alias_collisions_across_backends() {
                 .name("second")
                 .schemes(["second"])
                 .access(StorageAccess::ReadOnly)
-                .location_validator(validate_location)
+                .object_path_mapper(object_path)
                 .object_store_creator(in_memory_object_store)
                 .build()
                 .unwrap(),
@@ -776,7 +750,7 @@ fn registry_rejects_cli_alias_collisions_across_backends() {
                 .name("first")
                 .schemes(["first"])
                 .access(StorageAccess::ReadOnly)
-                .location_validator(validate_location)
+                .object_path_mapper(object_path)
                 .object_store_creator(in_memory_object_store)
                 .build()
                 .unwrap(),
@@ -786,7 +760,7 @@ fn registry_rejects_cli_alias_collisions_across_backends() {
                 .name("second")
                 .schemes(["second"])
                 .access(StorageAccess::ReadOnly)
-                .location_validator(validate_location)
+                .object_path_mapper(object_path)
                 .object_store_creator(in_memory_object_store)
                 .build()
                 .unwrap(),
@@ -809,7 +783,7 @@ fn registry_rejects_duplicate_group_ids_and_argument_group_id_collisions() {
                 .name("first")
                 .schemes(["first"])
                 .access(StorageAccess::ReadOnly)
-                .location_validator(validate_location)
+                .object_path_mapper(object_path)
                 .object_store_creator(in_memory_object_store)
                 .build()
                 .unwrap(),
@@ -819,7 +793,7 @@ fn registry_rejects_duplicate_group_ids_and_argument_group_id_collisions() {
                 .name("second")
                 .schemes(["second"])
                 .access(StorageAccess::ReadOnly)
-                .location_validator(validate_location)
+                .object_path_mapper(object_path)
                 .object_store_creator(in_memory_object_store)
                 .build()
                 .unwrap(),
@@ -840,7 +814,7 @@ fn registry_rejects_duplicate_group_ids_and_argument_group_id_collisions() {
                 .name("first")
                 .schemes(["first"])
                 .access(StorageAccess::ReadOnly)
-                .location_validator(validate_location)
+                .object_path_mapper(object_path)
                 .object_store_creator(in_memory_object_store)
                 .build()
                 .unwrap(),
@@ -850,7 +824,7 @@ fn registry_rejects_duplicate_group_ids_and_argument_group_id_collisions() {
                 .name("second")
                 .schemes(["second"])
                 .access(StorageAccess::ReadOnly)
-                .location_validator(validate_location)
+                .object_path_mapper(object_path)
                 .object_store_creator(in_memory_object_store)
                 .build()
                 .unwrap(),
@@ -872,7 +846,7 @@ fn registry_rejects_multiple_bare_location_backends() {
         .name("first")
         .schemes(["first"])
         .access(StorageAccess::ReadWrite)
-        .location_validator(validate_location)
+        .object_path_mapper(object_path)
         .object_store_creator(in_memory_object_store)
         .bare_location_mapper(map_first_bare_location)
         .build()
@@ -881,7 +855,7 @@ fn registry_rejects_multiple_bare_location_backends() {
         .name("second")
         .schemes(["second"])
         .access(StorageAccess::ReadWrite)
-        .location_validator(validate_location)
+        .object_path_mapper(object_path)
         .object_store_creator(in_memory_object_store)
         .bare_location_mapper(map_second_bare_location)
         .build()
@@ -890,7 +864,7 @@ fn registry_rejects_multiple_bare_location_backends() {
         .name("third")
         .schemes(["third"])
         .access(StorageAccess::ReadWrite)
-        .location_validator(validate_location)
+        .object_path_mapper(object_path)
         .object_store_creator(in_memory_object_store)
         .bare_location_mapper(map_second_bare_location)
         .build()
@@ -915,7 +889,7 @@ fn bare_location_mapper_must_return_a_scheme_claimed_by_its_backend() {
         .name("memory")
         .schemes(["mem"])
         .access(StorageAccess::ReadWrite)
-        .location_validator(validate_location)
+        .object_path_mapper(object_path)
         .object_store_creator(in_memory_object_store)
         .bare_location_mapper(map_mismatched_bare_location)
         .build()
@@ -947,13 +921,13 @@ fn bare_locations_are_unsupported_without_a_claiming_backend() {
 }
 
 #[test]
-fn read_only_backend_rejects_output_before_location_validation() {
-    READ_ONLY_LOCATION_VALIDATIONS.store(0, Ordering::SeqCst);
+fn read_only_backend_rejects_output_before_invoking_its_mapper() {
+    READ_ONLY_PATH_MAPPINGS.store(0, Ordering::SeqCst);
     let backend = StorageBackend::without_args()
         .name("read-only")
         .schemes(["readonly"])
         .access(StorageAccess::ReadOnly)
-        .location_validator(read_only_location_validator)
+        .object_path_mapper(read_only_object_path)
         .object_store_creator(in_memory_object_store)
         .build()
         .unwrap();
@@ -964,7 +938,7 @@ fn read_only_backend_rejects_output_before_location_validation() {
     let location = location_input("readonly://source/table");
 
     storage.input_handle(&location).unwrap();
-    assert_eq!(READ_ONLY_LOCATION_VALIDATIONS.load(Ordering::SeqCst), 1);
+    assert_eq!(READ_ONLY_PATH_MAPPINGS.load(Ordering::SeqCst), 1);
 
     let error = storage.output_handle(&location).unwrap_err();
     assert!(matches!(
@@ -974,7 +948,7 @@ fn read_only_backend_rejects_output_before_location_validation() {
             direction: StorageDirection::Output,
         }
     ));
-    assert_eq!(READ_ONLY_LOCATION_VALIDATIONS.load(Ordering::SeqCst), 1);
+    assert_eq!(READ_ONLY_PATH_MAPPINGS.load(Ordering::SeqCst), 1);
 }
 
 #[test]
@@ -983,7 +957,7 @@ fn unregistered_backends_are_absent_with_no_required_arguments_or_schemes() {
         .name("cloud")
         .schemes(["cloud"])
         .access(StorageAccess::ReadWrite)
-        .location_validator(validate_location)
+        .object_path_mapper(object_path)
         .object_store_creator(in_memory_object_store)
         .build()
         .unwrap();
@@ -1015,7 +989,7 @@ fn retry_capable_backends_share_one_argument_group_and_receive_defaults() {
         .name("first")
         .schemes(["first"])
         .access(StorageAccess::ReadOnly)
-        .location_validator(validate_location)
+        .object_path_mapper(object_path)
         .object_store_creator(retry_object_store)
         .shared_retries()
         .build()
@@ -1024,7 +998,7 @@ fn retry_capable_backends_share_one_argument_group_and_receive_defaults() {
         .name("second")
         .schemes(["second"])
         .access(StorageAccess::ReadOnly)
-        .location_validator(validate_location)
+        .object_path_mapper(object_path)
         .object_store_creator(in_memory_object_store)
         .shared_retries()
         .build()
@@ -1117,7 +1091,7 @@ fn enabled_retries_validate_backoff_while_zero_retries_disable_validation() {
             .name("memory")
             .schemes(["mem"])
             .access(StorageAccess::ReadOnly)
-            .location_validator(validate_location)
+            .object_path_mapper(object_path)
             .object_store_creator(in_memory_object_store)
             .shared_retries()
             .build()
@@ -1173,7 +1147,7 @@ fn enabled_retries_reject_each_invalid_retry_dimension() {
         .name("memory")
         .schemes(["mem"])
         .access(StorageAccess::ReadOnly)
-        .location_validator(validate_location)
+        .object_path_mapper(object_path)
         .object_store_creator(in_memory_object_store)
         .shared_retries()
         .build()
@@ -1254,13 +1228,13 @@ fn enabled_retries_reject_each_invalid_retry_dimension() {
 
 #[test]
 fn cache_reuses_one_store_per_origin_within_each_session() {
-    LOCATION_VALIDATIONS.store(0, Ordering::SeqCst);
+    OBJECT_PATH_MAPPINGS.store(0, Ordering::SeqCst);
     OBJECT_STORE_CREATIONS.store(0, Ordering::SeqCst);
     let backend = StorageBackend::without_args()
         .name("memory")
         .schemes(["mem"])
         .access(StorageAccess::ReadOnly)
-        .location_validator(counted_location_validator)
+        .object_path_mapper(counted_object_path)
         .object_store_creator(counted_object_store)
         .shared_retries()
         .build()
@@ -1293,7 +1267,7 @@ fn cache_reuses_one_store_per_origin_within_each_session() {
     assert!(Arc::ptr_eq(&first.object_store(), &path.object_store(),));
     assert_eq!(first.store_url().as_str(), "mem://one/");
     assert_eq!(equivalent.store_url(), first.store_url());
-    assert_eq!(LOCATION_VALIDATIONS.load(Ordering::SeqCst), 4);
+    assert_eq!(OBJECT_PATH_MAPPINGS.load(Ordering::SeqCst), 4);
     assert_eq!(OBJECT_STORE_CREATIONS.load(Ordering::SeqCst), 2);
 
     let retry_command = registry.augment_args(Command::new("storage-test"));
@@ -1306,7 +1280,7 @@ fn cache_reuses_one_store_per_origin_within_each_session() {
         &first.object_store(),
         &different_retry.object_store(),
     ));
-    assert_eq!(LOCATION_VALIDATIONS.load(Ordering::SeqCst), 5);
+    assert_eq!(OBJECT_PATH_MAPPINGS.load(Ordering::SeqCst), 5);
     assert_eq!(OBJECT_STORE_CREATIONS.load(Ordering::SeqCst), 3);
 }
 
@@ -1317,7 +1291,7 @@ fn backend_errors_retain_stage_specific_context() {
         .schemes(["mem"])
         .access(StorageAccess::ReadWrite)
         .bare_location_mapper(failing_bare_location)
-        .location_validator(validate_location)
+        .object_path_mapper(object_path)
         .object_store_creator(in_memory_object_store)
         .build()
         .unwrap();
@@ -1339,38 +1313,35 @@ fn backend_errors_retain_stage_specific_context() {
         other => panic!("expected bare-location mapping error, got {other:?}"),
     }
 
-    let validation_backend = StorageBackend::without_args()
+    let path_backend = StorageBackend::without_args()
         .name("memory")
         .schemes(["mem"])
         .access(StorageAccess::ReadWrite)
-        .location_validator(failing_location_validator)
+        .object_path_mapper(failing_object_path)
         .object_store_creator(in_memory_object_store)
         .build()
         .unwrap();
-    let (_, registry) = command_and_registry([validation_backend]);
+    let (_, registry) = command_and_registry([path_backend]);
     let storage = create_default_session(&registry);
     let location = location_input("mem://bucket/object");
     match storage.output_handle(&location).unwrap_err() {
-        StorageError::LocationValidation {
+        StorageError::ObjectPathMapping {
             backend,
             location,
             source,
         } => {
             assert_eq!(backend, "memory");
             assert_eq!(location.as_str(), "mem://bucket/object");
-            assert_eq!(
-                source.to_string(),
-                "backend-specific location-validation failure"
-            );
+            assert_eq!(source.to_string(), "backend-specific object-path failure");
         }
-        other => panic!("expected location-validation error, got {other:?}"),
+        other => panic!("expected object-path mapping error, got {other:?}"),
     }
 
     let store_backend = StorageBackend::without_args()
         .name("memory")
         .schemes(["mem"])
         .access(StorageAccess::ReadWrite)
-        .location_validator(validate_location)
+        .object_path_mapper(object_path)
         .object_store_creator(failing_object_store)
         .build()
         .unwrap();

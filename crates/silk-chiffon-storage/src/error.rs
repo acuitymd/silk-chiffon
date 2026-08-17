@@ -17,8 +17,6 @@ pub enum StorageError {
     AmbiguousLocation(String),
     #[error("bare storage locations are unsupported: {0}")]
     UnsupportedBareLocation(String),
-    #[error("bare storage patterns are unsupported: {0}")]
-    UnsupportedBarePattern(String),
     #[error("storage URL requires an explicit scheme: {0}")]
     UrlSchemeRequired(String),
     #[error("unsupported storage scheme: {0}")]
@@ -27,11 +25,6 @@ pub enum StorageError {
     NonCanonicalStorageUrl { scheme: String, input: String },
     #[error("storage backend {backend} mapped a bare location to unclaimed scheme: {scheme}")]
     BareLocationSchemeMismatch {
-        backend: &'static str,
-        scheme: String,
-    },
-    #[error("storage backend {backend} mapped a bare pattern to unclaimed scheme: {scheme}")]
-    BarePatternSchemeMismatch {
         backend: &'static str,
         scheme: String,
     },
@@ -47,24 +40,12 @@ pub enum StorageError {
         #[source]
         source: anyhow::Error,
     },
-    #[error("storage backend {backend} failed to map bare pattern {bare_pattern:?}: {source}")]
-    BarePatternMapping {
-        backend: &'static str,
-        bare_pattern: String,
-        #[source]
-        source: anyhow::Error,
-    },
-    #[error("storage backend {backend} rejected location {location}: {source}")]
-    LocationValidation {
+    #[error("storage backend {backend} failed to map {location} to an object path: {source}")]
+    ObjectPathMapping {
         backend: &'static str,
         location: Url,
         #[source]
         source: anyhow::Error,
-    },
-    #[error("storage location has an invalid object path {location}: {source}")]
-    InvalidObjectPath {
-        location: Url,
-        source: Box<object_store::path::Error>,
     },
     #[error("storage backend {backend} failed to create an object store for {store_url}: {source}")]
     ObjectStoreCreation {
@@ -86,13 +67,6 @@ pub enum StorageError {
     UserInfoNotSupported(String),
     #[error("invalid percent encoding in storage URL: {0}")]
     InvalidPercentEncoding(String),
-    #[error("invalid storage location pattern {input:?}: {source}")]
-    InvalidLocationPattern {
-        input: String,
-        source: glob::PatternError,
-    },
-    #[error("storage pattern syntax is allowed only in the URL path: {0}")]
-    PatternOutsideUrlPath(String),
     /// URL parsing would encode or normalize the supplied path.
     #[error("storage URL path is not canonical: {0}")]
     NonCanonicalUrlPath(String),
@@ -102,16 +76,6 @@ pub enum StorageError {
     /// An operation against an existing upstream object store failed.
     #[error(transparent)]
     ObjectStore(#[from] object_store::Error),
-    #[error("failed to read metadata for storage pattern {pattern:?}: {source}")]
-    PatternMetadata {
-        pattern: String,
-        source: object_store::Error,
-    },
-    #[error("failed to list storage pattern {pattern:?}: {source}")]
-    PatternListing {
-        pattern: String,
-        source: object_store::Error,
-    },
     #[error("output already exists: {0}")]
     OutputAlreadyExists(Url),
 }
