@@ -28,6 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/workflows/actions/sccache-action
       - uses: dtolnay/rust-toolchain@1.95.0
       - run: cargo check --workspace --all-targets --all-features --locked
 
