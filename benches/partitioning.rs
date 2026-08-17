@@ -14,7 +14,7 @@ use arrow::array::{Date32Array, Int16Array, Int32Array};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use silk_chiffon::{Cli, Command, PartitionStrategy, TransformCommand};
+use silk_chiffon::{Cli, Command, TransformCommand};
 use tempfile::TempDir;
 use tokio::runtime::Runtime;
 
@@ -183,7 +183,7 @@ fn write_arrow_file(path: &std::path::Path, schema: &SchemaRef, batches: Vec<Rec
 fn benchmark_transform_command(
     input_path: &str,
     output_template: &str,
-    partition_strategy: PartitionStrategy,
+    partition_strategy: &str,
 ) -> TransformCommand {
     let Cli {
         command: Command::Transform(command),
@@ -197,7 +197,7 @@ fn benchmark_transform_command(
         "--by".to_owned(),
         "field1".to_owned(),
         "--partition-strategy".to_owned(),
-        partition_strategy.to_string(),
+        partition_strategy.to_owned(),
         "--create-dirs".to_owned(),
         "--overwrite".to_owned(),
     ])
@@ -214,7 +214,7 @@ fn run_partition_benchmark(
     c: &mut Criterion,
     group_name: &str,
     configs: &[Config],
-    partition_strategy: PartitionStrategy,
+    partition_strategy: &str,
     create_batch: BatchCreator,
     sample_size: usize,
 ) {
@@ -291,7 +291,7 @@ fn bench_high_card_interleaved(c: &mut Criterion) {
         c,
         "high_card/interleaved",
         STRESS_CONFIGS,
-        PartitionStrategy::SortSingle,
+        "sort-single",
         create_interleaved_batch,
         10,
     );
@@ -302,7 +302,7 @@ fn bench_high_card_sorted(c: &mut Criterion) {
         c,
         "high_card/sorted",
         STRESS_CONFIGS,
-        PartitionStrategy::SortSingle,
+        "sort-single",
         create_sorted_batch,
         30,
     );
@@ -313,7 +313,7 @@ fn bench_low_card_interleaved(c: &mut Criterion) {
         c,
         "low_card/interleaved",
         STRESS_CONFIGS,
-        PartitionStrategy::NosortMulti,
+        "nosort-multi",
         create_interleaved_batch,
         10,
     );
@@ -324,7 +324,7 @@ fn bench_low_card_sorted(c: &mut Criterion) {
         c,
         "low_card/sorted",
         STRESS_CONFIGS,
-        PartitionStrategy::NosortMulti,
+        "nosort-multi",
         create_sorted_batch,
         30,
     );
@@ -336,7 +336,7 @@ fn bench_high_card_realistic(c: &mut Criterion) {
         c,
         "high_card/realistic",
         REALISTIC_CONFIGS,
-        PartitionStrategy::SortSingle,
+        "sort-single",
         create_clustered_batch,
         30,
     );
@@ -347,7 +347,7 @@ fn bench_low_card_realistic(c: &mut Criterion) {
         c,
         "low_card/realistic",
         REALISTIC_CONFIGS,
-        PartitionStrategy::NosortMulti,
+        "nosort-multi",
         create_clustered_batch,
         30,
     );

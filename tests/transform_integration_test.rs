@@ -1,7 +1,7 @@
 use arrow::array::{Array, Int32Array, Int64Array, NullArray, RecordBatch, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use camino::Utf8PathBuf;
-use silk_chiffon::{Cli, Command, PartitionStrategy, PoolReserveSpec, SortSpec};
+use silk_chiffon::{Cli, Command};
 use silk_chiffon_core::{PresentationMode, QueryDialect};
 use silk_chiffon_test_support::{TestBatch, TestExtract, TestFile};
 use std::ffi::OsString;
@@ -21,13 +21,13 @@ struct TestTransformCommand {
     dialect: QueryDialect,
     exclude_columns: Vec<String>,
     query: Option<String>,
-    sort_by: Option<SortSpec>,
-    non_spillable_reserve: Option<PoolReserveSpec>,
+    sort_by: Option<String>,
+    non_spillable_reserve: Option<String>,
     memory_pool_top_consumers: usize,
     preserve_input_order: bool,
     target_partitions: Option<usize>,
     by: Option<String>,
-    partition_strategy: PartitionStrategy,
+    partition_strategy: Option<String>,
     max_open_partitions: Option<usize>,
     list_outputs: Option<PresentationMode>,
     list_outputs_file: Option<Utf8PathBuf>,
@@ -105,10 +105,6 @@ async fn run_transform(command: TestTransformCommand) -> anyhow::Result<()> {
         push_value!("--sort-by", sort.to_string());
     }
     if let Some(reserve) = command.non_spillable_reserve {
-        let reserve = match reserve {
-            PoolReserveSpec::Percent(percent) => format!("{percent}%"),
-            PoolReserveSpec::Fixed(bytes) => format!("{bytes}B"),
-        };
         push_value!("--non-spillable-reserve", reserve);
     }
     if command.memory_pool_top_consumers != 10 {
@@ -126,11 +122,8 @@ async fn run_transform(command: TestTransformCommand) -> anyhow::Result<()> {
     if let Some(fields) = command.by {
         push_value!("--by", fields);
     }
-    if command.partition_strategy != PartitionStrategy::default() {
-        push_value!(
-            "--partition-strategy",
-            command.partition_strategy.to_string()
-        );
+    if let Some(strategy) = command.partition_strategy {
+        push_value!("--partition-strategy", strategy);
     }
     if let Some(max_open) = command.max_open_partitions {
         push_value!("--max-open-partitions", max_open.to_string());
@@ -506,7 +499,7 @@ async fn test_nosort_evict_requires_direct_file_number_interpolation() {
                 .to_string(),
         ),
         by: Some("name".to_string()),
-        partition_strategy: PartitionStrategy::NosortEvict,
+        partition_strategy: Some("nosort-evict".to_owned()),
         ..transform_defaults()
     })
     .await;
@@ -535,7 +528,7 @@ async fn test_partition_targets_are_not_rewritten_after_a_session_collision() {
                 .to_string(),
         ),
         by: Some("name".to_string()),
-        partition_strategy: PartitionStrategy::NosortMulti,
+        partition_strategy: Some("nosort-multi".to_owned()),
         overwrite: true,
         ..transform_defaults()
     })
@@ -1668,7 +1661,7 @@ async fn test_transform_low_cardinality_partition() {
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("name".to_string()),
-        partition_strategy: PartitionStrategy::NosortMulti,
+        partition_strategy: Some("nosort-multi".to_owned()),
         create_dirs: false,
         output_format: Some("parquet".to_owned()),
         ..transform_defaults()
@@ -2128,7 +2121,7 @@ async fn test_transform_partition_failure_writes_completed_outputs_only() {
         from: Some(input.to_string_lossy().into_owned()),
         to_many: Some(target.to_string_lossy().into_owned()),
         by: Some("name".to_owned()),
-        partition_strategy: PartitionStrategy::SortSingle,
+        partition_strategy: Some("sort-single".to_owned()),
         list_outputs: Some(PresentationMode::Json),
         list_outputs_file: Some(Utf8PathBuf::from_path_buf(report.clone()).unwrap()),
         create_dirs: false,
@@ -3628,7 +3621,7 @@ async fn test_partition_strategies_produce_same_output() {
                 .to_string(),
         ),
         by: Some("category".to_string()),
-        partition_strategy: PartitionStrategy::NosortMulti,
+        partition_strategy: Some("nosort-multi".to_owned()),
         create_dirs: false,
         output_format: Some("parquet".to_owned()),
         ..transform_defaults()
@@ -3928,7 +3921,7 @@ async fn test_reserved_spill_pool_simple_transform() {
     run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        non_spillable_reserve: Some(PoolReserveSpec::Percent(10)),
+        non_spillable_reserve: Some("10%".to_owned()),
         ..transform_defaults()
     })
     .await
@@ -3951,7 +3944,7 @@ async fn test_reserved_spill_pool_with_sorting() {
     run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        non_spillable_reserve: Some(PoolReserveSpec::Percent(10)),
+        non_spillable_reserve: Some("10%".to_owned()),
         sort_by: Some("id".parse().unwrap()),
         ..transform_defaults()
     })
@@ -3983,7 +3976,7 @@ async fn test_reserved_spill_pool_with_fixed_reserve() {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
         output_format: Some("parquet".to_owned()),
-        non_spillable_reserve: Some(PoolReserveSpec::Fixed(50 * 1024 * 1024)), // 50MB
+        non_spillable_reserve: Some("50MiB".to_owned()),
         sort_by: Some("name".parse().unwrap()),
         ..transform_defaults()
     })
@@ -4017,7 +4010,7 @@ async fn test_reserved_spill_pool_with_top_consumers() {
     run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        non_spillable_reserve: Some(PoolReserveSpec::Percent(25)),
+        non_spillable_reserve: Some("25%".to_owned()),
         memory_pool_top_consumers: 0,
         ..transform_defaults()
     })
@@ -4055,7 +4048,7 @@ async fn test_nosort_evict_partitioned_write() {
         from: Some(input.to_string_lossy().to_string()),
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("category".to_string()),
-        partition_strategy: PartitionStrategy::NosortEvict,
+        partition_strategy: Some("nosort-evict".to_owned()),
         max_open_partitions: Some(2),
         overwrite: true,
         ..transform_defaults()

@@ -124,7 +124,7 @@ pub(crate) async fn run(args: TransformCommand) -> Result<()> {
                     anyhow::bail!(
                         "service input {:?} does not support --from-pattern \
                          {pattern:?}; use --from",
-                        service_inputs.get(*index).name()
+                        service_inputs[*index].name()
                     );
                 }
                 None => anyhow::bail!("unsupported input scheme {scheme:?}"),
@@ -138,8 +138,7 @@ pub(crate) async fn run(args: TransformCommand) -> Result<()> {
                     (file_inputs.prepare_exact(reference).await?, true)
                 }
                 Some(crate::registration::InputSchemeOwner::ServiceInput(index)) => (
-                    service_inputs
-                        .get(*index)
+                    service_inputs[*index]
                         .create_input_provider(reference, &session)
                         .await?,
                     false,
@@ -255,7 +254,7 @@ pub(crate) async fn run(args: TransformCommand) -> Result<()> {
                 if let Some(indices) = projection {
                     stream = project_stream(stream, indices)?;
                 }
-                service_outputs.get(*index).consume(target, stream).await?;
+                service_outputs[*index].consume(target, stream).await?;
                 return Ok(());
             }
             Some(crate::registration::OutputSchemeOwner::FileOutput) => {}
@@ -270,7 +269,7 @@ pub(crate) async fn run(args: TransformCommand) -> Result<()> {
             Some(crate::registration::OutputSchemeOwner::ServiceOutput(index)) => {
                 anyhow::bail!(
                     "service output {:?} does not support --to-many {template:?}; use --to",
-                    service_outputs.get(*index).name()
+                    service_outputs[*index].name()
                 );
             }
             None => anyhow::bail!("unsupported output scheme {scheme:?}"),

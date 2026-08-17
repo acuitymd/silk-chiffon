@@ -4,7 +4,7 @@
 //! Parquet, and Vortex encodings so runtime crates do not carry fixture
 //! behavior.
 
-pub mod batch;
+mod batch;
 pub mod bigquery_arrow;
 pub mod controlled_upload;
 pub mod extract;
@@ -13,14 +13,13 @@ pub mod file;
 pub mod output;
 pub mod parquet;
 pub mod read_probe_store;
-pub mod verify;
 pub mod vortex;
 
 pub use batch::{StructColumnBuilder, TestBatch, TestBatchBuilder};
 pub use extract::TestExtract;
 pub use fault_injecting_store::{FaultInjectingStore, ObjectStoreOperation};
 pub use file::TestFile;
-pub use output::prepared_local_output_target;
+pub use output::{local_storage_session, prepared_local_output_target};
 pub use read_probe_store::ReadProbeStore;
 
 #[cfg(test)]

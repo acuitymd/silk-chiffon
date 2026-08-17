@@ -52,9 +52,7 @@ fn local_mapper_interprets_bare_locations_as_filesystem_paths() -> Result<(), St
     ] {
         let expected = working_directory.path().join(name);
         let input = location(expected.to_str().unwrap())?;
-        let handle = silk_chiffon_storage::local::session()
-            .unwrap()
-            .input_handle(&input)?;
+        let handle = common::local_storage_session().input_handle(&input)?;
         assert_eq!(handle.local_path()?, expected);
         assert_eq!(
             handle.object_path(),
@@ -63,9 +61,7 @@ fn local_mapper_interprets_bare_locations_as_filesystem_paths() -> Result<(), St
     }
 
     let relative = location("relative/data.parquet")?;
-    let handle = silk_chiffon_storage::local::session()
-        .unwrap()
-        .input_handle(&relative)?;
+    let handle = common::local_storage_session().input_handle(&relative)?;
     assert_eq!(
         handle.local_path()?,
         std::env::current_dir()
@@ -89,8 +85,7 @@ async fn local_mapper_expands_bare_path_patterns() {
         .to_string_lossy()
         .into_owned();
     let pattern = LocationPattern::parse(&source).unwrap();
-    let matches = silk_chiffon_storage::local::session()
-        .unwrap()
+    let matches = common::local_storage_session()
         .expand_input_pattern(&pattern)
         .await
         .unwrap();
@@ -124,8 +119,7 @@ fn canonical_file_urls_map_absolute_paths_to_store_keys() -> Result<(), Box<dyn 
         ),
     ] {
         let location = Location::parse_url(input)?;
-        let handle =
-            silk_chiffon_storage::local::session()?.input_handle(&location.clone().into())?;
+        let handle = common::local_storage_session().input_handle(&location.clone().into())?;
 
         assert_eq!(location.url().as_str(), input);
         assert_eq!(
@@ -172,7 +166,7 @@ fn canonical_storage_urls_parse_before_backend_selection() {
     assert_eq!(location.url().as_str(), "s3://bucket/object");
     #[cfg(feature = "local")]
     assert!(
-        matches!(silk_chiffon_storage::local::session().unwrap().input_handle(&input), Err(
+        matches!(common::local_storage_session().input_handle(&input), Err(
         StorageError::UnsupportedScheme(scheme)
     ) if scheme == "s3")
     );
@@ -184,7 +178,7 @@ fn object_path_validation_happens_during_handle_creation() {
     let location = LocationInput::parse("bad\0path").unwrap();
 
     assert!(matches!(
-        silk_chiffon_storage::local::session().unwrap().input_handle(&location),
+        common::local_storage_session().input_handle(&location),
         Err(StorageError::InvalidObjectPath {
             location: _,
             source,
@@ -237,10 +231,7 @@ fn storage_urls_preserve_queries() {
     #[cfg(feature = "local")]
     {
         let file = LocationInput::parse("file:///tmp/object?version=1").unwrap();
-        let handle = silk_chiffon_storage::local::session()
-            .unwrap()
-            .input_handle(&file)
-            .unwrap();
+        let handle = common::local_storage_session().input_handle(&file).unwrap();
         assert_eq!(handle.url().query(), Some("version=1"));
         assert_eq!(handle.object_path().as_ref(), "tmp/object");
         assert_eq!(handle.local_path().unwrap(), Path::new("/tmp/object"));
@@ -305,7 +296,7 @@ fn equivalent_locations_share_the_cached_store() {
     let working_directory = TempDir::new().unwrap();
     let path = working_directory.path().join("data.parquet");
     let bare = location(path.to_str().unwrap()).unwrap();
-    let storage = silk_chiffon_storage::local::session().unwrap();
+    let storage = common::local_storage_session();
 
     let first = storage.input_handle(&bare).unwrap();
     let file_url = location(first.url().as_str()).unwrap();
@@ -320,8 +311,7 @@ fn storage_handle_preserves_the_upstream_object_path() {
     let working_directory = TempDir::new().unwrap();
     let path = working_directory.path().join("nested/data%20set.parquet");
     let location = location(path.to_str().unwrap()).unwrap();
-    let handle = silk_chiffon_storage::local::session()
-        .unwrap()
+    let handle = common::local_storage_session()
         .input_handle(&location)
         .unwrap();
 
@@ -340,7 +330,7 @@ async fn absent_object_handle_creation_is_separate_from_input_lookup() {
     let working_directory = TempDir::new().unwrap();
     let path = working_directory.path().join("absent.parquet");
     let location = location(path.to_str().unwrap()).unwrap();
-    let storage = silk_chiffon_storage::local::session().unwrap();
+    let storage = common::local_storage_session();
     let _handle = storage.input_handle(&location).unwrap();
 
     assert!(storage.lookup_input(&location).await.is_err());
@@ -352,8 +342,7 @@ async fn absent_output_is_allowed() {
     let working_directory = TempDir::new().unwrap();
     let path = working_directory.path().join("absent.parquet");
     let location = location(path.to_str().unwrap()).unwrap();
-    let handle = silk_chiffon_storage::local::session()
-        .unwrap()
+    let handle = common::local_storage_session()
         .prepare_output_target(
             &location,
             &OutputPreparation::new(ExistingOutput::RejectIfObserved, false),
@@ -369,7 +358,7 @@ async fn existing_output_is_rejected() {
     let working_directory = TempDir::new().unwrap();
     let path = working_directory.path().join("existing.parquet");
     let location = location(path.to_str().unwrap()).unwrap();
-    let storage = silk_chiffon_storage::local::session().unwrap();
+    let storage = common::local_storage_session();
     std::fs::write(&path, b"existing").unwrap();
 
     assert!(
@@ -389,7 +378,7 @@ async fn input_handles_allow_reads_and_reject_every_mutation_path() {
     let working_directory = TempDir::new().unwrap();
     let path = working_directory.path().join("input.bin");
     std::fs::write(&path, b"abcdef").unwrap();
-    let storage = silk_chiffon_storage::local::session().unwrap();
+    let storage = common::local_storage_session();
     let handle = storage
         .input_handle(&location(path.to_str().unwrap()).unwrap())
         .unwrap();
@@ -431,8 +420,7 @@ async fn local_store_supports_object_operations() {
     let working_directory = TempDir::new().unwrap();
     let path = working_directory.path().join("nested/data.bin");
     let location = location(path.to_str().unwrap()).unwrap();
-    let handle = silk_chiffon_storage::local::session()
-        .unwrap()
+    let handle = common::local_storage_session()
         .prepare_output_target(
             &location,
             &OutputPreparation::new(ExistingOutput::Allow, true),
@@ -474,3 +462,4 @@ async fn local_store_supports_object_operations() {
     object_store.delete(handle.object_path()).await.unwrap();
     assert!(object_store.head(handle.object_path()).await.is_err());
 }
+mod common;

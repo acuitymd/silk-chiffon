@@ -11,8 +11,10 @@ use clap::{ArgMatches, Args, Command, FromArgMatches};
 use thiserror::Error;
 
 use crate::{
-    ObjectUploadArgs, RetryArgs, StorageBackend, StorageSession, StorageSessionCreationError,
+    StorageBackend, StorageSession, StorageSessionCreationError,
     backend::{CliArgumentKey, argument_keys},
+    retry::RetryArgs,
+    upload::ObjectUploadArgs,
 };
 
 /// Collects backend definitions before validating their names, schemes, CLI keys, and bare route.

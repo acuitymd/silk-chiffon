@@ -73,9 +73,6 @@ pub use object_store::RetryConfig;
 pub use output::{ExistingOutput, OutputPreparation};
 pub use pattern::LocationPattern;
 pub use registry::{StorageRegistry, StorageRegistryBuilder, StorageRegistryError};
-pub use retry::{RetryArgs, RetryConfigurationError};
+pub use retry::RetryConfigurationError;
 pub use session::{StorageSession, StorageSessionCreationError};
-pub use upload::{
-    BlockingObjectUploadWriter, ObjectUpload, ObjectUploadArgs, ObjectUploadError,
-    ObjectUploadSettings, ObjectUploadTask,
-};
+pub use upload::{BlockingObjectUploadWriter, ObjectUpload, ObjectUploadError, ObjectUploadTask};
