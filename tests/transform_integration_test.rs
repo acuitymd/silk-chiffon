@@ -1,21 +1,162 @@
-use arrow::array::{Array, Int32Array, Int64Array, RecordBatch, StringArray};
+use arrow::array::{Array, Int32Array, Int64Array, NullArray, RecordBatch, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use camino::Utf8PathBuf;
-use silk_chiffon::{
-    AllColumnsBloomFilterConfig, ArrowCompression, ArrowIPCFormat, ColumnDictionaryConfig,
-    ColumnSpecificBloomFilterConfig, DataFormat, DictionaryMode, ListOutputsFormat,
-    ParquetCompression, ParquetStatistics, ParquetWriterVersion, PartitionStrategy,
-    PoolReserveSpec, QueryDialect, SortColumn, SortDirection, SortSpec,
-    utils::test_data::{TestBatch, TestFile},
-};
-use std::path::Path;
+use silk_chiffon::{Cli, Command};
+use silk_chiffon_core::{PresentationMode, QueryDialect};
+use silk_chiffon_test_support::{TestBatch, TestExtract, TestFile};
+use std::ffi::OsString;
 use std::sync::Arc;
 use tempfile::TempDir;
 
+#[derive(Default)]
+struct TestTransformCommand {
+    from: Option<String>,
+    exact_references: Vec<String>,
+    patterns: Vec<String>,
+    allow_unmatched_patterns: bool,
+    input_format: Option<String>,
+    output_format: Option<String>,
+    to: Option<String>,
+    to_many: Option<String>,
+    dialect: QueryDialect,
+    exclude_columns: Vec<String>,
+    query: Option<String>,
+    sort_by: Option<String>,
+    non_spillable_reserve: Option<String>,
+    memory_pool_top_consumers: usize,
+    preserve_input_order: bool,
+    target_partitions: Option<usize>,
+    by: Option<String>,
+    partition_strategy: Option<String>,
+    max_open_partitions: Option<usize>,
+    list_outputs: Option<PresentationMode>,
+    list_outputs_file: Option<Utf8PathBuf>,
+    create_dirs: bool,
+    overwrite: bool,
+    format_args: Vec<OsString>,
+}
+
+fn transform_defaults_with<I, T>(format_args: I) -> TestTransformCommand
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString>,
+{
+    TestTransformCommand {
+        memory_pool_top_consumers: 10,
+        create_dirs: true,
+        format_args: format_args.into_iter().map(Into::into).collect(),
+        ..TestTransformCommand::default()
+    }
+}
+
+fn transform_defaults() -> TestTransformCommand {
+    transform_defaults_with(std::iter::empty::<OsString>())
+}
+
+async fn run_transform(command: TestTransformCommand) -> anyhow::Result<()> {
+    use clap::ValueEnum;
+
+    let mut arguments = vec![OsString::from("silk-chiffon"), OsString::from("transform")];
+    macro_rules! push_value {
+        ($flag:expr, $value:expr $(,)?) => {{
+            arguments.push(OsString::from($flag));
+            arguments.push(OsString::from($value));
+        }};
+    }
+    if let Some(reference) = command.from {
+        push_value!("--from", reference);
+    }
+    for reference in command.exact_references {
+        push_value!("--from", reference);
+    }
+    for pattern in command.patterns {
+        push_value!("--from-pattern", pattern);
+    }
+    if command.allow_unmatched_patterns {
+        arguments.push(OsString::from("--allow-unmatched-patterns"));
+    }
+    if let Some(format) = command.input_format {
+        push_value!("--input-format", format);
+    }
+    if let Some(format) = command.output_format {
+        push_value!("--output-format", format);
+    }
+    if let Some(target) = command.to {
+        push_value!("--to", target);
+    }
+    if let Some(template) = command.to_many {
+        push_value!("--to-many", template);
+    }
+    push_value!(
+        "--dialect",
+        command
+            .dialect
+            .to_possible_value()
+            .expect("every dialect has a Clap value")
+            .get_name(),
+    );
+    for column in command.exclude_columns {
+        push_value!("--exclude-columns", column);
+    }
+    if let Some(query) = command.query {
+        push_value!("--query", query);
+    }
+    if let Some(sort) = command.sort_by {
+        push_value!("--sort-by", sort.to_string());
+    }
+    if let Some(reserve) = command.non_spillable_reserve {
+        push_value!("--non-spillable-reserve", reserve);
+    }
+    if command.memory_pool_top_consumers != 10 {
+        push_value!(
+            "--memory-pool-top-consumers",
+            command.memory_pool_top_consumers.to_string(),
+        );
+    }
+    if command.preserve_input_order {
+        arguments.push(OsString::from("--preserve-input-order"));
+    }
+    if let Some(partitions) = command.target_partitions {
+        push_value!("--target-partitions", partitions.to_string());
+    }
+    if let Some(fields) = command.by {
+        push_value!("--by", fields);
+    }
+    if let Some(strategy) = command.partition_strategy {
+        push_value!("--partition-strategy", strategy);
+    }
+    if let Some(max_open) = command.max_open_partitions {
+        push_value!("--max-open-partitions", max_open.to_string());
+    }
+    if let Some(format) = command.list_outputs {
+        push_value!(
+            "--list-outputs",
+            format.to_possible_value().unwrap().get_name()
+        );
+    }
+    if let Some(path) = command.list_outputs_file {
+        push_value!("--list-outputs-file", path.into_os_string());
+    }
+    if command.create_dirs {
+        arguments.push(OsString::from("--create-dirs"));
+    }
+    if command.overwrite {
+        arguments.push(OsString::from("--overwrite"));
+    }
+    arguments.extend(command.format_args);
+
+    let Cli {
+        command: Command::Transform(command),
+    } = Cli::try_parse_from(arguments)?
+    else {
+        unreachable!()
+    };
+    Command::Transform(command).execute().await
+}
+
 mod test_helpers {
-    use camino::Utf8Path;
     use parquet::file::reader::FileReader;
-    use silk_chiffon::inspection::parquet::ParquetInspector;
+    use silk_chiffon_test_support::parquet::{ParquetContents, read_entire_file};
     use std::path::Path;
 
     pub fn get_parquet_row_group_metadata(
@@ -27,13 +168,13 @@ mod test_helpers {
         reader.metadata().row_group(idx).clone()
     }
 
-    pub fn inspect(path: &Path) -> ParquetInspector {
-        ParquetInspector::open(Utf8Path::from_path(path).unwrap()).unwrap()
+    pub fn inspect(path: &Path) -> ParquetContents {
+        read_entire_file(path).unwrap()
     }
 
-    pub fn assert_has_dictionary(inspector: &ParquetInspector, col_name: &str) {
+    pub fn assert_has_dictionary(inspector: &ParquetContents, col_name: &str) {
         let col = inspector.column(col_name).unwrap_or_else(|| {
-            let available: Vec<_> = inspector.row_groups()[0]
+            let available: Vec<_> = inspector.row_groups[0]
                 .columns
                 .iter()
                 .map(|c| &c.name)
@@ -50,9 +191,9 @@ mod test_helpers {
         );
     }
 
-    pub fn assert_no_dictionary(inspector: &ParquetInspector, col_name: &str) {
+    pub fn assert_no_dictionary(inspector: &ParquetContents, col_name: &str) {
         let col = inspector.column(col_name).unwrap_or_else(|| {
-            let available: Vec<_> = inspector.row_groups()[0]
+            let available: Vec<_> = inspector.row_groups[0]
                 .columns
                 .iter()
                 .map(|c| &c.name)
@@ -69,9 +210,9 @@ mod test_helpers {
         );
     }
 
-    pub fn assert_has_bloom_filter(inspector: &ParquetInspector, col_name: &str) {
+    pub fn assert_has_bloom_filter(inspector: &ParquetContents, col_name: &str) {
         let col = inspector.column(col_name).unwrap_or_else(|| {
-            let available: Vec<_> = inspector.row_groups()[0]
+            let available: Vec<_> = inspector.row_groups[0]
                 .columns
                 .iter()
                 .map(|c| &c.name)
@@ -88,9 +229,9 @@ mod test_helpers {
         );
     }
 
-    pub fn assert_no_bloom_filter(inspector: &ParquetInspector, col_name: &str) {
+    pub fn assert_no_bloom_filter(inspector: &ParquetContents, col_name: &str) {
         let col = inspector.column(col_name).unwrap_or_else(|| {
-            let available: Vec<_> = inspector.row_groups()[0]
+            let available: Vec<_> = inspector.row_groups[0]
                 .columns
                 .iter()
                 .map(|c| &c.name)
@@ -117,10 +258,10 @@ async fn test_transform_arrow_to_arrow_basic() {
     let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
     TestFile::write_arrow_batch(&input, &batch);
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -139,12 +280,11 @@ async fn test_transform_arrow_to_parquet() {
     let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
     TestFile::write_arrow_batch(&input, &batch);
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        output_format: Some(DataFormat::Parquet),
-        parquet_compression: ParquetCompression::Snappy,
-        ..Default::default()
+        output_format: Some("parquet".to_owned()),
+        ..transform_defaults_with(["--parquet-compression", "snappy"])
     })
     .await
     .unwrap();
@@ -164,11 +304,11 @@ async fn test_transform_parquet_to_arrow() {
     let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
     TestFile::write_parquet_batch(&input, &batch);
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        output_format: Some(DataFormat::Arrow),
-        ..Default::default()
+        output_format: Some("arrow".to_owned()),
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -187,11 +327,10 @@ async fn test_transform_parquet_to_parquet() {
     let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
     TestFile::write_parquet_batch(&input, &batch);
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        parquet_compression: ParquetCompression::Zstd,
-        ..Default::default()
+        ..transform_defaults_with(["--parquet-compression", "zstd"])
     })
     .await
     .unwrap();
@@ -203,7 +342,7 @@ async fn test_transform_parquet_to_parquet() {
 }
 
 #[tokio::test]
-async fn test_transform_from_many_basic() {
+async fn test_transform_repeatable_from_basic() {
     let temp_dir = TempDir::new().unwrap();
     let input1 = temp_dir.path().join("input1.arrow");
     let input2 = temp_dir.path().join("input2.arrow");
@@ -214,14 +353,14 @@ async fn test_transform_from_many_basic() {
     TestFile::write_arrow_batch(&input1, &batch1);
     TestFile::write_arrow_batch(&input2, &batch2);
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: None,
-        from_many: vec![
+        exact_references: vec![
             input1.to_string_lossy().to_string(),
             input2.to_string_lossy().to_string(),
         ],
         to: Some(output.to_string_lossy().to_string()),
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -232,7 +371,7 @@ async fn test_transform_from_many_basic() {
 }
 
 #[tokio::test]
-async fn test_transform_from_many_with_glob() {
+async fn test_transform_from_pattern_with_glob() {
     let temp_dir = TempDir::new().unwrap();
     let input1 = temp_dir.path().join("file1.arrow");
     let input2 = temp_dir.path().join("file2.arrow");
@@ -248,11 +387,11 @@ async fn test_transform_from_many_with_glob() {
 
     let glob_pattern = temp_dir.path().join("file*.arrow");
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: None,
-        from_many: vec![glob_pattern.to_string_lossy().to_string()],
+        patterns: vec![glob_pattern.to_string_lossy().to_string()],
         to: Some(output.to_string_lossy().to_string()),
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -272,13 +411,13 @@ async fn test_transform_to_many_partitioned() {
 
     let template = temp_dir.path().join("{{name}}.arrow");
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("name".to_string()),
         create_dirs: false,
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -297,6 +436,147 @@ async fn test_transform_to_many_partitioned() {
 }
 
 #[tokio::test]
+async fn test_transform_to_many_rejects_unselected_template_field() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let batch = TestBatch::simple_with(&[1], &["a"]);
+    TestFile::write_arrow_batch(&input, &batch);
+
+    let template = temp_dir.path().join("{{missing}}.arrow");
+    let result = run_transform(TestTransformCommand {
+        from: Some(input.to_string_lossy().to_string()),
+        to_many: Some(template.to_string_lossy().to_string()),
+        by: Some("name".to_string()),
+        ..transform_defaults()
+    })
+    .await;
+
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("template field \"missing\" is not selected by --by")
+    );
+}
+
+#[tokio::test]
+async fn test_transform_to_many_rejects_malformed_template() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let batch = TestBatch::simple_with(&[1], &["a"]);
+    TestFile::write_arrow_batch(&input, &batch);
+
+    let template = temp_dir.path().join("{{name.arrow");
+    let result = run_transform(TestTransformCommand {
+        from: Some(input.to_string_lossy().to_string()),
+        to_many: Some(template.to_string_lossy().to_string()),
+        by: Some("name".to_string()),
+        ..transform_defaults()
+    })
+    .await;
+
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid file output template")
+    );
+}
+
+#[tokio::test]
+async fn test_nosort_evict_requires_direct_file_number_interpolation() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    TestFile::write_arrow_batch(&input, &TestBatch::simple_with(&[1], &["a"]));
+
+    let result = run_transform(TestTransformCommand {
+        from: Some(input.to_string_lossy().to_string()),
+        to_many: Some(
+            temp_dir
+                .path()
+                .join("{{name}}.arrow")
+                .to_string_lossy()
+                .to_string(),
+        ),
+        by: Some("name".to_string()),
+        partition_strategy: Some("nosort-evict".to_owned()),
+        ..transform_defaults()
+    })
+    .await;
+
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("must directly interpolate { file_number }")
+    );
+}
+
+#[tokio::test]
+async fn test_partition_targets_are_not_rewritten_after_a_session_collision() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    TestFile::write_arrow_batch(&input, &TestBatch::simple_with(&[1, 2], &["a", "b"]));
+
+    let result = run_transform(TestTransformCommand {
+        from: Some(input.to_string_lossy().to_string()),
+        to_many: Some(
+            temp_dir
+                .path()
+                .join("same.arrow")
+                .to_string_lossy()
+                .to_string(),
+        ),
+        by: Some("name".to_string()),
+        partition_strategy: Some("nosort-multi".to_owned()),
+        overwrite: true,
+        ..transform_defaults()
+    })
+    .await;
+
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("already claimed by this storage session")
+    );
+    assert!(!temp_dir.path().join("same_1.arrow").exists());
+}
+
+#[tokio::test]
+async fn test_dynamic_partition_extension_requires_explicit_format() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    TestFile::write_arrow_batch(&input, &TestBatch::simple_with(&[1], &["a"]));
+    let template = temp_dir.path().join("{{name}}.{{ 'arrow' }}");
+
+    let result = run_transform(TestTransformCommand {
+        from: Some(input.to_string_lossy().to_string()),
+        to_many: Some(template.to_string_lossy().to_string()),
+        by: Some("name".to_string()),
+        ..transform_defaults()
+    })
+    .await;
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("Could not detect format")
+    );
+
+    run_transform(TestTransformCommand {
+        from: Some(input.to_string_lossy().to_string()),
+        to_many: Some(template.to_string_lossy().to_string()),
+        by: Some("name".to_string()),
+        output_format: Some("arrow".to_string()),
+        ..transform_defaults()
+    })
+    .await
+    .unwrap();
+    assert!(temp_dir.path().join("a.arrow").exists());
+}
+
+#[tokio::test]
 async fn test_transform_with_query() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
@@ -305,11 +585,11 @@ async fn test_transform_with_query() {
     let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
     TestFile::write_arrow_batch(&input, &batch);
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
         query: Some("SELECT * FROM data WHERE id > 1".to_string()),
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -328,16 +608,11 @@ async fn test_transform_with_sorting() {
     let batch = TestBatch::simple_with(&[3, 1, 2], &["c", "a", "b"]);
     TestFile::write_arrow_batch(&input, &batch);
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        sort_by: Some(SortSpec {
-            columns: vec![silk_chiffon::SortColumn {
-                name: "id".to_string(),
-                direction: SortDirection::Ascending,
-            }],
-        }),
-        ..Default::default()
+        sort_by: Some("id".parse().unwrap()),
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -363,11 +638,10 @@ async fn test_transform_with_arrow_compression() {
     let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
     TestFile::write_arrow_batch(&input, &batch);
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        arrow_compression: ArrowCompression::Zstd,
-        ..Default::default()
+        ..transform_defaults_with(["--arrow-compression", "zstd"])
     })
     .await
     .unwrap();
@@ -389,18 +663,11 @@ async fn test_transform_with_parquet_bloom_filters() {
     );
     TestFile::write_arrow_batch(&input, &batch);
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        output_format: Some(DataFormat::Parquet),
-        parquet_bloom_column: vec![ColumnSpecificBloomFilterConfig {
-            name: "id".to_string(),
-            config: silk_chiffon::ColumnBloomFilterConfig {
-                fpp: 0.01,
-                ndv: None,
-            },
-        }],
-        ..Default::default()
+        output_format: Some("parquet".to_owned()),
+        ..transform_defaults_with(["--parquet-bloom-column", "id"])
     })
     .await
     .unwrap();
@@ -420,18 +687,12 @@ async fn test_transform_with_sorted_metadata() {
     let batch = TestBatch::simple_with(&[3, 1, 2], &["c", "a", "b"]);
     TestFile::write_arrow_batch(&input, &batch);
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        sort_by: Some(SortSpec {
-            columns: vec![silk_chiffon::SortColumn {
-                name: "id".to_string(),
-                direction: SortDirection::Ascending,
-            }],
-        }),
-        output_format: Some(DataFormat::Parquet),
-        parquet_sorted_metadata: true,
-        ..Default::default()
+        sort_by: Some("id".parse().unwrap()),
+        output_format: Some("parquet".to_owned()),
+        ..transform_defaults_with(["--parquet-sorted-metadata"])
     })
     .await
     .unwrap();
@@ -454,12 +715,12 @@ async fn test_transform_partition_with_create_dirs() {
 
     let template = temp_dir.path().join("nested/{{name}}.arrow");
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("name".to_string()),
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -481,44 +742,44 @@ async fn test_transform_partition_with_overwrite() {
 
     let template = temp_dir.path().join("{{name}}.arrow");
 
-    let result = silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    let result = run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("name".to_string()),
         create_dirs: false,
-        ..Default::default()
+        ..transform_defaults()
     })
     .await;
 
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("already exists"));
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("name".to_string()),
         create_dirs: false,
         overwrite: true,
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
 }
 
 #[tokio::test]
-async fn test_transform_from_many_empty_glob() {
+async fn test_transform_from_pattern_empty_glob() {
     let temp_dir = TempDir::new().unwrap();
     let output = temp_dir.path().join("output.arrow");
 
     let glob_pattern = temp_dir.path().join("nonexistent*.arrow");
 
-    let result = silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    let result = run_transform(TestTransformCommand {
         from: None,
-        from_many: vec![glob_pattern.to_string_lossy().to_string()],
+        patterns: vec![glob_pattern.to_string_lossy().to_string()],
         to: Some(output.to_string_lossy().to_string()),
-        ..Default::default()
+        ..transform_defaults()
     })
     .await;
 
@@ -527,8 +788,94 @@ async fn test_transform_from_many_empty_glob() {
         result
             .unwrap_err()
             .to_string()
-            .contains("No input files found")
+            .contains("matched no locations")
     );
+}
+
+#[tokio::test]
+async fn test_transform_combines_exact_input_with_an_allowed_unmatched_pattern() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let output = temp_dir.path().join("output.arrow");
+    TestFile::write_arrow_batch(&input, &TestBatch::simple_with(&[1, 2], &["a", "b"]));
+
+    run_transform(TestTransformCommand {
+        exact_references: vec![input.to_string_lossy().into_owned()],
+        patterns: vec![
+            temp_dir
+                .path()
+                .join("missing-*.arrow")
+                .to_string_lossy()
+                .into_owned(),
+        ],
+        allow_unmatched_patterns: true,
+        to: Some(output.to_string_lossy().into_owned()),
+        ..transform_defaults()
+    })
+    .await
+    .unwrap();
+
+    assert!(output.exists());
+}
+
+#[tokio::test]
+async fn test_transform_rejects_an_unmatched_pattern_even_with_an_exact_input_by_default() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    TestFile::write_arrow_batch(&input, &TestBatch::simple_with(&[1, 2], &["a", "b"]));
+
+    let result = run_transform(TestTransformCommand {
+        exact_references: vec![input.to_string_lossy().into_owned()],
+        patterns: vec![
+            temp_dir
+                .path()
+                .join("missing-*.arrow")
+                .to_string_lossy()
+                .into_owned(),
+        ],
+        to: Some(
+            temp_dir
+                .path()
+                .join("output.arrow")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        ..transform_defaults()
+    })
+    .await;
+
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("matched no locations")
+    );
+}
+
+#[tokio::test]
+async fn test_transform_rejects_an_allowed_unmatched_pattern_without_another_source() {
+    let temp_dir = TempDir::new().unwrap();
+    let result = run_transform(TestTransformCommand {
+        patterns: vec![
+            temp_dir
+                .path()
+                .join("missing-*.arrow")
+                .to_string_lossy()
+                .into_owned(),
+        ],
+        allow_unmatched_patterns: true,
+        to: Some(
+            temp_dir
+                .path()
+                .join("output.arrow")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        ..transform_defaults()
+    })
+    .await;
+
+    assert!(result.unwrap_err().to_string().contains("no inputs"));
 }
 
 #[tokio::test]
@@ -541,14 +888,14 @@ async fn test_transform_partition_exclude_columns() {
 
     let template = temp_dir.path().join("{{name}}.arrow");
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("name".to_string()),
         exclude_columns: vec!["name".to_string()],
         create_dirs: false,
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -570,11 +917,11 @@ async fn test_transform_with_projection_query() {
     let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
     TestFile::write_arrow_batch(&input, &batch);
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
         query: Some("SELECT id FROM data".to_string()),
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -594,11 +941,11 @@ async fn test_transform_with_aggregation_query() {
     let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
     TestFile::write_arrow_batch(&input, &batch);
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
         query: Some("SELECT COUNT(*) as count FROM data".to_string()),
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -623,17 +970,12 @@ async fn test_transform_query_and_sort_combined() {
     let batch = TestBatch::simple_with(&[3, 1, 2], &["c", "a", "b"]);
     TestFile::write_arrow_batch(&input, &batch);
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
         query: Some("SELECT * FROM data WHERE id > 1".to_string()),
-        sort_by: Some(SortSpec {
-            columns: vec![SortColumn {
-                name: "id".to_string(),
-                direction: SortDirection::Ascending,
-            }],
-        }),
-        ..Default::default()
+        sort_by: Some("id".parse().unwrap()),
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -672,22 +1014,11 @@ async fn test_transform_multi_column_sort() {
 
     let output = temp_dir.path().join("output.arrow");
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        sort_by: Some(SortSpec {
-            columns: vec![
-                SortColumn {
-                    name: "category".to_string(),
-                    direction: SortDirection::Ascending,
-                },
-                SortColumn {
-                    name: "value".to_string(),
-                    direction: SortDirection::Ascending,
-                },
-            ],
-        }),
-        ..Default::default()
+        sort_by: Some("category,value".parse().unwrap()),
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -724,16 +1055,11 @@ async fn test_transform_sort_descending() {
     let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
     TestFile::write_arrow_batch(&input, &batch);
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        sort_by: Some(SortSpec {
-            columns: vec![SortColumn {
-                name: "id".to_string(),
-                direction: SortDirection::Descending,
-            }],
-        }),
-        ..Default::default()
+        sort_by: Some("id:desc".parse().unwrap()),
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -770,12 +1096,11 @@ async fn test_transform_parquet_compression_gzip() {
     let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
     TestFile::write_arrow_batch(&input, &batch);
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        output_format: Some(DataFormat::Parquet),
-        parquet_compression: ParquetCompression::Gzip,
-        ..Default::default()
+        output_format: Some("parquet".to_owned()),
+        ..transform_defaults_with(["--parquet-compression", "gzip"])
     })
     .await
     .unwrap();
@@ -795,12 +1120,11 @@ async fn test_transform_parquet_compression_lz4() {
     let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
     TestFile::write_arrow_batch(&input, &batch);
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        output_format: Some(DataFormat::Parquet),
-        parquet_compression: ParquetCompression::Lz4,
-        ..Default::default()
+        output_format: Some("parquet".to_owned()),
+        ..transform_defaults_with(["--parquet-compression", "lz4"])
     })
     .await
     .unwrap();
@@ -820,15 +1144,11 @@ async fn test_transform_parquet_bloom_all() {
     let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
     TestFile::write_arrow_batch(&input, &batch);
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        output_format: Some(DataFormat::Parquet),
-        parquet_bloom_all: Some(AllColumnsBloomFilterConfig {
-            fpp: 0.01,
-            ndv: None,
-        }),
-        ..Default::default()
+        output_format: Some("parquet".to_owned()),
+        ..transform_defaults_with(["--parquet-bloom-all"])
     })
     .await
     .unwrap();
@@ -847,12 +1167,11 @@ async fn test_transform_parquet_statistics() {
     let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
     TestFile::write_arrow_batch(&input, &batch);
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        output_format: Some(DataFormat::Parquet),
-        parquet_statistics: ParquetStatistics::Chunk,
-        ..Default::default()
+        output_format: Some("parquet".to_owned()),
+        ..transform_defaults_with(["--parquet-statistics", "chunk"])
     })
     .await
     .unwrap();
@@ -871,12 +1190,11 @@ async fn test_transform_parquet_writer_version() {
     let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
     TestFile::write_arrow_batch(&input, &batch);
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        output_format: Some(DataFormat::Parquet),
-        parquet_writer_version: ParquetWriterVersion::V1,
-        ..Default::default()
+        output_format: Some("parquet".to_owned()),
+        ..transform_defaults_with(["--parquet-writer-version", "v1"])
     })
     .await
     .unwrap();
@@ -895,12 +1213,11 @@ async fn test_transform_parquet_dictionary_all_off() {
     let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
     TestFile::write_arrow_batch(&input, &batch);
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        output_format: Some(DataFormat::Parquet),
-        parquet_dictionary_all_off: true,
-        ..Default::default()
+        output_format: Some("parquet".to_owned()),
+        ..transform_defaults_with(["--parquet-dictionary-all-off"])
     })
     .await
     .unwrap();
@@ -920,12 +1237,11 @@ async fn test_transform_parquet_dictionary_column_off() {
     let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
     TestFile::write_arrow_batch(&input, &batch);
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        output_format: Some(DataFormat::Parquet),
-        parquet_dictionary_column_off: vec!["id".to_string()],
-        ..Default::default()
+        output_format: Some("parquet".to_owned()),
+        ..transform_defaults_with(["--parquet-dictionary-column-off", "id"])
     })
     .await
     .unwrap();
@@ -945,16 +1261,15 @@ async fn test_transform_parquet_dictionary_column() {
     let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
     TestFile::write_arrow_batch(&input, &batch);
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        output_format: Some(DataFormat::Parquet),
-        parquet_dictionary_all_off: true,
-        parquet_dictionary_column: vec![ColumnDictionaryConfig {
-            name: "name".to_string(),
-            mode: DictionaryMode::Always,
-        }],
-        ..Default::default()
+        output_format: Some("parquet".to_owned()),
+        ..transform_defaults_with([
+            "--parquet-dictionary-all-off",
+            "--parquet-dictionary-column",
+            "name:always",
+        ])
     })
     .await
     .unwrap();
@@ -973,11 +1288,10 @@ async fn test_transform_arrow_format_stream() {
     let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
     TestFile::write_arrow_batch(&input, &batch);
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        arrow_format: ArrowIPCFormat::Stream,
-        ..Default::default()
+        ..transform_defaults_with(["--arrow-format", "stream"])
     })
     .await
     .unwrap();
@@ -985,6 +1299,261 @@ async fn test_transform_arrow_format_stream() {
     assert!(output.exists());
     let file_size = std::fs::metadata(&output).unwrap().len();
     assert!(file_size > 0);
+}
+
+#[tokio::test]
+async fn test_transform_reads_arrow_stream_input_incrementally() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let output = temp_dir.path().join("output.parquet");
+
+    let batches = [
+        TestBatch::simple_with(&[1, 2], &["a", "b"]),
+        TestBatch::simple_with(&[3], &["c"]),
+    ];
+    TestFile::write_arrow_stream(&input, &batches);
+
+    run_transform(TestTransformCommand {
+        from: Some(input.to_string_lossy().to_string()),
+        to: Some(output.to_string_lossy().to_string()),
+        ..transform_defaults()
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(
+        TestFile::read_parquet(&output)
+            .iter()
+            .map(arrow::array::RecordBatch::num_rows)
+            .sum::<usize>(),
+        3
+    );
+}
+
+#[tokio::test]
+async fn arrow_stream_projection_and_limit_execute_in_the_custom_opener() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let output = temp_dir.path().join("output.arrow");
+    TestFile::write_arrow_stream(
+        &input,
+        &[
+            TestBatch::simple_with(&[1, 2], &["a", "b"]),
+            TestBatch::simple_with(&[3, 4], &["c", "d"]),
+        ],
+    );
+
+    run_transform(TestTransformCommand {
+        from: Some(input.to_string_lossy().into_owned()),
+        to: Some(output.to_string_lossy().into_owned()),
+        query: Some("SELECT name FROM data ORDER BY id LIMIT 3".to_owned()),
+        ..transform_defaults()
+    })
+    .await
+    .unwrap();
+
+    let batches = TestFile::read_arrow(&output);
+    assert_eq!(batches[0].schema().fields().len(), 1);
+    assert_eq!(TestExtract::string_all(&batches, "name"), ["a", "b", "c"]);
+}
+
+#[tokio::test]
+async fn arrow_stream_exact_statistics_count_every_zero_body_batch() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let output = temp_dir.path().join("output.arrow");
+    let schema = Arc::new(Schema::new(vec![Field::new("empty", DataType::Null, true)]));
+    let batches = [
+        RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(NullArray::new(2))]).unwrap(),
+        RecordBatch::try_new(schema, vec![Arc::new(NullArray::new(3))]).unwrap(),
+    ];
+    TestFile::write_arrow_stream(&input, &batches);
+
+    run_transform(TestTransformCommand {
+        from: Some(input.to_string_lossy().into_owned()),
+        to: Some(output.to_string_lossy().into_owned()),
+        query: Some("SELECT COUNT(*) AS row_count FROM data".to_owned()),
+        ..transform_defaults()
+    })
+    .await
+    .unwrap();
+
+    let batches = TestFile::read_arrow(&output);
+    assert_eq!(TestExtract::i64(&batches[0], "row_count"), [5]);
+}
+
+#[tokio::test]
+async fn multiple_arrow_streams_repartition_only_at_file_boundaries() {
+    let temp_dir = TempDir::new().unwrap();
+    let first = temp_dir.path().join("first.arrow");
+    let second = temp_dir.path().join("second.arrow");
+    let output = temp_dir.path().join("output.arrow");
+    TestFile::write_arrow_stream(
+        &first,
+        &[
+            TestBatch::simple_with(&[1, 2], &["a", "b"]),
+            TestBatch::simple_with(&[3], &["c"]),
+        ],
+    );
+    TestFile::write_arrow_stream(
+        &second,
+        &[
+            TestBatch::simple_with(&[10], &["j"]),
+            TestBatch::simple_with(&[11, 12], &["k", "l"]),
+        ],
+    );
+
+    run_transform(TestTransformCommand {
+        patterns: vec![format!("{}/*.arrow", temp_dir.path().display())],
+        to: Some(output.to_string_lossy().into_owned()),
+        target_partitions: Some(4),
+        ..transform_defaults()
+    })
+    .await
+    .unwrap();
+
+    let mut ids = TestExtract::i32_all(&TestFile::read_arrow(&output), "id");
+    ids.sort_unstable();
+    assert_eq!(ids, [1, 2, 3, 10, 11, 12]);
+}
+
+#[tokio::test]
+async fn one_pattern_groups_arrow_file_and_stream_variants_separately() {
+    let temp_dir = TempDir::new().unwrap();
+    let file = temp_dir.path().join("file.arrow");
+    let stream = temp_dir.path().join("stream.arrow");
+    let output = temp_dir.path().join("output.arrow");
+    TestFile::write_arrow_batch(&file, &TestBatch::simple_with(&[1, 2], &["a", "b"]));
+    TestFile::write_arrow_stream(&stream, &[TestBatch::simple_with(&[3, 4], &["c", "d"])]);
+
+    run_transform(TestTransformCommand {
+        patterns: vec![format!("{}/*.arrow", temp_dir.path().display())],
+        to: Some(output.to_string_lossy().into_owned()),
+        target_partitions: Some(3),
+        ..transform_defaults()
+    })
+    .await
+    .unwrap();
+
+    let mut ids = TestExtract::i32_all(&TestFile::read_arrow(&output), "id");
+    ids.sort_unstable();
+    assert_eq!(ids, [1, 2, 3, 4]);
+}
+
+#[tokio::test]
+async fn arrow_file_checks_each_nonrepresentative_schema_before_rows() {
+    let temp_dir = TempDir::new().unwrap();
+    let mismatched = temp_dir.path().join("a.arrow");
+    let representative = temp_dir.path().join("z.arrow");
+    let output = temp_dir.path().join("output.parquet");
+    let mismatched_batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new(
+            "other",
+            DataType::Int32,
+            false,
+        )])),
+        vec![Arc::new(Int32Array::from(vec![1]))],
+    )
+    .unwrap();
+    TestFile::write_arrow_batch(&mismatched, &mismatched_batch);
+    let ids = (0..1_000).collect::<Vec<_>>();
+    let names = (0..1_000)
+        .map(|index| format!("representative-{index:04}-with-padding"))
+        .collect::<Vec<_>>();
+    let names = names.iter().map(String::as_str).collect::<Vec<_>>();
+    TestFile::write_arrow_batch(&representative, &TestBatch::simple_with(&ids, &names));
+
+    let error = run_transform(TestTransformCommand {
+        patterns: vec![format!("{}/*.arrow", temp_dir.path().display())],
+        to: Some(output.to_string_lossy().into_owned()),
+        query: Some("SELECT * FROM data LIMIT 1".to_owned()),
+        ..transform_defaults()
+    })
+    .await
+    .unwrap_err();
+
+    let message = format!("{error:#}");
+    assert!(message.contains("a.arrow"), "{message}");
+    assert!(message.contains("schema mismatch"), "{message}");
+    assert!(!message.contains("__silk_input"), "{message}");
+}
+
+#[tokio::test]
+async fn arrow_stream_checks_each_file_schema_before_yielding_its_first_batch() {
+    let temp_dir = TempDir::new().unwrap();
+    let mismatched = temp_dir.path().join("a.arrow");
+    let representative = temp_dir.path().join("z.arrow");
+    let output = temp_dir.path().join("output.parquet");
+    let mismatched_batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new(
+            "other",
+            DataType::Int32,
+            false,
+        )])),
+        vec![Arc::new(Int32Array::from(vec![1]))],
+    )
+    .unwrap();
+    TestFile::write_arrow_stream(&mismatched, &[mismatched_batch]);
+    let ids = (0..1_000).collect::<Vec<_>>();
+    let names = (0..1_000)
+        .map(|index| format!("representative-{index:04}-with-padding"))
+        .collect::<Vec<_>>();
+    let names = names.iter().map(String::as_str).collect::<Vec<_>>();
+    let representative_batch = TestBatch::simple_with(&ids, &names);
+    TestFile::write_arrow_stream(&representative, &[representative_batch]);
+
+    let error = run_transform(TestTransformCommand {
+        patterns: vec![format!("{}/*.arrow", temp_dir.path().display())],
+        to: Some(output.to_string_lossy().to_string()),
+        query: Some("SELECT * FROM data".to_owned()),
+        ..transform_defaults()
+    })
+    .await
+    .unwrap_err();
+
+    let message = format!("{error:#}");
+    assert!(message.contains("a.arrow"), "{message}");
+    assert!(message.contains("schema mismatch"), "{message}");
+    assert!(!message.contains("__silk_input"), "{message}");
+}
+
+#[tokio::test]
+async fn empty_vortex_files_still_participate_in_leaf_schema_validation() {
+    let temp_dir = TempDir::new().unwrap();
+    let mismatched = temp_dir.path().join("a.vortex");
+    let representative = temp_dir.path().join("z.vortex");
+    let output = temp_dir.path().join("output.arrow");
+    let mismatched_schema = Arc::new(Schema::new(vec![Field::new(
+        "other",
+        DataType::Int32,
+        false,
+    )]));
+    let bytes = silk_chiffon_test_support::vortex::encode_batches(&mismatched_schema, Vec::new())
+        .await
+        .unwrap();
+    std::fs::write(&mismatched, bytes).unwrap();
+    let representative_batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
+    let bytes = silk_chiffon_test_support::vortex::encode_batches(
+        &representative_batch.schema(),
+        vec![representative_batch],
+    )
+    .await
+    .unwrap();
+    std::fs::write(&representative, bytes).unwrap();
+
+    let error = run_transform(TestTransformCommand {
+        patterns: vec![format!("{}/*.vortex", temp_dir.path().display())],
+        to: Some(output.to_string_lossy().to_string()),
+        ..transform_defaults()
+    })
+    .await
+    .unwrap_err();
+
+    let message = format!("{error:#}");
+    assert!(message.contains("a.vortex"), "{message}");
+    assert!(message.contains("schema does not match"), "{message}");
+    assert!(!message.contains("__silk_input"), "{message}");
+    assert!(!output.exists());
 }
 
 #[tokio::test]
@@ -996,11 +1565,10 @@ async fn test_transform_arrow_record_batch_size() {
     let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
     TestFile::write_arrow_batch(&input, &batch);
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        arrow_record_batch_size: 1000,
-        ..Default::default()
+        ..transform_defaults_with(["--arrow-record-batch-size", "1000"])
     })
     .await
     .unwrap();
@@ -1019,12 +1587,11 @@ async fn test_transform_parquet_row_group_size() {
     let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
     TestFile::write_arrow_batch(&input, &batch);
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        output_format: Some(DataFormat::Parquet),
-        parquet_row_group_size: Some(1000),
-        ..Default::default()
+        output_format: Some("parquet".to_owned()),
+        ..transform_defaults_with(["--parquet-row-group-size", "1000"])
     })
     .await
     .unwrap();
@@ -1044,15 +1611,14 @@ async fn test_transform_partition_to_parquet() {
 
     let template = temp_dir.path().join("{{name}}.parquet");
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("name".to_string()),
         create_dirs: false,
-        output_format: Some(DataFormat::Parquet),
-        parquet_compression: ParquetCompression::Snappy,
-        ..Default::default()
+        output_format: Some("parquet".to_owned()),
+        ..transform_defaults_with(["--parquet-compression", "snappy"])
     })
     .await
     .unwrap();
@@ -1090,15 +1656,15 @@ async fn test_transform_low_cardinality_partition() {
 
     let template = temp_dir.path().join("{{name}}.parquet");
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("name".to_string()),
-        partition_strategy: PartitionStrategy::NosortMulti,
+        partition_strategy: Some("nosort-multi".to_owned()),
         create_dirs: false,
-        output_format: Some(DataFormat::Parquet),
-        ..Default::default()
+        output_format: Some("parquet".to_owned()),
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -1161,12 +1727,12 @@ async fn test_transform_multi_column_partition() {
 
     let template = temp_dir.path().join("year={{year}}/month={{month}}.arrow");
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("year,month".to_string()),
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -1177,7 +1743,7 @@ async fn test_transform_multi_column_partition() {
 }
 
 #[tokio::test]
-async fn test_transform_from_many_to_partitioned() {
+async fn test_transform_repeatable_from_to_partitioned() {
     let temp_dir = TempDir::new().unwrap();
     let input1 = temp_dir.path().join("input1.arrow");
     let input2 = temp_dir.path().join("input2.arrow");
@@ -1193,9 +1759,9 @@ async fn test_transform_from_many_to_partitioned() {
 
     let template = temp_dir.path().join("{{name}}.arrow");
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: None,
-        from_many: vec![
+        exact_references: vec![
             input1.to_string_lossy().to_string(),
             input2.to_string_lossy().to_string(),
         ],
@@ -1204,7 +1770,7 @@ async fn test_transform_from_many_to_partitioned() {
         by: Some("name".to_string()),
         create_dirs: false,
         overwrite: true,
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -1250,11 +1816,11 @@ async fn test_transform_invalid_query() {
     let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
     TestFile::write_arrow_batch(&input, &batch);
 
-    let result = silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    let result = run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
         query: Some("SELECT nonexistent FROM data".to_string()),
-        ..Default::default()
+        ..transform_defaults()
     })
     .await;
 
@@ -1270,10 +1836,10 @@ async fn test_transform_empty_file() {
     let schema = TestBatch::simple_schema();
     TestFile::write_arrow_empty(&input, &schema);
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -1292,15 +1858,11 @@ async fn test_transform_bloom_filter_with_custom_ndv() {
     let batch = TestBatch::simple_with(&[1, 2, 3, 4, 5], &["a", "b", "c", "d", "e"]);
     TestFile::write_arrow_batch(&input, &batch);
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        output_format: Some(DataFormat::Parquet),
-        parquet_bloom_all: Some(AllColumnsBloomFilterConfig {
-            fpp: 0.005,
-            ndv: Some(1000),
-        }),
-        ..Default::default()
+        output_format: Some("parquet".to_owned()),
+        ..transform_defaults_with(["--parquet-bloom-all", "fpp=0.005,ndv=1000"])
     })
     .await
     .unwrap();
@@ -1319,18 +1881,11 @@ async fn test_transform_bloom_filter_column_specific_with_ndv() {
     let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
     TestFile::write_arrow_batch(&input, &batch);
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        output_format: Some(DataFormat::Parquet),
-        parquet_bloom_column: vec![ColumnSpecificBloomFilterConfig {
-            name: "id".to_string(),
-            config: silk_chiffon::ColumnBloomFilterConfig {
-                fpp: 0.005,
-                ndv: Some(5000),
-            },
-        }],
-        ..Default::default()
+        output_format: Some("parquet".to_owned()),
+        ..transform_defaults_with(["--parquet-bloom-column", "id:fpp=0.005,ndv=5000"])
     })
     .await
     .unwrap();
@@ -1357,13 +1912,12 @@ async fn test_transform_mixed_parquet_and_arrow_inputs() {
 
     let glob_pattern = temp_dir.path().join("data*.arrow");
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: None,
-        from_many: vec![glob_pattern.to_string_lossy().to_string()],
+        patterns: vec![glob_pattern.to_string_lossy().to_string()],
         to: Some(output.to_string_lossy().to_string()),
-        output_format: Some(DataFormat::Parquet),
-        parquet_compression: ParquetCompression::Snappy,
-        ..Default::default()
+        output_format: Some("parquet".to_owned()),
+        ..transform_defaults_with(["--parquet-compression", "snappy"])
     })
     .await
     .unwrap();
@@ -1371,6 +1925,116 @@ async fn test_transform_mixed_parquet_and_arrow_inputs() {
     assert!(output.exists());
     let batches = TestFile::read_parquet(&output);
     assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 4);
+}
+
+#[tokio::test]
+async fn different_input_leaves_union_reordered_and_missing_columns_by_name() {
+    let temp_dir = TempDir::new().unwrap();
+    let first = temp_dir.path().join("first.arrow");
+    let second = temp_dir.path().join("second.arrow");
+    let output = temp_dir.path().join("output.arrow");
+    let first_batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("left", DataType::Utf8, false),
+        ])),
+        vec![
+            Arc::new(Int32Array::from(vec![1, 2])),
+            Arc::new(StringArray::from(vec!["a", "b"])),
+        ],
+    )
+    .unwrap();
+    let second_batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("right", DataType::Utf8, false),
+            Field::new("id", DataType::Int32, false),
+        ])),
+        vec![
+            Arc::new(StringArray::from(vec!["z"])),
+            Arc::new(Int32Array::from(vec![3])),
+        ],
+    )
+    .unwrap();
+    TestFile::write_arrow_batch(&first, &first_batch);
+    TestFile::write_arrow_batch(&second, &second_batch);
+
+    run_transform(TestTransformCommand {
+        exact_references: vec![
+            first.to_string_lossy().into_owned(),
+            second.to_string_lossy().into_owned(),
+        ],
+        to: Some(output.to_string_lossy().into_owned()),
+        ..transform_defaults()
+    })
+    .await
+    .unwrap();
+
+    let batches = TestFile::read_arrow(&output);
+    let names = batches[0]
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().clone())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["id", "left", "right"]);
+    let mut rows = batches
+        .iter()
+        .flat_map(|batch| {
+            let ids = TestExtract::i32(batch, "id");
+            let left = TestExtract::string_nullable(batch, "left");
+            let right = TestExtract::string_nullable(batch, "right");
+            ids.into_iter()
+                .zip(left)
+                .zip(right)
+                .map(|((id, left), right)| (id, left, right))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by_key(|row| row.0);
+    assert_eq!(
+        rows,
+        [
+            (1, Some("a".to_owned()), None),
+            (2, Some("b".to_owned()), None),
+            (3, None, Some("z".to_owned())),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn parquet_pattern_rejects_a_nonrepresentative_schema_mismatch() {
+    let temp_dir = TempDir::new().unwrap();
+    let expected = temp_dir.path().join("a.parquet");
+    let mismatched = temp_dir.path().join("b.parquet");
+    let output = temp_dir.path().join("output.arrow");
+    TestFile::write_parquet_batch(
+        &expected,
+        &TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]),
+    );
+    let mismatched_batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new(
+            "different",
+            DataType::Int32,
+            false,
+        )])),
+        vec![Arc::new(Int32Array::from(vec![9]))],
+    )
+    .unwrap();
+    TestFile::write_parquet_batch(&mismatched, &mismatched_batch);
+
+    let error = run_transform(TestTransformCommand {
+        patterns: vec![format!("{}/*.parquet", temp_dir.path().display())],
+        to: Some(output.to_string_lossy().into_owned()),
+        ..transform_defaults()
+    })
+    .await
+    .unwrap_err();
+
+    let message = format!("{error:#}");
+    assert!(message.contains("schema does not match"), "{message}");
+    assert!(message.contains(".parquet"), "{message}");
+    assert!(!message.contains("__silk_input"), "{message}");
+    assert!(!output.exists());
 }
 
 #[tokio::test]
@@ -1383,14 +2047,14 @@ async fn test_transform_partition_list_outputs_text() {
 
     let template = temp_dir.path().join("{{name}}.arrow");
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("name".to_string()),
-        list_outputs: Some(ListOutputsFormat::Text),
+        list_outputs: Some(PresentationMode::Text),
         create_dirs: false,
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -1406,20 +2070,23 @@ async fn test_transform_partition_list_outputs_text() {
 async fn test_transform_partition_list_outputs_json() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
+    let report = temp_dir.path().join("outputs.json");
 
     let batch = TestBatch::simple_with(&[1, 2], &["x", "y"]);
     TestFile::write_arrow_batch(&input, &batch);
 
     let template = temp_dir.path().join("{{name}}.arrow");
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("name".to_string()),
-        list_outputs: Some(ListOutputsFormat::Json),
+        exclude_columns: vec!["name".to_string()],
+        list_outputs: Some(PresentationMode::Json),
+        list_outputs_file: Some(Utf8PathBuf::from_path_buf(report.clone()).unwrap()),
         create_dirs: false,
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -1429,6 +2096,51 @@ async fn test_transform_partition_list_outputs_json() {
 
     assert!(output_x.exists());
     assert!(output_y.exists());
+    assert_eq!(TestFile::read_arrow(&output_x)[0].num_columns(), 1);
+
+    let report: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(report).unwrap()).unwrap();
+    let outputs = report.as_array().unwrap();
+    assert_eq!(outputs.len(), 2);
+    for output in outputs {
+        assert_eq!(output["partition_fields"][0]["field"], "name");
+        assert!(output["partition_fields"][0]["value"].is_string());
+    }
+}
+
+#[tokio::test]
+async fn test_transform_partition_failure_writes_completed_outputs_only() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let report = temp_dir.path().join("outputs.json");
+    let target = temp_dir.path().join("shared.arrow");
+
+    TestFile::write_arrow_batch(&input, &TestBatch::simple_with(&[1, 2], &["a", "b"]));
+
+    let error = run_transform(TestTransformCommand {
+        from: Some(input.to_string_lossy().into_owned()),
+        to_many: Some(target.to_string_lossy().into_owned()),
+        by: Some("name".to_owned()),
+        partition_strategy: Some("sort-single".to_owned()),
+        list_outputs: Some(PresentationMode::Json),
+        list_outputs_file: Some(Utf8PathBuf::from_path_buf(report.clone()).unwrap()),
+        create_dirs: false,
+        ..transform_defaults()
+    })
+    .await
+    .unwrap_err();
+
+    assert!(
+        format!("{error:#}").contains("already claimed by this storage session"),
+        "{error:#}"
+    );
+    let outputs: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(report).unwrap()).unwrap();
+    let outputs = outputs.as_array().unwrap();
+    assert_eq!(outputs.len(), 1);
+    assert_eq!(outputs[0]["partition_fields"][0]["value"], "a");
+    let target_url = url::Url::from_file_path(&target).unwrap();
+    assert_eq!(outputs[0]["durable_locations"][0], target_url.as_str());
 }
 
 #[tokio::test]
@@ -1440,12 +2152,12 @@ async fn test_transform_explicit_input_format_arrow_to_parquet() {
     let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
     TestFile::write_arrow_batch(&input, &batch);
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        input_format: Some(DataFormat::Arrow),
-        output_format: Some(DataFormat::Parquet),
-        ..Default::default()
+        input_format: Some("arrow".to_owned()),
+        output_format: Some("parquet".to_owned()),
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -1453,6 +2165,29 @@ async fn test_transform_explicit_input_format_arrow_to_parquet() {
     assert!(output.exists());
     let batches = TestFile::read_parquet(&output);
     assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 3);
+}
+
+#[tokio::test]
+async fn explicit_input_formats_use_the_selected_formats_detector() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let output = temp_dir.path().join("output.arrow");
+    TestFile::write_arrow_batch(
+        &input,
+        &TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]),
+    );
+
+    let error = run_transform(TestTransformCommand {
+        from: Some(input.to_string_lossy().to_string()),
+        to: Some(output.to_string_lossy().to_string()),
+        input_format: Some("parquet".to_owned()),
+        ..transform_defaults()
+    })
+    .await
+    .unwrap_err();
+
+    assert!(error.to_string().contains("is not recognized as parquet"));
+    assert!(!output.exists());
 }
 
 #[tokio::test]
@@ -1464,12 +2199,12 @@ async fn test_transform_explicit_output_format_parquet() {
     let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
     TestFile::write_parquet_batch(&input, &batch);
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        input_format: Some(DataFormat::Parquet),
-        output_format: Some(DataFormat::Arrow),
-        ..Default::default()
+        input_format: Some("parquet".to_owned()),
+        output_format: Some("arrow".to_owned()),
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -1488,11 +2223,10 @@ async fn test_transform_arrow_compression_lz4() {
     let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
     TestFile::write_arrow_batch(&input, &batch);
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        arrow_compression: ArrowCompression::Lz4,
-        ..Default::default()
+        ..transform_defaults_with(["--arrow-compression", "lz4"])
     })
     .await
     .unwrap();
@@ -1526,7 +2260,7 @@ async fn test_transform_query_with_partition() {
 
     let template = temp_dir.path().join("{{category}}.arrow");
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
@@ -1534,7 +2268,7 @@ async fn test_transform_query_with_partition() {
         create_dirs: false,
         overwrite: true,
         query: Some("SELECT * FROM data WHERE value > 15".to_string()),
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap_or_else(|e| panic!("Command failed with error: {:?}", e));
@@ -1573,12 +2307,12 @@ async fn test_transform_query_with_different_dialect() {
     let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
     TestFile::write_arrow_batch(&input, &batch);
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
         query: Some("SELECT * FROM data WHERE id >= 2".to_string()),
         dialect: QueryDialect::PostgreSQL,
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -1614,20 +2348,15 @@ async fn test_transform_partition_with_query_and_sort() {
 
     let template = temp_dir.path().join("{{region}}.arrow");
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("region".to_string()),
         create_dirs: false,
         query: Some("SELECT * FROM data WHERE score > 100".to_string()),
-        sort_by: Some(SortSpec {
-            columns: vec![SortColumn {
-                name: "score".to_string(),
-                direction: SortDirection::Ascending,
-            }],
-        }),
-        ..Default::default()
+        sort_by: Some("score".parse().unwrap()),
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -1785,14 +2514,17 @@ async fn test_parquet_roundtrip_data_fidelity() {
     TestFile::write_arrow(&input_arrow, &input_batches_to_write);
 
     // step 1: convert arrow to parquet with multiple row groups
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input_arrow.to_string_lossy().to_string()),
         to: Some(intermediate_parquet.to_string_lossy().to_string()),
         preserve_input_order: true,
-        output_format: Some(DataFormat::Parquet),
-        parquet_compression: ParquetCompression::Zstd,
-        parquet_row_group_size: Some(parquet_row_group_size),
-        ..Default::default()
+        output_format: Some("parquet".to_owned()),
+        ..transform_defaults_with(vec![
+            "--parquet-compression".to_owned(),
+            "zstd".to_owned(),
+            "--parquet-row-group-size".to_owned(),
+            parquet_row_group_size.to_string(),
+        ])
     })
     .await
     .unwrap();
@@ -1811,14 +2543,16 @@ async fn test_parquet_roundtrip_data_fidelity() {
     );
 
     // step 2: convert parquet back to arrow with specified batch size
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(intermediate_parquet.to_string_lossy().to_string()),
         to: Some(output_arrow.to_string_lossy().to_string()),
         preserve_input_order: true,
-        input_format: Some(DataFormat::Parquet),
-        output_format: Some(DataFormat::Arrow),
-        arrow_record_batch_size: output_batch_size,
-        ..Default::default()
+        input_format: Some("parquet".to_owned()),
+        output_format: Some("arrow".to_owned()),
+        ..transform_defaults_with(vec![
+            "--arrow-record-batch-size".to_owned(),
+            output_batch_size.to_string(),
+        ])
     })
     .await
     .unwrap();
@@ -2144,13 +2878,13 @@ async fn test_multi_column_partition_verifies_data_arrow() {
 
     let template = temp_dir.path().join("year={{year}}/month={{month}}.arrow");
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("year,month".to_string()),
-        output_format: Some(DataFormat::Arrow), // be explicit to ensure we are testing the correct format,
-        ..Default::default()
+        output_format: Some("arrow".to_owned()), // be explicit to ensure we are testing the correct format,
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -2223,13 +2957,13 @@ async fn test_multi_column_partition_verifies_data_parquet() {
         .path()
         .join("year={{year}}/month={{month}}.parquet");
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("year,month".to_string()),
-        output_format: Some(DataFormat::Parquet),
-        ..Default::default()
+        output_format: Some("parquet".to_owned()),
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -2289,13 +3023,13 @@ async fn test_multi_column_partition_three_columns_arrow() {
         .path()
         .join("year={{year}}/month={{month}}/day={{day}}.arrow");
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("year,month,day".to_string()),
-        output_format: Some(DataFormat::Arrow),
-        ..Default::default()
+        output_format: Some("arrow".to_owned()),
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -2348,13 +3082,13 @@ async fn test_multi_column_partition_three_columns_parquet() {
         .path()
         .join("year={{year}}/month={{month}}/day={{day}}.parquet");
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("year,month,day".to_string()),
-        output_format: Some(DataFormat::Parquet),
-        ..Default::default()
+        output_format: Some("parquet".to_owned()),
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -2407,13 +3141,13 @@ async fn test_multi_column_partition_mixed_types() {
         .path()
         .join("region={{region}}/year={{year}}.arrow");
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("region,year".to_string()),
-        output_format: Some(DataFormat::Arrow),
-        ..Default::default()
+        output_format: Some("arrow".to_owned()),
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -2474,14 +3208,14 @@ async fn test_multi_column_partition_parquet_with_exclude() {
         .path()
         .join("year={{year}}/month={{month}}.parquet");
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("year,month".to_string()),
         exclude_columns: vec!["year".to_string(), "month".to_string()],
-        output_format: Some(DataFormat::Parquet),
-        ..Default::default()
+        output_format: Some("parquet".to_owned()),
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -2526,14 +3260,14 @@ async fn test_multi_column_partition_arrow_with_exclude() {
 
     let template = temp_dir.path().join("year={{year}}/month={{month}}.arrow");
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("year,month".to_string()),
         exclude_columns: vec!["year".to_string(), "month".to_string()],
-        output_format: Some(DataFormat::Arrow),
-        ..Default::default()
+        output_format: Some("arrow".to_owned()),
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -2581,15 +3315,15 @@ async fn test_multi_column_partition_verifies_output_paths_arrow() {
         .path()
         .join("data/year={{year}}/month={{month}}/data.arrow");
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("year,month".to_string()),
-        list_outputs: Some(ListOutputsFormat::Json),
+        list_outputs: Some(PresentationMode::Json),
         list_outputs_file: Some(Utf8PathBuf::from_path_buf(list_output.clone()).unwrap()),
-        output_format: Some(DataFormat::Arrow),
-        ..Default::default()
+        output_format: Some("arrow".to_owned()),
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -2600,12 +3334,12 @@ async fn test_multi_column_partition_verifies_output_paths_arrow() {
     assert_eq!(files.len(), 4, "should have 4 partition files");
 
     for file in files {
-        let path = file["path"].as_str().unwrap();
-        let partition_values = file["partition_values"].as_array().unwrap();
+        let path = file["durable_locations"][0].as_str().unwrap();
+        let partition_values = file["partition_fields"].as_array().unwrap();
 
         assert_eq!(partition_values.len(), 2);
-        assert_eq!(partition_values[0]["column"], "year");
-        assert_eq!(partition_values[1]["column"], "month");
+        assert_eq!(partition_values[0]["field"], "year");
+        assert_eq!(partition_values[1]["field"], "month");
 
         let year = partition_values[0]["value"].as_i64().unwrap();
         let month = partition_values[1]["value"].as_i64().unwrap();
@@ -2623,13 +3357,10 @@ async fn test_multi_column_partition_verifies_output_paths_arrow() {
             month
         );
 
-        assert!(
-            std::path::Path::new(path).exists(),
-            "file should exist: {}",
-            path
-        );
+        let durable_path = url::Url::parse(path).unwrap().to_file_path().unwrap();
+        assert!(durable_path.exists(), "file should exist: {path}");
 
-        let batches = TestFile::read_arrow_auto(Path::new(path));
+        let batches = TestFile::read_arrow_auto(&durable_path);
         let expected_year = i32::try_from(year).unwrap();
         let expected_month = i32::try_from(month).unwrap();
         for batch in &batches {
@@ -2697,15 +3428,15 @@ async fn test_multi_column_partition_verifies_output_paths_parquet() {
         .path()
         .join("output/region={{region}}/year={{year}}.parquet");
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: None,
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("region,year".to_string()),
-        list_outputs: Some(ListOutputsFormat::Json),
+        list_outputs: Some(PresentationMode::Json),
         list_outputs_file: Some(Utf8PathBuf::from_path_buf(list_output.clone()).unwrap()),
-        output_format: Some(DataFormat::Parquet),
-        ..Default::default()
+        output_format: Some("parquet".to_owned()),
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -2716,12 +3447,12 @@ async fn test_multi_column_partition_verifies_output_paths_parquet() {
     assert_eq!(files.len(), 4, "should have 4 partition files");
 
     for file in files {
-        let path = file["path"].as_str().unwrap();
-        let partition_values = file["partition_values"].as_array().unwrap();
+        let path = file["durable_locations"][0].as_str().unwrap();
+        let partition_values = file["partition_fields"].as_array().unwrap();
 
         assert_eq!(partition_values.len(), 2);
-        assert_eq!(partition_values[0]["column"], "region");
-        assert_eq!(partition_values[1]["column"], "year");
+        assert_eq!(partition_values[0]["field"], "region");
+        assert_eq!(partition_values[1]["field"], "year");
 
         let region = partition_values[0]["value"].as_str().unwrap();
         let year = partition_values[1]["value"].as_i64().unwrap();
@@ -2739,13 +3470,10 @@ async fn test_multi_column_partition_verifies_output_paths_parquet() {
             year
         );
 
-        assert!(
-            std::path::Path::new(path).exists(),
-            "file should exist: {}",
-            path
-        );
+        let durable_path = url::Url::parse(path).unwrap().to_file_path().unwrap();
+        assert!(durable_path.exists(), "file should exist: {path}");
 
-        let batches = TestFile::read_parquet(Path::new(path));
+        let batches = TestFile::read_parquet(&durable_path);
         let expected_year = i32::try_from(year).unwrap();
         for batch in &batches {
             let regions = batch
@@ -2865,7 +3593,7 @@ async fn test_partition_strategies_produce_same_output() {
     std::fs::create_dir_all(&low_card_dir).unwrap();
 
     // run high-cardinality partitioning (requires sort)
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: None,
         to_many: Some(
@@ -2876,14 +3604,14 @@ async fn test_partition_strategies_produce_same_output() {
         ),
         by: Some("category".to_string()),
         create_dirs: false,
-        output_format: Some(DataFormat::Parquet),
-        ..Default::default()
+        output_format: Some("parquet".to_owned()),
+        ..transform_defaults()
     })
     .await
     .unwrap();
 
     // run low-cardinality partitioning (no global sort)
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: None,
         to_many: Some(
@@ -2893,10 +3621,10 @@ async fn test_partition_strategies_produce_same_output() {
                 .to_string(),
         ),
         by: Some("category".to_string()),
-        partition_strategy: PartitionStrategy::NosortMulti,
+        partition_strategy: Some("nosort-multi".to_owned()),
         create_dirs: false,
-        output_format: Some(DataFormat::Parquet),
-        ..Default::default()
+        output_format: Some("parquet".to_owned()),
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -2970,12 +3698,11 @@ async fn test_transform_with_sequential_encoder() {
     let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
     TestFile::write_arrow_batch(&input, &batch);
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        output_format: Some(DataFormat::Parquet),
-        parquet_compression: ParquetCompression::Snappy,
-        ..Default::default()
+        output_format: Some("parquet".to_owned()),
+        ..transform_defaults_with(["--parquet-compression", "snappy"])
     })
     .await
     .unwrap();
@@ -2996,16 +3723,15 @@ async fn test_dictionary_prefix_matches_nested_columns() {
     let batch = TestBatch::with_structs();
     TestFile::write_arrow_batch(&input, &batch);
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        output_format: Some(DataFormat::Parquet),
-        parquet_dictionary_all_off: true,
-        parquet_dictionary_column: vec![ColumnDictionaryConfig {
-            name: "person".to_string(),
-            mode: DictionaryMode::Always,
-        }],
-        ..Default::default()
+        output_format: Some("parquet".to_owned()),
+        ..transform_defaults_with([
+            "--parquet-dictionary-all-off",
+            "--parquet-dictionary-column",
+            "person:always",
+        ])
     })
     .await
     .unwrap();
@@ -3026,16 +3752,15 @@ async fn test_dictionary_specific_path_in_nested_column() {
     let batch = TestBatch::with_structs();
     TestFile::write_arrow_batch(&input, &batch);
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        output_format: Some(DataFormat::Parquet),
-        parquet_dictionary_all_off: true,
-        parquet_dictionary_column: vec![ColumnDictionaryConfig {
-            name: "person.name".to_string(),
-            mode: DictionaryMode::Always,
-        }],
-        ..Default::default()
+        output_format: Some("parquet".to_owned()),
+        ..transform_defaults_with([
+            "--parquet-dictionary-all-off",
+            "--parquet-dictionary-column",
+            "person.name:always",
+        ])
     })
     .await
     .unwrap();
@@ -3056,18 +3781,11 @@ async fn test_bloom_filter_prefix_matches_nested_columns() {
     let batch = TestBatch::with_structs();
     TestFile::write_arrow_batch(&input, &batch);
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        output_format: Some(DataFormat::Parquet),
-        parquet_bloom_column: vec![ColumnSpecificBloomFilterConfig {
-            name: "person".to_string(),
-            config: silk_chiffon::ColumnBloomFilterConfig {
-                fpp: 0.01,
-                ndv: Some(100),
-            },
-        }],
-        ..Default::default()
+        output_format: Some("parquet".to_owned()),
+        ..transform_defaults_with(["--parquet-bloom-column", "person:fpp=0.01,ndv=100"])
     })
     .await
     .unwrap();
@@ -3088,19 +3806,16 @@ async fn test_bloom_filter_prefix_with_exclusion() {
     let batch = TestBatch::with_structs();
     TestFile::write_arrow_batch(&input, &batch);
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        output_format: Some(DataFormat::Parquet),
-        parquet_bloom_column: vec![ColumnSpecificBloomFilterConfig {
-            name: "person".to_string(),
-            config: silk_chiffon::ColumnBloomFilterConfig {
-                fpp: 0.01,
-                ndv: Some(100),
-            },
-        }],
-        parquet_bloom_column_off: vec!["person.age".to_string()],
-        ..Default::default()
+        output_format: Some("parquet".to_owned()),
+        ..transform_defaults_with([
+            "--parquet-bloom-column",
+            "person:fpp=0.01,ndv=100",
+            "--parquet-bloom-column-off",
+            "person.age",
+        ])
     })
     .await
     .unwrap();
@@ -3112,13 +3827,13 @@ async fn test_bloom_filter_prefix_with_exclusion() {
 }
 
 #[tokio::test]
-async fn test_transform_sort_with_spill_reservation_sampling() {
-    // verifies the sample-based sort_spill_reservation_bytes path runs without error
+async fn test_transform_sort_uses_final_plan_statistics_for_spill_reservation() {
+    // The final sort input statistics tune DataFusion's spill reservation.
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.parquet");
     let output = temp_dir.path().join("output.parquet");
 
-    // wider schema so sampling produces a meaningful row-byte estimate
+    // Several physical types exercise the statistics-based sizing path.
     let batch = TestBatch::builder()
         .column_i32("id", &[5, 3, 1, 4, 2])
         .column_string("name", &["echo", "charlie", "alpha", "delta", "bravo"])
@@ -3126,17 +3841,12 @@ async fn test_transform_sort_with_spill_reservation_sampling() {
         .build();
     TestFile::write_parquet_batch(&input, &batch);
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        sort_by: Some(SortSpec {
-            columns: vec![SortColumn {
-                name: "id".to_string(),
-                direction: SortDirection::Ascending,
-            }],
-        }),
-        output_format: Some(DataFormat::Parquet),
-        ..Default::default()
+        sort_by: Some("id".parse().unwrap()),
+        output_format: Some("parquet".to_owned()),
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -3161,7 +3871,7 @@ async fn test_transform_sort_with_spill_reservation_sampling() {
 
 #[tokio::test]
 async fn test_transform_sort_multi_file_with_spill_reservation() {
-    // exercises sampling across multiple input files
+    // Row-size measurement covers the combined logical input, not only its first file.
     let temp_dir = TempDir::new().unwrap();
     let input1 = temp_dir.path().join("a.arrow");
     let input2 = temp_dir.path().join("b.arrow");
@@ -3170,19 +3880,14 @@ async fn test_transform_sort_multi_file_with_spill_reservation() {
     TestFile::write_arrow_batch(&input1, &TestBatch::simple_with(&[4, 2], &["d", "b"]));
     TestFile::write_arrow_batch(&input2, &TestBatch::simple_with(&[3, 1], &["c", "a"]));
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        from_many: vec![
+    run_transform(TestTransformCommand {
+        exact_references: vec![
             input1.to_string_lossy().to_string(),
             input2.to_string_lossy().to_string(),
         ],
         to: Some(output.to_string_lossy().to_string()),
-        sort_by: Some(SortSpec {
-            columns: vec![SortColumn {
-                name: "id".to_string(),
-                direction: SortDirection::Ascending,
-            }],
-        }),
-        ..Default::default()
+        sort_by: Some("id".parse().unwrap()),
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -3213,11 +3918,11 @@ async fn test_reserved_spill_pool_simple_transform() {
     let batch = TestBatch::simple_with(&[3, 1, 2], &["c", "a", "b"]);
     TestFile::write_arrow_batch(&input, &batch);
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        non_spillable_reserve: Some(PoolReserveSpec::Percent(10)),
-        ..Default::default()
+        non_spillable_reserve: Some("10%".to_owned()),
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -3236,17 +3941,12 @@ async fn test_reserved_spill_pool_with_sorting() {
     let batch = TestBatch::simple_with(&[3, 1, 2], &["c", "a", "b"]);
     TestFile::write_arrow_batch(&input, &batch);
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        non_spillable_reserve: Some(PoolReserveSpec::Percent(10)),
-        sort_by: Some(SortSpec {
-            columns: vec![SortColumn {
-                name: "id".to_string(),
-                direction: SortDirection::Ascending,
-            }],
-        }),
-        ..Default::default()
+        non_spillable_reserve: Some("10%".to_owned()),
+        sort_by: Some("id".parse().unwrap()),
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -3272,18 +3972,13 @@ async fn test_reserved_spill_pool_with_fixed_reserve() {
     let batch = TestBatch::simple_with(&[5, 2, 4, 1, 3], &["e", "b", "d", "a", "c"]);
     TestFile::write_arrow_batch(&input, &batch);
 
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        output_format: Some(DataFormat::Parquet),
-        non_spillable_reserve: Some(PoolReserveSpec::Fixed(50 * 1024 * 1024)), // 50MB
-        sort_by: Some(SortSpec {
-            columns: vec![SortColumn {
-                name: "name".to_string(),
-                direction: SortDirection::Ascending,
-            }],
-        }),
-        ..Default::default()
+        output_format: Some("parquet".to_owned()),
+        non_spillable_reserve: Some("50MiB".to_owned()),
+        sort_by: Some("name".parse().unwrap()),
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -3312,12 +4007,12 @@ async fn test_reserved_spill_pool_with_top_consumers() {
     TestFile::write_arrow_batch(&input, &batch);
 
     // exercise the top-consumers=0 (all) path alongside the reserved pool
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to: Some(output.to_string_lossy().to_string()),
-        non_spillable_reserve: Some(PoolReserveSpec::Percent(25)),
+        non_spillable_reserve: Some("25%".to_owned()),
         memory_pool_top_consumers: 0,
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
@@ -3348,27 +4043,27 @@ async fn test_nosort_evict_partitioned_write() {
     .unwrap();
     TestFile::write_arrow_batch(&input, &batch);
 
-    let template = output_dir.join("{{category}}.parquet");
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
+    let template = output_dir.join("{{category}}_{{file_number}}.parquet");
+    run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
         to_many: Some(template.to_string_lossy().to_string()),
         by: Some("category".to_string()),
-        partition_strategy: PartitionStrategy::NosortEvict,
+        partition_strategy: Some("nosort-evict".to_owned()),
         max_open_partitions: Some(2),
         overwrite: true,
-        ..Default::default()
+        ..transform_defaults()
     })
     .await
     .unwrap();
 
-    // with max_open=2, x and y open first; z evicts x; then x reopens as x_1
-    assert!(output_dir.join("x.parquet").exists());
-    assert!(output_dir.join("y.parquet").exists());
-    assert!(output_dir.join("z.parquet").exists());
+    assert!(output_dir.join("x_0.parquet").exists());
+    assert!(output_dir.join("y_0.parquet").exists());
+    assert!(output_dir.join("z_0.parquet").exists());
     assert!(
         output_dir.join("x_1.parquet").exists(),
-        "evicted partition should reopen with _1 suffix"
+        "the template should render the reopened partition's next file number"
     );
+    assert!(output_dir.join("y_1.parquet").exists());
 
     // verify data correctness: all 5 rows present across files
     let mut total_rows = 0;

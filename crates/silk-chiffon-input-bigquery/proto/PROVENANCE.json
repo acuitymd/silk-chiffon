@@ -1,0 +1,130 @@
+{
+  "schema_version": 1,
+  "repository": "https://github.com/googleapis/googleapis",
+  "commit": "5f933a6c53e57f87e47e3725fceca08cf24b5b16",
+  "protobuf": {
+    "repository": "https://github.com/protocolbuffers/protobuf",
+    "commit": "74211c0dfc2777318ab53c2cd2c317a2ef9012de",
+    "protoc_provider": "protoc-bin-vendored",
+    "protoc_provider_version": "3.2.0"
+  },
+  "roots": [
+    "google/cloud/bigquery/storage/v1/storage.proto",
+    "google/rpc/error_details.proto",
+    "google/api/routing.proto"
+  ],
+  "files": [
+    {
+      "path": "google/api/annotations.proto",
+      "sha256": "e79ea741cb605a65e78ca322174764a4af9fde1962c1631e12b84c4934ba9a6c",
+      "source": "googleapis"
+    },
+    {
+      "path": "google/api/client.proto",
+      "sha256": "5e9fc117290fe7d3472791543c979bec7cf4497f3fe6ffaf9de9ae99cc4f1804",
+      "source": "googleapis"
+    },
+    {
+      "path": "google/api/field_behavior.proto",
+      "sha256": "bb7ed77725c95f751ec2c47cd92359d0137c39383b8a62aef41bab7aa7478da5",
+      "source": "googleapis"
+    },
+    {
+      "path": "google/api/http.proto",
+      "sha256": "ead99129aa15dd5f6233942030c72eec33bc0d7b1c7c260dc143293ef66c5b78",
+      "source": "googleapis"
+    },
+    {
+      "path": "google/api/launch_stage.proto",
+      "sha256": "68e22c9821227b4e84c7029569fce1055c21e6ccab991e0986bc75f12ef4dd82",
+      "source": "googleapis"
+    },
+    {
+      "path": "google/api/resource.proto",
+      "sha256": "815d51eada4341bf01672b474b5ec0abbea190e8df9f4aa26a0c96dbdad2993b",
+      "source": "googleapis"
+    },
+    {
+      "path": "google/api/routing.proto",
+      "sha256": "f31cb43c3efe07a80cd814eede587f1a38b4dac88053069dcfeaac86700511be",
+      "source": "googleapis"
+    },
+    {
+      "path": "google/cloud/bigquery/storage/v1/arrow.proto",
+      "sha256": "776e2e17338f1b834f4a0614d26536482cea49aefbfaa7109f18df0684103d80",
+      "source": "googleapis"
+    },
+    {
+      "path": "google/cloud/bigquery/storage/v1/avro.proto",
+      "sha256": "74f4203d07bfe9aaed51088b1e5a3d0a0444497dbda44c2ddfd62a73f02ead12",
+      "source": "googleapis"
+    },
+    {
+      "path": "google/cloud/bigquery/storage/v1/protobuf.proto",
+      "sha256": "c04784b7ea70cdbdb5477842291020fd8dc4f5e3e9cd6048aee57c692dff0b9a",
+      "source": "googleapis"
+    },
+    {
+      "path": "google/cloud/bigquery/storage/v1/storage.proto",
+      "sha256": "f273b281802e32e997326fd5515bfeeae8eb4c8302bea07cffcde2ab88f118d6",
+      "source": "googleapis"
+    },
+    {
+      "path": "google/cloud/bigquery/storage/v1/stream.proto",
+      "sha256": "42ff5756711c5a7fd0021def31aad2c7537cbc65f22c026a8223d972bf01eb29",
+      "source": "googleapis"
+    },
+    {
+      "path": "google/cloud/bigquery/storage/v1/table.proto",
+      "sha256": "88c8da28210f427686664000c92c6af467b396a57df4571d16404c3a1ab93a5c",
+      "source": "googleapis"
+    },
+    {
+      "path": "google/protobuf/any.proto",
+      "sha256": "bcf5de6ce463b1a38ff76b77955aa7e580b4ec12af34a927b1d45c9efb0faf66",
+      "source": "protobuf"
+    },
+    {
+      "path": "google/protobuf/descriptor.proto",
+      "sha256": "428bd7cfc74c4e53dcab06d37080aa589452c2f93360bcbaccd5d1d78a50e8b1",
+      "source": "protobuf"
+    },
+    {
+      "path": "google/protobuf/duration.proto",
+      "sha256": "a3f7301ff2956ec2e30c2241ece07197e4a86c752348d5607224819d4921c9fe",
+      "source": "protobuf"
+    },
+    {
+      "path": "google/protobuf/timestamp.proto",
+      "sha256": "14052c6042c1dd2d0b50245f2812eaab6eaf82db0b6e8ce483eae527f73b6ee8",
+      "source": "protobuf"
+    },
+    {
+      "path": "google/protobuf/wrappers.proto",
+      "sha256": "6878dc7534cf9805eee56345cdc38b5e9ca39dece246710c663c7007a67fef49",
+      "source": "protobuf"
+    },
+    {
+      "path": "google/rpc/error_details.proto",
+      "sha256": "5c18d42e6924f447622534b4b7cdb8b53c0606c8ce729b912ee5edf88d1c5520",
+      "source": "googleapis"
+    },
+    {
+      "path": "google/rpc/status.proto",
+      "sha256": "f5bfd262e6705c7ae73f32e0ad8ee20ce8c0a2578df8c4f76ebf76b572f295ed",
+      "source": "googleapis"
+    }
+  ],
+  "licenses": [
+    {
+      "path": "licenses/LICENSE",
+      "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+      "source": "https://raw.githubusercontent.com/googleapis/googleapis/5f933a6c53e57f87e47e3725fceca08cf24b5b16/LICENSE"
+    },
+    {
+      "path": "licenses/PROTOBUF_LICENSE",
+      "sha256": "6e5e117324afd944dcf67f36cf329843bc1a92229a8cd9bb573d7a83130fea7d",
+      "source": "https://raw.githubusercontent.com/protocolbuffers/protobuf/74211c0dfc2777318ab53c2cd2c317a2ef9012de/LICENSE"
+    }
+  ]
+}
