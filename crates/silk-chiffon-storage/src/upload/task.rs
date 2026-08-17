@@ -56,7 +56,8 @@ fn task_error_after_cancel<T>(
 /// Formats use this owner after creating their bounded channel or writer bridge. The format keeps
 /// responsibility for encoding and its producer result, while this type couples producer shutdown
 /// to the upload's exactly-once completion or abort. Explicit terminal operations always join the
-/// producer and settle the upload; dropping the owner can only request nonblocking cleanup.
+/// producer and settle the upload. Only a successful, uncancelled producer can complete the
+/// upload. Dropping the owner can only request nonblocking cleanup.
 pub struct ObjectUploadTask<T> {
     task_name: &'static str,
     cancellation: CancellationToken,
@@ -84,18 +85,23 @@ where
     }
 
     /// Returns the token that coordinates producer and caller cancellation.
+    ///
+    /// Once cancellation is requested, [`Self::finish`] aborts instead of completing the upload.
     pub fn cancellation(&self) -> &CancellationToken {
         &self.cancellation
     }
 
-    /// Joins the producer, then completes its upload and returns both results.
+    /// Joins the producer, then completes its upload if the operation was not cancelled.
     pub async fn finish(mut self) -> Result<(T, Url)> {
         let task = self.task.take().expect("task exists until finish");
         let upload = self.upload.take().expect("upload exists until finish");
-        let task_result = task
+        let mut task_result = task
             .await
             .with_context(|| format!("{} task panicked", self.task_name))
             .and_then(|result| result);
+        if task_result.is_ok() && self.cancellation.is_cancelled() {
+            task_result = Err(anyhow::anyhow!("{} was cancelled", self.task_name));
+        }
         let value = match task_result {
             Ok(value) => value,
             Err(primary) => {

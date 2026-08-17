@@ -60,15 +60,10 @@ struct WriteSummary {
     rows_written: u64,
 }
 
-enum WriteOutcome {
-    Completed(WriteSummary),
-    Cancelled,
-}
-
 pub(crate) struct Sink {
     schema: SchemaRef,
     tx: Option<mpsc::Sender<RecordBatch>>,
-    task: Option<ObjectUploadTask<WriteOutcome>>,
+    task: Option<ObjectUploadTask<WriteSummary>>,
 }
 
 impl Sink {
@@ -124,12 +119,12 @@ fn writer_task<W>(
     compression: Compression,
     cancellation: &CancellationToken,
     mut rx: mpsc::Receiver<RecordBatch>,
-) -> Result<WriteOutcome>
+) -> Result<WriteSummary>
 where
     W: Write,
 {
     if cancellation.is_cancelled() {
-        return Ok(WriteOutcome::Cancelled);
+        anyhow::bail!("Arrow writer was cancelled");
     }
 
     let write_options = match compression {
@@ -157,13 +152,13 @@ where
 
     while let Some(batch) = rx.blocking_recv() {
         if cancellation.is_cancelled() {
-            return Ok(WriteOutcome::Cancelled);
+            anyhow::bail!("Arrow writer was cancelled");
         }
         coalescer.push_batch(batch)?;
 
         while let Some(completed_batch) = coalescer.next_completed_batch() {
             if cancellation.is_cancelled() {
-                return Ok(WriteOutcome::Cancelled);
+                anyhow::bail!("Arrow writer was cancelled");
             }
             writer.write(&completed_batch)?;
             rows_written += completed_batch.num_rows() as u64;
@@ -171,23 +166,23 @@ where
     }
 
     if cancellation.is_cancelled() {
-        return Ok(WriteOutcome::Cancelled);
+        anyhow::bail!("Arrow writer was cancelled");
     }
     coalescer.finish_buffered_batch()?;
     if let Some(final_batch) = coalescer.next_completed_batch() {
         if cancellation.is_cancelled() {
-            return Ok(WriteOutcome::Cancelled);
+            anyhow::bail!("Arrow writer was cancelled");
         }
         writer.write(&final_batch)?;
         rows_written += final_batch.num_rows() as u64;
     }
 
     if cancellation.is_cancelled() {
-        return Ok(WriteOutcome::Cancelled);
+        anyhow::bail!("Arrow writer was cancelled");
     }
     writer.finish()?;
 
-    Ok(WriteOutcome::Completed(WriteSummary { rows_written }))
+    Ok(WriteSummary { rows_written })
 }
 
 #[async_trait]
@@ -211,15 +206,12 @@ impl DataSink for Sink {
     async fn finish(mut self: Box<Self>) -> Result<SinkCompletion> {
         self.tx.take();
 
-        let (outcome, url) = self
+        let (result, url) = self
             .task
             .take()
             .context("sink already finished")?
             .finish()
             .await?;
-        let WriteOutcome::Completed(result) = outcome else {
-            anyhow::bail!("Arrow writer stopped before finishing");
-        };
 
         Ok(SinkCompletion::new(url, [], result.rows_written))
     }
@@ -374,7 +366,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancellation_stops_the_writer_before_finalization() {
+    async fn cancellation_fails_the_writer_before_finalization() {
         let batch = TestBatch::simple();
         let writer = RecordingWriter::default();
         let recorded = writer.clone();
@@ -398,9 +390,9 @@ mod tests {
 
         cancellation.cancel();
         drop(tx);
-        let outcome = task.await.unwrap().unwrap();
+        let result = task.await.unwrap();
 
-        assert!(matches!(outcome, WriteOutcome::Cancelled));
+        assert!(result.is_err_and(|error| error.to_string() == "Arrow writer was cancelled"));
         let bytes = recorded.bytes.lock().unwrap();
         assert!(!bytes.ends_with(b"ARROW1"));
     }

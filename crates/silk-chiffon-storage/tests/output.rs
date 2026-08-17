@@ -392,6 +392,27 @@ async fn upload_task_finishes_the_producer_before_completing_the_object() {
 }
 
 #[tokio::test]
+async fn upload_task_refuses_to_complete_after_cancellation() {
+    let storage = controlled_session(&["output-test"]);
+    let root = unique_controlled_root("upload-task-cancelled-finish");
+    let (mut upload, store, path) = controlled_upload(&storage, &root, "output").await;
+    let mut writer = upload.writer().unwrap();
+    let task = ObjectUploadTask::spawn("test producer", upload, move |cancellation| {
+        tokio::spawn(async move {
+            writer.send(Bytes::from_static(b"partial")).await.unwrap();
+            cancellation.cancelled().await;
+            Ok(())
+        })
+    });
+
+    task.cancellation().cancel();
+    let error = task.finish().await.unwrap_err();
+
+    assert!(format!("{error:#}").contains("test producer was cancelled"));
+    assert!(store.inner.head(&path).await.is_err());
+}
+
+#[tokio::test]
 async fn upload_task_cancels_its_producer_and_aborts_the_upload() {
     let storage = controlled_session(&["output-test", "--object-store-upload-part-size", "8"]);
     let root = unique_controlled_root("upload-task-abort");
