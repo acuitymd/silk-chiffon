@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use datafusion::catalog::TableProvider;
 use datafusion::prelude::SessionContext;
@@ -11,21 +12,15 @@ use vortex::io::session::RuntimeSessionExt;
 use vortex::session::VortexSession;
 use vortex_datafusion::v2::VortexTable;
 
-use crate::sources::data_source::{DataSource, Replayability, RowCount, RowCountCapability};
+use crate::sources::data_source::DataSource;
 
-/// A replayable Vortex input associated with a command's DataFusion session.
 pub struct VortexDataSource {
     path: String,
-    _session: SessionContext,
 }
 
 impl VortexDataSource {
-    /// Creates a source for one Vortex file.
-    pub fn new(path: String, session: SessionContext) -> Self {
-        Self {
-            path,
-            _session: session,
-        }
+    pub fn new(path: String) -> Self {
+        Self { path }
     }
 }
 
@@ -35,15 +30,43 @@ impl DataSource for VortexDataSource {
         "vortex"
     }
 
-    fn replayability(&self) -> Replayability {
-        Replayability::Replayable
+    fn schema(&self) -> Result<SchemaRef> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let session = VortexSession::default();
+                let vortex_file = session
+                    .open_options()
+                    .open_path(self.path.as_str())
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to open Vortex file: {}", e))?;
+
+                let dtype = vortex_file.dtype();
+                let arrow_schema = dtype.to_arrow_schema().map_err(|e| {
+                    anyhow::anyhow!("Failed to convert Vortex DType to Arrow Schema: {}", e)
+                })?;
+
+                Ok(Arc::new(arrow_schema))
+            })
+        })
     }
 
-    fn row_count_capability(&self) -> Option<&dyn RowCountCapability> {
-        Some(self)
+    fn row_count(&self) -> Result<usize> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let session = VortexSession::default();
+                let vortex_file = session
+                    .open_options()
+                    .open_path(self.path.as_str())
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to open Vortex file: {}", e))?;
+
+                #[allow(clippy::cast_possible_truncation)]
+                Ok(vortex_file.row_count() as usize)
+            })
+        })
     }
 
-    async fn table_provider(&self) -> Result<Arc<dyn TableProvider>> {
+    async fn as_table_provider(&self, _ctx: &mut SessionContext) -> Result<Arc<dyn TableProvider>> {
         let session = VortexSession::default().with_tokio();
         let vortex_file = session
             .open_options()
@@ -61,19 +84,9 @@ impl DataSource for VortexDataSource {
             Arc::new(arrow_schema),
         )))
     }
-}
 
-#[async_trait]
-impl RowCountCapability for VortexDataSource {
-    async fn row_count(&self) -> Result<RowCount> {
-        let session = VortexSession::default();
-        let vortex_file = session
-            .open_options()
-            .open_path(self.path.as_str())
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to open Vortex file: {}", e))?;
-
-        Ok(RowCount::Exact(vortex_file.row_count()))
+    fn supports_table_provider(&self) -> bool {
+        true
     }
 }
 
@@ -90,15 +103,18 @@ mod tests {
     use crate::sinks::data_sink::DataSink;
     use crate::sinks::vortex::{VortexSink, VortexSinkOptions};
 
-    async fn write_vortex_file(path: &Path, schema: &SchemaRef, batch: RecordBatch) {
-        let mut sink =
-            VortexSink::create(path.to_path_buf(), schema, VortexSinkOptions::new()).unwrap();
-        sink.write_batch(batch).await.unwrap();
-        Box::new(sink).finish().await.unwrap();
+    fn write_vortex_file(path: &Path, schema: &SchemaRef, batch: RecordBatch) {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let mut sink =
+                VortexSink::create(path.to_path_buf(), schema, VortexSinkOptions::new()).unwrap();
+            sink.write_batch(batch).await.unwrap();
+            sink.finish().await.unwrap();
+        });
     }
 
-    #[tokio::test]
-    async fn test_row_count() {
+    #[test]
+    fn test_row_count() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("test.vortex");
         let schema = Arc::new(Schema::new(vec![
@@ -113,13 +129,12 @@ mod tests {
             ],
         )
         .unwrap();
-        write_vortex_file(&path, &schema, batch).await;
+        write_vortex_file(&path, &schema, batch);
 
-        let source = VortexDataSource::new(
-            path.to_string_lossy().to_string(),
-            datafusion::prelude::SessionContext::new(),
-        );
-        let count = source.row_count().await.unwrap();
-        assert_eq!(count, RowCount::Exact(5));
+        // row_count() uses block_in_place, so we need our own runtime
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let source = VortexDataSource::new(path.to_string_lossy().to_string());
+        let count = rt.block_on(async { source.row_count().unwrap() });
+        assert_eq!(count, 5);
     }
 }

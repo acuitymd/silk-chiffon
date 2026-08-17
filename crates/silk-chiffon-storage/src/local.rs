@@ -33,7 +33,7 @@ pub fn backend() -> Result<StorageBackend, StorageBackendBuildError> {
         .schemes(["file"])
         .access(StorageAccess::ReadWrite)
         .object_path_mapper(map_object_path)
-        .object_store_creator(create_object_store);
+        .object_store_factory(create_object_store);
 
     #[cfg(feature = "local-bare-paths")]
     let builder = builder.bare_location_mapper(map_bare_location);

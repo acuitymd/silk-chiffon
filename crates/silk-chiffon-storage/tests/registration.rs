@@ -253,7 +253,7 @@ fn unit_backend(name: &'static str, scheme: &'static str) -> StorageBackend {
         .schemes([scheme])
         .access(StorageAccess::ReadWrite)
         .object_path_mapper(object_path)
-        .object_store_creator(in_memory_object_store)
+        .object_store_factory(in_memory_object_store)
         .build()
         .unwrap()
 }
@@ -290,7 +290,7 @@ fn backend_build_validates_the_complete_definition() {
         .schemes(["mem"])
         .access(StorageAccess::ReadWrite)
         .object_path_mapper(object_path)
-        .object_store_creator(in_memory_object_store)
+        .object_store_factory(in_memory_object_store)
         .build();
     assert!(matches!(
         missing_name,
@@ -303,7 +303,7 @@ fn backend_build_validates_the_complete_definition() {
             .schemes(["mem"])
             .access(StorageAccess::ReadWrite)
             .object_path_mapper(object_path)
-            .object_store_creator(in_memory_object_store)
+            .object_store_factory(in_memory_object_store)
             .build();
         assert!(matches!(
             result,
@@ -315,7 +315,7 @@ fn backend_build_validates_the_complete_definition() {
         .name("memory")
         .access(StorageAccess::ReadWrite)
         .object_path_mapper(object_path)
-        .object_store_creator(in_memory_object_store)
+        .object_store_factory(in_memory_object_store)
         .build();
     assert!(matches!(
         missing_schemes,
@@ -328,7 +328,7 @@ fn backend_build_validates_the_complete_definition() {
             .schemes([scheme])
             .access(StorageAccess::ReadWrite)
             .object_path_mapper(object_path)
-            .object_store_creator(in_memory_object_store)
+            .object_store_factory(in_memory_object_store)
             .build();
         assert!(matches!(
             result,
@@ -341,7 +341,7 @@ fn backend_build_validates_the_complete_definition() {
         .schemes(["mem", "mem"])
         .access(StorageAccess::ReadWrite)
         .object_path_mapper(object_path)
-        .object_store_creator(in_memory_object_store)
+        .object_store_factory(in_memory_object_store)
         .build();
     assert!(matches!(
         duplicate_scheme,
@@ -352,7 +352,7 @@ fn backend_build_validates_the_complete_definition() {
         .name("memory")
         .schemes(["mem"])
         .object_path_mapper(object_path)
-        .object_store_creator(in_memory_object_store)
+        .object_store_factory(in_memory_object_store)
         .build();
     assert!(matches!(
         missing_access,
@@ -363,22 +363,22 @@ fn backend_build_validates_the_complete_definition() {
         .name("memory")
         .schemes(["mem"])
         .access(StorageAccess::ReadWrite)
-        .object_store_creator(in_memory_object_store)
+        .object_store_factory(in_memory_object_store)
         .build();
     assert!(matches!(
         missing_path_mapper,
         Err(StorageBackendBuildError::MissingObjectPathMapper)
     ));
 
-    let missing_store_creator = StorageBackend::without_args()
+    let missing_store_factory = StorageBackend::without_args()
         .name("memory")
         .schemes(["mem"])
         .access(StorageAccess::ReadWrite)
         .object_path_mapper(object_path)
         .build();
     assert!(matches!(
-        missing_store_creator,
-        Err(StorageBackendBuildError::MissingObjectStoreCreator)
+        missing_store_factory,
+        Err(StorageBackendBuildError::MissingObjectStoreFactory)
     ));
 }
 
@@ -395,8 +395,8 @@ fn backend_builder_setters_replace_earlier_values() {
         .bare_location_mapper(map_second_bare_location)
         .object_path_mapper(failing_object_path)
         .object_path_mapper(object_path)
-        .object_store_creator(failing_object_store)
-        .object_store_creator(in_memory_object_store)
+        .object_store_factory(failing_object_store)
+        .object_store_factory(in_memory_object_store)
         .shared_retries()
         .shared_retries()
         .build()
@@ -424,7 +424,7 @@ fn registered_arguments_bind_typed_settings_and_create_handles_for_claimed_schem
         .schemes(["mem", "memory"])
         .access(StorageAccess::ReadWrite)
         .object_path_mapper(memory_object_path)
-        .object_store_creator(in_memory_object_store)
+        .object_store_factory(in_memory_object_store)
         .bare_location_mapper(map_memory_bare_location)
         .build()
         .unwrap();
@@ -526,7 +526,7 @@ fn registry_rejects_duplicate_cli_ids_long_options_and_short_options() {
                 .schemes(["first"])
                 .access(StorageAccess::ReadOnly)
                 .object_path_mapper(object_path)
-                .object_store_creator(in_memory_object_store)
+                .object_store_factory(in_memory_object_store)
                 .build()
                 .unwrap(),
         )
@@ -536,7 +536,7 @@ fn registry_rejects_duplicate_cli_ids_long_options_and_short_options() {
                 .schemes(["second"])
                 .access(StorageAccess::ReadOnly)
                 .object_path_mapper(object_path)
-                .object_store_creator(in_memory_object_store)
+                .object_store_factory(in_memory_object_store)
                 .build()
                 .unwrap(),
         )
@@ -557,7 +557,7 @@ fn registry_rejects_duplicate_cli_ids_long_options_and_short_options() {
                 .schemes(["first"])
                 .access(StorageAccess::ReadOnly)
                 .object_path_mapper(object_path)
-                .object_store_creator(in_memory_object_store)
+                .object_store_factory(in_memory_object_store)
                 .build()
                 .unwrap(),
         )
@@ -567,7 +567,7 @@ fn registry_rejects_duplicate_cli_ids_long_options_and_short_options() {
                 .schemes(["second"])
                 .access(StorageAccess::ReadOnly)
                 .object_path_mapper(object_path)
-                .object_store_creator(in_memory_object_store)
+                .object_store_factory(in_memory_object_store)
                 .build()
                 .unwrap(),
         )
@@ -577,7 +577,7 @@ fn registry_rejects_duplicate_cli_ids_long_options_and_short_options() {
                 .schemes(["third"])
                 .access(StorageAccess::ReadOnly)
                 .object_path_mapper(object_path)
-                .object_store_creator(in_memory_object_store)
+                .object_store_factory(in_memory_object_store)
                 .build()
                 .unwrap(),
         )
@@ -598,7 +598,7 @@ fn registry_rejects_duplicate_cli_ids_long_options_and_short_options() {
                 .schemes(["first"])
                 .access(StorageAccess::ReadOnly)
                 .object_path_mapper(object_path)
-                .object_store_creator(in_memory_object_store)
+                .object_store_factory(in_memory_object_store)
                 .build()
                 .unwrap(),
         )
@@ -608,7 +608,7 @@ fn registry_rejects_duplicate_cli_ids_long_options_and_short_options() {
                 .schemes(["second"])
                 .access(StorageAccess::ReadOnly)
                 .object_path_mapper(object_path)
-                .object_store_creator(in_memory_object_store)
+                .object_store_factory(in_memory_object_store)
                 .build()
                 .unwrap(),
         )
@@ -629,7 +629,7 @@ fn registry_rejects_duplicate_cli_ids_long_options_and_short_options() {
                 .schemes(["mem"])
                 .access(StorageAccess::ReadOnly)
                 .object_path_mapper(object_path)
-                .object_store_creator(in_memory_object_store)
+                .object_store_factory(in_memory_object_store)
                 .shared_retries()
                 .build()
                 .unwrap(),
@@ -652,7 +652,7 @@ fn backend_build_rejects_duplicate_cli_aliases() {
         .schemes(["mem"])
         .access(StorageAccess::ReadOnly)
         .object_path_mapper(object_path)
-        .object_store_creator(in_memory_object_store)
+        .object_store_factory(in_memory_object_store)
         .build();
     assert!(matches!(
         duplicate_id,
@@ -665,7 +665,7 @@ fn backend_build_rejects_duplicate_cli_aliases() {
         .schemes(["mem"])
         .access(StorageAccess::ReadOnly)
         .object_path_mapper(object_path)
-        .object_store_creator(in_memory_object_store)
+        .object_store_factory(in_memory_object_store)
         .build();
     assert!(matches!(
         duplicate_long,
@@ -678,7 +678,7 @@ fn backend_build_rejects_duplicate_cli_aliases() {
         .schemes(["mem"])
         .access(StorageAccess::ReadOnly)
         .object_path_mapper(object_path)
-        .object_store_creator(in_memory_object_store)
+        .object_store_factory(in_memory_object_store)
         .build();
     assert!(matches!(
         duplicate_short,
@@ -690,7 +690,7 @@ fn backend_build_rejects_duplicate_cli_aliases() {
         .schemes(["mem"])
         .access(StorageAccess::ReadOnly)
         .object_path_mapper(object_path)
-        .object_store_creator(in_memory_object_store)
+        .object_store_factory(in_memory_object_store)
         .build();
     assert!(matches!(
         duplicate_long_alias,
@@ -703,7 +703,7 @@ fn backend_build_rejects_duplicate_cli_aliases() {
         .schemes(["mem"])
         .access(StorageAccess::ReadOnly)
         .object_path_mapper(object_path)
-        .object_store_creator(in_memory_object_store)
+        .object_store_factory(in_memory_object_store)
         .build();
     assert!(matches!(
         duplicate_short_alias,
@@ -720,7 +720,7 @@ fn registry_rejects_cli_alias_collisions_across_backends() {
                 .schemes(["first"])
                 .access(StorageAccess::ReadOnly)
                 .object_path_mapper(object_path)
-                .object_store_creator(in_memory_object_store)
+                .object_store_factory(in_memory_object_store)
                 .build()
                 .unwrap(),
         )
@@ -730,7 +730,7 @@ fn registry_rejects_cli_alias_collisions_across_backends() {
                 .schemes(["second"])
                 .access(StorageAccess::ReadOnly)
                 .object_path_mapper(object_path)
-                .object_store_creator(in_memory_object_store)
+                .object_store_factory(in_memory_object_store)
                 .build()
                 .unwrap(),
         )
@@ -751,7 +751,7 @@ fn registry_rejects_cli_alias_collisions_across_backends() {
                 .schemes(["first"])
                 .access(StorageAccess::ReadOnly)
                 .object_path_mapper(object_path)
-                .object_store_creator(in_memory_object_store)
+                .object_store_factory(in_memory_object_store)
                 .build()
                 .unwrap(),
         )
@@ -761,7 +761,7 @@ fn registry_rejects_cli_alias_collisions_across_backends() {
                 .schemes(["second"])
                 .access(StorageAccess::ReadOnly)
                 .object_path_mapper(object_path)
-                .object_store_creator(in_memory_object_store)
+                .object_store_factory(in_memory_object_store)
                 .build()
                 .unwrap(),
         )
@@ -784,7 +784,7 @@ fn registry_rejects_duplicate_group_ids_and_argument_group_id_collisions() {
                 .schemes(["first"])
                 .access(StorageAccess::ReadOnly)
                 .object_path_mapper(object_path)
-                .object_store_creator(in_memory_object_store)
+                .object_store_factory(in_memory_object_store)
                 .build()
                 .unwrap(),
         )
@@ -794,7 +794,7 @@ fn registry_rejects_duplicate_group_ids_and_argument_group_id_collisions() {
                 .schemes(["second"])
                 .access(StorageAccess::ReadOnly)
                 .object_path_mapper(object_path)
-                .object_store_creator(in_memory_object_store)
+                .object_store_factory(in_memory_object_store)
                 .build()
                 .unwrap(),
         )
@@ -815,7 +815,7 @@ fn registry_rejects_duplicate_group_ids_and_argument_group_id_collisions() {
                 .schemes(["first"])
                 .access(StorageAccess::ReadOnly)
                 .object_path_mapper(object_path)
-                .object_store_creator(in_memory_object_store)
+                .object_store_factory(in_memory_object_store)
                 .build()
                 .unwrap(),
         )
@@ -825,7 +825,7 @@ fn registry_rejects_duplicate_group_ids_and_argument_group_id_collisions() {
                 .schemes(["second"])
                 .access(StorageAccess::ReadOnly)
                 .object_path_mapper(object_path)
-                .object_store_creator(in_memory_object_store)
+                .object_store_factory(in_memory_object_store)
                 .build()
                 .unwrap(),
         )
@@ -847,7 +847,7 @@ fn registry_rejects_multiple_bare_location_backends() {
         .schemes(["first"])
         .access(StorageAccess::ReadWrite)
         .object_path_mapper(object_path)
-        .object_store_creator(in_memory_object_store)
+        .object_store_factory(in_memory_object_store)
         .bare_location_mapper(map_first_bare_location)
         .build()
         .unwrap();
@@ -856,7 +856,7 @@ fn registry_rejects_multiple_bare_location_backends() {
         .schemes(["second"])
         .access(StorageAccess::ReadWrite)
         .object_path_mapper(object_path)
-        .object_store_creator(in_memory_object_store)
+        .object_store_factory(in_memory_object_store)
         .bare_location_mapper(map_second_bare_location)
         .build()
         .unwrap();
@@ -865,7 +865,7 @@ fn registry_rejects_multiple_bare_location_backends() {
         .schemes(["third"])
         .access(StorageAccess::ReadWrite)
         .object_path_mapper(object_path)
-        .object_store_creator(in_memory_object_store)
+        .object_store_factory(in_memory_object_store)
         .bare_location_mapper(map_second_bare_location)
         .build()
         .unwrap();
@@ -890,7 +890,7 @@ fn bare_location_mapper_must_return_a_scheme_claimed_by_its_backend() {
         .schemes(["mem"])
         .access(StorageAccess::ReadWrite)
         .object_path_mapper(object_path)
-        .object_store_creator(in_memory_object_store)
+        .object_store_factory(in_memory_object_store)
         .bare_location_mapper(map_mismatched_bare_location)
         .build()
         .unwrap();
@@ -928,7 +928,7 @@ fn read_only_backend_rejects_output_before_invoking_its_mapper() {
         .schemes(["readonly"])
         .access(StorageAccess::ReadOnly)
         .object_path_mapper(read_only_object_path)
-        .object_store_creator(in_memory_object_store)
+        .object_store_factory(in_memory_object_store)
         .build()
         .unwrap();
     assert!(backend.supports(StorageDirection::Input));
@@ -958,7 +958,7 @@ fn unregistered_backends_are_absent_with_no_required_arguments_or_schemes() {
         .schemes(["cloud"])
         .access(StorageAccess::ReadWrite)
         .object_path_mapper(object_path)
-        .object_store_creator(in_memory_object_store)
+        .object_store_factory(in_memory_object_store)
         .build()
         .unwrap();
     let (command, registry) = command_and_registry([]);
@@ -990,7 +990,7 @@ fn retry_capable_backends_share_one_argument_group_and_receive_defaults() {
         .schemes(["first"])
         .access(StorageAccess::ReadOnly)
         .object_path_mapper(object_path)
-        .object_store_creator(retry_object_store)
+        .object_store_factory(retry_object_store)
         .shared_retries()
         .build()
         .unwrap();
@@ -999,7 +999,7 @@ fn retry_capable_backends_share_one_argument_group_and_receive_defaults() {
         .schemes(["second"])
         .access(StorageAccess::ReadOnly)
         .object_path_mapper(object_path)
-        .object_store_creator(in_memory_object_store)
+        .object_store_factory(in_memory_object_store)
         .shared_retries()
         .build()
         .unwrap();
@@ -1092,7 +1092,7 @@ fn enabled_retries_validate_backoff_while_zero_retries_disable_validation() {
             .schemes(["mem"])
             .access(StorageAccess::ReadOnly)
             .object_path_mapper(object_path)
-            .object_store_creator(in_memory_object_store)
+            .object_store_factory(in_memory_object_store)
             .shared_retries()
             .build()
             .unwrap()
@@ -1148,7 +1148,7 @@ fn enabled_retries_reject_each_invalid_retry_dimension() {
         .schemes(["mem"])
         .access(StorageAccess::ReadOnly)
         .object_path_mapper(object_path)
-        .object_store_creator(in_memory_object_store)
+        .object_store_factory(in_memory_object_store)
         .shared_retries()
         .build()
         .unwrap();
@@ -1235,7 +1235,7 @@ fn cache_reuses_one_store_per_origin_within_each_session() {
         .schemes(["mem"])
         .access(StorageAccess::ReadOnly)
         .object_path_mapper(counted_object_path)
-        .object_store_creator(counted_object_store)
+        .object_store_factory(counted_object_store)
         .shared_retries()
         .build()
         .unwrap();
@@ -1292,7 +1292,7 @@ fn backend_errors_retain_stage_specific_context() {
         .access(StorageAccess::ReadWrite)
         .bare_location_mapper(failing_bare_location)
         .object_path_mapper(object_path)
-        .object_store_creator(in_memory_object_store)
+        .object_store_factory(in_memory_object_store)
         .build()
         .unwrap();
     let (_, registry) = command_and_registry([bare_backend]);
@@ -1318,7 +1318,7 @@ fn backend_errors_retain_stage_specific_context() {
         .schemes(["mem"])
         .access(StorageAccess::ReadWrite)
         .object_path_mapper(failing_object_path)
-        .object_store_creator(in_memory_object_store)
+        .object_store_factory(in_memory_object_store)
         .build()
         .unwrap();
     let (_, registry) = command_and_registry([path_backend]);
@@ -1342,7 +1342,7 @@ fn backend_errors_retain_stage_specific_context() {
         .schemes(["mem"])
         .access(StorageAccess::ReadWrite)
         .object_path_mapper(object_path)
-        .object_store_creator(failing_object_store)
+        .object_store_factory(failing_object_store)
         .build()
         .unwrap();
     let (_, registry) = command_and_registry([store_backend]);

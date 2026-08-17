@@ -1,4 +1,4 @@
-pub mod input_sources;
+pub mod input_strategy;
 pub mod output_file_info;
 pub mod output_strategy;
 pub mod partitioner;

@@ -36,10 +36,7 @@ use crate::{
     BloomFilterConfig, ColumnDictionaryConfig, ColumnEncodingConfig, DictionaryMode,
     ParquetCompression, ParquetEncoding, ParquetStatistics, ParquetWriterVersion, SortDirection,
     SortSpec,
-    sinks::{
-        completed_file_url,
-        data_sink::{DataSink, SinkResult},
-    },
+    sinks::data_sink::{DataSink, SinkResult},
     utils::memory::estimate_row_bytes,
 };
 
@@ -640,7 +637,7 @@ impl DataSink for ParquetSink {
         Ok(())
     }
 
-    async fn finish(mut self: Box<Self>) -> Result<SinkResult> {
+    async fn finish(&mut self) -> Result<SinkResult> {
         let mut inner = self.inner.lock().await;
 
         let writer = inner
@@ -649,10 +646,9 @@ impl DataSink for ParquetSink {
             .ok_or_else(|| anyhow!("Writer already closed"))?;
 
         let rows_written = writer.close().await?;
-        let url = completed_file_url(&inner.path).await?;
 
         Ok(SinkResult {
-            files_written: vec![url],
+            files_written: vec![inner.path.clone()],
             rows_written,
         })
     }
@@ -832,14 +828,11 @@ mod tests {
             .unwrap();
 
             sink.write_batch(batch).await.unwrap();
-            let result = Box::new(sink).finish().await.unwrap();
+            let result = sink.finish().await.unwrap();
 
             assert_eq!(result.rows_written, 3);
             assert_eq!(result.files_written.len(), 1);
-            assert_eq!(
-                result.files_written[0],
-                url::Url::from_file_path(&output_path).unwrap()
-            );
+            assert_eq!(result.files_written[0], output_path);
 
             let batches = verify::read_parquet_file(&output_path).unwrap();
             verify::assert_id_name_batch_data_matches(&batches[0], &[1, 2, 3], &["a", "b", "c"]);
@@ -866,7 +859,7 @@ mod tests {
             .unwrap();
 
             sink.write_batch(batch).await.unwrap();
-            Box::new(sink).finish().await.unwrap();
+            sink.finish().await.unwrap();
 
             let file = parquet::file::reader::SerializedFileReader::try_from(
                 std::fs::File::open(&output_path).unwrap(),
@@ -897,7 +890,7 @@ mod tests {
 
             sink.write_batch(batch1).await.unwrap();
             sink.write_batch(batch2).await.unwrap();
-            let result = Box::new(sink).finish().await.unwrap();
+            let result = sink.finish().await.unwrap();
 
             assert_eq!(result.rows_written, 4);
 
@@ -930,7 +923,7 @@ mod tests {
             sink.write_batch(batch1).await.unwrap();
             sink.write_batch(batch2).await.unwrap();
             sink.write_batch(batch3).await.unwrap();
-            let result = Box::new(sink).finish().await.unwrap();
+            let result = sink.finish().await.unwrap();
 
             assert_eq!(result.rows_written, 5);
 
@@ -989,7 +982,7 @@ mod tests {
                 .unwrap();
 
                 compressed_sink.write_batch(batch.clone()).await.unwrap();
-                Box::new(compressed_sink).finish().await.unwrap();
+                compressed_sink.finish().await.unwrap();
 
                 let file = read_entire_parquet_file(&output_path).unwrap();
                 assert_eq!(file.row_groups.len(), 1);
@@ -1004,7 +997,7 @@ mod tests {
 
             let schema = test_data::simple_schema();
 
-            let sink = ParquetSink::create(
+            let mut sink = ParquetSink::create(
                 output_path.clone(),
                 &schema,
                 &ParquetSinkOptions::new(),
@@ -1012,7 +1005,7 @@ mod tests {
             )
             .unwrap();
 
-            let result = Box::new(sink).finish().await.unwrap();
+            let result = sink.finish().await.unwrap();
 
             assert_eq!(result.rows_written, 0);
             assert!(output_path.exists());
@@ -1034,18 +1027,10 @@ mod tests {
 
             file_helpers::write_arrow_file(&input_path, &schema, vec![batch1, batch2]).unwrap();
 
-            let ctx = datafusion::prelude::SessionContext::new();
             let source = crate::sources::arrow::ArrowDataSource::new(
                 input_path.to_str().unwrap().to_string(),
-                ctx.clone(),
             );
-            let provider = source.table_provider().await.unwrap();
-            let stream = ctx
-                .read_table(provider)
-                .unwrap()
-                .execute_stream()
-                .await
-                .unwrap();
+            let stream = source.as_stream().await.unwrap();
 
             let mut sink = ParquetSink::create(
                 output_path.clone(),
@@ -1055,8 +1040,8 @@ mod tests {
             )
             .unwrap();
 
-            sink.write_stream(stream).await.unwrap();
-            let result = Box::new(sink).finish().await.unwrap();
+            let result = sink.write_stream(stream).await.unwrap();
+
             assert_eq!(result.rows_written, 5);
 
             let batches = verify::read_parquet_file(&output_path).unwrap();
@@ -1088,7 +1073,7 @@ mod tests {
             .unwrap();
 
             sink.write_batch(batch).await.unwrap();
-            Box::new(sink).finish().await.unwrap();
+            sink.finish().await.unwrap();
 
             let file = read_entire_parquet_file(&output_path).unwrap();
             assert!(file.row_groups[0].sorting_columns.is_some());
@@ -1114,7 +1099,7 @@ mod tests {
             .unwrap();
 
             sink.write_batch(batch).await.unwrap();
-            Box::new(sink).finish().await.unwrap();
+            sink.finish().await.unwrap();
 
             let file = read_entire_parquet_file(&output_path).unwrap();
             assert!(file.row_groups[0].sorting_columns.is_none());
@@ -1138,7 +1123,7 @@ mod tests {
                     .unwrap();
 
             sink.write_batch(batch).await.unwrap();
-            Box::new(sink).finish().await.unwrap();
+            sink.finish().await.unwrap();
 
             let file = read_entire_parquet_file(&output_path).unwrap();
             assert!(!file.has_any_bloom_filters);
@@ -1172,7 +1157,7 @@ mod tests {
                     .unwrap();
 
             sink.write_batch(batch).await.unwrap();
-            Box::new(sink).finish().await.unwrap();
+            sink.finish().await.unwrap();
 
             let file = read_entire_parquet_file(&output_path).unwrap();
             assert!(file.has_any_bloom_filters);
@@ -1208,7 +1193,7 @@ mod tests {
                     .unwrap();
 
             sink.write_batch(batch).await.unwrap();
-            Box::new(sink).finish().await.unwrap();
+            sink.finish().await.unwrap();
 
             let file = read_entire_parquet_file(&output_path).unwrap();
             assert!(file.has_any_bloom_filters);
@@ -1242,7 +1227,7 @@ mod tests {
                     .unwrap();
 
             sink.write_batch(batch).await.unwrap();
-            Box::new(sink).finish().await.unwrap();
+            sink.finish().await.unwrap();
 
             let file = read_entire_parquet_file(&output_path).unwrap();
             assert!(file.has_any_bloom_filters);
@@ -1277,7 +1262,7 @@ mod tests {
             .unwrap();
 
             sink.write_batch(batch).await.unwrap();
-            Box::new(sink).finish().await.unwrap();
+            sink.finish().await.unwrap();
 
             let file = read_entire_parquet_file(&output_path).unwrap();
             assert!(!file.has_any_dictionary);
@@ -1306,7 +1291,7 @@ mod tests {
             .unwrap();
 
             sink.write_batch(batch).await.unwrap();
-            Box::new(sink).finish().await.unwrap();
+            sink.finish().await.unwrap();
 
             let file = read_entire_parquet_file(&output_path).unwrap();
             assert!(file.has_any_dictionary);
@@ -1338,7 +1323,7 @@ mod tests {
                 .unwrap();
 
                 sink.write_batch(batch).await.unwrap();
-                Box::new(sink).finish().await.unwrap();
+                sink.finish().await.unwrap();
 
                 let file = read_entire_parquet_file(&output_path).unwrap();
 
@@ -1387,7 +1372,7 @@ mod tests {
                 .unwrap();
 
                 sink.write_batch(batch).await.unwrap();
-                Box::new(sink).finish().await.unwrap();
+                sink.finish().await.unwrap();
 
                 let file = read_entire_parquet_file(&output_path).unwrap();
                 assert_eq!(file.metadata.version(), Into::<i32>::into(version));
@@ -1454,7 +1439,7 @@ mod tests {
                     .unwrap();
 
             sink.write_batch(batch).await.unwrap();
-            Box::new(sink).finish().await.unwrap();
+            sink.finish().await.unwrap();
 
             let file = read_entire_parquet_file(&output_path).unwrap();
             assert!(file.has_any_bloom_filters);
@@ -1485,7 +1470,7 @@ mod tests {
                     .unwrap();
 
             sink.write_batch(batch).await.unwrap();
-            Box::new(sink).finish().await.unwrap();
+            sink.finish().await.unwrap();
 
             let file = read_entire_parquet_file(&output_path).unwrap();
             assert!(file.has_any_bloom_filters);
@@ -1525,7 +1510,7 @@ mod tests {
                     .unwrap();
 
             sink.write_batch(batch).await.unwrap();
-            Box::new(sink).finish().await.unwrap();
+            sink.finish().await.unwrap();
 
             let file = read_entire_parquet_file(&output_path).unwrap();
             assert!(file.has_any_bloom_filters);
@@ -1567,7 +1552,7 @@ mod tests {
                     .unwrap();
 
             sink.write_batch(batch).await.unwrap();
-            Box::new(sink).finish().await.unwrap();
+            sink.finish().await.unwrap();
 
             // bloom filter should be enabled using ndv_map value
             let file = read_entire_parquet_file(&output_path).unwrap();
@@ -1606,7 +1591,7 @@ mod tests {
             .unwrap();
 
             sink.write_batch(batch).await.unwrap();
-            Box::new(sink).finish().await.unwrap();
+            sink.finish().await.unwrap();
 
             let file = read_entire_parquet_file(&output_path).unwrap();
             assert_eq!(
@@ -1634,7 +1619,7 @@ mod tests {
                 ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
                     .unwrap();
             sink.write_batch(batch).await.unwrap();
-            Box::new(sink).finish().await.unwrap();
+            sink.finish().await.unwrap();
 
             let file = read_entire_parquet_file(&output_path).unwrap();
             assert!(file.row_groups[0].columns[0].has_dictionary);
@@ -1668,7 +1653,7 @@ mod tests {
                 ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
                     .unwrap();
             sink.write_batch(batch).await.unwrap();
-            Box::new(sink).finish().await.unwrap();
+            sink.finish().await.unwrap();
 
             let file = read_entire_parquet_file(&output_path).unwrap();
             assert!(file.has_any_bloom_filters);
@@ -1708,7 +1693,7 @@ mod tests {
                 ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
                     .unwrap();
             sink.write_batch(batch).await.unwrap();
-            Box::new(sink).finish().await.unwrap();
+            sink.finish().await.unwrap();
 
             let file = read_entire_parquet_file(&output_path).unwrap();
             assert!(file.has_any_bloom_filters);
@@ -1732,7 +1717,7 @@ mod tests {
                 ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
                     .unwrap();
             sink.write_batch(batch).await.unwrap();
-            Box::new(sink).finish().await.unwrap();
+            sink.finish().await.unwrap();
 
             let file = read_entire_parquet_file(&output_path).unwrap();
             assert!(file.row_groups[0].columns[0].has_dictionary);
@@ -1755,7 +1740,7 @@ mod tests {
                 ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
                     .unwrap();
             sink.write_batch(batch).await.unwrap();
-            Box::new(sink).finish().await.unwrap();
+            sink.finish().await.unwrap();
 
             let file = read_entire_parquet_file(&output_path).unwrap();
             assert!(!file.row_groups[0].columns[0].has_dictionary);
@@ -1790,7 +1775,7 @@ mod tests {
                 ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
                     .unwrap();
             sink.write_batch(batch).await.unwrap();
-            Box::new(sink).finish().await.unwrap();
+            sink.finish().await.unwrap();
 
             let file = read_entire_parquet_file(&output_path).unwrap();
             assert!(file.row_groups[0].columns[0].has_dictionary);
@@ -1827,7 +1812,7 @@ mod tests {
                 ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
                     .unwrap();
             sink.write_batch(batch).await.unwrap();
-            Box::new(sink).finish().await.unwrap();
+            sink.finish().await.unwrap();
 
             let file = read_entire_parquet_file(&output_path).unwrap();
             // high cardinality (100% distinct) disables dictionary
@@ -1856,7 +1841,7 @@ mod tests {
                 ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
                     .unwrap();
             sink.write_batch(batch).await.unwrap();
-            Box::new(sink).finish().await.unwrap();
+            sink.finish().await.unwrap();
 
             let file = read_entire_parquet_file(&output_path).unwrap();
             assert!(file.row_groups[0].columns[0].has_dictionary);
@@ -1898,7 +1883,7 @@ mod tests {
                 ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
                     .unwrap();
             sink.write_batch(batch).await.unwrap();
-            Box::new(sink).finish().await.unwrap();
+            sink.finish().await.unwrap();
 
             let file = read_entire_parquet_file(&output_path).unwrap();
             let leaf = file.row_groups[0]
@@ -1959,7 +1944,7 @@ mod tests {
                 ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
                     .unwrap();
             sink.write_batch(batch).await.unwrap();
-            Box::new(sink).finish().await.unwrap();
+            sink.finish().await.unwrap();
 
             let file = parquet::file::reader::SerializedFileReader::try_from(
                 std::fs::File::open(&output_path).unwrap(),
@@ -2028,7 +2013,7 @@ mod tests {
 
             sink.write_batch(batch1).await.unwrap();
             sink.write_batch(batch2).await.unwrap();
-            let _result = Box::new(sink).finish().await.unwrap();
+            let _result = sink.finish().await.unwrap();
 
             let file = read_entire_parquet_file(&output_path).unwrap();
 
@@ -2243,7 +2228,7 @@ mod tests {
             .unwrap();
 
             sink.write_batch(batch).await.unwrap();
-            let result = Box::new(sink).finish().await.unwrap();
+            let result = sink.finish().await.unwrap();
 
             assert_eq!(result.rows_written, 3);
             assert!(output_path.exists());
@@ -2273,7 +2258,7 @@ mod tests {
             .unwrap();
 
             sink.write_batch(batch).await.unwrap();
-            let result = Box::new(sink).finish().await.unwrap();
+            let result = sink.finish().await.unwrap();
 
             assert_eq!(result.rows_written, 3);
             assert!(output_path.exists());
@@ -2309,7 +2294,7 @@ mod tests {
             .unwrap();
 
             sink.write_batch(batch).await.unwrap();
-            let result = Box::new(sink).finish().await.unwrap();
+            let result = sink.finish().await.unwrap();
 
             assert_eq!(result.rows_written, 3);
             assert!(output_path.exists());
@@ -2352,7 +2337,7 @@ mod tests {
             .unwrap();
 
             sink.write_batch(batch).await.unwrap();
-            let result = Box::new(sink).finish().await.unwrap();
+            let result = sink.finish().await.unwrap();
 
             assert_eq!(result.rows_written, 3);
             assert!(output_path.exists());
@@ -2384,7 +2369,7 @@ mod tests {
                 ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
                     .unwrap();
             sink.write_batch(batch).await.unwrap();
-            Box::new(sink).finish().await.unwrap();
+            sink.finish().await.unwrap();
 
             let inspector = inspect(&output_path);
             assert_has_dictionary(&inspector, "outer.inner");
@@ -2430,7 +2415,7 @@ mod tests {
                 ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
                     .unwrap();
             sink.write_batch(batch).await.unwrap();
-            Box::new(sink).finish().await.unwrap();
+            sink.finish().await.unwrap();
 
             let inspector = inspect(&output_path);
             assert_has_bloom_filter(&inspector, "outer.inner");
@@ -2462,7 +2447,7 @@ mod tests {
                 ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
                     .unwrap();
             sink.write_batch(batch).await.unwrap();
-            Box::new(sink).finish().await.unwrap();
+            sink.finish().await.unwrap();
 
             let inspector = inspect(&output_path);
             assert_no_dictionary(&inspector, "outer.inner");
@@ -2590,7 +2575,7 @@ mod tests {
                 ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
                     .unwrap();
             sink.write_batch(batch).await.unwrap();
-            Box::new(sink).finish().await.unwrap();
+            sink.finish().await.unwrap();
 
             let encodings = get_column_encodings(&output_path);
             assert!(
@@ -2621,7 +2606,7 @@ mod tests {
                 ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
                     .unwrap();
             sink.write_batch(batch).await.unwrap();
-            Box::new(sink).finish().await.unwrap();
+            sink.finish().await.unwrap();
 
             let encodings = get_column_encodings(&output_path);
             assert!(
@@ -2648,7 +2633,7 @@ mod tests {
                 ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
                     .unwrap();
             sink.write_batch(batch).await.unwrap();
-            Box::new(sink).finish().await.unwrap();
+            sink.finish().await.unwrap();
 
             let encodings = get_column_encodings(&output_path);
             // booleans should use PLAIN for data encoding
@@ -2676,7 +2661,7 @@ mod tests {
                 ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
                     .unwrap();
             sink.write_batch(batch).await.unwrap();
-            Box::new(sink).finish().await.unwrap();
+            sink.finish().await.unwrap();
 
             let encodings = get_column_encodings(&output_path);
 
@@ -2706,7 +2691,7 @@ mod tests {
                 ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
                     .unwrap();
             sink.write_batch(batch).await.unwrap();
-            Box::new(sink).finish().await.unwrap();
+            sink.finish().await.unwrap();
 
             let encodings = get_column_encodings(&output_path);
 
@@ -2748,7 +2733,7 @@ mod tests {
                 ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
                     .unwrap();
             sink.write_batch(batch).await.unwrap();
-            Box::new(sink).finish().await.unwrap();
+            sink.finish().await.unwrap();
 
             let encodings = get_column_encodings(&output_path);
             assert!(
@@ -2793,7 +2778,7 @@ mod tests {
                 ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
                     .unwrap();
             sink.write_batch(batch).await.unwrap();
-            Box::new(sink).finish().await.unwrap();
+            sink.finish().await.unwrap();
 
             let encodings = get_column_encodings(&output_path);
             assert!(
@@ -2830,7 +2815,7 @@ mod tests {
                 ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
                     .unwrap();
             sink.write_batch(batch).await.unwrap();
-            Box::new(sink).finish().await.unwrap();
+            sink.finish().await.unwrap();
 
             let encodings = get_column_encodings(&output_path);
             assert!(
@@ -2869,7 +2854,7 @@ mod tests {
                 ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
                     .unwrap();
             sink.write_batch(batch).await.unwrap();
-            Box::new(sink).finish().await.unwrap();
+            sink.finish().await.unwrap();
 
             let encodings = get_column_encodings(&output_path);
             assert!(
@@ -2912,7 +2897,7 @@ mod tests {
                 ParquetSink::create(output_path.clone(), &schema, &options, test_runtimes())
                     .unwrap();
             sink.write_batch(batch).await.unwrap();
-            Box::new(sink).finish().await.unwrap();
+            sink.finish().await.unwrap();
 
             let encodings = get_column_encodings(&output_path);
             assert!(

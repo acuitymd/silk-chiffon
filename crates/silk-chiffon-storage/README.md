@@ -76,7 +76,7 @@ let backend = StorageBackend::with_args::<CloudArgs>()
     .access(StorageAccess::ReadWrite)
     .bare_location_mapper(map_bare_location)
     .object_path_mapper(map_object_path)
-    .object_store_creator(create_object_store)
+    .object_store_factory(create_object_store)
     .shared_retries()
     .build()?;
 ```
@@ -87,9 +87,9 @@ The callbacks divide handle creation into three backend-owned decisions:
 
 - `BareLocationMapper<T>` is an optional callback. When configured, it maps the original schemeless text to a canonical `Location` and claims the registry's single bare-location route.
 - `ObjectPathMapper<T>` maps a canonical location into the namespace expected by that backend's object store. It runs after successful routing, access checks, bare mapping, and mapped-scheme validation, including on cache hits.
-- `ObjectStoreCreatorFn<T>` creates a client for one store-root URL. It runs only on a session cache miss and receives shared retry configuration only when the backend opted in.
+- `ObjectStoreFactory<T>` creates a client for one store-root URL. It runs only on a session cache miss and receives shared retry configuration only when the backend opted in.
 
-`StorageAccess` declares read-only, write-only, or read-write support independently of those callbacks. A session rejects an unsupported direction before any mapper or creator runs.
+`StorageAccess` declares read-only, write-only, or read-write support independently of those callbacks. A session rejects an unsupported direction before any mapper or factory runs.
 
 ## Registry invariants
 
@@ -151,7 +151,7 @@ Backends that do not opt in receive no retry configuration. Participating object
 
 ## Store identity and DataFusion
 
-A session caches one object-store client per store-root URL: scheme, host, and port, with the path reset to `/` and the query and fragment removed. After successful routing and validation, the object-path mapper still runs on cache hits. The object-store creator runs only on a cache miss while the cache lock is held, so concurrent requests cannot create duplicate clients for the same root.
+A session caches one object-store client per store-root URL: scheme, host, and port, with the path reset to `/` and the query and fragment removed. After successful routing and validation, the object-path mapper still runs on cache hits. The object-store factory runs only on a cache miss while the cache lock is held, so concurrent requests cannot create duplicate clients for the same root.
 
 `StorageHandle::store_url` exposes the cache key, and `StorageHandle::object_store` returns a cheap clone of the shared client pointer. The pipeline registers that pair with DataFusion. This crate itself remains independent of DataFusion.
 
@@ -160,7 +160,7 @@ A session caches one object-store client per store-root URL: scheme, host, and p
 Handle creation performs neither an object-existence check nor an overwrite check. Those policies remain explicit:
 
 - `validate_input` calls `head` and requires the input object to exist.
-- `ensure_output_absent` permits an absent object and rejects an existing object. Callers skip it when overwrite is enabled.
+- `preflight_output` permits an absent object, rejects an existing object when overwrite is disabled, and skips `head` when overwrite is enabled.
 
 Keeping these checks separate lets callers create an input handle without forcing an eager existence check and create an output handle before its object exists.
 

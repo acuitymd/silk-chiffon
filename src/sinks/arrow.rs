@@ -15,10 +15,7 @@ use tokio::{sync::mpsc, task::JoinHandle};
 
 use crate::{
     ArrowCompression, ArrowIPCFormat,
-    sinks::{
-        completed_file_url,
-        data_sink::{DataSink, SinkResult},
-    },
+    sinks::data_sink::{DataSink, SinkResult},
     utils::memory::estimate_row_bytes,
 };
 
@@ -188,13 +185,13 @@ fn writer_task(
 
 #[async_trait]
 impl DataSink for ArrowSink {
-    async fn write_stream(&mut self, mut stream: SendableRecordBatchStream) -> Result<()> {
+    async fn write_stream(&mut self, mut stream: SendableRecordBatchStream) -> Result<SinkResult> {
         while let Some(batch) = stream.next().await {
             let batch = batch?;
             self.write_batch(batch).await?;
         }
 
-        Ok(())
+        self.finish().await
     }
 
     async fn write_batch(&mut self, batch: RecordBatch) -> Result<()> {
@@ -203,16 +200,15 @@ impl DataSink for ArrowSink {
         Ok(())
     }
 
-    async fn finish(mut self: Box<Self>) -> Result<SinkResult> {
+    async fn finish(&mut self) -> Result<SinkResult> {
         // drop sender to signal EOF
         self.tx.take();
 
         let handle = self.handle.take().context("sink already finished")?;
         let result = handle.await.context("writer task panicked")??;
-        let url = completed_file_url(&result.path).await?;
 
         Ok(SinkResult {
-            files_written: vec![url],
+            files_written: vec![result.path],
             rows_written: result.rows_written,
         })
     }
@@ -267,14 +263,11 @@ mod tests {
                 ArrowSink::create(output_path.clone(), &schema, ArrowSinkOptions::new()).unwrap();
 
             sink.write_batch(batch).await.unwrap();
-            let result = Box::new(sink).finish().await.unwrap();
+            let result = sink.finish().await.unwrap();
 
             assert_eq!(result.rows_written, 3);
             assert_eq!(result.files_written.len(), 1);
-            assert_eq!(
-                result.files_written[0],
-                url::Url::from_file_path(&output_path).unwrap()
-            );
+            assert_eq!(result.files_written[0], output_path);
 
             let batches = verify::read_output_file(&output_path).unwrap();
             assert_eq!(batches.len(), 1);
@@ -295,7 +288,7 @@ mod tests {
 
             sink.write_batch(batch1).await.unwrap();
             sink.write_batch(batch2).await.unwrap();
-            let result = Box::new(sink).finish().await.unwrap();
+            let result = sink.finish().await.unwrap();
 
             assert_eq!(result.rows_written, 4);
 
@@ -324,7 +317,7 @@ mod tests {
             sink.write_batch(batch1).await.unwrap();
             sink.write_batch(batch2).await.unwrap();
             sink.write_batch(batch3).await.unwrap();
-            let result = Box::new(sink).finish().await.unwrap();
+            let result = sink.finish().await.unwrap();
 
             assert_eq!(result.rows_written, 5);
 
@@ -351,7 +344,7 @@ mod tests {
             .unwrap();
 
             sink.write_batch(batch).await.unwrap();
-            let result = Box::new(sink).finish().await.unwrap();
+            let result = sink.finish().await.unwrap();
 
             assert_eq!(result.rows_written, 3);
 
@@ -401,14 +394,14 @@ mod tests {
                 .unwrap();
 
                 compressed_sink.write_batch(batch.clone()).await.unwrap();
-                let compressed_result = Box::new(compressed_sink).finish().await.unwrap();
+                let compressed_result = compressed_sink.finish().await.unwrap();
                 let compressed_size = output_path.metadata().unwrap().len();
 
                 let mut uncompressed_sink =
                     ArrowSink::create(output_path.clone(), &schema, ArrowSinkOptions::new())
                         .unwrap();
                 uncompressed_sink.write_batch(batch).await.unwrap();
-                let uncompressed_result = Box::new(uncompressed_sink).finish().await.unwrap();
+                let uncompressed_result = uncompressed_sink.finish().await.unwrap();
                 let uncompressed_size = output_path.metadata().unwrap().len();
 
                 assert_eq!(compressed_result.rows_written, 100);
@@ -440,7 +433,7 @@ mod tests {
             .unwrap();
 
             sink.write_batch(batch).await.unwrap();
-            Box::new(sink).finish().await.unwrap();
+            sink.finish().await.unwrap();
 
             assert!(output_path.exists());
 
@@ -462,7 +455,7 @@ mod tests {
                 ArrowSink::create(output_path.clone(), &schema, ArrowSinkOptions::new()).unwrap();
 
             sink.write_batch(batch).await.unwrap();
-            Box::new(sink).finish().await.unwrap();
+            sink.finish().await.unwrap();
 
             let file = std::fs::File::open(&output_path).unwrap();
             let reader = arrow::ipc::reader::FileReader::try_new_buffered(file, None).unwrap();
@@ -478,10 +471,10 @@ mod tests {
 
             let schema = test_data::simple_schema();
 
-            let sink =
+            let mut sink =
                 ArrowSink::create(output_path.clone(), &schema, ArrowSinkOptions::new()).unwrap();
 
-            let result = Box::new(sink).finish().await.unwrap();
+            let result = sink.finish().await.unwrap();
 
             assert_eq!(result.rows_written, 0);
             assert!(output_path.exists());
@@ -503,24 +496,16 @@ mod tests {
 
             file_helpers::write_arrow_file(&input_path, &schema, vec![batch1, batch2]).unwrap();
 
-            let ctx = datafusion::prelude::SessionContext::new();
             let source = crate::sources::arrow::ArrowDataSource::new(
                 input_path.to_str().unwrap().to_string(),
-                ctx.clone(),
             );
-            let provider = source.table_provider().await.unwrap();
-            let stream = ctx
-                .read_table(provider)
-                .unwrap()
-                .execute_stream()
-                .await
-                .unwrap();
+            let stream = source.as_stream().await.unwrap();
 
             let mut sink =
                 ArrowSink::create(output_path.clone(), &schema, ArrowSinkOptions::new()).unwrap();
 
-            sink.write_stream(stream).await.unwrap();
-            let result = Box::new(sink).finish().await.unwrap();
+            let result = sink.write_stream(stream).await.unwrap();
+
             assert_eq!(result.rows_written, 5);
 
             let batches = verify::read_output_file(&output_path).unwrap();

@@ -324,7 +324,7 @@ mod tests {
             let mut sink =
                 VortexSink::create(path.to_path_buf(), schema, VortexSinkOptions::new()).unwrap();
             sink.write_batch(batch).await.unwrap();
-            Box::new(sink).finish().await.unwrap();
+            sink.finish().await.unwrap();
         });
     }
 

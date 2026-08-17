@@ -35,11 +35,11 @@ pub type ObjectPathMapper<T> = fn(location: &Location, settings: &T) -> anyhow::
 
 /// Creates an object-store client for one session cache entry.
 ///
-/// The session derives `store_url` from the canonical location and calls this creator only on a
+/// The session derives `store_url` from the canonical location and calls this factory only on a
 /// cache miss. This URL is the scheme and authority root used as the session cache key: its path
 /// is `/`, and it has no query or fragment. `retry` is present only when the backend opted into
 /// [`StorageBackendBuilder::shared_retries`].
-pub type ObjectStoreCreatorFn<T> = fn(
+pub type ObjectStoreFactory<T> = fn(
     store_url: &Url,
     settings: &T,
     retry: Option<&RetryConfig>,
@@ -175,7 +175,7 @@ pub struct StorageBackendBuilder<T> {
     access: Option<StorageAccess>,
     bare_location_mapper: Option<BareLocationMapper<T>>,
     object_path_mapper: Option<ObjectPathMapper<T>>,
-    object_store_creator: Option<ObjectStoreCreatorFn<T>>,
+    object_store_factory: Option<ObjectStoreFactory<T>>,
     uses_shared_retries: bool,
     augment_args: fn(Command) -> Command,
     parse_args: fn(&ArgMatches) -> Result<T, clap::Error>,
@@ -192,7 +192,7 @@ impl<T> StorageBackendBuilder<T> {
             access: None,
             bare_location_mapper: None,
             object_path_mapper: None,
-            object_store_creator: None,
+            object_store_factory: None,
             uses_shared_retries: false,
             augment_args,
             parse_args,
@@ -234,12 +234,12 @@ impl<T> StorageBackendBuilder<T> {
     }
 
     /// Sets the callback that creates object stores for session cache misses.
-    pub fn object_store_creator(mut self, creator: ObjectStoreCreatorFn<T>) -> Self {
-        self.object_store_creator = Some(creator);
+    pub fn object_store_factory(mut self, factory: ObjectStoreFactory<T>) -> Self {
+        self.object_store_factory = Some(factory);
         self
     }
 
-    /// Makes the registry's shared retry configuration available to this backend's store creator.
+    /// Makes the registry's shared retry configuration available to this backend's store factory.
     pub fn shared_retries(mut self) -> Self {
         self.uses_shared_retries = true;
         self
@@ -287,9 +287,9 @@ impl<T> StorageBackendBuilder<T> {
         let object_path_mapper = self
             .object_path_mapper
             .ok_or(StorageBackendBuildError::MissingObjectPathMapper)?;
-        let object_store_creator = self
-            .object_store_creator
-            .ok_or(StorageBackendBuildError::MissingObjectStoreCreator)?;
+        let object_store_factory = self
+            .object_store_factory
+            .ok_or(StorageBackendBuildError::MissingObjectStoreFactory)?;
 
         Ok(StorageBackend {
             definition: Box::new(TypedBackendDefinition {
@@ -298,7 +298,7 @@ impl<T> StorageBackendBuilder<T> {
                 access,
                 bare_location_mapper: self.bare_location_mapper,
                 object_path_mapper,
-                object_store_creator,
+                object_store_factory,
                 uses_shared_retries: self.uses_shared_retries,
                 cli_argument_keys: cli_argument_keys.into_boxed_slice(),
                 augment_args: self.augment_args,
@@ -327,8 +327,8 @@ pub enum StorageBackendBuildError {
     MissingAccess,
     #[error("storage backend object-path mapper is required")]
     MissingObjectPathMapper,
-    #[error("storage backend object-store creator is required")]
-    MissingObjectStoreCreator,
+    #[error("storage backend object-store factory is required")]
+    MissingObjectStoreFactory,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]

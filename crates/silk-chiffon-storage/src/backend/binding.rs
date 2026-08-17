@@ -49,7 +49,7 @@ use object_store::{ObjectStore, RetryConfig, path::Path as ObjectPath};
 use url::Url;
 
 use super::{
-    BareLocationMapper, CliArgumentKey, ObjectPathMapper, ObjectStoreCreatorFn, StorageAccess,
+    BareLocationMapper, CliArgumentKey, ObjectPathMapper, ObjectStoreFactory, StorageAccess,
     StorageDirection,
 };
 use crate::Location;
@@ -99,7 +99,7 @@ pub(super) struct TypedBackendDefinition<T> {
     pub(super) access: StorageAccess,
     pub(super) bare_location_mapper: Option<BareLocationMapper<T>>,
     pub(super) object_path_mapper: ObjectPathMapper<T>,
-    pub(super) object_store_creator: ObjectStoreCreatorFn<T>,
+    pub(super) object_store_factory: ObjectStoreFactory<T>,
     pub(super) uses_shared_retries: bool,
     pub(super) cli_argument_keys: Box<[CliArgumentKey]>,
     pub(super) augment_args: fn(Command) -> Command,
@@ -145,7 +145,7 @@ where
             settings: (self.parse_args)(matches)?,
             bare_location_mapper: self.bare_location_mapper,
             object_path_mapper: self.object_path_mapper,
-            object_store_creator: self.object_store_creator,
+            object_store_factory: self.object_store_factory,
             uses_shared_retries: self.uses_shared_retries,
         }))
     }
@@ -158,7 +158,7 @@ struct TypedBackendBinding<T> {
     settings: T,
     bare_location_mapper: Option<BareLocationMapper<T>>,
     object_path_mapper: ObjectPathMapper<T>,
-    object_store_creator: ObjectStoreCreatorFn<T>,
+    object_store_factory: ObjectStoreFactory<T>,
     uses_shared_retries: bool,
 }
 
@@ -192,6 +192,6 @@ where
         store_url: &Url,
         retry: Option<&RetryConfig>,
     ) -> anyhow::Result<std::sync::Arc<dyn ObjectStore>> {
-        (self.object_store_creator)(store_url, &self.settings, retry)
+        (self.object_store_factory)(store_url, &self.settings, retry)
     }
 }

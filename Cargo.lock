@@ -4402,7 +4402,6 @@ dependencies = [
  "rand 0.10.2",
  "serde",
  "serde_json",
- "silk-chiffon-core",
  "silk-chiffon-storage",
  "strum_macros",
  "sysinfo",

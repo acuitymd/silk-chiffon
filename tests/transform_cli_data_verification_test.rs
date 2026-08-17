@@ -39,24 +39,6 @@ fn test_arrow_to_arrow() {
 }
 
 #[test]
-fn test_relative_output_paths_complete_for_all_formats() {
-    let temp_dir = TempDir::new().unwrap();
-    let input = temp_dir.path().join("input.arrow");
-    let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
-    TestFile::write_arrow_batch(&input, &batch);
-
-    for format in ["arrow", "parquet", "vortex"] {
-        let output = format!("output.{format}");
-        cargo::cargo_bin_cmd!("silk-chiffon")
-            .current_dir(temp_dir.path())
-            .args(["transform", "--from", "input.arrow", "--to", &output])
-            .assert()
-            .success();
-        assert!(temp_dir.path().join(output).exists());
-    }
-}
-
-#[test]
 fn test_arrow_to_parquet() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");

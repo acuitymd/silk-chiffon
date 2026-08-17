@@ -17,10 +17,7 @@ use vortex::dtype::DType;
 use vortex::file::WriteOptionsSessionExt;
 use vortex::session::VortexSession;
 
-use crate::sinks::{
-    completed_file_url,
-    data_sink::{DataSink, SinkResult},
-};
+use crate::sinks::data_sink::{DataSink, SinkResult};
 
 #[derive(Clone, Copy)]
 pub struct VortexSinkOptions {
@@ -157,7 +154,7 @@ impl DataSink for VortexSink {
         Ok(())
     }
 
-    async fn finish(mut self: Box<Self>) -> Result<SinkResult> {
+    async fn finish(&mut self) -> Result<SinkResult> {
         let mut inner = self.inner.lock().await;
         inner.finish_buffered_batch()?;
         inner.flush_completed_batches().await?;
@@ -177,10 +174,9 @@ impl DataSink for VortexSink {
             .await
             .map_err(|e| anyhow!("error joining writer task: {e}"))?
             .map_err(|e| anyhow!("writer task errored: {e}"))?;
-        let url = completed_file_url(&self.path).await?;
 
         Ok(SinkResult {
-            files_written: vec![url],
+            files_written: vec![self.path.clone()],
             rows_written: inner.rows_written,
         })
     }

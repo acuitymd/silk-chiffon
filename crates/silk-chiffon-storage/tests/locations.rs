@@ -9,7 +9,7 @@ use futures::TryStreamExt;
 use object_store::ObjectStoreExt;
 use silk_chiffon_storage::{Location, LocationInput, StorageError};
 #[cfg(feature = "local-bare-paths")]
-use silk_chiffon_storage::{ensure_output_absent, validate_input};
+use silk_chiffon_storage::{preflight_output, validate_input};
 #[cfg(feature = "local-bare-paths")]
 use std::sync::Arc;
 #[cfg(feature = "local-bare-paths")]
@@ -337,7 +337,7 @@ async fn absent_object_handle_creation_is_separate_from_input_validation() {
 
 #[tokio::test]
 #[cfg(feature = "local-bare-paths")]
-async fn absent_output_is_allowed() {
+async fn absent_output_passes_preflight() {
     let working_directory = TempDir::new().unwrap();
     let path = working_directory.path().join("absent.parquet");
     let location = location(path.to_str().unwrap()).unwrap();
@@ -346,12 +346,12 @@ async fn absent_output_is_allowed() {
         .output_handle(&location)
         .unwrap();
 
-    ensure_output_absent(&handle).await.unwrap();
+    preflight_output(&handle, false).await.unwrap();
 }
 
 #[tokio::test]
 #[cfg(feature = "local-bare-paths")]
-async fn existing_output_is_rejected() {
+async fn existing_output_requires_overwrite() {
     let working_directory = TempDir::new().unwrap();
     let path = working_directory.path().join("existing.parquet");
     let location = location(path.to_str().unwrap()).unwrap();
@@ -365,7 +365,8 @@ async fn existing_output_is_rejected() {
         .await
         .unwrap();
 
-    assert!(ensure_output_absent(&handle).await.is_err());
+    assert!(preflight_output(&handle, false).await.is_err());
+    preflight_output(&handle, true).await.unwrap();
 }
 
 #[tokio::test]

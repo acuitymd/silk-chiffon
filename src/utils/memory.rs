@@ -7,7 +7,7 @@ use arrow::datatypes::{DataType, Schema};
 use futures::StreamExt;
 use sysinfo::System;
 
-use crate::io_strategies::input_sources::InputSources;
+use crate::io_strategies::input_strategy::InputStrategy;
 
 /// Returns total memory in bytes, respecting container cgroup limits.
 ///
@@ -168,23 +168,18 @@ fn parse_memory_stat_net_used(content: &str) -> Option<u64> {
     Some(total.saturating_sub(slab_reclaimable))
 }
 
-/// Reads source rows to measure their average in-memory Arrow size.
+/// Sample actual rows from an `InputStrategy` to measure average in-memory Arrow row size.
 ///
-/// Creates a provider in the prepared pipeline's session and streams complete batches until
-/// reaching `target_rows` at a batch boundary or reaching the end of the input. The result uses
-/// `RecordBatch::get_array_memory_size()`, including variable-width columns such as strings and
-/// lists.
-///
-/// This consumes one read of the source prefix. A caller that will read the input again must first
-/// require [`Replayability::Replayable`](silk_chiffon_core::Replayability::Replayable).
-pub async fn measure_avg_input_row_bytes(
-    session: &datafusion::prelude::SessionContext,
-    inputs: &InputSources,
+/// Creates a throwaway `SessionContext` and streams batches until `target_rows` rows are
+/// read (or EOF). Returns the average bytes per row based on
+/// `RecordBatch::get_array_memory_size()`, which reflects the real in-memory footprint
+/// including variable-width columns like strings and lists.
+pub async fn sample_avg_row_bytes(
+    input_strategy: &InputStrategy,
     target_rows: usize,
 ) -> anyhow::Result<usize> {
-    let provider = inputs.table_provider(session).await?;
-    let frame = session.read_table(provider)?.limit(0, Some(target_rows))?;
-    let mut stream = frame.execute_stream().await?;
+    let mut ctx = datafusion::prelude::SessionContext::new();
+    let mut stream = input_strategy.as_stream(&mut ctx).await?;
 
     let mut total_bytes: usize = 0;
     let mut total_rows: usize = 0;
@@ -205,7 +200,7 @@ pub async fn measure_avg_input_row_bytes(
 
 const MIN_SORT_SPILL_RESERVATION: usize = 10 * 1024 * 1024; // 10MB (DataFusion default)
 
-/// Estimate `sort_spill_reservation_bytes` from measured row size and input characteristics.
+/// Estimate `sort_spill_reservation_bytes` from sampled row size and input characteristics.
 ///
 /// The merge phase holds one batch per spill file in memory simultaneously.
 /// We estimate spill file count from total in-memory input size vs per-partition memory
@@ -528,7 +523,7 @@ kernel 500";
     }
 
     #[tokio::test]
-    async fn test_measure_avg_input_row_bytes_single_arrow() {
+    async fn test_sample_avg_row_bytes_single_arrow() {
         use crate::sources::arrow::ArrowDataSource;
         use crate::utils::test_data::{TestBatch, TestFile};
 
@@ -537,21 +532,17 @@ kernel 500";
         let batch = TestBatch::simple_with(&[1, 2, 3], &["hello", "world", "foo"]);
         TestFile::write_arrow_batch(&path, &batch);
 
-        let session = datafusion::prelude::SessionContext::new();
-        let source: Box<dyn crate::sources::data_source::DataSource> = Box::new(
-            ArrowDataSource::new(path.to_string_lossy().to_string(), session.clone()),
-        );
-        let inputs = InputSources::new(source);
+        let source: Box<dyn crate::sources::data_source::DataSource> =
+            Box::new(ArrowDataSource::new(path.to_string_lossy().to_string()));
+        let strategy = InputStrategy::Single(source);
 
-        let avg = measure_avg_input_row_bytes(&session, &inputs, 100)
-            .await
-            .unwrap();
+        let avg = sample_avg_row_bytes(&strategy, 100).await.unwrap();
         // i32 (4 bytes) + variable-length strings -- should be non-trivial
         assert!(avg > 0, "avg_row_bytes should be > 0, got {avg}");
     }
 
     #[tokio::test]
-    async fn test_measure_avg_input_row_bytes_multiple_files() {
+    async fn test_sample_avg_row_bytes_multiple_files() {
         use crate::sources::arrow::ArrowDataSource;
         use crate::utils::test_data::{TestBatch, TestFile};
 
@@ -563,24 +554,18 @@ kernel 500";
         TestFile::write_arrow_batch(&path1, &batch1);
         TestFile::write_arrow_batch(&path2, &batch2);
 
-        let session = datafusion::prelude::SessionContext::new();
-        let mut inputs = InputSources::new(Box::new(ArrowDataSource::new(
-            path1.to_string_lossy().to_string(),
-            session.clone(),
-        )));
-        inputs.push(Box::new(ArrowDataSource::new(
-            path2.to_string_lossy().to_string(),
-            session.clone(),
-        )));
+        let sources: Vec<Box<dyn crate::sources::data_source::DataSource>> = vec![
+            Box::new(ArrowDataSource::new(path1.to_string_lossy().to_string())),
+            Box::new(ArrowDataSource::new(path2.to_string_lossy().to_string())),
+        ];
+        let strategy = InputStrategy::Multiple(sources);
 
-        let avg = measure_avg_input_row_bytes(&session, &inputs, 100)
-            .await
-            .unwrap();
+        let avg = sample_avg_row_bytes(&strategy, 100).await.unwrap();
         assert!(avg > 0);
     }
 
     #[tokio::test]
-    async fn test_measure_avg_input_row_bytes_parquet() {
+    async fn test_sample_avg_row_bytes_parquet() {
         use crate::sources::parquet::ParquetDataSource;
         use crate::utils::test_data::{TestBatch, TestFile};
 
@@ -593,27 +578,22 @@ kernel 500";
             .build();
         TestFile::write_parquet_batch(&path, &batch);
 
-        let session = datafusion::prelude::SessionContext::new();
-        let source: Box<dyn crate::sources::data_source::DataSource> = Box::new(
-            ParquetDataSource::new(path.to_string_lossy().to_string(), session.clone()),
-        );
-        let inputs = InputSources::new(source);
+        let source: Box<dyn crate::sources::data_source::DataSource> =
+            Box::new(ParquetDataSource::new(path.to_string_lossy().to_string()));
+        let strategy = InputStrategy::Single(source);
 
-        let avg = measure_avg_input_row_bytes(&session, &inputs, 100)
-            .await
-            .unwrap();
+        let avg = sample_avg_row_bytes(&strategy, 100).await.unwrap();
         assert!(avg > 0);
     }
 
     #[tokio::test]
-    async fn test_measure_avg_input_row_bytes_respects_target_rows() {
+    async fn test_sample_avg_row_bytes_respects_target_rows() {
         use crate::sources::arrow::ArrowDataSource;
         use crate::utils::test_data::{TestBatch, TestFile};
 
         let dir = tempfile::tempdir().unwrap();
 
         // write 5 files with 100 rows each = 500 rows total
-        let session = datafusion::prelude::SessionContext::new();
         let mut sources: Vec<Box<dyn crate::sources::data_source::DataSource>> = Vec::new();
         for i in 0..5 {
             let path = dir.path().join(format!("file_{i}.arrow"));
@@ -623,25 +603,18 @@ kernel 500";
             TestFile::write_arrow_batch(&path, &batch);
             sources.push(Box::new(ArrowDataSource::new(
                 path.to_string_lossy().to_string(),
-                session.clone(),
             )));
         }
 
-        let mut sources = sources.into_iter();
-        let mut inputs = InputSources::new(sources.next().unwrap());
-        for source in sources {
-            inputs.push(source);
-        }
+        let strategy = InputStrategy::Multiple(sources);
 
         // target only 50 rows -- should still produce a valid average
-        let avg = measure_avg_input_row_bytes(&session, &inputs, 50)
-            .await
-            .unwrap();
+        let avg = sample_avg_row_bytes(&strategy, 50).await.unwrap();
         assert!(avg > 0);
     }
 
     #[tokio::test]
-    async fn test_measure_avg_input_row_bytes_wide_vs_narrow() {
+    async fn test_sample_avg_row_bytes_wide_vs_narrow() {
         use crate::sources::arrow::ArrowDataSource;
         use crate::utils::test_data::{TestBatch, TestFile};
 
@@ -652,14 +625,10 @@ kernel 500";
         let narrow_batch = TestBatch::builder().column_i32("x", &[1, 2, 3]).build();
         TestFile::write_arrow_batch(&narrow_path, &narrow_batch);
 
-        let session = datafusion::prelude::SessionContext::new();
-        let narrow_inputs = InputSources::new(Box::new(ArrowDataSource::new(
+        let narrow_strategy = InputStrategy::Single(Box::new(ArrowDataSource::new(
             narrow_path.to_string_lossy().to_string(),
-            session.clone(),
         )));
-        let narrow_avg = measure_avg_input_row_bytes(&session, &narrow_inputs, 100)
-            .await
-            .unwrap();
+        let narrow_avg = sample_avg_row_bytes(&narrow_strategy, 100).await.unwrap();
 
         // wide: many columns including strings
         let wide_path = dir.path().join("wide.arrow");
@@ -672,13 +641,10 @@ kernel 500";
             .build();
         TestFile::write_arrow_batch(&wide_path, &wide_batch);
 
-        let wide_inputs = InputSources::new(Box::new(ArrowDataSource::new(
+        let wide_strategy = InputStrategy::Single(Box::new(ArrowDataSource::new(
             wide_path.to_string_lossy().to_string(),
-            session.clone(),
         )));
-        let wide_avg = measure_avg_input_row_bytes(&session, &wide_inputs, 100)
-            .await
-            .unwrap();
+        let wide_avg = sample_avg_row_bytes(&wide_strategy, 100).await.unwrap();
 
         assert!(
             wide_avg > narrow_avg,
