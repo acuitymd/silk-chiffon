@@ -301,9 +301,6 @@ impl PreparedPipeline {
 }
 
 /// The running final plan together with every resource required while it is polled.
-///
-/// DataFusion defines dropping the execution stream as cancellation. Sources therefore bind their
-/// tasks and channels to the inner stream instead of relying on a separate pipeline token.
 pub struct PipelineExecution {
     inner: SendableRecordBatchStream,
     _session: SessionContext,

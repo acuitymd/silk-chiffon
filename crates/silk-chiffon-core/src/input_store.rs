@@ -373,7 +373,7 @@ mod tests {
 
     async fn put_input(storage: &StorageSession, url: &str, bytes: &'static [u8]) -> InputObject {
         let input = LocationInput::parse(url).unwrap();
-        let handle = storage.input_handle(&input).unwrap();
+        let handle = storage.output_handle(&input).unwrap();
         handle
             .object_store()
             .put(handle.object_path(), Bytes::from_static(bytes).into())

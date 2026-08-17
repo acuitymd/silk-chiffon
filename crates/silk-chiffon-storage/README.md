@@ -19,9 +19,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-A `StorageHandle` keeps the canonical location URL, an `Arc<dyn ObjectStore>`, the object path decoded from that URL, the root URL that identifies the cached client, and command-scoped upload settings. Its fields are private so values from different handle requests cannot be mixed accidentally. `StorageHandle::local_path` adapts a `file:` handle for input and inspection code that still requires a filesystem path.
+A `StorageHandle` keeps the canonical location URL, an `Arc<dyn ObjectStore>`, the object path decoded from that URL, and the root URL that identifies the cached client. Its fields are private so values from different handle requests cannot be mixed accidentally. `StorageHandle::local_path` adapts a `file:` handle for code that still requires a filesystem path.
 
-Input handle creation selects and invokes a backend without checking existence. `StorageSession::prepare_output_target` resolves and claims an output, optionally observes external existence, then invokes backend preparation such as local parent-directory handling.
+Handle creation selects and invokes a backend. It does not check whether an input exists or whether an output may be overwritten.
 
 ## Understand the lifecycle
 
@@ -39,10 +39,9 @@ The host executable chooses which backends exist, lets the registry augment its 
 
 ```rust
 use clap::Command;
-use silk_chiffon_storage::{ExistingOutput, LocationInput, OutputPreparation, StorageRegistry, local};
+use silk_chiffon_storage::{LocationInput, StorageRegistry, local};
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let registry = StorageRegistry::builder()
         .register(local::backend()?)
         .build()?;
@@ -53,12 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let location = LocationInput::parse("data/input.parquet")?;
     let input = storage.input_handle(&location)?;
-    let output = storage
-        .prepare_output_target(
-            &location,
-            &OutputPreparation::new(ExistingOutput::Allow, false),
-        )
-        .await?;
+    let output = storage.output_handle(&location)?;
 
     assert!(std::sync::Arc::ptr_eq(
         &input.object_store(),
@@ -68,7 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-`StorageRegistry::augment_args` only adds storage arguments to the command the host owns. The registry never parses process arguments. `StorageRegistry::create_session` receives the host-parsed `ArgMatches`, parses one settings value per backend, shared retry settings when needed, and object-upload settings, then starts a fresh object-store cache and upload limiter.
+`StorageRegistry::augment_args` only adds storage arguments to the command the host owns. The registry never parses process arguments. `StorageRegistry::create_session` receives the host-parsed `ArgMatches`, parses one settings value per backend, parses shared retry settings when needed, and starts a fresh object-store cache.
 
 Calling `create_session` again produces independently parsed settings and a fresh cache. Cloning one session shares its settings and cache.
 
@@ -97,7 +91,6 @@ The callbacks divide handle creation and pattern routing into four backend-owned
 - `BarePatternMapper<T>` is an optional callback for schemeless patterns. It requires the same backend to claim exact bare locations and must return a `LocationPattern` under one of that backend's schemes.
 - Every backend must choose a location-validation policy. `LocationValidator<T>` checks authority, query, and other backend-specific URL rules after routing; `allow_any_location()` explicitly accepts every location that passed core syntax validation. Storage derives the `ObjectPath` generically from the decoded URL path.
 - `ObjectStoreCreatorFn<T>` creates a client for one store-root URL. It runs only on a session cache miss and receives shared retry configuration only when the backend opted in.
-- `PrepareOutputTargetFn<T>` performs backend-specific target preparation after the session has claimed the normalized target and applied the advisory external-existence policy. The local backend validates or creates parent directories here.
 
 `StorageAccess` declares read-only, write-only, or read-write support independently of those callbacks. A session rejects an unsupported direction before location validation or store creation.
 
@@ -179,15 +172,12 @@ A session caches one object-store client per store-root URL: scheme, host, and p
 
 ## Existence and output policy
 
-Input lookup and output policy remain explicit:
+Ordinary handle creation performs neither an object-existence check nor an overwrite check. Input lookup and output policy remain explicit:
 
 - `StorageSession::lookup_input` calls `head` and returns an `InputObject` containing the observed metadata.
-- `StorageSession::prepare_output_target` atomically retains a command-session claim on normalized `(store_url, object_path)` identity, then applies `ExistingOutput::Allow` or `ExistingOutput::RejectIfObserved` and the backend callback. A second same-session claim fails even when overwrite is allowed.
-- `ObjectUpload` owns the one-object put or multipart lifecycle. `complete` is the durability boundary, while `abort` cancels in-flight work and awaits multipart cleanup.
+- `ensure_output_absent` permits an absent object and rejects an existing object. Callers skip it when overwrite is enabled.
 
-The observed input or output metadata is neither a snapshot nor an external reservation. Callers require selected inputs to remain stable for the command lifetime, and another process may race an advisory output check.
-
-Every session uses a 10 MiB adaptive single-put threshold and multipart part size by default, with at most eight part requests in flight across all of its uploads. Host applications may expose the contributed `--object-store-upload-part-size` and `--object-store-max-in-flight-parts` arguments or construct smaller settings in embedding and test code.
+The observed input metadata is neither a snapshot nor a reservation. Callers require selected inputs to remain stable for the command lifetime. Keeping lookup separate from handle creation lets callers create an input handle without forcing an eager existence check and create an output handle before its object exists.
 
 Pattern expansion is the exception: an exact `LocationPattern` calls `head` once so absence can contribute zero matches without listing.
 

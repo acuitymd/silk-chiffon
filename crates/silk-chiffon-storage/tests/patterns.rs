@@ -182,7 +182,7 @@ fn storage_with_creator(creator: ObjectStoreCreatorFn<()>) -> StorageSession {
 
 async fn put(storage: &StorageSession, url: &str) {
     let input = LocationInput::parse(url).unwrap();
-    let handle = storage.input_handle(&input).unwrap();
+    let handle = storage.output_handle(&input).unwrap();
     handle
         .object_store()
         .put(handle.object_path(), Bytes::from_static(b"test").into())

@@ -22,17 +22,13 @@ pub trait SinkBinding: Send + Sync {
     ) -> Result<Box<dyn DataSink>>;
 }
 
-/// A single-owner, format-independent writer for one logical output.
+/// A format-independent writer for one logical output.
 ///
 /// Writing and completion are separate because a sink may buffer encoded data,
 /// upload parts, or write a format footer after its last input batch.
-/// Sinks can move between tasks, but callers write through one mutable owner.
 #[async_trait]
-pub trait DataSink: Send {
+pub trait DataSink: Send + Sync {
     /// Writes every batch in a DataFusion stream without completing the sink.
-    ///
-    /// On failure, the input stream is dropped before this method returns. That starts upstream
-    /// execution cancellation before the caller awaits sink cleanup.
     async fn write_stream(&mut self, mut stream: SendableRecordBatchStream) -> Result<()> {
         while let Some(batch) = stream.next().await {
             self.write_batch(batch?).await?;
@@ -45,9 +41,6 @@ pub trait DataSink: Send {
 
     /// Completes the output and reports the durable objects it produced.
     async fn finish(self: Box<Self>) -> Result<SinkCompletion>;
-
-    /// Cancels an unfinished output and awaits its cleanup.
-    async fn abort(self: Box<Self>) -> Result<()>;
 }
 
 /// Durable locations and row count produced by one completed sink.

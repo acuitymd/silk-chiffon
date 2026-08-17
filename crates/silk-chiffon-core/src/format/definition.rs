@@ -55,7 +55,7 @@ pub type InspectorFn<T> =
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SinkBindingConfig {
     thread_budget: NonZeroUsize,
-    open_sink_mode: OpenSinkMode,
+    sink_concurrency: SinkConcurrency,
     output_ordering: Vec<OutputOrderingColumn>,
 }
 
@@ -63,12 +63,12 @@ impl SinkBindingConfig {
     /// Creates the format-neutral context supplied to a sink binder.
     pub fn new(
         thread_budget: NonZeroUsize,
-        open_sink_mode: OpenSinkMode,
+        sink_concurrency: SinkConcurrency,
         output_ordering: Vec<OutputOrderingColumn>,
     ) -> Self {
         Self {
             thread_budget,
-            open_sink_mode,
+            sink_concurrency,
             output_ordering,
         }
     }
@@ -79,8 +79,8 @@ impl SinkBindingConfig {
     }
 
     /// Returns whether the host may keep multiple output sinks open simultaneously.
-    pub const fn open_sink_mode(&self) -> OpenSinkMode {
-        self.open_sink_mode
+    pub const fn sink_concurrency(&self) -> SinkConcurrency {
+        self.sink_concurrency
     }
 
     /// Returns the order guaranteed within each output sink's input stream.
@@ -91,11 +91,11 @@ impl SinkBindingConfig {
 
 /// Whether an output strategy keeps one or several sinks open at a time.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum OpenSinkMode {
+pub enum SinkConcurrency {
     /// The host keeps at most one output sink open.
-    OneAtATime,
+    Sequential,
     /// The host may keep several output sinks open simultaneously.
-    Multiple,
+    Concurrent,
 }
 
 /// One column in the order produced within each output.

@@ -22,8 +22,8 @@ mod registry;
 pub use definition::{
     DetectedFormat, FormatDefinition, FormatDefinitionBuilder, FormatFuture, FormatOperation,
     FormatOperationError, InputDetection, InputDetectorFn, InputProviderFn, InputVariant,
-    InspectionBinding, InspectionDefinition, InspectionMode, InspectorFn, OpenSinkMode,
-    OutputOrderingColumn, SinkBinderFn, SinkBindingConfig, SortDirection, TransformBinding,
+    InspectionBinding, InspectionDefinition, InspectionMode, InspectorFn, OutputOrderingColumn,
+    SinkBinderFn, SinkBindingConfig, SinkConcurrency, SortDirection, TransformBinding,
     TransformBindings, TransformDefinition, TransformDefinitionBuilder,
 };
 pub use registry::{FormatRegistry, FormatRegistryBuilder, FormatRegistryError};

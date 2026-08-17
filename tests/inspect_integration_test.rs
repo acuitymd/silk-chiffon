@@ -6,10 +6,7 @@ use arrow::array::{Int32Array, RecordBatch, StringArray};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use assert_cmd::cargo::cargo_bin_cmd;
 use predicates::prelude::*;
-use silk_chiffon::utils::{
-    test_data::{TestBatch, TestFile},
-    test_helpers::prepared_local_output,
-};
+use silk_chiffon::utils::test_data::{TestBatch, TestFile};
 use std::fs::File;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -259,12 +256,8 @@ mod vortex_tests {
     fn write_vortex_file(path: &std::path::Path, schema: &SchemaRef, batches: Vec<RecordBatch>) {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            let mut sink = VortexSink::create(
-                prepared_local_output(path),
-                schema,
-                VortexSinkOptions::new(),
-            )
-            .unwrap();
+            let mut sink =
+                VortexSink::create(path.to_path_buf(), schema, VortexSinkOptions::new()).unwrap();
             for batch in batches {
                 sink.write_batch(batch).await.unwrap();
             }
@@ -413,12 +406,8 @@ fn test_detect_vortex_file() {
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-        let mut sink = VortexSink::create(
-            prepared_local_output(&file),
-            &schema,
-            VortexSinkOptions::new(),
-        )
-        .unwrap();
+        let mut sink =
+            VortexSink::create(file.to_path_buf(), &schema, VortexSinkOptions::new()).unwrap();
         sink.write_batch(batch).await.unwrap();
         Box::new(sink).finish().await.unwrap();
     });
@@ -672,12 +661,8 @@ mod parity_tests {
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            let mut sink = VortexSink::create(
-                prepared_local_output(&file),
-                &schema,
-                VortexSinkOptions::new(),
-            )
-            .unwrap();
+            let mut sink =
+                VortexSink::create(file.to_path_buf(), &schema, VortexSinkOptions::new()).unwrap();
             sink.write_batch(batch).await.unwrap();
             Box::new(sink).finish().await.unwrap();
         });
@@ -945,12 +930,8 @@ mod parity_tests {
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            let mut sink = VortexSink::create(
-                prepared_local_output(&file),
-                &schema,
-                VortexSinkOptions::new(),
-            )
-            .unwrap();
+            let mut sink =
+                VortexSink::create(file.to_path_buf(), &schema, VortexSinkOptions::new()).unwrap();
             sink.write_batch(batch).await.unwrap();
             Box::new(sink).finish().await.unwrap();
         });
@@ -986,12 +967,8 @@ mod parity_tests {
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            let mut sink = VortexSink::create(
-                prepared_local_output(&file),
-                &schema,
-                VortexSinkOptions::new(),
-            )
-            .unwrap();
+            let mut sink =
+                VortexSink::create(file.to_path_buf(), &schema, VortexSinkOptions::new()).unwrap();
             sink.write_batch(batch).await.unwrap();
             Box::new(sink).finish().await.unwrap();
         });
@@ -1089,12 +1066,8 @@ mod parity_tests {
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            let mut sink = VortexSink::create(
-                prepared_local_output(&file),
-                &schema,
-                VortexSinkOptions::new(),
-            )
-            .unwrap();
+            let mut sink =
+                VortexSink::create(file.to_path_buf(), &schema, VortexSinkOptions::new()).unwrap();
             sink.write_batch(batch).await.unwrap();
             Box::new(sink).finish().await.unwrap();
         });

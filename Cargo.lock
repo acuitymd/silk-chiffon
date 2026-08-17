@@ -4366,7 +4366,6 @@ dependencies = [
  "anyhow",
  "async-trait",
  "bytes",
- "bytesize",
  "clap",
  "futures",
  "glob",
@@ -4376,7 +4375,6 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
- "tokio-util",
  "url",
 ]
 
@@ -4424,7 +4422,6 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
- "tokio-util",
  "url",
  "uuid",
  "vortex",
@@ -4844,7 +4841,6 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
- "futures-util",
  "libc",
  "pin-project-lite",
  "tokio",

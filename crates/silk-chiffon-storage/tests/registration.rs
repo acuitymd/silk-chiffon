@@ -9,9 +9,9 @@ use std::{
 use clap::{Args, Command};
 use object_store::{ObjectStore, memory::InMemory};
 use silk_chiffon_storage::{
-    ExistingOutput, Location, LocationInput, LocationPattern, OutputPreparation, RetryConfig,
-    RetryConfigurationError, StorageAccess, StorageBackend, StorageBackendBuildError,
-    StorageDirection, StorageError, StorageRegistry, StorageRegistryError, StorageSession,
+    Location, LocationInput, LocationPattern, RetryConfig, RetryConfigurationError, StorageAccess,
+    StorageBackend, StorageBackendBuildError, StorageDirection, StorageError, StorageRegistry,
+    StorageRegistryError, StorageSession,
 };
 use url::Url;
 
@@ -408,8 +408,8 @@ fn backend_build_validates_the_complete_definition() {
     ));
 }
 
-#[tokio::test]
-async fn backend_builder_setters_replace_earlier_values() {
+#[test]
+fn backend_builder_setters_replace_earlier_values() {
     let backend = StorageBackend::without_args()
         .name("first")
         .name("second")
@@ -438,11 +438,7 @@ async fn backend_builder_setters_replace_earlier_values() {
     let (_, registry) = command_and_registry([backend]);
     let storage = create_default_session(&registry);
     let handle = storage
-        .prepare_output_target(
-            &location_input("bare-object"),
-            &OutputPreparation::new(ExistingOutput::Allow, false),
-        )
-        .await
+        .output_handle(&location_input("bare-object"))
         .unwrap();
     assert_eq!(handle.url().as_str(), "second://bucket/object");
 }
@@ -950,8 +946,8 @@ fn bare_locations_are_unsupported_without_a_claiming_backend() {
     ));
 }
 
-#[tokio::test]
-async fn read_only_backend_rejects_output_before_location_validation() {
+#[test]
+fn read_only_backend_rejects_output_before_location_validation() {
     READ_ONLY_LOCATION_VALIDATIONS.store(0, Ordering::SeqCst);
     let backend = StorageBackend::without_args()
         .name("read-only")
@@ -970,13 +966,7 @@ async fn read_only_backend_rejects_output_before_location_validation() {
     storage.input_handle(&location).unwrap();
     assert_eq!(READ_ONLY_LOCATION_VALIDATIONS.load(Ordering::SeqCst), 1);
 
-    let error = storage
-        .prepare_output_target(
-            &location,
-            &OutputPreparation::new(ExistingOutput::Allow, false),
-        )
-        .await
-        .unwrap_err();
+    let error = storage.output_handle(&location).unwrap_err();
     assert!(matches!(
         error,
         StorageError::DirectionUnsupported {
@@ -1103,7 +1093,7 @@ fn local_only_registry_omits_shared_retry_arguments() {
 
     let explicit = location_input("file:///tmp/local-object");
     let input = storage.input_handle(&explicit).unwrap();
-    let output = storage.input_handle(&explicit).unwrap();
+    let output = storage.output_handle(&explicit).unwrap();
     assert!(Arc::ptr_eq(&input.object_store(), &output.object_store(),));
 
     let bare = location_input("/tmp/local-object");
@@ -1334,7 +1324,7 @@ fn backend_errors_retain_stage_specific_context() {
     let (_, registry) = command_and_registry([bare_backend]);
     let storage = create_default_session(&registry);
     match storage
-        .input_handle(&location_input("bare-object"))
+        .output_handle(&location_input("bare-object"))
         .unwrap_err()
     {
         StorageError::BareLocationMapping {
@@ -1360,7 +1350,7 @@ fn backend_errors_retain_stage_specific_context() {
     let (_, registry) = command_and_registry([validation_backend]);
     let storage = create_default_session(&registry);
     let location = location_input("mem://bucket/object");
-    match storage.input_handle(&location).unwrap_err() {
+    match storage.output_handle(&location).unwrap_err() {
         StorageError::LocationValidation {
             backend,
             location,
@@ -1386,7 +1376,7 @@ fn backend_errors_retain_stage_specific_context() {
         .unwrap();
     let (_, registry) = command_and_registry([store_backend]);
     let storage = create_default_session(&registry);
-    match storage.input_handle(&location).unwrap_err() {
+    match storage.output_handle(&location).unwrap_err() {
         StorageError::ObjectStoreCreation {
             backend,
             store_url,

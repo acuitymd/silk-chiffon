@@ -285,7 +285,7 @@ fn bench_adaptive(c: &mut Criterion) {
                         };
 
                         let mut writer = AdaptiveParquetWriter::new(
-                            silk_chiffon::utils::test_helpers::prepared_local_output(&path),
+                            &path,
                             schema,
                             props,
                             Arc::clone(runtimes),

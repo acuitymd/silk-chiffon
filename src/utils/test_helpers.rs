@@ -101,34 +101,6 @@ pub mod test_data {
     }
 }
 
-/// Prepares one local output handle for tests that exercise a storage-backed sink directly.
-#[cfg(feature = "local")]
-pub fn prepared_local_output(
-    path: impl AsRef<std::path::Path>,
-) -> silk_chiffon_storage::StorageHandle {
-    use silk_chiffon_storage::{ExistingOutput, LocationInput, OutputPreparation};
-
-    let path = path.as_ref().to_path_buf();
-    std::thread::spawn(move || {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(async move {
-                silk_chiffon_storage::local::session()
-                    .unwrap()
-                    .prepare_output_target(
-                        &LocationInput::parse(path.to_str().unwrap()).unwrap(),
-                        &OutputPreparation::new(ExistingOutput::Allow, false),
-                    )
-                    .await
-                    .unwrap()
-            })
-    })
-    .join()
-    .unwrap()
-}
-
 pub mod file_helpers {
     use anyhow::Result;
     use arrow::{

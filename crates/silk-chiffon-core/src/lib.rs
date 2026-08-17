@@ -15,8 +15,8 @@ pub use format::{
     DetectedFormat, FormatDefinition, FormatDefinitionBuilder, FormatFuture, FormatOperation,
     FormatOperationError, FormatRegistry, FormatRegistryBuilder, FormatRegistryError,
     InputDetection, InputDetectorFn, InputProviderFn, InputVariant, InspectionBinding,
-    InspectionDefinition, InspectionMode, InspectorFn, OpenSinkMode, OutputOrderingColumn,
-    SinkBinderFn, SinkBindingConfig, SortDirection, TransformBinding, TransformBindings,
+    InspectionDefinition, InspectionMode, InspectorFn, OutputOrderingColumn, SinkBinderFn,
+    SinkBindingConfig, SinkConcurrency, SortDirection, TransformBinding, TransformBindings,
     TransformDefinition, TransformDefinitionBuilder,
 };
 pub use input_store::{CanonicalInput, InputLeaf};

@@ -112,15 +112,6 @@ pub enum StorageError {
         pattern: String,
         source: object_store::Error,
     },
-    #[error("output target already exists: {target}")]
-    OutputTargetAlreadyExists { target: Url },
-    #[error("output target is already claimed by this storage session: {target}")]
-    OutputTargetAlreadyClaimed { target: Url },
-    #[error("storage backend {backend} failed to prepare output target {target}: {source}")]
-    OutputTargetPreparation {
-        backend: &'static str,
-        target: Url,
-        #[source]
-        source: anyhow::Error,
-    },
+    #[error("output already exists: {0}")]
+    OutputAlreadyExists(Url),
 }

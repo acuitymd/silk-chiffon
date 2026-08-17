@@ -18,9 +18,9 @@ use datafusion::{catalog::TableProvider, prelude::SessionContext};
 use object_store::ObjectStoreExt;
 use silk_chiffon_core::{
     DataSink, FormatDefinition, FormatFuture, FormatRegistry, InputDetection, InputLeaf,
-    InputVariant, InspectionDefinition, InspectionMode, InspectionOutput, OpenSinkMode,
-    OutputOrderingColumn, ServiceInputBinding, ServiceInputDefinition, ServiceOutputBinding,
-    ServiceOutputDefinition, SinkBinding, SinkBindingConfig, TransformDefinition,
+    InputVariant, InspectionDefinition, InspectionMode, InspectionOutput, OutputOrderingColumn,
+    ServiceInputBinding, ServiceInputDefinition, ServiceOutputBinding, ServiceOutputDefinition,
+    SinkBinding, SinkBindingConfig, SinkConcurrency, TransformDefinition,
 };
 use silk_chiffon_storage::{InputObject, StorageDirection, StorageHandle, StorageRegistry};
 use thiserror::Error;
@@ -1008,7 +1008,7 @@ fn parquet_options(context: &SinkBindingConfig, args: &ParquetArgs) -> Result<Pa
         )
         .apply_if_some(sort_spec, ParquetSinkOptions::with_sort_spec);
 
-    if context.open_sink_mode() == OpenSinkMode::Multiple {
+    if context.sink_concurrency() == SinkConcurrency::Concurrent {
         // Several open Parquet pipelines multiply their buffered row groups, so keep each
         // pipeline single-slot.
         options = options
@@ -1043,7 +1043,7 @@ impl SinkBinding for ArrowSinkBinding {
         schema: SchemaRef,
     ) -> Result<Box<dyn DataSink>> {
         Ok(Box::new(ArrowSink::create(
-            handle,
+            handle.local_path()?,
             &schema,
             self.options.clone(),
         )?))
@@ -1063,7 +1063,7 @@ impl SinkBinding for ParquetSinkBinding {
         schema: SchemaRef,
     ) -> Result<Box<dyn DataSink>> {
         Ok(Box::new(ParquetSink::create(
-            handle,
+            handle.local_path()?,
             &schema,
             &self.options,
             Arc::clone(&self.runtimes),
@@ -1082,7 +1082,11 @@ impl SinkBinding for VortexSinkBinding {
         handle: StorageHandle,
         schema: SchemaRef,
     ) -> Result<Box<dyn DataSink>> {
-        Ok(Box::new(VortexSink::create(handle, &schema, self.options)?))
+        Ok(Box::new(VortexSink::create(
+            handle.local_path()?,
+            &schema,
+            self.options,
+        )?))
     }
 }
 
@@ -1173,7 +1177,7 @@ mod tests {
         num::NonZeroUsize,
         sync::{
             Arc, LazyLock, Mutex,
-            atomic::{AtomicBool, AtomicUsize, Ordering},
+            atomic::{AtomicUsize, Ordering},
         },
     };
 
@@ -1182,25 +1186,17 @@ mod tests {
     use bytes::Bytes;
     use clap::{Args, CommandFactory, FromArgMatches};
     use datafusion::{
-        catalog::{TableProvider, streaming::StreamingTable},
-        datasource::MemTable,
-        execution::TaskContext,
-        physical_plan::{
-            SendableRecordBatchStream, stream::RecordBatchReceiverStreamBuilder,
-            streaming::PartitionStream,
-        },
+        catalog::TableProvider, datasource::MemTable, physical_plan::SendableRecordBatchStream,
         prelude::SessionContext,
     };
     use futures::{StreamExt, future::BoxFuture};
     use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory, path::Path as ObjectPath};
     use silk_chiffon_core::{
-        DataSink, FormatDefinition, FormatFuture, FormatRegistry, InputLeaf, OpenSinkMode,
+        DataSink, FormatDefinition, FormatFuture, FormatRegistry, InputLeaf,
         ServiceInputDefinition, ServiceOutputDefinition, SinkBinding, SinkBindingConfig,
-        TransformDefinition,
+        SinkConcurrency, TransformDefinition,
     };
-    use silk_chiffon_storage::{
-        OutputPreparation, StorageAccess, StorageBackend, StorageHandle, StorageRegistry,
-    };
+    use silk_chiffon_storage::{StorageAccess, StorageBackend, StorageRegistry};
     use url::Url;
 
     use super::{
@@ -1209,18 +1205,13 @@ mod tests {
     };
     use crate::{
         CliSchema, Command, ParquetArgs,
-        utils::{
-            test_data::{TestBatch, TestExtract, TestFile},
-            test_helpers::prepared_local_output,
-        },
+        utils::test_data::{TestBatch, TestExtract, TestFile},
     };
     static SINK_BINDINGS: AtomicUsize = AtomicUsize::new(0);
     static SERVICE_INPUT_REFERENCES: Mutex<Vec<String>> = Mutex::new(Vec::new());
     static SERVICE_OUTPUT_RESULT: Mutex<Option<(String, usize)>> = Mutex::new(None);
     static TYPED_SERVICE_OUTPUT_RESULT: Mutex<Option<TypedServiceOutputResult>> = Mutex::new(None);
     static LARGE_LEAF_FILES: AtomicUsize = AtomicUsize::new(0);
-    static SERVICE_SOURCE_STATE: LazyLock<Arc<ServiceSourceState>> =
-        LazyLock::new(|| Arc::new(ServiceSourceState::new()));
     static REMOTE_STORES: LazyLock<Mutex<HashMap<String, Arc<InMemory>>>> =
         LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -1230,84 +1221,6 @@ mod tests {
         marker: usize,
         fields: Vec<String>,
         ids: Vec<i32>,
-    }
-
-    #[derive(Debug)]
-    struct ServiceSourceState {
-        started: AtomicBool,
-        stopped: AtomicBool,
-        cancelled: AtomicBool,
-        state_changed: tokio::sync::Notify,
-    }
-
-    impl ServiceSourceState {
-        fn new() -> Self {
-            Self {
-                started: AtomicBool::new(false),
-                stopped: AtomicBool::new(false),
-                cancelled: AtomicBool::new(false),
-                state_changed: tokio::sync::Notify::new(),
-            }
-        }
-
-        fn reset(&self) {
-            self.started.store(false, Ordering::SeqCst);
-            self.stopped.store(false, Ordering::SeqCst);
-            self.cancelled.store(false, Ordering::SeqCst);
-        }
-
-        async fn wait_until_stopped(&self) {
-            loop {
-                let state_changed = self.state_changed.notified();
-                if self.stopped.load(Ordering::SeqCst) {
-                    return;
-                }
-                state_changed.await;
-            }
-        }
-    }
-
-    struct ServiceSourceLifetime {
-        state: Arc<ServiceSourceState>,
-    }
-
-    impl Drop for ServiceSourceLifetime {
-        fn drop(&mut self) {
-            self.state.cancelled.store(true, Ordering::SeqCst);
-            self.state.stopped.store(true, Ordering::SeqCst);
-            self.state.state_changed.notify_waiters();
-        }
-    }
-
-    #[derive(Debug)]
-    struct StructuredServicePartition {
-        batch: RecordBatch,
-    }
-
-    impl PartitionStream for StructuredServicePartition {
-        fn schema(&self) -> &arrow::datatypes::SchemaRef {
-            self.batch.schema_ref()
-        }
-
-        fn execute(&self, _context: Arc<TaskContext>) -> SendableRecordBatchStream {
-            let mut stream = RecordBatchReceiverStreamBuilder::new(self.batch.schema(), 1);
-            let sender = stream.tx();
-            let batch = self.batch.clone();
-            let state = Arc::clone(&SERVICE_SOURCE_STATE);
-            stream.spawn(async move {
-                let _lifetime = ServiceSourceLifetime {
-                    state: Arc::clone(&state),
-                };
-                state.started.store(true, Ordering::SeqCst);
-                state.state_changed.notify_waiters();
-                loop {
-                    if sender.send(Ok(batch.clone())).await.is_err() {
-                        return Ok(());
-                    }
-                }
-            });
-            stream.build()
-        }
     }
 
     fn remote_store(root: &str) -> Arc<InMemory> {
@@ -1328,22 +1241,13 @@ mod tests {
         Ok(remote_store(store_url.as_str()))
     }
 
-    fn prepare_remote_output<'a>(
-        _: &'a StorageHandle,
-        _: &'a OutputPreparation,
-        _: &'a (),
-    ) -> BoxFuture<'a, Result<()>> {
-        Box::pin(async { Ok(()) })
-    }
-
     fn remote_backend() -> StorageBackend {
         StorageBackend::without_args()
             .name("test-remote")
             .schemes(["test-remote"])
-            .access(StorageAccess::ReadWrite)
+            .access(StorageAccess::ReadOnly)
             .allow_any_location()
             .object_store_creator(create_remote_store)
-            .prepare_output_target(prepare_remote_output)
             .build()
             .unwrap()
     }
@@ -1385,7 +1289,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("input.vortex");
         let mut sink = crate::sinks::vortex::VortexSink::create(
-            prepared_local_output(&path),
+            path.clone(),
             &batch.schema(),
             crate::sinks::vortex::VortexSinkOptions::new(),
         )
@@ -1414,20 +1318,6 @@ mod tests {
         Box::pin(async { test_provider(TestBatch::simple_with(&[4, 5, 6], &["d", "e", "f"])) })
     }
 
-    fn create_structured_service_input<'a>(
-        _: &'a str,
-        _: &'a SessionContext,
-        _: &'a (),
-    ) -> BoxFuture<'a, Result<Arc<dyn TableProvider>>> {
-        Box::pin(async {
-            let batch = TestBatch::simple_with(&[4, 5, 6], &["d", "e", "f"]);
-            Ok(Arc::new(StreamingTable::try_new(
-                batch.schema(),
-                vec![Arc::new(StructuredServicePartition { batch })],
-            )?) as Arc<dyn TableProvider>)
-        })
-    }
-
     fn write_test_service_output<'a>(
         target: &'a str,
         mut stream: SendableRecordBatchStream,
@@ -1440,20 +1330,6 @@ mod tests {
             }
             *SERVICE_OUTPUT_RESULT.lock().unwrap() = Some((target.to_owned(), rows));
             Ok(())
-        })
-    }
-
-    fn fail_after_one_service_batch<'a>(
-        _: &'a str,
-        mut stream: SendableRecordBatchStream,
-        _: &'a (),
-    ) -> BoxFuture<'a, Result<()>> {
-        Box::pin(async move {
-            stream
-                .next()
-                .await
-                .ok_or_else(|| anyhow::anyhow!("service source ended before its first batch"))??;
-            anyhow::bail!("controlled service output failure")
         })
     }
 
@@ -1875,96 +1751,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exact_remote_output_runs_through_the_complete_application_route() {
-        let directory = tempfile::tempdir().unwrap();
-        let input = directory.path().join("input.arrow");
-        TestFile::write_arrow_batch(
-            &input,
-            &TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]),
-        );
-        let cli = test_cli(
-            remote_application_definition(),
-            &[
-                "silk-chiffon",
-                "transform",
-                "--from",
-                input.to_str().unwrap(),
-                "--to",
-                "test-remote://coverage-output/exact/output.arrow",
-            ],
-        );
-        let Command::Transform(command) = cli.command else {
-            panic!("expected transform command");
-        };
-
-        crate::commands::transform::run(command).await.unwrap();
-
-        let bytes = remote_store("test-remote://coverage-output/")
-            .get(&ObjectPath::from("exact/output.arrow"))
-            .await
-            .unwrap()
-            .bytes()
-            .await
-            .unwrap();
-        let downloaded = directory.path().join("downloaded.arrow");
-        std::fs::write(&downloaded, bytes).unwrap();
-        assert_eq!(
-            TestExtract::i32_all(&TestFile::read_arrow(&downloaded), "id"),
-            [1, 2, 3]
-        );
-    }
-
-    #[tokio::test]
-    async fn partitioned_remote_output_prepares_and_completes_each_object_lazily() {
-        let directory = tempfile::tempdir().unwrap();
-        let input = directory.path().join("input.arrow");
-        TestFile::write_arrow_batch(
-            &input,
-            &TestBatch::simple_with(&[1, 2, 3], &["a", "b", "a"]),
-        );
-        let cli = test_cli(
-            remote_application_definition(),
-            &[
-                "silk-chiffon",
-                "transform",
-                "--from",
-                input.to_str().unwrap(),
-                "--to-many",
-                "test-remote://coverage-partitioned/{{name}}.parquet",
-                "--by",
-                "name",
-                "--partition-strategy",
-                "nosort-multi",
-            ],
-        );
-        let Command::Transform(command) = cli.command else {
-            panic!("expected transform command");
-        };
-
-        crate::commands::transform::run(command).await.unwrap();
-
-        let store = remote_store("test-remote://coverage-partitioned/");
-        let mut ids = Vec::new();
-        for name in ["a", "b"] {
-            let bytes = store
-                .get(&ObjectPath::from(format!("{name}.parquet")))
-                .await
-                .unwrap()
-                .bytes()
-                .await
-                .unwrap();
-            let downloaded = directory.path().join(format!("{name}.parquet"));
-            std::fs::write(&downloaded, bytes).unwrap();
-            ids.extend(TestExtract::i32_all(
-                &TestFile::read_parquet(&downloaded),
-                "id",
-            ));
-        }
-        ids.sort_unstable();
-        assert_eq!(ids, [1, 2, 3]);
-    }
-
-    #[tokio::test]
     async fn remote_arrow_stream_executes_through_the_scoped_store() {
         let root = "test-remote://coverage-stream/";
         put_remote_file(
@@ -2322,55 +2108,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn service_output_failure_cancels_the_service_input_execution() {
-        SERVICE_SOURCE_STATE.reset();
-        let input = ServiceInputDefinition::without_args(create_structured_service_input)
-            .name("structured-input")
-            .schemes(["structured-input"])
-            .build()
-            .unwrap();
-        let output = ServiceOutputDefinition::without_args(fail_after_one_service_batch)
-            .name("failing-output")
-            .schemes(["failing-output"])
-            .build()
-            .unwrap();
-        let definition = application_definition_with_services(
-            FormatRegistry::builder().build().unwrap(),
-            vec![input],
-            vec![output],
-        );
-        let cli = test_cli(
-            definition,
-            &[
-                "silk-chiffon",
-                "transform",
-                "--from",
-                "structured-input://dataset",
-                "--to",
-                "failing-output://result",
-            ],
-        );
-        let Command::Transform(command) = cli.command else {
-            panic!("expected transform command");
-        };
-
-        let error = crate::commands::transform::run(command).await.unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("controlled service output failure"),
-            "{error:#}"
-        );
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            SERVICE_SOURCE_STATE.wait_until_stopped().await;
-        })
-        .await
-        .expect("service input task survived its execution stream");
-        assert!(SERVICE_SOURCE_STATE.started.load(Ordering::SeqCst));
-        assert!(SERVICE_SOURCE_STATE.cancelled.load(Ordering::SeqCst));
-    }
-
-    #[tokio::test]
     async fn service_input_patterns_are_rejected_before_file_expansion() {
         let directory = tempfile::tempdir().unwrap();
         let output = directory.path().join("output.arrow");
@@ -2651,7 +2388,7 @@ mod tests {
         let args = ParquetArgs::from_arg_matches(matches).unwrap();
         let context = SinkBindingConfig::new(
             NonZeroUsize::new(4).unwrap(),
-            OpenSinkMode::Multiple,
+            SinkConcurrency::Concurrent,
             Vec::new(),
         );
         let options = parquet_options(&context, &args).unwrap();

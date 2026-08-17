@@ -158,7 +158,7 @@ fn enumerate_field(
 pub struct AdaptiveWriterConfig {
     /// Rows per row group (last row group may be smaller).
     pub max_row_group_size: usize,
-    /// Bytes buffered between Parquet encoding and the object upload.
+    /// I/O buffer size in bytes for writing encoded data to disk.
     pub buffer_size: usize,
     /// Number of row groups that can be encoded in parallel.
     pub max_row_group_concurrency: usize,

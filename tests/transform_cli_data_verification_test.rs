@@ -1401,7 +1401,7 @@ fn test_nosort_evict_partitioned_output() {
     .unwrap();
     TestFile::write_arrow_batch(&input, &batch);
 
-    let template = output_dir.join("{{category}}_{{file_number}}.parquet");
+    let template = output_dir.join("{{category}}.parquet");
     cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
             "transform",
@@ -1420,14 +1420,15 @@ fn test_nosort_evict_partitioned_output() {
         .assert()
         .success();
 
-    assert!(output_dir.join("a_0.parquet").exists());
-    assert!(output_dir.join("b_0.parquet").exists());
-    assert!(output_dir.join("c_0.parquet").exists());
+    // with max_open=2 and 3 partitions, at least one eviction happens
+    // first files: a.parquet, b.parquet; then c triggers eviction
+    assert!(output_dir.join("a.parquet").exists());
+    assert!(output_dir.join("b.parquet").exists());
+    assert!(output_dir.join("c.parquet").exists());
 
     // a reappears after eviction, so a_1.parquet should exist
     assert!(
         output_dir.join("a_1.parquet").exists(),
-        "the template should render the reopened partition's next file number"
+        "evicted partition 'a' should reopen as a_1.parquet"
     );
-    assert!(output_dir.join("b_1.parquet").exists());
 }

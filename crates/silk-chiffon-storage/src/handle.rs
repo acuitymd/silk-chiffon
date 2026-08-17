@@ -6,10 +6,10 @@
 
 use std::{path::PathBuf, sync::Arc};
 
-use object_store::{ObjectStore, path::Path as ObjectPath};
+use object_store::{ObjectStore, ObjectStoreExt, path::Path as ObjectPath};
 use url::Url;
 
-use crate::{StorageError, upload::ObjectUploadContext};
+use crate::StorageError;
 
 /// One exact location paired with the client and object path needed to access it.
 ///
@@ -21,7 +21,6 @@ pub struct StorageHandle {
     object_store: Arc<dyn ObjectStore>,
     object_path: ObjectPath,
     store_url: Url,
-    pub(crate) object_upload_context: Arc<ObjectUploadContext>,
 }
 
 impl std::fmt::Debug for StorageHandle {
@@ -32,10 +31,6 @@ impl std::fmt::Debug for StorageHandle {
             .field("object_store", &self.object_store)
             .field("object_path", &self.object_path)
             .field("store_url", &self.store_url)
-            .field(
-                "object_upload_settings",
-                &self.object_upload_context.settings,
-            )
             .finish()
     }
 }
@@ -46,14 +41,12 @@ impl StorageHandle {
         object_store: Arc<dyn ObjectStore>,
         object_path: ObjectPath,
         store_url: Url,
-        object_upload_context: Arc<ObjectUploadContext>,
     ) -> Self {
         Self {
             url,
             object_store,
             object_path,
             store_url,
-            object_upload_context,
         }
     }
 
@@ -95,5 +88,22 @@ impl StorageHandle {
         self.url
             .to_file_path()
             .map_err(|()| StorageError::InvalidFilePath(PathBuf::from(self.url.as_str())))
+    }
+}
+
+/// Requires an output handle's object to be absent.
+///
+/// This invokes `ObjectStoreExt::head` once, accepts a not-found response, and rejects an existing
+/// object. The check is advisory and does not reserve the destination against another writer.
+///
+/// # Errors
+///
+/// Returns [`StorageError::OutputAlreadyExists`] for an existing object or
+/// [`StorageError::ObjectStore`] when the metadata request fails for another reason.
+pub async fn ensure_output_absent(handle: &StorageHandle) -> Result<(), StorageError> {
+    match handle.object_store.head(&handle.object_path).await {
+        Ok(_) => Err(StorageError::OutputAlreadyExists(handle.url.clone())),
+        Err(object_store::Error::NotFound { .. }) => Ok(()),
+        Err(error) => Err(error.into()),
     }
 }

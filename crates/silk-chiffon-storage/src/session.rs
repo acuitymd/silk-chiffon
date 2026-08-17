@@ -4,11 +4,7 @@
 //! backend membership and routes; session creation adds each backend's parsed settings and a fresh
 //! object-store cache. Cloning a session shares that command-scoped state.
 
-use std::{
-    collections::{HashMap, HashSet},
-    fmt,
-    sync::Arc,
-};
+use std::{collections::HashMap, fmt, sync::Arc};
 
 use futures::TryStreamExt;
 use glob::MatchOptions;
@@ -18,10 +14,9 @@ use thiserror::Error;
 use url::{Position, Url};
 
 use crate::{
-    ExistingOutput, InputObject, Location, LocationInput, LocationPattern, ObjectUploadSettings,
-    OutputPreparation, RetryConfigurationError, StorageBackendBuildError, StorageDirection,
-    StorageError, StorageHandle, StorageRegistryError, backend::BackendBinding,
-    pattern::PatternInput, registry::RoutingIndex, upload::ObjectUploadContext,
+    InputObject, Location, LocationInput, LocationPattern, RetryConfigurationError,
+    StorageBackendBuildError, StorageDirection, StorageError, StorageHandle, StorageRegistryError,
+    backend::BackendBinding, pattern::PatternInput, registry::RoutingIndex,
 };
 
 /// Storage state bound to one command invocation.
@@ -42,10 +37,6 @@ impl fmt::Debug for StorageSession {
             .field("backends", &self.state.backends.len())
             .field("retry", &self.state.retry)
             .field(
-                "object_upload_settings",
-                &self.state.object_upload_context.settings,
-            )
-            .field(
                 "cached_object_stores",
                 &self.state.object_store_cache.lock().len(),
             )
@@ -58,14 +49,6 @@ struct SessionState {
     routing: Arc<RoutingIndex>,
     retry: Option<RetryConfig>,
     object_store_cache: Mutex<HashMap<Url, Arc<dyn ObjectStore>>>,
-    object_upload_context: Arc<ObjectUploadContext>,
-    claimed_output_targets: Mutex<HashSet<OutputTargetIdentity>>,
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct OutputTargetIdentity {
-    store_url: Url,
-    object_path: ObjectPath,
 }
 
 impl StorageSession {
@@ -73,17 +56,13 @@ impl StorageSession {
         backends: Box<[Box<dyn BackendBinding>]>,
         routing: Arc<RoutingIndex>,
         retry: Option<RetryConfig>,
-        object_upload_settings: ObjectUploadSettings,
     ) -> Self {
-        let object_upload_context = Arc::new(ObjectUploadContext::new(object_upload_settings));
         Self {
             state: Arc::new(SessionState {
                 backends,
                 routing,
                 retry,
                 object_store_cache: Mutex::new(HashMap::new()),
-                object_upload_context,
-                claimed_output_targets: Mutex::new(HashSet::new()),
             }),
         }
     }
@@ -93,11 +72,6 @@ impl StorageSession {
     /// This is `None` when no registered backend requested shared retries.
     pub fn retry_configuration(&self) -> Option<&RetryConfig> {
         self.state.retry.as_ref()
-    }
-
-    /// Returns the immutable object-upload settings for this command.
-    pub fn object_upload_settings(&self) -> &ObjectUploadSettings {
-        &self.state.object_upload_context.settings
     }
 
     /// Creates a handle for reading without checking whether the object exists.
@@ -124,49 +98,14 @@ impl StorageSession {
         Ok(InputObject::new(handle, metadata))
     }
 
-    /// Resolves, claims, checks, and performs backend preparation for one output target.
+    /// Creates a handle for writing without checking existence or overwrite policy.
     ///
-    /// The claim is retained for the session lifetime even when later preparation fails. External
-    /// existence checks are advisory and do not reserve the object against another process.
-    pub async fn prepare_output_target(
-        &self,
-        input: &LocationInput,
-        preparation: &OutputPreparation,
-    ) -> Result<StorageHandle, StorageError> {
-        let handle = self.create_handle(input, StorageDirection::Output)?;
-        let identity = OutputTargetIdentity {
-            store_url: handle.store_url().clone(),
-            object_path: handle.object_path().clone(),
-        };
-        if !self.state.claimed_output_targets.lock().insert(identity) {
-            return Err(StorageError::OutputTargetAlreadyClaimed {
-                target: handle.url().clone(),
-            });
-        }
-
-        if preparation.existing_output() == ExistingOutput::RejectIfObserved {
-            match handle.object_store().head(handle.object_path()).await {
-                Ok(_) => {
-                    return Err(StorageError::OutputTargetAlreadyExists {
-                        target: handle.url().clone(),
-                    });
-                }
-                Err(object_store::Error::NotFound { .. }) => {}
-                Err(source) => return Err(source.into()),
-            }
-        }
-
-        let backend_index = self.backend_index_for_url(handle.url())?;
-        let backend = &self.state.backends[backend_index];
-        backend
-            .prepare_output_target(&handle, preparation)
-            .await
-            .map_err(|source| StorageError::OutputTargetPreparation {
-                backend: backend.name(),
-                target: handle.url().clone(),
-                source,
-            })?;
-        Ok(handle)
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] when no backend owns the route, the selected backend rejects
+    /// output, a bare mapper returns a scheme not owned by that backend, or a callback fails.
+    pub fn output_handle(&self, input: &LocationInput) -> Result<StorageHandle, StorageError> {
+        self.create_handle(input, StorageDirection::Output)
     }
 
     /// Expands one exact location or object-path glob into zero or more input objects.
@@ -330,7 +269,6 @@ impl StorageSession {
                 pattern_handle.object_store(),
                 metadata.location.clone(),
                 pattern_handle.store_url().clone(),
-                Arc::clone(&self.state.object_upload_context),
             );
             handles.push(InputObject::new(handle, metadata));
         }
@@ -395,16 +333,12 @@ impl StorageSession {
     }
 
     fn backend_index_for_location(&self, location: &Location) -> Result<usize, StorageError> {
-        self.backend_index_for_url(location.url())
-    }
-
-    fn backend_index_for_url(&self, url: &Url) -> Result<usize, StorageError> {
         self.state
             .routing
             .backend_index_by_scheme
-            .get(url.scheme())
+            .get(location.url().scheme())
             .copied()
-            .ok_or_else(|| StorageError::UnsupportedScheme(url.scheme().to_owned()))
+            .ok_or_else(|| StorageError::UnsupportedScheme(location.url().scheme().to_owned()))
     }
 
     fn require_pattern_backend(
@@ -484,7 +418,6 @@ impl StorageSession {
             object_store,
             object_path,
             store_url,
-            Arc::clone(&self.state.object_upload_context),
         ))
     }
 }

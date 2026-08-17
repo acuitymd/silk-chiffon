@@ -22,8 +22,8 @@ pub(in crate::commands::transform) struct PartitionFieldValue {
     pub(in crate::commands::transform) value: Value,
 }
 
-/// Deterministic inventory of outputs completed before success or failure.
-#[derive(Clone, Debug, Serialize)]
+/// The deterministic report presented by `--list-outputs` after all writes finish.
+#[derive(Debug, Serialize)]
 #[serde(transparent)]
 pub(in crate::commands::transform) struct FileOutputReport(Vec<CompletedFileOutput>);
 

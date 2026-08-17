@@ -11,7 +11,7 @@ use clap::{ArgMatches, Args, Command, FromArgMatches};
 use thiserror::Error;
 
 use crate::{
-    ObjectUploadArgs, RetryArgs, StorageBackend, StorageSession, StorageSessionCreationError,
+    RetryArgs, StorageBackend, StorageSession, StorageSessionCreationError,
     backend::{CliArgumentKey, argument_keys},
 };
 
@@ -123,20 +123,11 @@ impl StorageRegistry {
     /// [`Self::create_session`]. Registry validation covers storage contributors, not arguments
     /// that were already present on `command`.
     pub fn augment_args(&self, mut command: Command) -> Command {
-        let host_about = command.get_about().cloned();
-        let host_long_about = command.get_long_about().cloned();
-        command = ObjectUploadArgs::augment_args(command);
         if self.uses_shared_retries {
             command = RetryArgs::augment_args(command);
         }
         for backend in &self.backends {
             command = backend.augment_args(command);
-        }
-        if let Some(about) = host_about {
-            command = command.about(about);
-        }
-        if let Some(long_about) = host_long_about {
-            command = command.long_about(long_about);
         }
         command
     }
@@ -154,7 +145,6 @@ impl StorageRegistry {
         &self,
         matches: &ArgMatches,
     ) -> Result<StorageSession, StorageSessionCreationError> {
-        let object_upload_settings = ObjectUploadArgs::from_arg_matches(matches)?.into_settings();
         let retry = if self.uses_shared_retries {
             Some(RetryArgs::from_arg_matches(matches)?.into_retry_config()?)
         } else {
@@ -171,7 +161,6 @@ impl StorageRegistry {
             backends.into_boxed_slice(),
             Arc::clone(&self.routing),
             retry,
-            object_upload_settings,
         ))
     }
 }
@@ -262,17 +251,6 @@ fn validate_cli_arguments(
 ) -> Result<(), StorageRegistryError> {
     let mut claims = HashMap::<CliArgumentKey, Vec<&'static str>>::new();
     let mut order = Vec::new();
-
-    let upload_keys = argument_keys(
-        "shared object uploads",
-        <ObjectUploadArgs as Args>::augment_args,
-    );
-    add_cli_claims(
-        &mut claims,
-        &mut order,
-        "shared object uploads",
-        &upload_keys,
-    );
 
     let retry_keys = uses_shared_retries
         .then(|| argument_keys("shared storage retries", <RetryArgs as Args>::augment_args));

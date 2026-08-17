@@ -7,14 +7,14 @@
 
 mod binding;
 
-use std::{collections::HashSet, fmt, future::Future, pin::Pin, sync::Arc};
+use std::{collections::HashSet, fmt, sync::Arc};
 
 use clap::{ArgMatches, Args, Command, FromArgMatches};
 use object_store::{ObjectStore, RetryConfig};
 use thiserror::Error;
 use url::Url;
 
-use crate::{Location, LocationPattern, OutputPreparation, StorageHandle};
+use crate::{Location, LocationPattern};
 
 pub(crate) use binding::BackendBinding;
 use binding::{BackendDefinition, TypedBackendDefinition};
@@ -54,22 +54,6 @@ pub type ObjectStoreCreatorFn<T> = fn(
     settings: &T,
     retry: Option<&RetryConfig>,
 ) -> anyhow::Result<Arc<dyn ObjectStore>>;
-
-/// Performs backend-specific work before a prepared output handle is opened by a format.
-pub type PrepareOutputTargetFn<T> =
-    for<'a> fn(
-        &'a StorageHandle,
-        &'a OutputPreparation,
-        &'a T,
-    ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>>;
-
-fn prepare_output_target_without_backend_work<'a, T>(
-    _handle: &'a StorageHandle,
-    _preparation: &'a OutputPreparation,
-    _settings: &'a T,
-) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>> {
-    Box::pin(async { Ok(()) })
-}
 
 /// Whether a handle will be used for input or output.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -203,7 +187,6 @@ pub struct StorageBackendBuilder<T> {
     bare_pattern_mapper: Option<BarePatternMapper<T>>,
     location_validator: Option<LocationValidator<T>>,
     object_store_creator: Option<ObjectStoreCreatorFn<T>>,
-    prepare_output_target: PrepareOutputTargetFn<T>,
     uses_shared_retries: bool,
     augment_args: fn(Command) -> Command,
     parse_args: fn(&ArgMatches) -> Result<T, clap::Error>,
@@ -222,7 +205,6 @@ impl<T> StorageBackendBuilder<T> {
             bare_pattern_mapper: None,
             location_validator: None,
             object_store_creator: None,
-            prepare_output_target: prepare_output_target_without_backend_work::<T>,
             uses_shared_retries: false,
             augment_args,
             parse_args,
@@ -280,12 +262,6 @@ impl<T> StorageBackendBuilder<T> {
     /// Sets the callback that creates object stores for session cache misses.
     pub fn object_store_creator(mut self, creator: ObjectStoreCreatorFn<T>) -> Self {
         self.object_store_creator = Some(creator);
-        self
-    }
-
-    /// Sets the backend callback run after generic output policy and before sink opening.
-    pub fn prepare_output_target(mut self, callback: PrepareOutputTargetFn<T>) -> Self {
-        self.prepare_output_target = callback;
         self
     }
 
@@ -353,7 +329,6 @@ impl<T> StorageBackendBuilder<T> {
                 bare_pattern_mapper: self.bare_pattern_mapper,
                 location_validator,
                 object_store_creator,
-                prepare_output_target: self.prepare_output_target,
                 uses_shared_retries: self.uses_shared_retries,
                 cli_argument_keys: cli_argument_keys.into_boxed_slice(),
                 augment_args: self.augment_args,
