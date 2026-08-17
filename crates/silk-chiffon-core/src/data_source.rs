@@ -36,9 +36,8 @@ pub enum RowCount {
 
 /// A format-independent input that DataFusion can plan and execute.
 ///
-/// File-format bindings create sources for resolved storage handles. Service-input bindings create
-/// them directly from raw exact references. Each source owns the state needed to open its logical
-/// input and exposes a table provider for planning in the command's shared DataFusion session.
+/// A format creates one source for each command input. The source owns any state needed to open
+/// that input and creates its table provider in the command's shared DataFusion session.
 /// DataFusion remains responsible for physical boundedness, partitioning, projection, and filter
 /// pushdown.
 #[async_trait]

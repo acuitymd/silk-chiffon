@@ -1,34 +1,33 @@
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 
 use crate::{
     ListOutputsFormat, PartitionStrategy, SortDirection, SortSpec, TransformCommand,
     default_thread_budget,
-    operations::{query::QueryOperation, sort::SortOperation},
-    utils::{
-        memory::{estimate_sort_spill_reservation, measure_avg_input_row_bytes},
-        projected_stream::project_stream,
+    io_strategies::{
+        OutputFileInfo, input_sources::InputSources, output_strategy::SinkOpenerFn,
+        path_template::PathTemplate,
     },
+    operations::{query::QueryOperation, sort::SortOperation},
+    pipeline::Pipeline,
+    sources::data_source::{DataSource, Replayability, RowCount},
+    utils::memory::{estimate_sort_spill_reservation, measure_avg_input_row_bytes},
 };
 use anyhow::{Result, anyhow};
 use camino::Utf8Path;
+use glob::glob;
 use owo_colors::OwoColorize;
 use silk_chiffon_core::{
-    DataSource, InputSources, OutputOrderingColumn, Pipeline, Replayability, RowCount,
-    SinkBindingConfig, SinkConcurrency, SortDirection as CoreSortDirection,
+    OutputOrderingColumn, SinkBinding, SinkBindingConfig, SinkConcurrency,
+    SortDirection as CoreSortDirection, TransformBinding, TransformBindings,
 };
+use silk_chiffon_storage::{LocationInput, StorageHandle, StorageSession};
 use tabled::{builder::Builder, settings::Style};
-
-mod file_input;
-mod file_output;
-mod scheme;
-
-use file_input::FileInputRoute;
-use file_output::{FileOutputReport, FileOutputRoute, FileOutputTarget};
-use scheme::explicit_scheme;
 
 pub async fn run(args: TransformCommand) -> Result<()> {
     let TransformCommand {
-        inputs,
+        from,
+        from_many,
         to,
         to_many,
         by,
@@ -54,10 +53,6 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         spill_compression,
         formats,
         storage,
-        service_inputs,
-        service_outputs,
-        input_schemes,
-        output_schemes,
     } = args;
 
     let usable_cpus = thread_budget
@@ -68,13 +63,8 @@ pub async fn run(args: TransformCommand) -> Result<()> {
     let has_sort =
         sort_by.is_some() || (by.is_some() && partition_strategy == PartitionStrategy::SortSingle);
 
-    if preserve_input_order
-        && !matches!(
-            &inputs,
-            crate::InputRequest::ExactReferences(references) if references.len() == 1
-        )
-    {
-        anyhow::bail!("--preserve-input-order requires exactly one --from reference");
+    if preserve_input_order && from.is_none() {
+        anyhow::bail!("--preserve-input-order requires --from (single input file)");
     }
 
     let effective_target_partitions = if preserve_input_order {
@@ -116,66 +106,72 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         .with_spill_compression(spill_compression);
     let session = pipeline.create_session_context()?;
 
-    let file_inputs = FileInputRoute::new(&storage, &formats, input_format.as_deref(), &session);
-    let mut sources: Vec<Box<dyn DataSource>> = Vec::new();
-    let mut used_file_input = false;
-    match &inputs {
-        crate::InputRequest::ExactReferences(references) => {
-            for reference in references.iter() {
-                let source = match explicit_scheme(reference) {
-                    Some(scheme) => match input_schemes.owner(scheme) {
-                        Some(crate::registration::InputSchemeOwner::FileInput) => {
-                            used_file_input = true;
-                            file_inputs.create_exact_source(reference).await?
-                        }
-                        Some(crate::registration::InputSchemeOwner::ServiceInput(index)) => {
-                            service_inputs
-                                .get(*index)
-                                .create_source(reference, &session)
-                                .await?
-                        }
-                        None => anyhow::bail!("unsupported input scheme {scheme:?}"),
-                    },
-                    None => {
-                        used_file_input = true;
-                        file_inputs.create_exact_source(reference).await?
-                    }
-                };
-                sources.push(source);
+    let (input_paths, should_glob) = if let Some(single_input) = from {
+        (vec![single_input], false)
+    } else {
+        (from_many, true)
+    };
+
+    let input_sources = if !should_glob && input_paths.len() == 1 {
+        let handle = input_handle(&input_paths[0], &storage)?;
+        let format = format_for_handle(
+            &formats,
+            input_format.as_deref(),
+            &handle,
+            &input_paths[0],
+            "input",
+        )?;
+        let source = format.create_source(&handle, &session).await?;
+        pipeline = pipeline.with_storage_handle(handle);
+        InputSources::new(source)
+    } else {
+        let mut expanded_paths = Vec::new();
+
+        for pattern in &input_paths {
+            for entry in glob(pattern)
+                .map_err(|e| anyhow!("Error expanding glob pattern {}: {}", pattern, e))?
+            {
+                expanded_paths.push(
+                    entry
+                        .map_err(|e| anyhow!("Error decoding file path: {}", e))?
+                        .to_string_lossy()
+                        .to_string(),
+                );
             }
         }
-        crate::InputRequest::Patterns(patterns) => {
-            for pattern in patterns.iter() {
-                if let Some(scheme) = explicit_scheme(pattern) {
-                    match input_schemes.owner(scheme) {
-                        Some(crate::registration::InputSchemeOwner::FileInput) => {}
-                        Some(crate::registration::InputSchemeOwner::ServiceInput(index)) => {
-                            anyhow::bail!(
-                                "service input {:?} does not support --from-pattern \
-                                 {pattern:?}; use --from",
-                                service_inputs.get(*index).name()
-                            );
-                        }
-                        None => anyhow::bail!("unsupported input scheme {scheme:?}"),
-                    }
-                }
-            }
-            used_file_input = true;
-            sources.extend(file_inputs.create_pattern_sources(patterns.iter()).await?);
+
+        expanded_paths.sort();
+        expanded_paths.dedup();
+
+        if expanded_paths.is_empty() {
+            anyhow::bail!("No input files found matching patterns: {:?}", input_paths);
         }
-    }
-    if input_format.is_some() && !used_file_input {
-        anyhow::bail!("--input-format applies only to file inputs");
-    }
-    let mut sources = sources.into_iter();
-    let mut input_sources = InputSources::new(
-        sources
-            .next()
-            .expect("InputRequest is nonempty and every reference creates one source"),
-    );
-    for source in sources {
-        input_sources.push(source);
-    }
+
+        let mut sources: Vec<Box<dyn DataSource>> = Vec::new();
+        for input_path in &expanded_paths {
+            let handle = input_handle(input_path, &storage)?;
+            let format = format_for_handle(
+                &formats,
+                input_format.as_deref(),
+                &handle,
+                input_path,
+                "input",
+            )?;
+            let source = format.create_source(&handle, &session).await?;
+            pipeline = pipeline.with_storage_handle(handle);
+            sources.push(source);
+        }
+        let mut sources = sources.into_iter();
+        let mut inputs = InputSources::new(
+            sources
+                .next()
+                .expect("empty path expansion is rejected above"),
+        );
+        for source in sources {
+            inputs.push(source);
+        }
+        inputs
+    };
 
     let list_outputs_format = list_outputs;
 
@@ -264,50 +260,29 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         }
     }
 
-    if let Some(target) = to.as_deref()
-        && let Some(scheme) = explicit_scheme(target)
-    {
-        match output_schemes.owner(scheme) {
-            Some(crate::registration::OutputSchemeOwner::ServiceOutput(index)) => {
-                if output_format.is_some() {
-                    anyhow::bail!("--output-format applies only to file outputs");
-                }
-                if list_outputs.is_some() {
-                    anyhow::bail!("--list-outputs applies only to file outputs");
-                }
-                let projection = if exclude_columns.is_empty() {
-                    None
-                } else {
-                    let schema = prepared.output_schema();
-                    validate_excluded_columns(&schema, &exclude_columns)?;
-                    projection_indices_excluding(&schema, &exclude_columns)
-                };
-                let mut stream = prepared.begin_execution()?.into_sendable_stream();
-                if let Some(indices) = projection {
-                    stream = project_stream(stream, indices)?;
-                }
-                service_outputs.get(*index).write(target, stream).await?;
-                return Ok(());
-            }
-            Some(crate::registration::OutputSchemeOwner::FileOutput) => {}
-            None => anyhow::bail!("unsupported output scheme {scheme:?}"),
-        }
-    }
-    if let Some(template) = to_many.as_deref()
-        && let Some(scheme) = explicit_scheme(template)
-    {
-        match output_schemes.owner(scheme) {
-            Some(crate::registration::OutputSchemeOwner::FileOutput) => {}
-            Some(crate::registration::OutputSchemeOwner::ServiceOutput(index)) => {
-                anyhow::bail!(
-                    "service output {:?} does not support --to-many {template:?}; use --to",
-                    service_outputs.get(*index).name()
-                );
-            }
-            None => anyhow::bail!("unsupported output scheme {scheme:?}"),
-        }
-    }
-
+    let output_location = to
+        .as_deref()
+        .or(to_many.as_deref())
+        .expect("Clap requires output");
+    let output_handle = to
+        .as_deref()
+        .map(|output| output_handle(output, &storage))
+        .transpose()?;
+    let output_format = match &output_handle {
+        Some(handle) => format_for_handle(
+            &formats,
+            output_format.as_deref(),
+            handle,
+            output_location,
+            "output",
+        )?,
+        None => format_for_path(
+            &formats,
+            output_format.as_deref(),
+            output_location,
+            "output",
+        )?,
+    };
     let output_ordering = user_sort_spec_without_partition_cols
         .columns
         .iter()
@@ -340,72 +315,107 @@ pub async fn run(args: TransformCommand) -> Result<()> {
         sink_concurrency,
         output_ordering,
     );
-    let target = match (to, to_many) {
-        (Some(target), None) => FileOutputTarget::Exact {
-            target,
-            exclude_columns,
-            create_dirs,
-            overwrite,
-        },
-        (None, Some(pattern)) => FileOutputTarget::Template {
-            pattern,
-            partition_fields: partition_columns,
-            strategy: partition_strategy,
-            max_open_partitions,
-            exclude_columns,
-            create_dirs,
-            overwrite,
-        },
-        _ => unreachable!("Clap requires exactly one output mode"),
-    };
-    let output = FileOutputRoute::new(
-        &storage,
-        &formats,
-        output_format.as_deref(),
-        prepared.session(),
-    )
-    .bind(target, &sink_context, &prepared.output_schema())
-    .await?;
+    let sink_binding = output_format.bind_sink(&sink_context).await?;
+    let sink_opener = storage_sink_opener(storage.clone(), sink_binding);
 
-    let execution = prepared.begin_execution()?;
-    let report = output.write(execution.into_sendable_stream()).await?;
+    if let Some(output_path) = to {
+        let handle = output_handle.expect("an exact output creates a handle");
+        let output_path = local_output_path(&output_path, &handle)?;
+        prepared = prepared.with_storage_handle(&handle);
+        prepared = prepared.with_output_strategy_with_single_sink(
+            output_path,
+            sink_opener,
+            exclude_columns.clone(),
+            create_dirs,
+            overwrite,
+        );
+    } else if let Some(template) = to_many {
+        let path_template = PathTemplate::new(template);
+
+        if max_open_partitions.is_some() && partition_strategy != PartitionStrategy::NosortEvict {
+            anyhow::bail!(
+                "--max-open-partitions is only supported with --partition-strategy=nosort-evict"
+            );
+        }
+
+        let max_open_partitions = NonZeroUsize::new(max_open_partitions.unwrap_or(100))
+            .ok_or_else(|| anyhow!("--max-open-partitions must be at least 1"))?;
+
+        match partition_strategy {
+            PartitionStrategy::NosortMulti => {
+                prepared = prepared.with_multi_writer_partitioned_sink(
+                    partition_columns,
+                    path_template,
+                    sink_opener,
+                    exclude_columns.clone(),
+                    create_dirs,
+                    overwrite,
+                    list_outputs.unwrap_or_default(),
+                );
+            }
+            PartitionStrategy::NosortEvict => {
+                prepared = prepared.with_evict_writer_partitioned_sink(
+                    partition_columns,
+                    path_template,
+                    sink_opener,
+                    exclude_columns.clone(),
+                    create_dirs,
+                    overwrite,
+                    list_outputs.unwrap_or_default(),
+                    max_open_partitions,
+                );
+            }
+            PartitionStrategy::SortSingle => {
+                prepared = prepared.with_single_writer_partitioned_sink(
+                    partition_columns,
+                    path_template,
+                    sink_opener,
+                    exclude_columns.clone(),
+                    create_dirs,
+                    overwrite,
+                    list_outputs.unwrap_or_default(),
+                );
+            }
+        }
+    }
+
+    let files = prepared.execute().await?;
 
     if let Some(format) = list_outputs_format {
-        print_output_files(&report, format, list_outputs_file.as_deref())?;
+        print_output_files(&files, format, list_outputs_file.as_deref())?;
     }
 
     Ok(())
 }
 
 fn print_output_files(
-    report: &FileOutputReport,
+    files: &[OutputFileInfo],
     format: ListOutputsFormat,
     output_path: Option<&Utf8Path>,
 ) -> Result<()> {
     let output = match format {
         ListOutputsFormat::None => return Ok(()),
         ListOutputsFormat::Text => {
-            if report.outputs().is_empty() {
+            if files.is_empty() {
                 return Ok(());
             }
 
             let mut builder = Builder::default();
 
-            let mut header: Vec<String> = report
-                .outputs()
+            let mut header: Vec<String> = files
                 .first()
-                .map(|output| {
-                    output
-                        .partition_fields
+                .map(|f| {
+                    f.partition_values
                         .iter()
-                        .map(|value| to_title_case(&value.field))
+                        .map(|pv| to_title_case(&pv.column))
                         .collect()
                 })
                 .unwrap_or_default();
-            header.push("Durable Locations".to_string());
-            header.push("Rows Written".to_string());
+            header.push("Path".to_string());
+            header.push("Row Count".to_string());
 
             if output_path.is_none() {
+                // writing to stdout, so use colors
                 let colored_header: Vec<String> =
                     header.iter().map(|h| h.bold().to_string()).collect();
                 builder.push_record(colored_header);
@@ -413,32 +423,38 @@ fn print_output_files(
                 builder.push_record(header);
             }
 
-            for completed in report.outputs() {
-                let mut row: Vec<String> = completed
-                    .partition_fields
+            // sort by path for consistent output
+            let mut sorted_files = files.to_vec();
+            sorted_files.sort_by(|a, b| a.path.cmp(&b.path));
+
+            for file in &sorted_files {
+                let mut row: Vec<String> = file
+                    .partition_values
                     .iter()
-                    .map(|value| {
-                        let value = format_json_value(&value.value);
+                    .map(|pv| {
+                        let val = format_json_value(&pv.value);
                         if output_path.is_none() {
-                            value.green().to_string()
+                            // again, writing to stdout, so use colors
+                            val.green().to_string()
                         } else {
-                            value
+                            val
                         }
                     })
                     .collect();
-                row.push(completed.durable_locations.join(", "));
-                let rows_written = completed.rows_written.to_string();
+                row.push(file.path.clone());
+                let row_count = file.row_count.to_string();
                 if output_path.is_none() {
-                    row.push(rows_written.cyan().to_string());
+                    // once again, writing to stdout, so use colors
+                    row.push(row_count.cyan().to_string());
                 } else {
-                    row.push(rows_written);
+                    row.push(row_count);
                 }
                 builder.push_record(row);
             }
 
             builder.build().with(Style::rounded()).to_string()
         }
-        ListOutputsFormat::Json => serde_json::to_string_pretty(report)?,
+        ListOutputsFormat::Json => serde_json::to_string_pretty(files)?,
     };
 
     if let Some(path) = output_path {
@@ -473,25 +489,91 @@ fn to_title_case(s: &str) -> String {
         .join(" ")
 }
 
-fn validate_excluded_columns(
-    schema: &arrow::datatypes::SchemaRef,
-    exclude_columns: &[String],
-) -> Result<()> {
-    for column in exclude_columns {
-        schema
-            .column_with_name(column)
-            .ok_or_else(|| anyhow!("Column {column:?} not found in schema"))?;
-    }
-    Ok(())
+fn input_handle(input: &str, storage: &StorageSession) -> Result<StorageHandle> {
+    let location = LocationInput::parse(input)?;
+    Ok(storage.input_handle(&location)?)
 }
 
-fn projection_indices_excluding(
-    schema: &arrow::datatypes::SchemaRef,
-    exclude_columns: &[String],
-) -> Option<Vec<usize>> {
-    (!exclude_columns.is_empty()).then(|| {
-        (0..schema.fields().len())
-            .filter(|index| !exclude_columns.contains(schema.field(*index).name()))
-            .collect()
+fn output_handle(output: &str, storage: &StorageSession) -> Result<StorageHandle> {
+    let location = LocationInput::parse(output)?;
+    Ok(storage.output_handle(&location)?)
+}
+
+fn format_for_handle<'a>(
+    formats: &'a TransformBindings,
+    explicit_format: Option<&str>,
+    handle: &StorageHandle,
+    display_path: &str,
+    direction: &str,
+) -> Result<&'a TransformBinding> {
+    if let Some(format) = explicit_format {
+        return formats
+            .get(format)
+            .ok_or_else(|| anyhow!("format is not registered: {format}"));
+    }
+    let extension = std::path::Path::new(handle.url().path())
+        .extension()
+        .and_then(std::ffi::OsStr::to_str);
+    format_for_extension(formats, extension, display_path, direction)
+}
+
+fn format_for_path<'a>(
+    formats: &'a TransformBindings,
+    explicit_format: Option<&str>,
+    path: &str,
+    direction: &str,
+) -> Result<&'a TransformBinding> {
+    if let Some(format) = explicit_format {
+        return formats
+            .get(format)
+            .ok_or_else(|| anyhow!("format is not registered: {format}"));
+    }
+    let extension = std::path::Path::new(path)
+        .extension()
+        .and_then(std::ffi::OsStr::to_str);
+    format_for_extension(formats, extension, path, direction)
+}
+
+fn format_for_extension<'a>(
+    formats: &'a TransformBindings,
+    extension: Option<&str>,
+    path: &str,
+    direction: &str,
+) -> Result<&'a TransformBinding> {
+    extension
+        .and_then(|extension| formats.by_extension(extension))
+        .ok_or_else(|| {
+            anyhow!(
+                "Could not detect format from path '{}'. Use --{}-format to specify explicitly.",
+                path,
+                direction
+            )
+        })
+}
+
+fn local_output_path(output: &str, handle: &StorageHandle) -> Result<String> {
+    if !output.starts_with("file:///") {
+        return Ok(output.to_owned());
+    }
+    handle
+        .local_path()?
+        .into_os_string()
+        .into_string()
+        .map_err(|path| anyhow!("Local path is not valid UTF-8: {}", path.to_string_lossy()))
+}
+
+fn storage_sink_opener(
+    storage: StorageSession,
+    sink_binding: Box<dyn SinkBinding>,
+) -> SinkOpenerFn {
+    let sink_binding: Arc<dyn SinkBinding> = sink_binding.into();
+    Box::new(move |path, schema| {
+        let storage = storage.clone();
+        let sink_binding = Arc::clone(&sink_binding);
+        Box::pin(async move {
+            let location = LocationInput::parse(&path)?;
+            let handle = storage.output_handle(&location)?;
+            sink_binding.open_sink(handle, schema).await
+        })
     })
 }

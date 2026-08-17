@@ -78,7 +78,6 @@ strum_macros = "^0.28.0"
 sysinfo = "^0.39.6"
 tabled = { version = "^0.21.0", features = ["ansi"] }
 tempfile = "^3.27.0"
-thiserror.workspace = true
 tokio = { version = "^1.53.1", features = ["rt-multi-thread", "macros", "io-util", "fs", "sync"] }
 url.workspace = true
 uuid = { version = "^1.24.0", features = ["v4"] }

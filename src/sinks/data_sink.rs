@@ -1,1 +1,1 @@
-pub use silk_chiffon_core::{DataSink, SinkCompletion};
+pub use silk_chiffon_core::{DataSink, SinkResult};

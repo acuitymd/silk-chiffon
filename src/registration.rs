@@ -1,9 +1,4 @@
-use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
-    ffi::OsString,
-    fmt,
-    sync::Arc,
-};
+use std::{ffi::OsString, sync::Arc};
 
 use anyhow::{Context, Result, anyhow};
 use apply_if::ApplyIf;
@@ -17,12 +12,10 @@ use clap::{
 use datafusion::prelude::SessionContext;
 use silk_chiffon_core::{
     DataSink, DataSource, FormatDefinition, FormatFuture, FormatMatch, FormatRegistry,
-    InspectionDefinition, InspectionMode, InspectionOutput, OutputOrderingColumn,
-    ServiceInputBinding, ServiceInputDefinition, ServiceOutputBinding, ServiceOutputDefinition,
-    SinkBinding, SinkBindingConfig, SinkConcurrency, TransformDefinition,
+    InspectionDefinition, InspectionMode, InspectionOutput, OutputOrderingColumn, SinkBinding,
+    SinkBindingConfig, SinkConcurrency, TransformDefinition,
 };
-use silk_chiffon_storage::{StorageDirection, StorageHandle, StorageRegistry};
-use thiserror::Error;
+use silk_chiffon_storage::{StorageHandle, StorageRegistry};
 
 #[cfg(feature = "local")]
 use silk_chiffon_storage::local;
@@ -64,438 +57,17 @@ pub fn storage_registry() -> StorageRegistry {
         .expect("built-in storage backends must not conflict")
 }
 
-pub(crate) enum InputSchemeOwner {
-    FileInput,
-    ServiceInput(usize),
-}
-
-pub(crate) enum OutputSchemeOwner {
-    FileOutput,
-    ServiceOutput(usize),
-}
-
-pub(crate) struct InputSchemeIndex(HashMap<&'static str, InputSchemeOwner>);
-
-impl InputSchemeIndex {
-    fn new(
-        storage: &StorageRegistry,
-        services: &[ServiceInputDefinition],
-    ) -> Result<Self, ApplicationAssemblyError> {
-        let mut claims = BTreeMap::<&'static str, Vec<String>>::new();
-        for backend in storage
-            .backends()
-            .iter()
-            .filter(|backend| backend.supports(StorageDirection::Input))
-        {
-            for &scheme in backend.schemes() {
-                claims
-                    .entry(scheme)
-                    .or_default()
-                    .push(format!("file input storage {:?}", backend.name()));
-            }
-        }
-        for (position, service) in services.iter().enumerate() {
-            for &scheme in service.schemes() {
-                claims.entry(scheme).or_default().push(format!(
-                    "service input {:?} at position {}",
-                    service.name(),
-                    position + 1
-                ));
-            }
-        }
-        if let Some((&scheme, claimants)) = claims.iter().find(|(_, claimants)| claimants.len() > 1)
-        {
-            return Err(ApplicationAssemblyError::InputSchemeClaimConflict {
-                scheme,
-                claimants: ConflictingClaimants::from_vec(claimants.clone()),
-            });
-        }
-
-        let mut index = HashMap::new();
-        for backend in storage
-            .backends()
-            .iter()
-            .filter(|backend| backend.supports(StorageDirection::Input))
-        {
-            for &scheme in backend.schemes() {
-                index.insert(scheme, InputSchemeOwner::FileInput);
-            }
-        }
-        for (position, service) in services.iter().enumerate() {
-            for &scheme in service.schemes() {
-                index.insert(scheme, InputSchemeOwner::ServiceInput(position));
-            }
-        }
-        Ok(Self(index))
-    }
-
-    pub(crate) fn owner(&self, scheme: &str) -> Option<&InputSchemeOwner> {
-        self.0.get(scheme)
-    }
-}
-
-pub(crate) struct OutputSchemeIndex(HashMap<&'static str, OutputSchemeOwner>);
-
-impl OutputSchemeIndex {
-    fn new(
-        storage: &StorageRegistry,
-        services: &[ServiceOutputDefinition],
-    ) -> Result<Self, ApplicationAssemblyError> {
-        let mut claims = BTreeMap::<&'static str, Vec<String>>::new();
-        for backend in storage
-            .backends()
-            .iter()
-            .filter(|backend| backend.supports(StorageDirection::Output))
-        {
-            for &scheme in backend.schemes() {
-                claims
-                    .entry(scheme)
-                    .or_default()
-                    .push(format!("file output storage {:?}", backend.name()));
-            }
-        }
-        for (position, service) in services.iter().enumerate() {
-            for &scheme in service.schemes() {
-                claims.entry(scheme).or_default().push(format!(
-                    "service output {:?} at position {}",
-                    service.name(),
-                    position + 1
-                ));
-            }
-        }
-        if let Some((&scheme, claimants)) = claims.iter().find(|(_, claimants)| claimants.len() > 1)
-        {
-            return Err(ApplicationAssemblyError::OutputSchemeClaimConflict {
-                scheme,
-                claimants: ConflictingClaimants::from_vec(claimants.clone()),
-            });
-        }
-
-        let mut index = HashMap::new();
-        for backend in storage
-            .backends()
-            .iter()
-            .filter(|backend| backend.supports(StorageDirection::Output))
-        {
-            for &scheme in backend.schemes() {
-                index.insert(scheme, OutputSchemeOwner::FileOutput);
-            }
-        }
-        for (position, service) in services.iter().enumerate() {
-            for &scheme in service.schemes() {
-                index.insert(scheme, OutputSchemeOwner::ServiceOutput(position));
-            }
-        }
-        Ok(Self(index))
-    }
-
-    pub(crate) fn owner(&self, scheme: &str) -> Option<&OutputSchemeOwner> {
-        self.0.get(scheme)
-    }
-}
-
-pub(crate) struct ServiceInputBindings(Box<[ServiceInputBinding]>);
-
-impl ServiceInputBindings {
-    pub(crate) fn get(&self, index: usize) -> &ServiceInputBinding {
-        &self.0[index]
-    }
-}
-
-pub(crate) struct ServiceOutputBindings(Box<[ServiceOutputBinding]>);
-
-impl ServiceOutputBindings {
-    pub(crate) fn get(&self, index: usize) -> &ServiceOutputBinding {
-        &self.0[index]
-    }
-}
-
-#[derive(Debug)]
-struct DefinitionSnapshot {
-    position: usize,
-    name: &'static str,
-    schemes: Box<[&'static str]>,
-}
-
-impl fmt::Display for DefinitionSnapshot {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "definition #{} {:?} schemes {:?}",
-            self.position, self.name, self.schemes
-        )
-    }
-}
-
-#[derive(Debug)]
-struct ConflictingClaimants {
-    first: String,
-    second: String,
-    rest: Box<[String]>,
-}
-
-impl ConflictingClaimants {
-    fn from_vec(claimants: Vec<String>) -> Self {
-        let mut claimants = claimants.into_iter();
-        Self {
-            first: claimants.next().expect("a conflict has a first claimant"),
-            second: claimants.next().expect("a conflict has a second claimant"),
-            rest: claimants.collect(),
-        }
-    }
-}
-
-impl fmt::Display for ConflictingClaimants {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{}, {}", self.first, self.second)?;
-        for claimant in &self.rest {
-            write!(formatter, ", {claimant}")?;
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Error)]
-enum ApplicationAssemblyError {
-    #[error(
-        "duplicate service input name {name:?}: {}",
-        format_snapshots(.definitions)
-    )]
-    DuplicateServiceInputName {
-        name: &'static str,
-        definitions: Box<[DefinitionSnapshot]>,
-    },
-    #[error(
-        "duplicate service output name {name:?}: {}",
-        format_snapshots(.definitions)
-    )]
-    DuplicateServiceOutputName {
-        name: &'static str,
-        definitions: Box<[DefinitionSnapshot]>,
-    },
-    #[error("input scheme {scheme:?} is claimed by multiple routes: {claimants}")]
-    InputSchemeClaimConflict {
-        scheme: &'static str,
-        claimants: ConflictingClaimants,
-    },
-    #[error("output scheme {scheme:?} is claimed by multiple routes: {claimants}")]
-    OutputSchemeClaimConflict {
-        scheme: &'static str,
-        claimants: ConflictingClaimants,
-    },
-    #[error("CLI key {key:?} is claimed by multiple definitions: {claimants}")]
-    CliKeyClaimConflict {
-        key: String,
-        claimants: ConflictingClaimants,
-    },
-}
-
-fn format_snapshots(snapshots: &[DefinitionSnapshot]) -> String {
-    snapshots
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-fn validate_service_input_names(
-    definitions: &[ServiceInputDefinition],
-) -> Result<(), ApplicationAssemblyError> {
-    validate_service_names(
-        definitions
-            .iter()
-            .map(|definition| (definition.name(), definition.schemes())),
-    )
-    .map_err(
-        |(name, definitions)| ApplicationAssemblyError::DuplicateServiceInputName {
-            name,
-            definitions,
-        },
-    )
-}
-
-fn validate_service_output_names(
-    definitions: &[ServiceOutputDefinition],
-) -> Result<(), ApplicationAssemblyError> {
-    validate_service_names(
-        definitions
-            .iter()
-            .map(|definition| (definition.name(), definition.schemes())),
-    )
-    .map_err(
-        |(name, definitions)| ApplicationAssemblyError::DuplicateServiceOutputName {
-            name,
-            definitions,
-        },
-    )
-}
-
-fn validate_service_names<'a>(
-    definitions: impl Iterator<Item = (&'static str, &'a [&'static str])>,
-) -> std::result::Result<(), (&'static str, Box<[DefinitionSnapshot]>)> {
-    let definitions = definitions.collect::<Vec<_>>();
-    for &(name, _) in &definitions {
-        let snapshots = definitions
-            .iter()
-            .enumerate()
-            .filter(|(_, (candidate, _))| *candidate == name)
-            .map(|(position, &(name, schemes))| DefinitionSnapshot {
-                position: position + 1,
-                name,
-                schemes: schemes.into(),
-            })
-            .collect::<Vec<_>>();
-        if snapshots.len() > 1 {
-            return Err((name, snapshots.into_boxed_slice()));
-        }
-    }
-    Ok(())
-}
-
-fn validate_cli_key_claims(
-    formats: &FormatRegistry,
-    storage: &StorageRegistry,
-    service_inputs: &[ServiceInputDefinition],
-    service_outputs: &[ServiceOutputDefinition],
-) -> Result<(), ApplicationAssemblyError> {
-    let mut claims = BTreeMap::<CliKey, Vec<String>>::new();
-    let command_name = "fake-convenience-command-that-is-never-used";
-    add_cli_key_claims(
-        &mut claims,
-        "application transform arguments",
-        &TransformArgs::augment_args(ClapCommand::new(command_name)),
-    );
-    add_cli_key_claims(
-        &mut claims,
-        "format definitions",
-        &formats.augment_transform_args(ClapCommand::new(command_name)),
-    );
-    add_cli_key_claims(
-        &mut claims,
-        "storage definitions",
-        &storage.augment_args(ClapCommand::new(command_name)),
-    );
-    for (position, definition) in service_inputs.iter().enumerate() {
-        add_cli_key_claims(
-            &mut claims,
-            &format!(
-                "service input {:?} at position {}",
-                definition.name(),
-                position + 1
-            ),
-            &definition.augment_args(ClapCommand::new(command_name)),
-        );
-    }
-    for (position, definition) in service_outputs.iter().enumerate() {
-        add_cli_key_claims(
-            &mut claims,
-            &format!(
-                "service output {:?} at position {}",
-                definition.name(),
-                position + 1
-            ),
-            &definition.augment_args(ClapCommand::new(command_name)),
-        );
-    }
-
-    if let Some((key, claimants)) = claims.iter().find(|(_, claimants)| claimants.len() > 1) {
-        return Err(ApplicationAssemblyError::CliKeyClaimConflict {
-            key: key.to_string(),
-            claimants: ConflictingClaimants::from_vec(claimants.clone()),
-        });
-    }
-    Ok(())
-}
-
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-enum CliKey {
-    Id(String),
-    Long(String),
-    Short(char),
-}
-
-impl fmt::Display for CliKey {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Id(id) => write!(formatter, "Clap ID {id:?}"),
-            Self::Long(long) => write!(formatter, "--{long}"),
-            Self::Short(short) => write!(formatter, "-{short}"),
-        }
-    }
-}
-
-fn add_cli_key_claims(
-    claims: &mut BTreeMap<CliKey, Vec<String>>,
-    claimant: &str,
-    command: &ClapCommand,
-) {
-    let mut keys = BTreeSet::new();
-    for argument in command.get_arguments() {
-        keys.insert(CliKey::Id(argument.get_id().as_str().to_owned()));
-        if let Some(long) = argument.get_long() {
-            keys.insert(CliKey::Long(long.to_owned()));
-        }
-        if let Some(aliases) = argument.get_all_aliases() {
-            keys.extend(
-                aliases
-                    .into_iter()
-                    .map(|alias| CliKey::Long(alias.to_owned())),
-            );
-        }
-        if let Some(short) = argument.get_short() {
-            keys.insert(CliKey::Short(short));
-        }
-        if let Some(aliases) = argument.get_all_short_aliases() {
-            keys.extend(aliases.into_iter().map(CliKey::Short));
-        }
-    }
-    for group in command.get_groups() {
-        keys.insert(CliKey::Id(group.get_id().as_str().to_owned()));
-    }
-    for key in keys {
-        claims.entry(key).or_default().push(claimant.to_owned());
-    }
-}
-
-pub(crate) struct ApplicationDefinition {
+pub(crate) struct CliDefinition {
     formats: FormatRegistry,
     storage: StorageRegistry,
-    service_inputs: Box<[ServiceInputDefinition]>,
-    service_outputs: Box<[ServiceOutputDefinition]>,
-    input_schemes: InputSchemeIndex,
-    output_schemes: OutputSchemeIndex,
 }
 
-impl ApplicationDefinition {
+impl CliDefinition {
     pub(crate) fn new() -> Self {
-        Self::from_parts(
-            format_registry(),
-            storage_registry(),
-            Vec::new(),
-            Vec::new(),
-        )
-        .expect("built-in application definitions must not conflict")
-    }
-
-    fn from_parts(
-        formats: FormatRegistry,
-        storage: StorageRegistry,
-        service_inputs: Vec<ServiceInputDefinition>,
-        service_outputs: Vec<ServiceOutputDefinition>,
-    ) -> Result<Self, ApplicationAssemblyError> {
-        validate_service_input_names(&service_inputs)?;
-        validate_service_output_names(&service_outputs)?;
-        let input_schemes = InputSchemeIndex::new(&storage, &service_inputs)?;
-        let output_schemes = OutputSchemeIndex::new(&storage, &service_outputs)?;
-        validate_cli_key_claims(&formats, &storage, &service_inputs, &service_outputs)?;
-        Ok(Self {
-            formats,
-            storage,
-            service_inputs: service_inputs.into_boxed_slice(),
-            service_outputs: service_outputs.into_boxed_slice(),
-            input_schemes,
-            output_schemes,
-        })
+        Self {
+            formats: format_registry(),
+            storage: storage_registry(),
+        }
     }
 
     pub(crate) fn command(&self, command: ClapCommand) -> ClapCommand {
@@ -529,16 +101,8 @@ impl ApplicationDefinition {
             }
             _ => argument,
         });
-        let mut command = self
-            .formats
-            .augment_transform_args(self.storage.augment_args(command));
-        for definition in &self.service_inputs {
-            command = definition.augment_args(command);
-        }
-        for definition in &self.service_outputs {
-            command = definition.augment_args(command);
-        }
-        command
+        self.formats
+            .augment_transform_args(self.storage.augment_args(command))
     }
 
     fn augment_inspect_command(&self, mut command: ClapCommand) -> ClapCommand {
@@ -572,29 +136,7 @@ impl ApplicationDefinition {
                 let args = TransformArgs::from_arg_matches(matches)?;
                 let formats = self.formats.bind_transform(matches)?;
                 let storage = self.storage.create_session(matches).map_err(clap_error)?;
-                let service_inputs = ServiceInputBindings(
-                    self.service_inputs
-                        .iter()
-                        .map(|definition| definition.bind(matches))
-                        .collect::<Result<Vec<_>, _>>()?
-                        .into_boxed_slice(),
-                );
-                let service_outputs = ServiceOutputBindings(
-                    self.service_outputs
-                        .iter()
-                        .map(|definition| definition.bind(matches))
-                        .collect::<Result<Vec<_>, _>>()?
-                        .into_boxed_slice(),
-                );
-                RuntimeCommand::Transform(TransformCommand::from_parsed(
-                    args,
-                    formats,
-                    storage,
-                    service_inputs,
-                    service_outputs,
-                    self.input_schemes,
-                    self.output_schemes,
-                ))
+                RuntimeCommand::Transform(TransformCommand::from_parsed(args, formats, storage))
             }
             "detect" => {
                 let args = DetectArgs::from_arg_matches(matches)?;
@@ -620,7 +162,7 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
-    let definition = ApplicationDefinition::new();
+    let definition = CliDefinition::new();
     let matches = definition
         .command(crate::CliSchema::command())
         .try_get_matches_from(arguments)?;
@@ -1091,7 +633,7 @@ mod tests {
     use std::{
         num::NonZeroUsize,
         sync::{
-            Arc, Mutex,
+            Arc,
             atomic::{AtomicUsize, Ordering},
         },
     };
@@ -1099,10 +641,9 @@ mod tests {
     use anyhow::Result;
     use arrow::{array::RecordBatch, datatypes::SchemaRef};
     use async_trait::async_trait;
-    use clap::{Args, CommandFactory, FromArgMatches};
+    use clap::{CommandFactory, FromArgMatches};
     use datafusion::{
         catalog::{TableProvider, streaming::StreamingTable},
-        datasource::MemTable,
         error::DataFusionError,
         execution::TaskContext,
         physical_plan::{
@@ -1110,17 +651,13 @@ mod tests {
         },
         prelude::SessionContext,
     };
-    use futures::{StreamExt, future::BoxFuture};
+    use futures::StreamExt;
     use silk_chiffon_core::{
-        DataSource, FormatDefinition, FormatFuture, FormatRegistry, Replayability,
-        ServiceInputDefinition, ServiceOutputDefinition, SinkBinding, SinkBindingConfig,
-        SinkConcurrency, TransformDefinition,
+        DataSource, FormatDefinition, FormatFuture, FormatRegistry, Replayability, SinkBinding,
+        SinkBindingConfig, SinkConcurrency, TransformDefinition,
     };
 
-    use super::{
-        ApplicationAssemblyError, ApplicationDefinition, arrow_format, parquet_options,
-        storage_registry,
-    };
+    use super::{CliDefinition, arrow_format, parquet_options, storage_registry};
     use crate::{
         CliSchema, Command, ParquetArgs,
         utils::test_data::{TestBatch, TestExtract, TestFile},
@@ -1129,181 +666,6 @@ mod tests {
 
     static STREAM_EXECUTIONS: AtomicUsize = AtomicUsize::new(0);
     static SINK_BINDINGS: AtomicUsize = AtomicUsize::new(0);
-    static SERVICE_INPUT_REFERENCES: Mutex<Vec<String>> = Mutex::new(Vec::new());
-    static SERVICE_OUTPUT_RESULT: Mutex<Option<(String, usize)>> = Mutex::new(None);
-    static TYPED_SERVICE_OUTPUT_RESULT: Mutex<Option<TypedServiceOutputResult>> = Mutex::new(None);
-
-    #[derive(Debug, Eq, PartialEq)]
-    struct TypedServiceOutputResult {
-        target: String,
-        marker: usize,
-        fields: Vec<String>,
-        ids: Vec<i32>,
-    }
-
-    struct TestServiceSource {
-        batch: RecordBatch,
-    }
-
-    #[async_trait]
-    impl DataSource for TestServiceSource {
-        fn name(&self) -> &str {
-            "test-service"
-        }
-
-        fn replayability(&self) -> Replayability {
-            Replayability::Replayable
-        }
-
-        async fn table_provider(&self) -> Result<Arc<dyn TableProvider>> {
-            Ok(Arc::new(MemTable::try_new(
-                self.batch.schema(),
-                vec![vec![self.batch.clone()]],
-            )?))
-        }
-    }
-
-    fn create_test_service_input<'a>(
-        reference: &'a str,
-        _: &'a SessionContext,
-        _: &'a (),
-    ) -> BoxFuture<'a, Result<Box<dyn DataSource>>> {
-        SERVICE_INPUT_REFERENCES
-            .lock()
-            .unwrap()
-            .push(reference.to_owned());
-        Box::pin(async {
-            Ok(Box::new(TestServiceSource {
-                batch: TestBatch::simple_with(&[4, 5, 6], &["d", "e", "f"]),
-            }) as Box<dyn DataSource>)
-        })
-    }
-
-    fn write_test_service_output<'a>(
-        target: &'a str,
-        mut stream: SendableRecordBatchStream,
-        _: &'a (),
-    ) -> BoxFuture<'a, Result<()>> {
-        Box::pin(async move {
-            let mut rows = 0;
-            while let Some(batch) = stream.next().await {
-                rows += batch?.num_rows();
-            }
-            *SERVICE_OUTPUT_RESULT.lock().unwrap() = Some((target.to_owned(), rows));
-            Ok(())
-        })
-    }
-
-    fn test_service_input(name: &'static str, scheme: &'static str) -> ServiceInputDefinition {
-        ServiceInputDefinition::without_args(create_test_service_input)
-            .name(name)
-            .schemes([scheme])
-            .build()
-            .unwrap()
-    }
-
-    fn test_service_output(name: &'static str, scheme: &'static str) -> ServiceOutputDefinition {
-        ServiceOutputDefinition::without_args(write_test_service_output)
-            .name(name)
-            .schemes([scheme])
-            .build()
-            .unwrap()
-    }
-
-    #[derive(Args)]
-    struct TypedServiceInputArgs {
-        #[arg(long)]
-        test_service_input_start: i32,
-    }
-
-    #[derive(Args)]
-    struct TypedServiceOutputArgs {
-        #[arg(long)]
-        test_service_output_marker: usize,
-    }
-
-    fn create_typed_service_input<'a>(
-        reference: &'a str,
-        _: &'a SessionContext,
-        settings: &'a TypedServiceInputArgs,
-    ) -> BoxFuture<'a, Result<Box<dyn DataSource>>> {
-        Box::pin(async move {
-            anyhow::ensure!(reference == "typed-input://dataset");
-            let start = settings.test_service_input_start;
-            Ok(Box::new(TestServiceSource {
-                batch: TestBatch::simple_with(&[start, start + 1, start + 2], &["a", "b", "c"]),
-            }) as Box<dyn DataSource>)
-        })
-    }
-
-    fn write_typed_service_output<'a>(
-        target: &'a str,
-        mut stream: SendableRecordBatchStream,
-        settings: &'a TypedServiceOutputArgs,
-    ) -> BoxFuture<'a, Result<()>> {
-        Box::pin(async move {
-            let fields = stream
-                .schema()
-                .fields()
-                .iter()
-                .map(|field| field.name().clone())
-                .collect();
-            let mut batches = Vec::new();
-            while let Some(batch) = stream.next().await {
-                batches.push(batch?);
-            }
-            *TYPED_SERVICE_OUTPUT_RESULT.lock().unwrap() = Some(TypedServiceOutputResult {
-                target: target.to_owned(),
-                marker: settings.test_service_output_marker,
-                fields,
-                ids: TestExtract::i32_all(&batches, "id"),
-            });
-            Ok(())
-        })
-    }
-
-    #[derive(Args)]
-    struct ConflictingInputArgs {
-        #[arg(long)]
-        query: Option<String>,
-    }
-
-    #[derive(Args)]
-    struct ConflictingOutputArgs {
-        #[arg(long)]
-        query: Option<String>,
-    }
-
-    fn create_conflicting_service_input<'a>(
-        reference: &'a str,
-        _: &'a SessionContext,
-        _: &'a ConflictingInputArgs,
-    ) -> BoxFuture<'a, Result<Box<dyn DataSource>>> {
-        SERVICE_INPUT_REFERENCES
-            .lock()
-            .unwrap()
-            .push(reference.to_owned());
-        Box::pin(async {
-            Ok(Box::new(TestServiceSource {
-                batch: TestBatch::simple_with(&[4, 5, 6], &["d", "e", "f"]),
-            }) as Box<dyn DataSource>)
-        })
-    }
-
-    fn write_conflicting_service_output<'a>(
-        target: &'a str,
-        mut stream: SendableRecordBatchStream,
-        _: &'a ConflictingOutputArgs,
-    ) -> BoxFuture<'a, Result<()>> {
-        Box::pin(async move {
-            let mut rows = 0;
-            while let Some(batch) = stream.next().await {
-                rows += batch?.num_rows();
-            }
-            *SERVICE_OUTPUT_RESULT.lock().unwrap() = Some((target.to_owned(), rows));
-            Ok(())
-        })
-    }
 
     #[derive(Debug)]
     struct SinglePassPartition {
@@ -1365,36 +727,6 @@ mod tests {
             .transform(
                 TransformDefinition::without_args()
                     .source(single_pass_source)
-                    .build(),
-            )
-            .build()
-    }
-
-    fn registered_store_source<'a>(
-        handle: &'a StorageHandle,
-        session: &'a SessionContext,
-        _: &'a (),
-    ) -> FormatFuture<'a, Box<dyn DataSource>> {
-        Box::pin(async move {
-            let handle_store = handle.object_store();
-            let registered_store = session
-                .runtime_env()
-                .object_store_registry
-                .get_store(handle.store_url())?;
-            assert!(Arc::ptr_eq(&handle_store, &registered_store));
-
-            Ok(Box::new(TestServiceSource {
-                batch: TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]),
-            }) as Box<dyn DataSource>)
-        })
-    }
-
-    fn registered_store_format() -> FormatDefinition {
-        FormatDefinition::builder("registered-store-test")
-            .extensions(["registered-store-test"])
-            .transform(
-                TransformDefinition::without_args()
-                    .source(registered_store_source)
                     .build(),
             )
             .build()
@@ -1486,7 +818,7 @@ mod tests {
             .build()
     }
 
-    fn test_cli(definition: ApplicationDefinition, arguments: &[&str]) -> crate::Cli {
+    fn test_cli(definition: CliDefinition, arguments: &[&str]) -> crate::Cli {
         let matches = definition
             .command(CliSchema::command())
             .try_get_matches_from(arguments)
@@ -1494,465 +826,15 @@ mod tests {
         definition.bind(&matches).unwrap()
     }
 
-    fn application_definition(formats: FormatRegistry) -> ApplicationDefinition {
-        ApplicationDefinition::from_parts(formats, storage_registry(), Vec::new(), Vec::new())
-            .unwrap()
-    }
-
-    fn application_definition_with_services(
-        formats: FormatRegistry,
-        service_inputs: Vec<ServiceInputDefinition>,
-        service_outputs: Vec<ServiceOutputDefinition>,
-    ) -> ApplicationDefinition {
-        ApplicationDefinition::from_parts(
-            formats,
-            storage_registry(),
-            service_inputs,
-            service_outputs,
-        )
-        .unwrap()
-    }
-
-    #[test]
-    fn assembly_reports_every_duplicate_service_name_snapshot_in_order() {
-        let error = ApplicationDefinition::from_parts(
-            FormatRegistry::builder().build().unwrap(),
-            storage_registry(),
-            vec![
-                test_service_input("duplicate", "test-a"),
-                test_service_input("other", "test-b"),
-                test_service_input("duplicate", "test-c"),
-            ],
-            Vec::new(),
-        )
-        .err()
-        .expect("duplicate names must fail assembly");
-
-        let ApplicationAssemblyError::DuplicateServiceInputName { name, definitions } = error
-        else {
-            panic!("expected duplicate service input names");
-        };
-        assert_eq!(name, "duplicate");
-        assert_eq!(definitions.len(), 2);
-        assert_eq!(definitions[0].position, 1);
-        assert_eq!(definitions[0].schemes.as_ref(), ["test-a"]);
-        assert_eq!(definitions[1].position, 3);
-        assert_eq!(definitions[1].schemes.as_ref(), ["test-c"]);
-    }
-
-    #[test]
-    fn assembly_allows_the_same_service_name_once_per_direction() {
-        ApplicationDefinition::from_parts(
-            FormatRegistry::builder().build().unwrap(),
-            storage_registry(),
-            vec![test_service_input("shared", "test-input")],
-            vec![test_service_output("shared", "test-output")],
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn assembly_reports_duplicate_service_output_names_separately() {
-        let error = ApplicationDefinition::from_parts(
-            FormatRegistry::builder().build().unwrap(),
-            storage_registry(),
-            Vec::new(),
-            vec![
-                test_service_output("duplicate", "test-a"),
-                test_service_output("duplicate", "test-b"),
-            ],
-        )
-        .err()
-        .expect("duplicate names must fail assembly");
-
-        let ApplicationAssemblyError::DuplicateServiceOutputName { name, definitions } = error
-        else {
-            panic!("expected duplicate service output names");
-        };
-        assert_eq!(name, "duplicate");
-        assert_eq!(definitions.len(), 2);
-        assert_eq!(definitions[0].position, 1);
-        assert_eq!(definitions[1].position, 2);
-    }
-
-    #[test]
-    fn assembly_reports_file_and_service_scheme_claimants_by_direction() {
-        let input_error = ApplicationDefinition::from_parts(
-            FormatRegistry::builder().build().unwrap(),
-            storage_registry(),
-            vec![test_service_input("conflict", "file")],
-            Vec::new(),
-        )
-        .err()
-        .expect("the local file input route already claims file");
-        let ApplicationAssemblyError::InputSchemeClaimConflict { scheme, claimants } = input_error
-        else {
-            panic!("expected an input scheme conflict");
-        };
-        assert_eq!(scheme, "file");
-        assert!(claimants.first.contains("file input storage"));
-        assert!(claimants.second.contains("service input"));
-
-        let output_error = ApplicationDefinition::from_parts(
-            FormatRegistry::builder().build().unwrap(),
-            storage_registry(),
-            Vec::new(),
-            vec![test_service_output("conflict", "file")],
-        )
-        .err()
-        .expect("the local file output route already claims file");
-        assert!(matches!(
-            output_error,
-            ApplicationAssemblyError::OutputSchemeClaimConflict { scheme: "file", .. }
-        ));
-    }
-
-    #[test]
-    fn assembly_reports_all_claimants_for_the_first_cli_key_conflict() {
-        let input = ServiceInputDefinition::with_args(create_conflicting_service_input)
-            .name("conflicting-input")
-            .schemes(["test-input"])
-            .build()
-            .unwrap();
-        let output = ServiceOutputDefinition::with_args(write_conflicting_service_output)
-            .name("conflicting-output")
-            .schemes(["test-output"])
-            .build()
-            .unwrap();
-        let error = ApplicationDefinition::from_parts(
-            FormatRegistry::builder().build().unwrap(),
-            storage_registry(),
-            vec![input],
-            vec![output],
-        )
-        .err()
-        .expect("CLI key conflicts must fail assembly");
-
-        let ApplicationAssemblyError::CliKeyClaimConflict { key, claimants } = error else {
-            panic!("expected a CLI key conflict");
-        };
-        assert_eq!(key, "Clap ID \"query\"");
-        assert_eq!(claimants.first, "application transform arguments");
-        assert!(claimants.second.contains("service input"));
-        assert_eq!(claimants.rest.len(), 1);
-        assert!(claimants.rest[0].contains("service output"));
-    }
-
-    #[tokio::test]
-    async fn exact_file_and_service_inputs_share_one_service_output() {
-        SERVICE_INPUT_REFERENCES.lock().unwrap().clear();
-        SERVICE_OUTPUT_RESULT.lock().unwrap().take();
-        let directory = tempfile::tempdir().unwrap();
-        let input = directory.path().join("input.arrow");
-        TestFile::write_arrow_batch(
-            &input,
-            &TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]),
-        );
-        let definition = application_definition_with_services(
-            FormatRegistry::builder()
-                .register(arrow_format())
-                .build()
-                .unwrap(),
-            vec![test_service_input("test-input", "test-input")],
-            vec![test_service_output("test-output", "test-output")],
-        );
-        let cli = test_cli(
-            definition,
-            &[
-                "silk-chiffon",
-                "transform",
-                "--from",
-                input.to_str().unwrap(),
-                "--from",
-                "test-input://same",
-                "--from",
-                "test-input://same",
-                "--to",
-                "test-output://result",
-            ],
-        );
-        let Command::Transform(command) = cli.command else {
-            panic!("expected transform command");
-        };
-
-        crate::commands::transform::run(command).await.unwrap();
-
-        assert_eq!(
-            SERVICE_INPUT_REFERENCES.lock().unwrap().as_slice(),
-            ["test-input://same", "test-input://same"]
-        );
-        assert_eq!(
-            SERVICE_OUTPUT_RESULT.lock().unwrap().as_ref(),
-            Some(&("test-output://result".to_owned(), 9))
-        );
-    }
-
-    #[tokio::test]
-    async fn typed_service_only_transform_projects_and_drains_the_output() {
-        TYPED_SERVICE_OUTPUT_RESULT.lock().unwrap().take();
-        let input = ServiceInputDefinition::with_args(create_typed_service_input)
-            .name("typed-input")
-            .schemes(["typed-input"])
-            .build()
-            .unwrap();
-        let output = ServiceOutputDefinition::with_args(write_typed_service_output)
-            .name("typed-output")
-            .schemes(["typed-output"])
-            .build()
-            .unwrap();
-        let definition = application_definition_with_services(
-            FormatRegistry::builder().build().unwrap(),
-            vec![input],
-            vec![output],
-        );
-        let cli = test_cli(
-            definition,
-            &[
-                "silk-chiffon",
-                "transform",
-                "--from",
-                "typed-input://dataset",
-                "--to",
-                "typed-output://result",
-                "--test-service-input-start",
-                "40",
-                "--test-service-output-marker",
-                "23",
-                "--exclude-columns",
-                "name",
-            ],
-        );
-        let Command::Transform(command) = cli.command else {
-            panic!("expected transform command");
-        };
-
-        crate::commands::transform::run(command).await.unwrap();
-
-        assert_eq!(
-            TYPED_SERVICE_OUTPUT_RESULT.lock().unwrap().as_ref(),
-            Some(&TypedServiceOutputResult {
-                target: "typed-output://result".to_owned(),
-                marker: 23,
-                fields: vec!["id".to_owned()],
-                ids: vec![40, 41, 42],
-            })
-        );
-    }
-
-    #[tokio::test]
-    async fn file_input_registers_the_handle_store_before_source_creation() {
-        SERVICE_OUTPUT_RESULT.lock().unwrap().take();
-        let directory = tempfile::tempdir().unwrap();
-        let input = directory.path().join("input.registered-store-test");
-        std::fs::write(&input, []).unwrap();
-        let definition = application_definition_with_services(
-            FormatRegistry::builder()
-                .register(registered_store_format())
-                .build()
-                .unwrap(),
-            Vec::new(),
-            vec![test_service_output("test-output", "test-output")],
-        );
-        let cli = test_cli(
-            definition,
-            &[
-                "silk-chiffon",
-                "transform",
-                "--from",
-                input.to_str().unwrap(),
-                "--to",
-                "test-output://result",
-            ],
-        );
-        let Command::Transform(command) = cli.command else {
-            panic!("expected transform command");
-        };
-
-        crate::commands::transform::run(command).await.unwrap();
-
-        assert_eq!(
-            SERVICE_OUTPUT_RESULT.lock().unwrap().as_ref(),
-            Some(&("test-output://result".to_owned(), 3))
-        );
-    }
-
-    #[tokio::test]
-    async fn service_input_patterns_are_rejected_before_file_expansion() {
-        let directory = tempfile::tempdir().unwrap();
-        let output = directory.path().join("output.arrow");
-        let definition = application_definition_with_services(
-            FormatRegistry::builder()
-                .register(arrow_format())
-                .build()
-                .unwrap(),
-            vec![test_service_input("test-input", "test-input")],
-            Vec::new(),
-        );
-        let cli = test_cli(
-            definition,
-            &[
-                "silk-chiffon",
-                "transform",
-                "--from-pattern",
-                "test-input://*",
-                "--to",
-                output.to_str().unwrap(),
-            ],
-        );
-        let Command::Transform(command) = cli.command else {
-            panic!("expected transform command");
-        };
-
-        let error = crate::commands::transform::run(command).await.unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("does not support --from-pattern")
-        );
-    }
-
-    #[tokio::test]
-    async fn service_outputs_reject_partition_templates() {
-        let directory = tempfile::tempdir().unwrap();
-        let input = directory.path().join("input.arrow");
-        TestFile::write_arrow_batch(
-            &input,
-            &TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]),
-        );
-        let definition = application_definition_with_services(
-            FormatRegistry::builder()
-                .register(arrow_format())
-                .build()
-                .unwrap(),
-            Vec::new(),
-            vec![test_service_output("test-output", "test-output")],
-        );
-        let cli = test_cli(
-            definition,
-            &[
-                "silk-chiffon",
-                "transform",
-                "--from",
-                input.to_str().unwrap(),
-                "--to-many",
-                "test-output://{{name}}",
-                "--by",
-                "name",
-            ],
-        );
-        let Command::Transform(command) = cli.command else {
-            panic!("expected transform command");
-        };
-
-        let error = crate::commands::transform::run(command).await.unwrap_err();
-        assert!(error.to_string().contains("does not support --to-many"));
-    }
-
-    #[tokio::test]
-    async fn service_routes_reject_file_only_options_and_unknown_schemes() {
-        let directory = tempfile::tempdir().unwrap();
-        let input = directory.path().join("input.arrow");
-        let output = directory.path().join("output.arrow");
-        TestFile::write_arrow_batch(
-            &input,
-            &TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]),
-        );
-        let input = input.to_str().unwrap();
-        let output = output.to_str().unwrap();
-        let cases = [
-            (
-                vec![
-                    "silk-chiffon",
-                    "transform",
-                    "--from",
-                    "test-input://source",
-                    "--to",
-                    output,
-                    "--input-format",
-                    "arrow",
-                ],
-                "--input-format applies only to file inputs",
-            ),
-            (
-                vec![
-                    "silk-chiffon",
-                    "transform",
-                    "--from",
-                    input,
-                    "--to",
-                    "test-output://target",
-                    "--output-format",
-                    "arrow",
-                ],
-                "--output-format applies only to file outputs",
-            ),
-            (
-                vec![
-                    "silk-chiffon",
-                    "transform",
-                    "--from",
-                    input,
-                    "--to",
-                    "test-output://target",
-                    "--list-outputs",
-                    "text",
-                ],
-                "--list-outputs applies only to file outputs",
-            ),
-            (
-                vec![
-                    "silk-chiffon",
-                    "transform",
-                    "--from",
-                    "unknown-input://source",
-                    "--to",
-                    output,
-                ],
-                "unsupported input scheme \"unknown-input\"",
-            ),
-            (
-                vec![
-                    "silk-chiffon",
-                    "transform",
-                    "--from",
-                    input,
-                    "--to",
-                    "unknown-output://target",
-                ],
-                "unsupported output scheme \"unknown-output\"",
-            ),
-        ];
-
-        for (arguments, expected) in cases {
-            let definition = application_definition_with_services(
-                FormatRegistry::builder()
-                    .register(arrow_format())
-                    .build()
-                    .unwrap(),
-                vec![test_service_input("test-input", "test-input")],
-                vec![test_service_output("test-output", "test-output")],
-            );
-            let cli = test_cli(definition, &arguments);
-            let Command::Transform(command) = cli.command else {
-                panic!("expected transform command");
-            };
-
-            let error = crate::commands::transform::run(command).await.unwrap_err();
-            assert!(
-                error.to_string().contains(expected),
-                "expected {expected:?}, got {error:#}"
-            );
-        }
-    }
-
-    fn directional_format_definition() -> ApplicationDefinition {
-        application_definition(
-            FormatRegistry::builder()
+    fn directional_format_definition() -> CliDefinition {
+        CliDefinition {
+            formats: FormatRegistry::builder()
                 .register(single_pass_format())
                 .register(counted_sink_format())
                 .build()
                 .unwrap(),
-        )
+            storage: storage_registry(),
+        }
     }
 
     #[test]
@@ -2006,7 +888,7 @@ mod tests {
 
     #[test]
     fn concurrent_sinks_use_single_slot_parquet_pipelines() {
-        let matches = ApplicationDefinition::new()
+        let matches = CliDefinition::new()
             .command(CliSchema::command())
             .try_get_matches_from([
                 "silk-chiffon",
@@ -2045,7 +927,10 @@ mod tests {
             .register(arrow_format())
             .build()
             .unwrap();
-        let definition = application_definition(formats);
+        let definition = CliDefinition {
+            formats,
+            storage: storage_registry(),
+        };
         let matches = definition
             .command(CliSchema::command())
             .try_get_matches_from([
@@ -2083,13 +968,14 @@ mod tests {
         let output = directory.path().join("output.counted-sink-test");
         std::fs::write(&input, b"test source input").unwrap();
 
-        let definition = application_definition(
-            FormatRegistry::builder()
+        let definition = CliDefinition {
+            formats: FormatRegistry::builder()
                 .register(infinite_format())
                 .register(counted_sink_format())
                 .build()
                 .unwrap(),
-        );
+            storage: storage_registry(),
+        };
         let cli = test_cli(
             definition,
             &[
@@ -2106,7 +992,7 @@ mod tests {
         };
 
         let error = crate::commands::transform::run(command).await.unwrap_err();
-        assert!(error.to_string().contains("require a bounded final plan"));
+        assert!(error.to_string().contains("require a bounded input plan"));
         assert_eq!(SINK_BINDINGS.load(Ordering::SeqCst), 0);
     }
 
@@ -2117,13 +1003,14 @@ mod tests {
         let output = directory.path().join("output.arrow");
         std::fs::write(&input, b"test source input").unwrap();
 
-        let definition = application_definition(
-            FormatRegistry::builder()
+        let definition = CliDefinition {
+            formats: FormatRegistry::builder()
                 .register(infinite_format())
                 .register(arrow_format())
                 .build()
                 .unwrap(),
-        );
+            storage: storage_registry(),
+        };
         let cli = test_cli(
             definition,
             &[

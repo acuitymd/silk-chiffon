@@ -1,6 +1,8 @@
 pub mod commands;
 pub mod inspection;
+pub mod io_strategies;
 pub mod operations;
+pub mod pipeline;
 pub mod registration;
 pub mod sinks;
 pub mod sources;
@@ -12,11 +14,11 @@ use arrow::ipc::CompressionType;
 use camino::Utf8PathBuf;
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum, builder::ValueHint};
 use clap_complete::Shell;
+use datafusion::config::Dialect;
 use parquet::{
     basic::{BrotliLevel, Compression, Encoding, GzipLevel, ZstdLevel},
     file::properties::{EnabledStatistics, WriterVersion},
 };
-use silk_chiffon_core::{QueryDialect, SpillCompression};
 use std::{
     ffi::OsString,
     fmt::{self, Formatter},
@@ -301,18 +303,18 @@ struct CliSchema {
     command: CommandSchema,
 }
 
-/// A parsed command whose registered format, storage, and service settings are bound.
+/// A parsed command whose format and storage settings have already been bound.
 pub struct Cli {
     pub command: Command,
 }
 
 impl Cli {
-    /// Parses the process arguments with the composed application definition.
+    /// Parses the process arguments with the composed format and storage registries.
     pub fn parse() -> Self {
         Self::try_parse_from(std::env::args_os()).unwrap_or_else(|error| error.exit())
     }
 
-    /// Parses an explicit argument sequence with the composed application definition.
+    /// Parses an explicit argument sequence with the composed registries.
     pub fn try_parse_from<I, T>(arguments: I) -> Result<Self, clap::Error>
     where
         I: IntoIterator<Item = T>,
@@ -350,14 +352,13 @@ enum CommandSchema {
     ///     silk-chiffon transform --from input.arrow --to output.parquet
     ///
     ///     # Merge multiple files
-    ///     silk-chiffon transform --from file1.arrow --from file2.arrow --to merged.parquet
+    ///     silk-chiffon transform --from-many file1.arrow --from-many file2.arrow --to merged.parquet
     ///
     ///     # Partition into multiple files
     ///     silk-chiffon transform --from input.arrow --to-many "{{region}}.parquet" --by region
     ///
     ///     # Merge and partition with glob
-    ///     silk-chiffon transform --from-pattern '*.arrow' \
-    ///       --to-many "{{year}}/{{month}}.parquet" --by year,month
+    ///     silk-chiffon transform --from-many '*.arrow' --to-many "{{year}}/{{month}}.parquet" --by year,month
     #[command(verbatim_doc_comment)]
     Transform(TransformArgs),
 
@@ -399,9 +400,9 @@ enum CommandSchema {
 #[allow(clippy::large_enum_variant)]
 /// Runtime state for one parsed top-level command.
 ///
-/// Unlike the private Clap schema, these variants contain command-scoped
-/// extension state. Command implementations therefore receive validated
-/// bindings instead of consulting global registries.
+/// Unlike the private Clap schema, these variants contain command-scoped format bindings and a
+/// storage session. Command implementations therefore receive validated extension state instead
+/// of consulting global registries.
 pub enum Command {
     Transform(TransformCommand),
     Detect(DetectCommand),
@@ -411,27 +412,15 @@ pub enum Command {
 
 impl clap::CommandFactory for Cli {
     fn command() -> clap::Command {
-        crate::registration::ApplicationDefinition::new().command(CliSchema::command())
+        crate::registration::CliDefinition::new().command(CliSchema::command())
     }
 
     fn command_for_update() -> clap::Command {
-        crate::registration::ApplicationDefinition::new().command(CliSchema::command_for_update())
+        crate::registration::CliDefinition::new().command(CliSchema::command_for_update())
     }
 }
 
 impl Command {
-    /// Resolves the Tokio runtime worker count for this command.
-    pub fn runtime_worker_threads(&self) -> usize {
-        match self {
-            Self::Transform(command) => command
-                .thread_budget
-                .as_ref()
-                .map(ThreadBudgetSpec::resolve)
-                .unwrap_or_else(default_thread_budget),
-            _ => default_thread_budget(),
-        }
-    }
-
     /// Writes shell completions for the fully composed CLI.
     pub fn generate_completions(shell: Shell) {
         clap_complete::generate(
@@ -460,8 +449,7 @@ pub enum ListOutputsFormat {
 pub enum PartitionStrategy {
     /// Sort by partition columns first, then write one file at a time.
     /// Uses minimal file handles but requires sorting the entire dataset.
-    /// Best for high-cardinality partition columns, or when partition columns
-    /// are highly fragmented.
+    /// Best for high-cardinality partition columns, or when partition columns are highly fragmented.
     #[default]
     SortSingle,
     /// Keep a file handle open per partition, write rows directly.
@@ -475,6 +463,45 @@ pub enum PartitionStrategy {
     /// Per-writer concurrency is minimized (sequential encoding) since parallelism
     /// comes from having many partition writers active simultaneously.
     NosortEvict,
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Display)]
+#[value(rename_all = "lowercase")]
+pub enum QueryDialect {
+    #[default]
+    DuckDb,
+    Generic,
+    MySQL,
+    PostgreSQL,
+    Hive,
+    SQLite,
+    Snowflake,
+    Redshift,
+    MsSQL,
+    ClickHouse,
+    BigQuery,
+    ANSI,
+    Databricks,
+}
+
+impl From<QueryDialect> for Dialect {
+    fn from(dialect: QueryDialect) -> Self {
+        match dialect {
+            QueryDialect::DuckDb => Dialect::DuckDB,
+            QueryDialect::Generic => Dialect::Generic,
+            QueryDialect::MySQL => Dialect::MySQL,
+            QueryDialect::PostgreSQL => Dialect::PostgreSQL,
+            QueryDialect::Hive => Dialect::Hive,
+            QueryDialect::SQLite => Dialect::SQLite,
+            QueryDialect::Snowflake => Dialect::Snowflake,
+            QueryDialect::Redshift => Dialect::Redshift,
+            QueryDialect::MsSQL => Dialect::MsSQL,
+            QueryDialect::ClickHouse => Dialect::ClickHouse,
+            QueryDialect::BigQuery => Dialect::BigQuery,
+            QueryDialect::Databricks => Dialect::Databricks,
+            QueryDialect::ANSI => Dialect::Ansi,
+        }
+    }
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug, Default)]
@@ -538,6 +565,29 @@ impl ParquetCompression {
                     _ => unreachable!(),
                 })
             }
+        }
+    }
+}
+
+/// Compression codec for spilled intermediate data.
+#[derive(ValueEnum, Clone, Copy, Debug, Default)]
+#[value(rename_all = "lowercase")]
+pub enum SpillCompression {
+    /// No compression (fastest, largest files)
+    None,
+    /// LZ4 frame compression (fast, good compression)
+    #[default]
+    Lz4,
+    /// Zstd compression (slower, best compression)
+    Zstd,
+}
+
+impl From<SpillCompression> for datafusion::config::SpillCompression {
+    fn from(compression: SpillCompression) -> Self {
+        match compression {
+            SpillCompression::None => datafusion::config::SpillCompression::Uncompressed,
+            SpillCompression::Lz4 => datafusion::config::SpillCompression::Lz4Frame,
+            SpillCompression::Zstd => datafusion::config::SpillCompression::Zstd,
         }
     }
 }
@@ -1197,8 +1247,7 @@ impl BloomFilterConfig {
     }
 
     /// Returns true if user specified NDV for any column or globally.
-    /// When NDV is specified, bloom filters should be enabled unconditionally
-    /// rather than tied to dictionary encoding.
+    /// When NDV is specified, bloom filters should be enabled unconditionally (not tied to dictionary).
     pub fn has_user_specified_ndv(&self) -> bool {
         // check global setting
         if self.all_enabled.as_ref().is_some_and(|c| c.ndv.is_some()) {
@@ -1283,33 +1332,33 @@ impl BloomFilterConfigBuilder {
 
 #[derive(Args, Clone, Debug)]
 struct TransformArgs {
-    /// Exact input reference. May be specified multiple times.
+    /// Single input file path.
     #[arg(
         long,
-        conflicts_with = "from_pattern",
-        required_unless_present = "from_pattern",
+        conflicts_with_all = ["from_many"],
+        required_unless_present = "from_many",
         help_heading = "Input/Output"
     )]
-    pub from: Vec<String>,
+    pub from: Option<String>,
 
-    /// File location pattern. May be specified multiple times.
+    /// Multiple input file paths (supports glob patterns). Can be specified multiple times.
     #[arg(
-        long = "from-pattern",
+        long,
         conflicts_with = "from",
         required_unless_present = "from",
         help_heading = "Input/Output"
     )]
-    pub from_pattern: Vec<String>,
+    pub from_many: Vec<String>,
 
-    /// Override file input format detection.
+    /// Override input format detection.
     #[arg(long, help_heading = "Input/Output")]
     pub input_format: Option<String>,
 
-    /// Override file output format detection.
+    /// Override output format detection.
     #[arg(long, help_heading = "Input/Output")]
     pub output_format: Option<String>,
 
-    /// Exact file or service output target.
+    /// Single output file path.
     #[arg(
         long,
         conflicts_with_all = ["to_many", "by"],
@@ -1318,7 +1367,7 @@ struct TransformArgs {
     )]
     pub to: Option<String>,
 
-    /// File output template for partitioning (e.g., "{{region}}.parquet"). Requires --by.
+    /// Output path template for partitioning (e.g., "{{region}}.parquet"). Requires --by.
     #[arg(
         long,
         conflicts_with = "to",
@@ -1444,7 +1493,7 @@ struct TransformArgs {
     #[arg(
         long,
         default_value_t = false,
-        conflicts_with_all = ["query", "sort_by", "to_many", "from_pattern"],
+        conflicts_with_all = ["query", "sort_by", "to_many", "from_many"],
         help_heading = "Execution"
     )]
     pub preserve_input_order: bool,
@@ -1486,11 +1535,11 @@ struct TransformArgs {
     #[arg(long, requires = "list_outputs", help_heading = "Partitioning")]
     pub list_outputs_file: Option<Utf8PathBuf>,
 
-    /// Create file-output directories as needed.
+    /// Create directories as needed.
     #[arg(long, default_value_t = true, help_heading = "Output Behavior")]
     pub create_dirs: bool,
 
-    /// Overwrite existing file outputs.
+    /// Overwrite existing files.
     #[arg(long, help_heading = "Output Behavior")]
     pub overwrite: bool,
 }
@@ -1543,7 +1592,7 @@ pub struct ParquetArgs {
     ///
     /// Examples:
     ///
-    ///     --parquet-bloom-all  # Bloom for low-cardinality columns
+    ///     --parquet-bloom-all                                     # Bloom for low-cardinality columns
     ///     --parquet-bloom-all "fpp=0.001"                         # Tighter false positive rate
     ///     --parquet-bloom-all "ndv=10000"                         # Force bloom on ALL columns
     ///     --parquet-bloom-all --parquet-bloom-column-off user_id  # Exclude user_id
@@ -1626,7 +1675,7 @@ pub struct ParquetArgs {
     /// Examples:
     ///
     ///     --parquet-bloom-all --parquet-bloom-column-off user_id  # All except user_id
-    ///     --parquet-bloom-column-off "user.address"  # Disable all user.address leaves
+    ///     --parquet-bloom-column-off "user.address"               # Disable for all user.address leaves
     ///     --parquet-bloom-column-off col1 --parquet-bloom-column-off col2  # Disable multiple
     #[arg(
         long = "parquet-bloom-column-off",
@@ -1679,8 +1728,7 @@ pub struct ParquetArgs {
     /// NON-ANALYZABLE TYPES:
     /// Cardinality analysis only works on certain types. Non-analyzable types (nested types
     /// like structs/lists/maps, and floats due to high cardinality) automatically use "always"
-    /// mode even if you specify "analyze". Use dot notation for nested paths
-    /// (e.g., "user.address").
+    /// mode even if you specify "analyze". Use dot notation for nested paths (e.g., "user.address").
     /// This enables dictionary for all leaf columns under that path.
     ///
     /// BLOOM FILTER INTERACTION:
@@ -1939,66 +1987,33 @@ pub struct VortexArgs {
 
 /// Parsed transform arguments with command-scoped format bindings and storage state.
 pub struct TransformCommand {
-    inputs: InputRequest,
-    input_format: Option<String>,
-    output_format: Option<String>,
-    to: Option<String>,
-    to_many: Option<String>,
-    dialect: QueryDialect,
-    exclude_columns: Vec<String>,
-    query: Option<String>,
-    sort_by: Option<SortSpec>,
-    memory_budget: MemoryBudgetSpec,
-    non_spillable_reserve: Option<PoolReserveSpec>,
-    memory_pool_top_consumers: usize,
-    thread_budget: Option<ThreadBudgetSpec>,
-    target_partitions: Option<usize>,
-    spill_path: Option<Utf8PathBuf>,
-    spill_compression: SpillCompression,
-    preserve_input_order: bool,
-    by: Option<String>,
-    partition_strategy: PartitionStrategy,
-    max_open_partitions: Option<usize>,
-    list_outputs: Option<ListOutputsFormat>,
-    list_outputs_file: Option<Utf8PathBuf>,
-    create_dirs: bool,
-    overwrite: bool,
-    formats: silk_chiffon_core::TransformBindings,
-    storage: silk_chiffon_storage::StorageSession,
-    service_inputs: crate::registration::ServiceInputBindings,
-    service_outputs: crate::registration::ServiceOutputBindings,
-    input_schemes: crate::registration::InputSchemeIndex,
-    output_schemes: crate::registration::OutputSchemeIndex,
-}
-
-pub(crate) struct NonEmpty<T> {
-    first: T,
-    rest: Vec<T>,
-}
-
-impl<T> NonEmpty<T> {
-    fn from_vec(values: Vec<T>) -> Self {
-        let mut values = values.into_iter();
-        Self {
-            first: values
-                .next()
-                .expect("Clap requires at least one transform input"),
-            rest: values.collect(),
-        }
-    }
-
-    pub(crate) fn iter(&self) -> impl Iterator<Item = &T> {
-        std::iter::once(&self.first).chain(&self.rest)
-    }
-
-    pub(crate) fn len(&self) -> usize {
-        1 + self.rest.len()
-    }
-}
-
-pub(crate) enum InputRequest {
-    ExactReferences(NonEmpty<String>),
-    Patterns(NonEmpty<String>),
+    pub from: Option<String>,
+    pub from_many: Vec<String>,
+    pub input_format: Option<String>,
+    pub output_format: Option<String>,
+    pub to: Option<String>,
+    pub to_many: Option<String>,
+    pub dialect: QueryDialect,
+    pub exclude_columns: Vec<String>,
+    pub query: Option<String>,
+    pub sort_by: Option<SortSpec>,
+    pub memory_budget: MemoryBudgetSpec,
+    pub non_spillable_reserve: Option<PoolReserveSpec>,
+    pub memory_pool_top_consumers: usize,
+    pub thread_budget: Option<ThreadBudgetSpec>,
+    pub target_partitions: Option<usize>,
+    pub spill_path: Option<Utf8PathBuf>,
+    pub spill_compression: SpillCompression,
+    pub preserve_input_order: bool,
+    pub by: Option<String>,
+    pub partition_strategy: PartitionStrategy,
+    pub max_open_partitions: Option<usize>,
+    pub list_outputs: Option<ListOutputsFormat>,
+    pub list_outputs_file: Option<Utf8PathBuf>,
+    pub create_dirs: bool,
+    pub overwrite: bool,
+    pub formats: silk_chiffon_core::TransformBindings,
+    pub storage: silk_chiffon_storage::StorageSession,
 }
 
 impl TransformCommand {
@@ -2006,14 +2021,10 @@ impl TransformCommand {
         args: TransformArgs,
         formats: silk_chiffon_core::TransformBindings,
         storage: silk_chiffon_storage::StorageSession,
-        service_inputs: crate::registration::ServiceInputBindings,
-        service_outputs: crate::registration::ServiceOutputBindings,
-        input_schemes: crate::registration::InputSchemeIndex,
-        output_schemes: crate::registration::OutputSchemeIndex,
     ) -> Self {
         let TransformArgs {
             from,
-            from_pattern,
+            from_many,
             input_format,
             output_format,
             to,
@@ -2039,14 +2050,9 @@ impl TransformCommand {
             overwrite,
         } = args;
 
-        let inputs = if from.is_empty() {
-            InputRequest::Patterns(NonEmpty::from_vec(from_pattern))
-        } else {
-            InputRequest::ExactReferences(NonEmpty::from_vec(from))
-        };
-
         Self {
-            inputs,
+            from,
+            from_many,
             input_format,
             output_format,
             to,
@@ -2072,11 +2078,17 @@ impl TransformCommand {
             overwrite,
             formats,
             storage,
-            service_inputs,
-            service_outputs,
-            input_schemes,
-            output_schemes,
         }
+    }
+
+    /// Returns the format functions bound to this command's parsed arguments.
+    pub fn formats(&self) -> &silk_chiffon_core::TransformBindings {
+        &self.formats
+    }
+
+    /// Returns the storage session created for this command invocation.
+    pub fn storage(&self) -> &silk_chiffon_storage::StorageSession {
+        &self.storage
     }
 }
 
@@ -2934,11 +2946,11 @@ mod tests {
         }
 
         #[test]
-        fn test_preserve_input_order_conflicts_with_from_pattern() {
+        fn test_preserve_input_order_conflicts_with_from_many() {
             let result = Cli::try_parse_from([
                 "silk-chiffon",
                 "transform",
-                "--from-pattern",
+                "--from-many",
                 "*.parquet",
                 "--to",
                 "output.parquet",
@@ -2946,7 +2958,7 @@ mod tests {
             ]);
             assert!(result.is_err());
             let err = result.unwrap_err().to_string();
-            assert!(err.contains("preserve-input-order") || err.contains("from-pattern"));
+            assert!(err.contains("preserve-input-order") || err.contains("from-many"));
         }
     }
 }

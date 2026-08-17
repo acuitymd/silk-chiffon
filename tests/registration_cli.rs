@@ -1,9 +1,16 @@
+#[cfg(feature = "local-bare-paths")]
+use std::num::NonZeroUsize;
+
 use clap::CommandFactory;
+#[cfg(feature = "local-bare-paths")]
+use datafusion::prelude::SessionContext;
 #[cfg(feature = "local-bare-paths")]
 use silk_chiffon::utils::test_data::{TestBatch, TestFile};
 use silk_chiffon::{Cli, Command, registration};
 #[cfg(feature = "local-bare-paths")]
-use silk_chiffon_core::{InspectionMode, InspectionOutput};
+use silk_chiffon_core::{
+    InspectionMode, InspectionOutput, Replayability, RowCount, SinkBindingConfig, SinkConcurrency,
+};
 #[cfg(feature = "local-bare-paths")]
 use silk_chiffon_storage::LocationInput;
 
@@ -63,9 +70,17 @@ fn composed_cli_binds_registered_transform_arguments() {
     ])
     .unwrap();
 
-    let Command::Transform(_command) = cli.command else {
+    let Command::Transform(command) = cli.command else {
         panic!("expected transform command");
     };
+    assert_eq!(command.formats().formats().count(), 3);
+    #[cfg(feature = "local-bare-paths")]
+    assert!(
+        command
+            .storage()
+            .input_handle(&LocationInput::parse("input.arrow").unwrap())
+            .is_ok()
+    );
 }
 
 #[test]
@@ -86,77 +101,6 @@ fn composed_cli_rejects_an_unregistered_format() {
     assert!(message.contains("arrow"));
     assert!(message.contains("parquet"));
     assert!(message.contains("vortex"));
-}
-
-#[test]
-fn transform_cli_separates_repeatable_exact_references_from_patterns() {
-    Cli::try_parse_from([
-        "silk-chiffon",
-        "transform",
-        "--from",
-        "one.arrow",
-        "--from",
-        "two.arrow",
-        "--to",
-        "output.arrow",
-    ])
-    .unwrap();
-
-    Cli::try_parse_from([
-        "silk-chiffon",
-        "transform",
-        "--from-pattern",
-        "one-*.arrow",
-        "--from-pattern",
-        "two-*.arrow",
-        "--to",
-        "output.arrow",
-    ])
-    .unwrap();
-
-    let mixed = Cli::try_parse_from([
-        "silk-chiffon",
-        "transform",
-        "--from",
-        "one.arrow",
-        "--from-pattern",
-        "two-*.arrow",
-        "--to",
-        "output.arrow",
-    ])
-    .unwrap_err();
-    assert_eq!(mixed.kind(), clap::error::ErrorKind::ArgumentConflict);
-}
-
-#[test]
-fn transform_cli_rejects_removed_input_flag() {
-    let error = Cli::try_parse_from([
-        "silk-chiffon",
-        "transform",
-        "--from-many",
-        "*.arrow",
-        "--to",
-        "output.arrow",
-    ])
-    .unwrap_err();
-    assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
-}
-
-#[test]
-fn runtime_command_resolves_the_worker_thread_policy() {
-    let cli = Cli::try_parse_from([
-        "silk-chiffon",
-        "transform",
-        "--from",
-        "input.arrow",
-        "--to",
-        "output.arrow",
-        "--thread-budget",
-        "2",
-    ])
-    .unwrap();
-
-    assert_eq!(cli.command.runtime_worker_threads(), 2);
 }
 
 #[test]
@@ -187,10 +131,11 @@ fn registered_arguments_are_present_in_help_and_completions() {
 
 #[cfg(feature = "local-bare-paths")]
 #[tokio::test(flavor = "multi_thread")]
-async fn registered_transform_uses_bound_format_and_storage_settings() {
+async fn registered_capabilities_use_command_storage_and_explicit_outputs() {
     let temp_dir = tempfile::tempdir().unwrap();
     let input = temp_dir.path().join("input.parquet");
     let output_one = temp_dir.path().join("one.parquet");
+    let output_two = temp_dir.path().join("two.parquet");
     let batch = TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]);
     TestFile::write_parquet_batch(&input, &batch);
 
@@ -208,22 +153,52 @@ async fn registered_transform_uses_bound_format_and_storage_settings() {
     let Command::Transform(command) = cli.command else {
         panic!("expected transform command");
     };
-    silk_chiffon::commands::transform::run(command)
-        .await
-        .unwrap();
-    assert!(output_one.exists());
-    assert_eq!(
-        TestFile::read_parquet(&output_one)
-            .iter()
-            .map(arrow::array::RecordBatch::num_rows)
-            .sum::<usize>(),
-        3
-    );
-
-    let storage = silk_chiffon_storage::local::session().unwrap();
-    let input_handle = storage
+    let input_handle = command
+        .storage()
         .input_handle(&LocationInput::parse(input.to_str().unwrap()).unwrap())
         .unwrap();
+    let parquet = command.formats().get("parquet").unwrap();
+    let session = SessionContext::new();
+    let source = parquet
+        .create_source(&input_handle, &session)
+        .await
+        .unwrap();
+    assert_eq!(source.replayability(), Replayability::Replayable);
+    assert_eq!(
+        source
+            .row_count_capability()
+            .unwrap()
+            .row_count()
+            .await
+            .unwrap(),
+        RowCount::Exact(3)
+    );
+    assert!(!source.schema().await.unwrap().fields().is_empty());
+    let schema = batch.schema();
+
+    let context = SinkBindingConfig::new(
+        NonZeroUsize::new(2).unwrap(),
+        SinkConcurrency::Sequential,
+        Vec::new(),
+    );
+    let sink_binding = parquet.bind_sink(&context).await.unwrap();
+    for output in [&output_one, &output_two] {
+        let handle = command
+            .storage()
+            .output_handle(&LocationInput::parse(output.to_str().unwrap()).unwrap())
+            .unwrap();
+        let mut sink = sink_binding
+            .open_sink(handle, std::sync::Arc::clone(&schema))
+            .await
+            .unwrap();
+        sink.write_batch(batch.clone()).await.unwrap();
+        let result = sink.finish().await.unwrap();
+        assert_eq!(result.rows_written, 3);
+        assert_eq!(result.files_written.len(), 1);
+    }
+    assert!(output_one.exists());
+    assert!(output_two.exists());
+
     let detected = registration::format_registry()
         .detect(&input_handle)
         .await

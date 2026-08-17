@@ -181,31 +181,25 @@ fn write_arrow_file(path: &std::path::Path, schema: &SchemaRef, batches: Vec<Rec
     writer.finish().unwrap();
 }
 
-fn benchmark_transform_command(
-    input_path: &str,
-    output_template: &str,
-    partition_strategy: PartitionStrategy,
-) -> TransformCommand {
+fn benchmark_transform_command() -> TransformCommand {
     let Cli {
-        command: Command::Transform(command),
-    } = Cli::try_parse_from(vec![
-        "silk-chiffon".to_owned(),
-        "transform".to_owned(),
-        "--from".to_owned(),
-        input_path.to_owned(),
-        "--to-many".to_owned(),
-        output_template.to_owned(),
-        "--by".to_owned(),
-        "field1".to_owned(),
-        "--partition-strategy".to_owned(),
-        partition_strategy.to_string(),
-        "--create-dirs".to_owned(),
-        "--overwrite".to_owned(),
+        command: Command::Transform(mut command),
+    } = Cli::try_parse_from([
+        "silk-chiffon",
+        "transform",
+        "--from",
+        "input.arrow",
+        "--to",
+        "output.parquet",
+        "--create-dirs",
+        "--overwrite",
     ])
     .unwrap()
     else {
         unreachable!()
     };
+    command.from = None;
+    command.to = None;
     command
 }
 
@@ -269,11 +263,13 @@ fn run_partition_benchmark(
                         .unwrap();
                     let _ = std::fs::remove_dir_all(out_dir);
 
-                    let cmd = benchmark_transform_command(
-                        &fixture.input_path,
-                        &fixture.output_template,
+                    let cmd = TransformCommand {
+                        from: Some(fixture.input_path.clone()),
+                        to_many: Some(fixture.output_template.clone()),
+                        by: Some("field1".to_string()),
                         partition_strategy,
-                    );
+                        ..benchmark_transform_command()
+                    };
 
                     rt.block_on(async {
                         transform::run(cmd).await.unwrap();

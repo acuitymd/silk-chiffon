@@ -2,7 +2,7 @@ use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use datafusion::prelude::{DataFrame, SessionContext};
 
-use silk_chiffon_core::DataOperation;
+use crate::operations::data_operation::DataOperation;
 
 pub const DEFAULT_TABLE_NAME: &str = "data";
 

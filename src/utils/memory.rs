@@ -7,7 +7,7 @@ use arrow::datatypes::{DataType, Schema};
 use futures::StreamExt;
 use sysinfo::System;
 
-use silk_chiffon_core::InputSources;
+use crate::io_strategies::input_sources::InputSources;
 
 /// Returns total memory in bytes, respecting container cgroup limits.
 ///
