@@ -153,3 +153,115 @@ async fn run_vortex(args: &InspectVortexArgs, storage: &StorageContext) -> Resul
     out.flush()?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use object_store::{ObjectStore, ObjectStoreExt, PutPayload, memory::InMemory, path::Path};
+
+    use crate::{OutputFormat, utils::test_helpers::object_store::CountingStore};
+
+    #[tokio::test]
+    async fn arrow_errors_name_remote_location() {
+        let store = InMemory::new();
+        store
+            .put(
+                &Path::from("truncated.arrow"),
+                PutPayload::from_static(b"ARROW1"),
+            )
+            .await
+            .unwrap();
+        let storage = Arc::new(StorageContext::with_gcs_store(
+            StorageConfig::default(),
+            Arc::new(store),
+        ));
+        let command = InspectSubcommand::Arrow(InspectArrowArgs {
+            file: "gs://inspect-tests/truncated.arrow".to_string(),
+            batches: false,
+            format: OutputFormat::Json,
+            row_count: false,
+        });
+
+        let error = run_with_storage_context(command, storage)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            error.contains("gs://inspect-tests/truncated.arrow"),
+            "{error}"
+        );
+        assert!(error.contains("trailer"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn parquet_json_validates_remote_columns_before_page_fetch() {
+        let inner = InMemory::new();
+        inner
+            .put(
+                &Path::from("people.parquet"),
+                PutPayload::from(std::fs::read("tests/files/people.parquet").unwrap()),
+            )
+            .await
+            .unwrap();
+        let (store, requests) = CountingStore::new(inner);
+        let store: Arc<dyn ObjectStore> = Arc::new(store);
+        let storage = Arc::new(StorageContext::with_gcs_store(
+            StorageConfig::default(),
+            store,
+        ));
+        let input = storage
+            .resolve_input("gs://inspect-tests/people.parquet")
+            .await
+            .unwrap();
+        ParquetInspector::open(&input).await.unwrap();
+        let footer_ranges = requests.ranges.lock().unwrap().clone();
+        requests.ranges.lock().unwrap().clear();
+        let command = InspectSubcommand::Parquet(InspectParquetArgs {
+            file: "gs://inspect-tests/people.parquet".to_string(),
+            format: OutputFormat::Json,
+            row_group: 0,
+            pages: Some("missing".to_string()),
+        });
+
+        let error = run_with_storage_context(command, storage)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("column missing"));
+        assert!(error.contains("gs://inspect-tests/people.parquet"));
+        assert_eq!(*requests.ranges.lock().unwrap(), footer_ranges);
+    }
+
+    #[tokio::test]
+    async fn vortex_errors_name_remote_location() {
+        let store = InMemory::new();
+        store
+            .put(
+                &Path::from("truncated.vortex"),
+                PutPayload::from_static(b"VTXFbroken"),
+            )
+            .await
+            .unwrap();
+        let storage = Arc::new(StorageContext::with_gcs_store(
+            StorageConfig::default(),
+            Arc::new(store),
+        ));
+        let command = InspectSubcommand::Vortex(InspectVortexArgs {
+            file: "gs://inspect-tests/truncated.vortex".to_string(),
+            schema: false,
+            stats: false,
+            layout: false,
+            format: OutputFormat::Text,
+        });
+
+        let error = run_with_storage_context(command, storage)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("gs://inspect-tests/truncated.vortex"));
+    }
+}

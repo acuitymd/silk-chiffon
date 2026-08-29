@@ -86,3 +86,100 @@ pub async fn detect_format(input: &InputObject) -> Result<DetectedFormat> {
 
     Ok(DetectedFormat::Unknown)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::sync::{Arc, atomic::Ordering};
+
+    use object_store::{ObjectStore, ObjectStoreExt, PutPayload, memory::InMemory, path::Path};
+
+    use crate::{
+        storage::{StorageConfig, StorageContext},
+        utils::test_helpers::object_store::CountingStore,
+    };
+
+    async fn input(
+        bytes: Vec<u8>,
+        key: &str,
+    ) -> (
+        crate::storage::InputObject,
+        Arc<crate::utils::test_helpers::object_store::RequestLog>,
+    ) {
+        let inner = InMemory::new();
+        inner
+            .put(&Path::from(key), PutPayload::from(bytes))
+            .await
+            .unwrap();
+        let (store, requests) = CountingStore::new(inner);
+        let store: Arc<dyn ObjectStore> = Arc::new(store);
+        let storage = StorageContext::with_gcs_store(StorageConfig::default(), store);
+        let input = storage
+            .resolve_input(&format!("gs://inspect-tests/{key}"))
+            .await
+            .unwrap();
+        (input, requests)
+    }
+
+    #[tokio::test]
+    async fn identifies_object_store_formats_with_bounded_ranges() {
+        let fixtures = [
+            (
+                std::fs::read("tests/files/people.parquet").unwrap(),
+                "people.parquet",
+                DetectedFormat::Parquet,
+                2,
+            ),
+            (
+                std::fs::read("tests/files/people.file.arrow").unwrap(),
+                "people.file.arrow",
+                DetectedFormat::Arrow {
+                    variant: "file".to_string(),
+                },
+                4,
+            ),
+            (
+                std::fs::read("tests/files/people.stream.arrow").unwrap(),
+                "people.stream.arrow",
+                DetectedFormat::Arrow {
+                    variant: "stream".to_string(),
+                },
+                5,
+            ),
+            (
+                b"VTXFpayloadVTXF".to_vec(),
+                "people.vortex",
+                DetectedFormat::Vortex,
+                2,
+            ),
+        ];
+
+        for (bytes, key, expected, expected_ranges) in fixtures {
+            let size = bytes.len() as u64;
+            let (input, requests) = input(bytes, key).await;
+
+            assert_eq!(detect_format(&input).await.unwrap(), expected);
+            assert_eq!(requests.heads.load(Ordering::SeqCst), 1);
+            assert_eq!(requests.full_gets.load(Ordering::SeqCst), 0);
+            let ranges = requests.ranges.lock().unwrap();
+            assert_eq!(ranges.len(), expected_ranges);
+            assert!(ranges.iter().all(|range| {
+                range
+                    .as_range(size)
+                    .is_ok_and(|range| range.end - range.start < size)
+            }));
+        }
+    }
+
+    #[tokio::test]
+    async fn truncated_objects_are_unknown() {
+        for bytes in [Vec::new(), b"PAR".to_vec(), b"VTX".to_vec()] {
+            let (input, _) = input(bytes, "truncated.data").await;
+            assert_eq!(
+                detect_format(&input).await.unwrap(),
+                DetectedFormat::Unknown
+            );
+        }
+    }
+}
