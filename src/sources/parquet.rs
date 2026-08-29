@@ -46,8 +46,17 @@ impl DataSource for ParquetDataSource {
 
     async fn as_table_provider(&self, ctx: &mut SessionContext) -> Result<Arc<dyn TableProvider>> {
         let table_name = format!("parquet_{}", Uuid::new_v4().as_simple());
-        ctx.register_parquet(&table_name, &self.path, ParquetReadOptions::default())
-            .await?;
+        // datafusion 54 filters single-file registration by file_extension;
+        // "" disables that so an explicit --input-format works on any extension.
+        ctx.register_parquet(
+            &table_name,
+            &self.path,
+            ParquetReadOptions {
+                file_extension: "",
+                ..Default::default()
+            },
+        )
+        .await?;
         let table = ctx.table(&table_name).await?;
         Ok(table.into_view())
     }

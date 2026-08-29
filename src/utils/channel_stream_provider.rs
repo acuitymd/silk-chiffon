@@ -3,7 +3,6 @@
 //! Provides a TableProvider that reads record batches from a channel,
 //! enabling streaming analysis while data is being ingested.
 
-use std::any::Any;
 use std::fmt::{self, Formatter};
 use std::sync::Arc;
 
@@ -54,10 +53,6 @@ impl ChannelTableProvider {
 
 #[async_trait::async_trait]
 impl TableProvider for ChannelTableProvider {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         Arc::clone(&self.schema)
     }
@@ -135,10 +130,6 @@ impl ChannelExec {
 impl ExecutionPlan for ChannelExec {
     fn name(&self) -> &str {
         "ChannelExec"
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 
     fn schema(&self) -> SchemaRef {

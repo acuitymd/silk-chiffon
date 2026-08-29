@@ -5,6 +5,8 @@
 //! consumers (like sort merge phases) can fail to allocate even small amounts. This pool
 //! solves that by maintaining a reserve that only non-spillable consumers can use.
 
+use std::fmt::{Display, Formatter};
+
 use datafusion::common::{Result, resources_datafusion_err};
 use datafusion::execution::memory_pool::{
     MemoryConsumer, MemoryLimit, MemoryPool, MemoryReservation, human_readable_size,
@@ -76,6 +78,10 @@ impl ReservedSpillPool {
 }
 
 impl MemoryPool for ReservedSpillPool {
+    fn name(&self) -> &str {
+        "reserved"
+    }
+
     fn register(&self, consumer: &MemoryConsumer) {
         if consumer.can_spill() {
             self.state.lock().num_spill += 1;
@@ -173,6 +179,18 @@ impl MemoryPool for ReservedSpillPool {
 
     fn memory_limit(&self) -> MemoryLimit {
         MemoryLimit::Finite(self.pool_size)
+    }
+}
+
+impl Display for ReservedSpillPool {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}(pool_size: {}, reserve_for_non_spillable: {})",
+            self.name(),
+            human_readable_size(self.pool_size),
+            human_readable_size(self.reserve_for_non_spillable),
+        )
     }
 }
 
