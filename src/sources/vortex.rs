@@ -1,25 +1,60 @@
+//! Vortex metadata and scans backed by `ObjectStore`.
+
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
-use datafusion::catalog::TableProvider;
-use datafusion::prelude::SessionContext;
-use vortex::VortexSessionDefault;
-use vortex::file::OpenOptionsSessionExt;
+use datafusion::{catalog::TableProvider, prelude::SessionContext};
+use tokio::sync::OnceCell;
 use vortex::io::session::RuntimeSessionExt;
 use vortex::session::VortexSession;
+use vortex::{VortexSessionDefault, file::OpenOptionsSessionExt};
 use vortex_datafusion::v2::VortexTable;
 
-use crate::sources::data_source::DataSource;
+use crate::{
+    sources::data_source::{DataSource, SourceMetadata},
+    storage::InputObject,
+};
 
 pub struct VortexDataSource {
-    path: String,
+    input: InputObject,
+    metadata: OnceCell<SourceMetadata>,
 }
 
 impl VortexDataSource {
-    pub fn new(path: String) -> Self {
-        Self { path }
+    pub fn new(input: InputObject) -> Self {
+        Self {
+            input,
+            metadata: OnceCell::new(),
+        }
+    }
+
+    async fn metadata(&self) -> Result<&SourceMetadata> {
+        self.metadata
+            .get_or_try_init(|| async {
+                let session = VortexSession::default().with_tokio();
+                let file = session
+                    .open_options()
+                    .with_file_size(self.input.metadata().size)
+                    .open_object_store(
+                        self.input.location().store().object_store(),
+                        self.input.location().path().as_ref(),
+                    )
+                    .await
+                    .map_err(|error| anyhow!("failed to open Vortex object: {error}"))?;
+                let schema = file
+                    .dtype()
+                    .to_arrow_schema()
+                    .map_err(|error| anyhow!("failed to convert Vortex dtype: {error}"))?;
+                #[allow(clippy::cast_possible_truncation)]
+                let row_count = file.row_count() as usize;
+                Ok(SourceMetadata {
+                    schema: Arc::new(schema),
+                    row_count,
+                })
+            })
+            .await
     }
 }
 
@@ -29,58 +64,39 @@ impl DataSource for VortexDataSource {
         "vortex"
     }
 
-    fn schema(&self) -> Result<SchemaRef> {
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let session = VortexSession::default();
-                let vortex_file = session
-                    .open_options()
-                    .open_path(self.path.as_str())
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to open Vortex file: {}", e))?;
-
-                let dtype = vortex_file.dtype();
-                let arrow_schema = dtype.to_arrow_schema().map_err(|e| {
-                    anyhow::anyhow!("Failed to convert Vortex DType to Arrow Schema: {}", e)
-                })?;
-
-                Ok(Arc::new(arrow_schema))
-            })
-        })
+    fn input(&self) -> &InputObject {
+        &self.input
     }
 
-    fn row_count(&self) -> Result<usize> {
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let session = VortexSession::default();
-                let vortex_file = session
-                    .open_options()
-                    .open_path(self.path.as_str())
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to open Vortex file: {}", e))?;
-
-                #[allow(clippy::cast_possible_truncation)]
-                Ok(vortex_file.row_count() as usize)
-            })
-        })
+    async fn schema(&self) -> Result<SchemaRef> {
+        Ok(Arc::clone(&self.metadata().await?.schema))
     }
 
-    async fn as_table_provider(&self, _ctx: &mut SessionContext) -> Result<Arc<dyn TableProvider>> {
+    async fn row_count(&self) -> Result<usize> {
+        Ok(self.metadata().await?.row_count)
+    }
+
+    async fn as_table_provider(&self, _ctx: &SessionContext) -> Result<Arc<dyn TableProvider>> {
         let session = VortexSession::default().with_tokio();
-        let vortex_file = session
+        let file = session
             .open_options()
-            .open_path(self.path.as_str())
+            .with_file_size(self.input.metadata().size)
+            .open_object_store(
+                self.input.location().store().object_store(),
+                self.input.location().path().as_ref(),
+            )
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to open Vortex file: {}", e))?;
-        let arrow_schema = vortex_file.dtype().to_arrow_schema().map_err(|e| {
-            anyhow::anyhow!("Failed to convert Vortex DType to Arrow Schema: {}", e)
-        })?;
-        let data_source = vortex_file.data_source()?;
+            .map_err(|error| anyhow!("failed to open Vortex object: {error}"))?;
+        let schema = file
+            .dtype()
+            .to_arrow_schema()
+            .map_err(|error| anyhow!("failed to convert Vortex dtype: {error}"))?;
+        let data_source = file.data_source()?;
 
         Ok(Arc::new(VortexTable::new(
             data_source,
             session,
-            Arc::new(arrow_schema),
+            Arc::new(schema),
         )))
     }
 
@@ -91,31 +107,46 @@ impl DataSource for VortexDataSource {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-    use std::sync::Arc;
+    use super::*;
 
-    use arrow::array::{Int32Array, RecordBatch, StringArray};
-    use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+    use std::path::Path as FsPath;
+
+    use arrow::{
+        array::{Int32Array, RecordBatch, StringArray},
+        datatypes::{DataType, Field, Schema, SchemaRef},
+    };
+    use object_store::{
+        ObjectMeta, ObjectStore, ObjectStoreExt, PutPayload, memory::InMemory, path::Path,
+    };
     use tempfile::TempDir;
 
-    use super::*;
-    use crate::sinks::data_sink::DataSink;
-    use crate::sinks::vortex::{VortexSink, VortexSinkOptions};
+    use crate::{
+        sinks::{
+            data_sink::DataSink,
+            vortex::{VortexSink, VortexSinkOptions},
+        },
+        storage::{
+            ObjectLocation, OutputPolicy, StorageConfig, StorageContext, StoreHandle, StoreKind,
+        },
+    };
 
-    fn write_vortex_file(path: &Path, schema: &SchemaRef, batch: RecordBatch) {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let mut sink =
-                VortexSink::create(path.to_path_buf(), schema, VortexSinkOptions::new()).unwrap();
-            sink.write_batch(batch).await.unwrap();
-            sink.finish().await.unwrap();
-        });
+    async fn write_vortex_file(path: &FsPath, schema: &SchemaRef, batch: RecordBatch) {
+        let storage = StorageContext::new(StorageConfig::default()).unwrap();
+        let output = storage
+            .create_output(
+                path.to_string_lossy().as_ref(),
+                OutputPolicy::new(true, true),
+            )
+            .await
+            .unwrap();
+        let mut sink = VortexSink::create(output, schema, VortexSinkOptions::new()).unwrap();
+        sink.write_batch(batch).await.unwrap();
+        sink.finish().await.unwrap();
     }
 
-    #[test]
-    fn test_row_count() {
+    async fn source() -> VortexDataSource {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("test.vortex");
+        let file_path = dir.path().join("test.vortex");
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Int32, false),
             Field::new("name", DataType::Utf8, false),
@@ -128,12 +159,55 @@ mod tests {
             ],
         )
         .unwrap();
-        write_vortex_file(&path, &schema, batch);
+        write_vortex_file(&file_path, &schema, batch).await;
+        let bytes = std::fs::read(&file_path).unwrap();
+        let size = u64::try_from(bytes.len()).unwrap();
+        let path = Path::from("test.bin");
+        let memory = InMemory::new();
+        memory.put(&path, PutPayload::from(bytes)).await.unwrap();
+        let store: Arc<dyn ObjectStore> = Arc::new(memory);
+        let handle = Arc::new(StoreHandle::new(
+            StoreKind::Gcs {
+                bucket: "test".to_string(),
+            },
+            datafusion::execution::object_store::ObjectStoreUrl::parse("memory://test").unwrap(),
+            store,
+        ));
+        let location = ObjectLocation::new(
+            "memory://test/test.bin".to_string(),
+            "memory://test/test.bin".to_string(),
+            path.clone(),
+            handle,
+        );
+        let meta = ObjectMeta {
+            location: path,
+            last_modified: chrono::Utc::now(),
+            size,
+            e_tag: None,
+            version: None,
+        };
+        VortexDataSource::new(InputObject::new(location, meta))
+    }
 
-        // row_count() uses block_in_place, so we need our own runtime
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let source = VortexDataSource::new(path.to_string_lossy().to_string());
-        let count = rt.block_on(async { source.row_count().unwrap() });
-        assert_eq!(count, 5);
+    #[tokio::test]
+    async fn reads_dtype_and_row_count_from_object_store() {
+        let source = source().await;
+
+        assert_eq!(source.schema().await.unwrap().fields().len(), 2);
+        assert_eq!(source.row_count().await.unwrap(), 5);
+    }
+
+    #[tokio::test]
+    async fn scans_object_store() {
+        let source = source().await;
+        let strategy =
+            crate::io_strategies::input_strategy::InputStrategy::Single(Box::new(source));
+        let ctx = SessionContext::new();
+        let batches =
+            futures::TryStreamExt::try_collect::<Vec<_>>(strategy.as_stream(&ctx).await.unwrap())
+                .await
+                .unwrap();
+
+        assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 5);
     }
 }

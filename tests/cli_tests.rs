@@ -1,14 +1,14 @@
 use assert_cmd::cargo;
+use clap::Parser;
 use predicates::prelude::*;
-use silk_chiffon::StorageConfig;
 use silk_chiffon::inspection::parquet::ParquetInspector;
-use silk_chiffon::storage::StorageContext;
 use silk_chiffon::utils::test_data::{TestBatch, TestFile};
+use silk_chiffon::{Cli, Commands};
 use tempfile::TempDir;
 
 fn inspect(path: &std::path::Path) -> ParquetInspector {
     tokio::runtime::Runtime::new().unwrap().block_on(async {
-        let storage = StorageContext::new(StorageConfig::default()).unwrap();
+        let storage = silk_chiffon::storage::StorageContext::new(Default::default()).unwrap();
         let input = storage
             .resolve_input(path.to_string_lossy().as_ref())
             .await
@@ -38,12 +38,119 @@ fn test_transform_help() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Transform data between formats"))
-        .stdout(predicate::str::contains("Single input file"))
-        .stdout(predicate::str::contains("Multiple input file"))
-        .stdout(predicate::str::contains("Single output file"))
         .stdout(predicate::str::contains(
-            "Output path template for partitioning",
+            "Single input as a local path, file:// URL, or gs:// URI",
+        ))
+        .stdout(predicate::str::contains(
+            "Inputs as local paths, file:// URLs, or gs:// URIs",
+        ))
+        .stdout(predicate::str::contains(
+            "Single output as a local path, file:// URL, or gs:// URI",
+        ))
+        .stdout(predicate::str::contains("Local or gs:// output template"));
+}
+
+#[test]
+fn object_store_help_names_remote_semantics() {
+    cargo::cargo_bin_cmd!("silk-chiffon")
+        .args(["transform", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "local path, file:// URL, or gs:// URI",
+        ))
+        .stdout(predicate::str::contains(
+            "GCS prefixes need no directory creation",
+        ))
+        .stdout(predicate::str::contains(
+            "Remote manifests commit after data outputs",
+        ))
+        .stdout(predicate::str::contains(
+            "Local directory only. gs:// is not supported",
         ));
+}
+
+#[test]
+fn list_outputs_file_accepts_a_gcs_uri() {
+    let cli = Cli::try_parse_from([
+        "silk-chiffon",
+        "transform",
+        "--from",
+        "input.arrow",
+        "--to-many",
+        "gs://bucket/output/{{name}}.arrow",
+        "--by",
+        "name",
+        "--list-outputs",
+        "json",
+        "--list-outputs-file",
+        "gs://bucket/manifests/outputs.json",
+    ])
+    .unwrap();
+    let Commands::Transform(command) = cli.command else {
+        panic!("expected transform command");
+    };
+
+    assert_eq!(
+        command.list_outputs_file.as_deref(),
+        Some("gs://bucket/manifests/outputs.json")
+    );
+}
+
+#[test]
+fn object_store_options_reach_transform_dispatch() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let output = temp_dir.path().join("output.parquet");
+    TestFile::write_arrow_batch(
+        &input,
+        &TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]),
+    );
+
+    let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
+    cmd.args([
+        "--object-store-max-requests",
+        "12",
+        "transform",
+        "--object-store-upload-part-size",
+        "16MiB",
+        "--from",
+        input.to_str().unwrap(),
+        "--to",
+        output.to_str().unwrap(),
+        "--object-store-upload-concurrency",
+        "3",
+    ])
+    .assert()
+    .success();
+
+    assert!(output.exists());
+}
+
+#[test]
+fn object_store_options_reach_inspect_dispatch() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    TestFile::write_arrow_batch(
+        &input,
+        &TestBatch::simple_with(&[1, 2, 3], &["a", "b", "c"]),
+    );
+
+    let mut cmd = cargo::cargo_bin_cmd!("silk-chiffon");
+    cmd.args([
+        "inspect",
+        "identify",
+        input.to_str().unwrap(),
+        "--object-store-max-requests",
+        "12",
+        "--object-store-upload-part-size",
+        "16MiB",
+        "--object-store-upload-concurrency",
+        "3",
+    ])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("\"format\":\"arrow\""));
 }
 
 #[test]

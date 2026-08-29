@@ -20,6 +20,11 @@ pub struct InputObject {
 }
 
 impl InputObject {
+    #[cfg(test)]
+    pub(crate) fn new(location: ObjectLocation, meta: ObjectMeta) -> Self {
+        Self { location, meta }
+    }
+
     #[must_use]
     pub fn location(&self) -> &ObjectLocation {
         &self.location

@@ -37,7 +37,6 @@ use tabled::{
 };
 
 use crate::{
-    inspection::readers::read_parquet_metadata,
     inspection::{
         inspectable::{
             Inspectable, format_bytes, format_number, render_metadata_map, render_schema_fields,
@@ -48,6 +47,7 @@ use crate::{
             missing_value, true_or_missing_display, value,
         },
     },
+    sources::parquet::read_parquet_metadata,
     storage::InputObject,
 };
 

@@ -1,5 +1,13 @@
+//! Partition output path templates.
+//!
+//! Template values may change only the object key. A `gs://` template keeps
+//! its literal scheme and bucket, while bare and `file://` templates remain
+//! local. This prevents a raw substitution from redirecting a partition to a
+//! different store.
+
 use std::collections::HashMap;
 
+use anyhow::{Result, bail};
 use arrow::util::display::{ArrayFormatter, FormatOptions};
 use minijinja::{AutoEscape, Environment, Value};
 use percent_encoding::{AsciiSet, CONTROLS, percent_encode};
@@ -96,6 +104,17 @@ impl PathTemplate {
         tmpl.render(context).unwrap()
     }
 
+    pub fn resolve_checked(&self, values: &PartitionValues) -> Result<String> {
+        let resolved = self.resolve(values);
+        self.validate_store_identity(&resolved)?;
+        Ok(resolved)
+    }
+
+    #[must_use]
+    pub fn static_location(&self) -> Option<&str> {
+        (!self.template_str.contains('{')).then_some(self.template_str.as_str())
+    }
+
     /// Like resolve(), but inserts a file index before the extension.
     /// e.g. "output/{{col}}.parquet" with index 2 -> "output/val_2.parquet"
     pub fn resolve_with_index(&self, values: &PartitionValues, file_index: usize) -> String {
@@ -108,6 +127,66 @@ impl PathTemplate {
                 format!("{}_{}{}", &base[..dot_pos], file_index, &base[dot_pos..])
             }
             None => format!("{}_{}", base, file_index),
+        }
+    }
+
+    pub fn resolve_with_index_checked(
+        &self,
+        values: &PartitionValues,
+        file_index: usize,
+    ) -> Result<String> {
+        let resolved = self.resolve_with_index(values, file_index);
+        self.validate_store_identity(&resolved)?;
+        Ok(resolved)
+    }
+
+    fn validate_store_identity(&self, resolved: &str) -> Result<()> {
+        let expected = TemplateStoreIdentity::parse(&self.template_str)?;
+        let actual = TemplateStoreIdentity::parse(resolved)?;
+        if expected != actual {
+            bail!(
+                "output template substitution changed store identity from {expected} to {actual}"
+            );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum TemplateStoreIdentity<'a> {
+    Local,
+    Gcs(&'a str),
+}
+
+impl<'a> TemplateStoreIdentity<'a> {
+    fn parse(value: &'a str) -> Result<Self> {
+        let Some((scheme, remainder)) = value.split_once("://") else {
+            return Ok(Self::Local);
+        };
+        match scheme.to_ascii_lowercase().as_str() {
+            "file" => Ok(Self::Local),
+            "gs" => {
+                let bucket = remainder.split('/').next().unwrap_or_default();
+                if bucket.is_empty() {
+                    bail!("GCS output template requires a bucket");
+                }
+                if bucket.contains('{') || bucket.contains('}') {
+                    bail!("GCS output template bucket must be literal");
+                }
+                Ok(Self::Gcs(bucket))
+            }
+            unsupported => bail!(
+                "unsupported output template scheme '{unsupported}'; supported schemes are file and gs"
+            ),
+        }
+    }
+}
+
+impl std::fmt::Display for TemplateStoreIdentity<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Local => f.write_str("local storage"),
+            Self::Gcs(bucket) => write!(f, "gs://{bucket}"),
         }
     }
 }
@@ -139,6 +218,49 @@ mod tests {
 
         let result = template.resolve(&values);
         assert_eq!(result, "output/2024.parquet");
+    }
+
+    #[test]
+    fn checked_resolution_retains_gcs_store_identity() {
+        let template = PathTemplate::new("gs://data-bucket/output/{{year}}.parquet".to_string());
+        let mut values = HashMap::new();
+        values.insert(
+            "year".to_string(),
+            Arc::new(Int32Array::from(vec![2024])) as _,
+        );
+
+        assert_eq!(
+            template.resolve_checked(&values).unwrap(),
+            "gs://data-bucket/output/2024.parquet"
+        );
+    }
+
+    #[test]
+    fn checked_resolution_rejects_store_identity_substitution() {
+        let template = PathTemplate::new("{{target | raw}}".to_string());
+        let mut values = HashMap::new();
+        values.insert(
+            "target".to_string(),
+            Arc::new(StringArray::from(vec!["gs://other-bucket/output.parquet"])) as _,
+        );
+
+        let error = template.resolve_checked(&values).unwrap_err();
+
+        assert!(error.to_string().contains("changed store identity"));
+    }
+
+    #[test]
+    fn checked_resolution_requires_a_literal_gcs_bucket() {
+        let template = PathTemplate::new("gs://{{bucket}}/output.parquet".to_string());
+        let mut values = HashMap::new();
+        values.insert(
+            "bucket".to_string(),
+            Arc::new(StringArray::from(vec!["data-bucket"])) as _,
+        );
+
+        let error = template.resolve_checked(&values).unwrap_err();
+
+        assert!(error.to_string().contains("bucket must be literal"));
     }
 
     #[test]

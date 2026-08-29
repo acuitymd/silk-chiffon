@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use anyhow::Result;
 use arrow::array::RecordBatch;
 use async_trait::async_trait;
@@ -22,6 +20,6 @@ pub trait DataSink: Send + Sync {
 
 #[derive(Debug)]
 pub struct SinkResult {
-    pub files_written: Vec<PathBuf>,
+    pub files_written: Vec<String>,
     pub rows_written: u64,
 }

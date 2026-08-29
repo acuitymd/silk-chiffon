@@ -14,7 +14,7 @@ use memory_pool::ReservedSpillPool;
 
 use crate::utils::memory::total_memory;
 use crate::{
-    ListOutputsFormat, QueryDialect, SpillCompression,
+    QueryDialect, SpillCompression,
     io_strategies::{
         OutputFileInfo,
         input_strategy::InputStrategy,
@@ -83,15 +83,11 @@ impl Pipeline {
         path: String,
         sink_factory: SinkFactory,
         exclude_columns: Vec<String>,
-        create_dirs: bool,
-        overwrite: bool,
     ) -> Self {
         self.output_strategy = Some(OutputStrategy::Single {
             path,
             sink_factory,
             exclude_columns,
-            create_dirs,
-            overwrite,
         });
 
         self
@@ -104,18 +100,12 @@ impl Pipeline {
         template: PathTemplate,
         sink_factory: SinkFactory,
         exclude_columns: Vec<String>,
-        create_dirs: bool,
-        overwrite: bool,
-        list_outputs: ListOutputsFormat,
     ) -> Self {
         self.output_strategy = Some(OutputStrategy::PartitionedSingleWriter {
             columns,
             template: Box::new(template),
             sink_factory,
             exclude_columns,
-            create_dirs,
-            overwrite,
-            list_outputs,
         });
 
         self
@@ -128,18 +118,12 @@ impl Pipeline {
         template: PathTemplate,
         sink_factory: SinkFactory,
         exclude_columns: Vec<String>,
-        create_dirs: bool,
-        overwrite: bool,
-        list_outputs: ListOutputsFormat,
     ) -> Self {
         self.output_strategy = Some(OutputStrategy::PartitionedMultiWriter {
             columns,
             template: Box::new(template),
             sink_factory,
             exclude_columns,
-            create_dirs,
-            overwrite,
-            list_outputs,
         });
 
         self
@@ -152,9 +136,6 @@ impl Pipeline {
         template: PathTemplate,
         sink_factory: SinkFactory,
         exclude_columns: Vec<String>,
-        create_dirs: bool,
-        overwrite: bool,
-        list_outputs: ListOutputsFormat,
         max_open: NonZeroUsize,
     ) -> Self {
         self.output_strategy = Some(OutputStrategy::PartitionedEvictWriter {
@@ -162,9 +143,6 @@ impl Pipeline {
             template: Box::new(template),
             sink_factory,
             exclude_columns,
-            create_dirs,
-            overwrite,
-            list_outputs,
             max_open,
         });
 

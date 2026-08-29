@@ -5,11 +5,11 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::{
-    inspection::readers::{read_arrow_file_metadata, read_stream_metadata},
     inspection::{
         magic::read_magic_edges,
         style::{dim, value},
     },
+    sources::arrow::{read_arrow_file_metadata, read_stream_metadata},
     storage::InputObject,
 };
 

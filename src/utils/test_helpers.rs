@@ -227,3 +227,232 @@ pub mod verify {
         (0..array.len()).map(|i| array.value(i)).collect()
     }
 }
+
+#[cfg(test)]
+pub mod object_store {
+    //! Counting in-memory object store for request-shape assertions.
+
+    use std::{
+        fmt,
+        ops::Range,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
+
+    use async_trait::async_trait;
+    use bytes::Bytes;
+    use futures::stream::BoxStream;
+    use object_store::{
+        CopyMode, CopyOptions, GetOptions, GetRange, GetResult, ListResult, MultipartUpload,
+        ObjectMeta, ObjectStore, PutMultipartOptions, PutOptions, PutPayload, PutResult,
+        RenameOptions, Result as StoreResult, UploadPart, memory::InMemory, path::Path,
+    };
+
+    #[derive(Debug, Default)]
+    pub struct RequestLog {
+        pub ranges: Mutex<Vec<GetRange>>,
+        pub full_gets: AtomicUsize,
+        pub heads: AtomicUsize,
+        pub multiparts: AtomicUsize,
+        pub parts: AtomicUsize,
+        pub aborts: AtomicUsize,
+        pub fail_parts: AtomicBool,
+        pub active_ranges: AtomicUsize,
+        pub max_active_ranges: AtomicUsize,
+    }
+
+    #[derive(Debug)]
+    pub struct CountingStore {
+        inner: InMemory,
+        requests: Arc<RequestLog>,
+        emulate_gcs_013: bool,
+        range_delay: Option<Duration>,
+    }
+
+    impl CountingStore {
+        pub fn new(inner: InMemory) -> (Self, Arc<RequestLog>) {
+            let requests = Arc::new(RequestLog::default());
+            (
+                Self {
+                    inner,
+                    requests: Arc::clone(&requests),
+                    emulate_gcs_013: false,
+                    range_delay: None,
+                },
+                requests,
+            )
+        }
+
+        pub fn new_gcs_013(inner: InMemory) -> (Self, Arc<RequestLog>) {
+            let (mut store, requests) = Self::new(inner);
+            store.emulate_gcs_013 = true;
+            (store, requests)
+        }
+
+        pub fn new_with_range_delay(
+            inner: InMemory,
+            range_delay: Duration,
+        ) -> (Self, Arc<RequestLog>) {
+            let (mut store, requests) = Self::new(inner);
+            store.range_delay = Some(range_delay);
+            (store, requests)
+        }
+    }
+
+    pub async fn wait_for_count(counter: &AtomicUsize, expected: usize) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while counter.load(Ordering::SeqCst) < expected {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("timed out waiting for object-store request");
+    }
+
+    impl fmt::Display for CountingStore {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("CountingStore")
+        }
+    }
+
+    #[async_trait]
+    impl ObjectStore for CountingStore {
+        async fn put_opts(
+            &self,
+            location: &Path,
+            payload: PutPayload,
+            options: PutOptions,
+        ) -> StoreResult<PutResult> {
+            self.inner.put_opts(location, payload, options).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &Path,
+            options: PutMultipartOptions,
+        ) -> StoreResult<Box<dyn MultipartUpload>> {
+            self.requests.multiparts.fetch_add(1, Ordering::SeqCst);
+            let inner = self.inner.put_multipart_opts(location, options).await?;
+            Ok(Box::new(CountingMultipart {
+                inner,
+                requests: Arc::clone(&self.requests),
+            }))
+        }
+
+        async fn get_opts(&self, location: &Path, options: GetOptions) -> StoreResult<GetResult> {
+            if options.head {
+                self.requests.heads.fetch_add(1, Ordering::SeqCst);
+            } else if let Some(range) = &options.range {
+                self.requests.ranges.lock().unwrap().push(range.clone());
+                let active = self.requests.active_ranges.fetch_add(1, Ordering::SeqCst) + 1;
+                self.requests
+                    .max_active_ranges
+                    .fetch_max(active, Ordering::SeqCst);
+                if let Some(delay) = self.range_delay {
+                    tokio::time::sleep(delay).await;
+                }
+                let result = self.inner.get_opts(location, options).await;
+                self.requests.active_ranges.fetch_sub(1, Ordering::SeqCst);
+                return result;
+            } else {
+                self.requests.full_gets.fetch_add(1, Ordering::SeqCst);
+            }
+            self.inner.get_opts(location, options).await
+        }
+
+        async fn get_ranges(
+            &self,
+            location: &Path,
+            ranges: &[Range<u64>],
+        ) -> StoreResult<Vec<Bytes>> {
+            self.requests
+                .ranges
+                .lock()
+                .unwrap()
+                .extend(ranges.iter().cloned().map(GetRange::Bounded));
+            self.inner.get_ranges(location, ranges).await
+        }
+
+        fn delete_stream(
+            &self,
+            locations: BoxStream<'static, StoreResult<Path>>,
+        ) -> BoxStream<'static, StoreResult<Path>> {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, StoreResult<ObjectMeta>> {
+            self.inner.list(prefix)
+        }
+
+        fn list_with_offset(
+            &self,
+            prefix: Option<&Path>,
+            offset: &Path,
+        ) -> BoxStream<'static, StoreResult<ObjectMeta>> {
+            self.inner.list_with_offset(prefix, offset)
+        }
+
+        async fn list_with_delimiter(&self, prefix: Option<&Path>) -> StoreResult<ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(&self, from: &Path, to: &Path, options: CopyOptions) -> StoreResult<()> {
+            let mode = if self.emulate_gcs_013 {
+                match options.mode {
+                    CopyMode::Create => CopyMode::Overwrite,
+                    CopyMode::Overwrite => CopyMode::Create,
+                }
+            } else {
+                options.mode
+            };
+            self.inner
+                .copy_opts(from, to, CopyOptions::new().with_mode(mode))
+                .await
+        }
+
+        async fn rename_opts(
+            &self,
+            from: &Path,
+            to: &Path,
+            options: RenameOptions,
+        ) -> StoreResult<()> {
+            self.inner.rename_opts(from, to, options).await
+        }
+    }
+
+    #[derive(Debug)]
+    struct CountingMultipart {
+        inner: Box<dyn MultipartUpload>,
+        requests: Arc<RequestLog>,
+    }
+
+    #[async_trait]
+    impl MultipartUpload for CountingMultipart {
+        fn put_part(&mut self, data: PutPayload) -> UploadPart {
+            let future = self.inner.put_part(data);
+            let requests = Arc::clone(&self.requests);
+            Box::pin(async move {
+                requests.parts.fetch_add(1, Ordering::SeqCst);
+                if requests.fail_parts.load(Ordering::SeqCst) {
+                    return Err(object_store::Error::Generic {
+                        store: "counting test store",
+                        source: "injected upload failure".into(),
+                    });
+                }
+                future.await
+            })
+        }
+
+        async fn complete(&mut self) -> StoreResult<PutResult> {
+            self.inner.complete().await
+        }
+
+        async fn abort(&mut self) -> StoreResult<()> {
+            self.requests.aborts.fetch_add(1, Ordering::SeqCst);
+            self.inner.abort().await
+        }
+    }
+}
