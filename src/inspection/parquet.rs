@@ -2,23 +2,27 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    fs::File,
     io::Write,
+    sync::Arc,
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result, anyhow, bail};
 use arrow::datatypes::SchemaRef;
-use camino::{Utf8Path, Utf8PathBuf};
+use bytes::{Buf, Bytes};
 use chrono::{DateTime, NaiveDate, Utc};
+use futures::{StreamExt, stream};
 use num_format::{Locale, ToFormattedString};
+use object_store::ObjectStoreExt;
 use owo_colors::OwoColorize;
 use parquet::{
     arrow::parquet_to_arrow_schema,
     basic::{Compression, ConvertedType, LogicalType, TimeUnit},
-    column::page::Page,
+    column::page::{Page, PageReader},
+    errors::ParquetError,
     file::{
-        metadata::SortingColumn,
-        reader::{FileReader, RowGroupReader, SerializedFileReader},
+        metadata::{ColumnChunkMetaData, ParquetMetaData, SortingColumn},
+        reader::{ChunkReader, Length},
+        serialized_reader::SerializedPageReader,
         statistics::Statistics,
     },
 };
@@ -32,21 +36,26 @@ use tabled::{
     },
 };
 
-use crate::inspection::{
-    inspectable::{
-        Inspectable, format_bytes, format_number, render_metadata_map, render_schema_fields,
-        schema_to_json, truncate_chars,
+use crate::{
+    inspection::readers::read_parquet_metadata,
+    inspection::{
+        inspectable::{
+            Inspectable, format_bytes, format_number, render_metadata_map, render_schema_fields,
+            schema_to_json, truncate_chars,
+        },
+        style::{
+            apply_theme, boolean_display, column_name, compression, dim, encoding, header, label,
+            missing_value, true_or_missing_display, value,
+        },
     },
-    magic::{magic_bytes_match_end, magic_bytes_match_start},
-    style::{
-        apply_theme, boolean_display, column_name, compression, dim, encoding, header, label,
-        missing_value, true_or_missing_display, value,
-    },
+    storage::InputObject,
 };
 
-const PARQUET_MAGIC: &[u8] = b"PAR1";
+const PAGE_FETCH_CONCURRENCY: usize = 16;
 
 pub struct ParquetInspector {
+    input: InputObject,
+    metadata: Arc<ParquetMetaData>,
     schema: SchemaRef,
     row_groups: Vec<RowGroupInfo>,
     num_rows: u64,
@@ -60,7 +69,7 @@ pub struct ParquetInspector {
     has_bloom_filters: bool,
     has_page_index: bool,
     custom_metadata: HashMap<String, String>,
-    file_path: Utf8PathBuf,
+    file_path: String,
     file_column_stats: Vec<FileColumnStats>,
     format_version: String,
     created_by: Option<String>,
@@ -108,6 +117,8 @@ pub struct ColumnInfo {
     /// detailed page-level encodings (requires reading pages)
     pub page_encodings: Option<PageEncodings>,
     pub statistics: Option<ColumnStatistics>,
+    #[serde(skip)]
+    pages: Option<Vec<PageInfo>>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -120,6 +131,118 @@ pub struct PageEncodings {
     pub def_levels: Option<String>,
     /// encoding used for repetition levels (v1 pages only)
     pub rep_levels: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct PageInfo {
+    index: usize,
+    page_type: &'static str,
+    encoding: String,
+    num_values: u64,
+    size: u64,
+    rows: Option<u64>,
+    nulls: Option<u64>,
+    def_encoding: Option<String>,
+    rep_encoding: Option<String>,
+    def_levels_byte_len: Option<u64>,
+    rep_levels_byte_len: Option<u64>,
+    is_sorted: Option<bool>,
+    is_compressed: Option<bool>,
+    has_statistics: bool,
+}
+
+impl PageInfo {
+    fn to_json(&self) -> Value {
+        match self.page_type {
+            "Dict" => json!({
+                "index": self.index,
+                "type": self.page_type,
+                "encoding": self.encoding,
+                "num_values": self.num_values,
+                "size": self.size,
+                "is_sorted": self.is_sorted,
+            }),
+            "Data" => json!({
+                "index": self.index,
+                "type": self.page_type,
+                "encoding": self.encoding,
+                "num_values": self.num_values,
+                "size": self.size,
+                "def_level_encoding": self.def_encoding,
+                "rep_level_encoding": self.rep_encoding,
+                "has_statistics": self.has_statistics,
+            }),
+            "DataV2" => json!({
+                "index": self.index,
+                "type": self.page_type,
+                "encoding": self.encoding,
+                "num_values": self.num_values,
+                "size": self.size,
+                "num_rows": self.rows,
+                "num_nulls": self.nulls,
+                "def_levels_byte_len": self.def_levels_byte_len,
+                "rep_levels_byte_len": self.rep_levels_byte_len,
+                "is_compressed": self.is_compressed,
+                "has_statistics": self.has_statistics,
+            }),
+            _ => unreachable!("page type is constructed internally"),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct OffsetChunkReader {
+    bytes: Bytes,
+    base: u64,
+    file_len: u64,
+}
+
+impl Length for OffsetChunkReader {
+    fn len(&self) -> u64 {
+        self.file_len
+    }
+}
+
+impl OffsetChunkReader {
+    fn relative_offset(&self, start: u64) -> parquet::errors::Result<usize> {
+        let relative = start.checked_sub(self.base).ok_or_else(|| {
+            ParquetError::EOF(format!(
+                "requested offset {start} precedes fetched range starting at {}",
+                self.base
+            ))
+        })?;
+        let relative = usize::try_from(relative)
+            .map_err(|_| ParquetError::EOF(format!("requested offset {start} is too large")))?;
+        if relative > self.bytes.len() {
+            return Err(ParquetError::EOF(format!(
+                "requested offset {start} exceeds fetched range ending at {}",
+                self.base + self.bytes.len() as u64
+            )));
+        }
+        Ok(relative)
+    }
+}
+
+impl ChunkReader for OffsetChunkReader {
+    type T = bytes::buf::Reader<Bytes>;
+
+    fn get_read(&self, start: u64) -> parquet::errors::Result<Self::T> {
+        let offset = self.relative_offset(start)?;
+        Ok(self.bytes.slice(offset..).reader())
+    }
+
+    fn get_bytes(&self, start: u64, length: usize) -> parquet::errors::Result<Bytes> {
+        let offset = self.relative_offset(start)?;
+        let end = offset
+            .checked_add(length)
+            .filter(|end| *end <= self.bytes.len())
+            .ok_or_else(|| {
+                ParquetError::EOF(format!(
+                    "requested {length} bytes at offset {start} exceeds the fetched column chunk"
+                ))
+            })?;
+        Ok(self.bytes.slice(offset..end))
+    }
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -236,68 +359,54 @@ fn format_timestamp_chrono(val: i64, unit: &TimeUnit) -> String {
         .unwrap_or_else(|| val.to_string())
 }
 
-/// read pages from a column and extract encoding info by page type
-fn read_page_encodings(rg_reader: &dyn RowGroupReader, col_idx: usize) -> Option<PageEncodings> {
-    let mut page_reader = rg_reader.get_column_page_reader(col_idx).ok()?;
-    let mut encodings = PageEncodings::default();
-    let mut data_encodings_seen = HashSet::new();
-
-    while let Ok(Some(page)) = page_reader.get_next_page() {
-        match page {
-            Page::DictionaryPage { encoding, .. } => {
-                encodings.dictionary = Some(format!("{encoding:?}"));
-            }
-            Page::DataPage {
-                encoding,
-                def_level_encoding,
-                rep_level_encoding,
-                ..
-            } => {
-                let enc_str = format!("{encoding:?}");
-                if data_encodings_seen.insert(enc_str.clone()) {
-                    encodings.data.push(enc_str);
-                }
-                if encodings.def_levels.is_none() {
-                    encodings.def_levels = Some(format!("{def_level_encoding:?}"));
-                }
-                if encodings.rep_levels.is_none() {
-                    encodings.rep_levels = Some(format!("{rep_level_encoding:?}"));
-                }
-            }
-            Page::DataPageV2 { encoding, .. } => {
-                let enc_str = format!("{encoding:?}");
-                if data_encodings_seen.insert(enc_str.clone()) {
-                    encodings.data.push(enc_str);
-                }
-            }
-        }
-    }
-
-    Some(encodings)
+struct ColumnPageInspection {
+    encodings: PageEncodings,
+    pages: Vec<PageInfo>,
 }
 
-/// read pages from a column and return JSON array of page details
-fn read_pages_json(rg_reader: &dyn RowGroupReader, col_idx: usize) -> Option<Vec<Value>> {
-    let mut page_reader = rg_reader.get_column_page_reader(col_idx).ok()?;
+fn inspect_column_pages(
+    bytes: Bytes,
+    base: u64,
+    file_len: u64,
+    column: &ColumnChunkMetaData,
+    row_count: usize,
+) -> Result<ColumnPageInspection> {
+    let chunk = OffsetChunkReader {
+        bytes,
+        base,
+        file_len,
+    };
+    let mut page_reader = SerializedPageReader::new(Arc::new(chunk), column, row_count, None)?;
+    let mut encodings = PageEncodings::default();
+    let mut data_encodings_seen = HashSet::new();
     let mut pages = Vec::new();
-    let mut page_idx = 0;
 
-    while let Ok(Some(page)) = page_reader.get_next_page() {
-        let page_json = match &page {
+    while let Some(page) = page_reader.get_next_page()? {
+        let index = pages.len();
+        let page = match page {
             Page::DictionaryPage {
                 buf,
                 num_values,
                 encoding,
                 is_sorted,
             } => {
-                json!({
-                    "index": page_idx,
-                    "type": "Dict",
-                    "encoding": format!("{encoding:?}"),
-                    "num_values": num_values,
-                    "size": buf.len(),
-                    "is_sorted": is_sorted,
-                })
+                encodings.dictionary = Some(format!("{encoding:?}"));
+                PageInfo {
+                    index,
+                    page_type: "Dict",
+                    encoding: format!("{encoding:?}"),
+                    num_values: u64::from(num_values),
+                    size: buf.len() as u64,
+                    rows: None,
+                    nulls: None,
+                    def_encoding: None,
+                    rep_encoding: None,
+                    def_levels_byte_len: None,
+                    rep_levels_byte_len: None,
+                    is_sorted: Some(is_sorted),
+                    is_compressed: None,
+                    has_statistics: false,
+                }
             }
             Page::DataPage {
                 buf,
@@ -307,21 +416,32 @@ fn read_pages_json(rg_reader: &dyn RowGroupReader, col_idx: usize) -> Option<Vec
                 rep_level_encoding,
                 statistics,
             } => {
-                let stats_json = statistics.as_ref().map(|_s| {
-                    // statistics in DataPage are already decoded by parquet-rs
-                    // but we don't have access to logical type here, so just note presence
-                    json!(true)
-                });
-                json!({
-                    "index": page_idx,
-                    "type": "Data",
-                    "encoding": format!("{encoding:?}"),
-                    "num_values": num_values,
-                    "size": buf.len(),
-                    "def_level_encoding": format!("{def_level_encoding:?}"),
-                    "rep_level_encoding": format!("{rep_level_encoding:?}"),
-                    "has_statistics": stats_json.is_some(),
-                })
+                let enc_str = format!("{encoding:?}");
+                if data_encodings_seen.insert(enc_str.clone()) {
+                    encodings.data.push(enc_str.clone());
+                }
+                if encodings.def_levels.is_none() {
+                    encodings.def_levels = Some(format!("{def_level_encoding:?}"));
+                }
+                if encodings.rep_levels.is_none() {
+                    encodings.rep_levels = Some(format!("{rep_level_encoding:?}"));
+                }
+                PageInfo {
+                    index,
+                    page_type: "Data",
+                    encoding: enc_str,
+                    num_values: u64::from(num_values),
+                    size: buf.len() as u64,
+                    rows: None,
+                    nulls: None,
+                    def_encoding: Some(format!("{def_level_encoding:?}")),
+                    rep_encoding: Some(format!("{rep_level_encoding:?}")),
+                    def_levels_byte_len: None,
+                    rep_levels_byte_len: None,
+                    is_sorted: None,
+                    is_compressed: None,
+                    has_statistics: statistics.is_some(),
+                }
             }
             Page::DataPageV2 {
                 buf,
@@ -334,35 +454,42 @@ fn read_pages_json(rg_reader: &dyn RowGroupReader, col_idx: usize) -> Option<Vec
                 is_compressed,
                 statistics,
             } => {
-                let stats_json = statistics.as_ref().map(|_s| json!(true));
-                json!({
-                    "index": page_idx,
-                    "type": "DataV2",
-                    "encoding": format!("{encoding:?}"),
-                    "num_values": num_values,
-                    "size": buf.len(),
-                    "num_rows": num_rows,
-                    "num_nulls": num_nulls,
-                    "def_levels_byte_len": def_levels_byte_len,
-                    "rep_levels_byte_len": rep_levels_byte_len,
-                    "is_compressed": is_compressed,
-                    "has_statistics": stats_json.is_some(),
-                })
+                let enc_str = format!("{encoding:?}");
+                if data_encodings_seen.insert(enc_str.clone()) {
+                    encodings.data.push(enc_str.clone());
+                }
+                PageInfo {
+                    index,
+                    page_type: "DataV2",
+                    encoding: enc_str,
+                    num_values: u64::from(num_values),
+                    size: buf.len() as u64,
+                    rows: Some(u64::from(num_rows)),
+                    nulls: Some(u64::from(num_nulls)),
+                    def_encoding: None,
+                    rep_encoding: None,
+                    def_levels_byte_len: Some(u64::from(def_levels_byte_len)),
+                    rep_levels_byte_len: Some(u64::from(rep_levels_byte_len)),
+                    is_sorted: None,
+                    is_compressed: Some(is_compressed),
+                    has_statistics: statistics.is_some(),
+                }
             }
         };
-        pages.push(page_json);
-        page_idx += 1;
+        pages.push(page);
     }
 
-    if pages.is_empty() { None } else { Some(pages) }
+    Ok(ColumnPageInspection { encodings, pages })
 }
 
 impl ParquetInspector {
-    pub fn open(path: &Utf8Path) -> Result<Self> {
-        let file_size = std::fs::metadata(path)?.len();
-        let file = File::open(path)?;
-        let reader = SerializedFileReader::new(file)?;
-        let metadata = reader.metadata();
+    pub async fn open(input: &InputObject) -> Result<Self> {
+        let metadata = read_parquet_metadata(input).await.with_context(|| {
+            format!(
+                "could not read Parquet metadata from '{}'",
+                input.location().display()
+            )
+        })?;
         let file_metadata = metadata.file_metadata();
 
         let schema = parquet_to_arrow_schema(
@@ -377,11 +504,13 @@ impl ParquetInspector {
         let created_by = file_metadata.created_by().map(String::from);
 
         let mut inspector = Self {
+            input: input.clone(),
+            metadata: Arc::clone(&metadata),
             schema: schema.into(),
             row_groups: Vec::new(),
             num_rows,
             num_columns: 0,
-            file_size,
+            file_size: input.metadata().size,
             total_compressed_size: 0,
             total_uncompressed_size: 0,
             total_bloom_filter_size: 0,
@@ -390,7 +519,7 @@ impl ParquetInspector {
             has_bloom_filters: false,
             has_page_index: false,
             custom_metadata: HashMap::new(),
-            file_path: path.to_owned(),
+            file_path: input.location().display().to_string(),
             file_column_stats: Vec::new(),
             format_version,
             created_by,
@@ -418,7 +547,6 @@ impl ParquetInspector {
 
         for rg_idx in 0..metadata.num_row_groups() {
             let rg_meta = metadata.row_group(rg_idx);
-            let rg_reader = reader.get_row_group(rg_idx)?;
             let mut columns = Vec::new();
 
             for col_idx in 0..rg_meta.num_columns() {
@@ -488,8 +616,6 @@ impl ParquetInspector {
                     (None, _) => {} // already invalidated
                 }
 
-                let page_encodings = read_page_encodings(rg_reader.as_ref(), col_idx);
-
                 columns.push(ColumnInfo {
                     name,
                     compression: compression_str.to_string(),
@@ -500,8 +626,9 @@ impl ParquetInspector {
                     has_page_index: has_page_idx,
                     has_statistics: has_stats,
                     encodings,
-                    page_encodings,
+                    page_encodings: None,
                     statistics: stats,
+                    pages: None,
                 });
             }
 
@@ -529,6 +656,144 @@ impl ParquetInspector {
         inspector.num_columns = num_columns;
 
         Ok(inspector)
+    }
+
+    pub async fn load_pages(
+        &mut self,
+        row_group: Option<usize>,
+        columns: Option<&[&str]>,
+    ) -> Result<()> {
+        let requested = self.resolve_columns(row_group, columns)?;
+        let row_groups = self.selected_row_groups(row_group)?;
+        let mut plans = Vec::new();
+        for row_group_index in row_groups {
+            let metadata = self.metadata.row_group(row_group_index);
+            let row_count = usize::try_from(metadata.num_rows()).map_err(|_| {
+                anyhow!(
+                    "row count for row group {row_group_index} in '{}' exceeds this platform's limit",
+                    self.file_path
+                )
+            })?;
+            for (column_index, column) in metadata.columns().iter().enumerate() {
+                let name = column.column_path().parts().join(".");
+                if requested
+                    .as_ref()
+                    .is_some_and(|names| !names.contains(&name))
+                {
+                    continue;
+                }
+                let (start, length) = column.byte_range();
+                let end = start.checked_add(length).ok_or_else(|| {
+                    anyhow!(
+                        "column chunk range overflows for row group {row_group_index}, column {column_index} in '{}'",
+                        self.file_path
+                    )
+                })?;
+                plans.push((row_group_index, column_index, row_count, start..end));
+            }
+        }
+
+        let store = Arc::clone(self.input.location().store().object_store());
+        let path = self.input.location().path().clone();
+        let metadata = Arc::clone(&self.metadata);
+        let file_len = self.file_size;
+        let display = self.file_path.clone();
+        let mut fetched = stream::iter(plans)
+            .map(move |(row_group_index, column_index, row_count, range)| {
+                let store = Arc::clone(&store);
+                let path = path.clone();
+                let metadata = Arc::clone(&metadata);
+                let display = display.clone();
+                async move {
+                    let base = range.start;
+                    let bytes = store.get_range(&path, range).await.with_context(|| {
+                        format!(
+                            "could not read row group {row_group_index}, column {column_index} from '{display}'"
+                        )
+                    })?;
+                    let column = metadata.row_group(row_group_index).column(column_index);
+                    let pages = inspect_column_pages(bytes, base, file_len, column, row_count)
+                        .with_context(|| {
+                            format!(
+                                "could not parse pages for row group {row_group_index}, column {column_index} in '{display}'"
+                            )
+                        })?;
+                    Ok::<_, anyhow::Error>((row_group_index, column_index, pages))
+                }
+            })
+            .buffer_unordered(PAGE_FETCH_CONCURRENCY);
+
+        while let Some(result) = fetched.next().await {
+            let (row_group_index, column_index, pages) = result?;
+            let column = &mut self.row_groups[row_group_index].columns[column_index];
+            column.page_encodings = Some(pages.encodings);
+            column.pages = Some(pages.pages);
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn validate_columns(
+        &self,
+        row_group: Option<usize>,
+        columns: &[&str],
+    ) -> Result<()> {
+        self.resolve_columns(row_group, Some(columns))?;
+        Ok(())
+    }
+
+    fn selected_row_groups(&self, row_group: Option<usize>) -> Result<Vec<usize>> {
+        match row_group {
+            Some(index) if index >= self.row_groups.len() => bail!(
+                "row group {index} does not exist in '{}' (file has {} row groups)",
+                self.file_path,
+                self.row_groups.len()
+            ),
+            Some(index) => Ok(vec![index]),
+            None => Ok((0..self.row_groups.len()).collect()),
+        }
+    }
+
+    fn resolve_columns(
+        &self,
+        row_group: Option<usize>,
+        columns: Option<&[&str]>,
+    ) -> Result<Option<HashSet<String>>> {
+        let Some(columns) = columns else {
+            self.selected_row_groups(row_group)?;
+            return Ok(None);
+        };
+        let row_groups = self.selected_row_groups(row_group)?;
+        let available = row_groups
+            .iter()
+            .flat_map(|index| self.row_groups[*index].columns.iter())
+            .map(|column| column.name.clone())
+            .collect::<HashSet<_>>();
+        let mut resolved = HashSet::new();
+        for requested in columns {
+            if available.contains(*requested) {
+                resolved.insert((*requested).to_string());
+                continue;
+            }
+            let mut leaf_matches = available
+                .iter()
+                .filter(|name| name.rsplit('.').next() == Some(*requested))
+                .cloned()
+                .collect::<Vec<_>>();
+            leaf_matches.sort_unstable();
+            match leaf_matches.as_slice() {
+                [name] => {
+                    resolved.insert(name.clone());
+                }
+                [] => bail!("column {requested} not found in '{}'", self.file_path),
+                names => bail!(
+                    "column name {requested} is ambiguous in '{}'; use one of {}",
+                    self.file_path,
+                    names.join(", ")
+                ),
+            }
+        }
+        Ok(Some(resolved))
     }
 
     pub fn row_groups(&self) -> &[RowGroupInfo] {
@@ -661,13 +926,6 @@ impl ParquetInspector {
         )?;
         writeln!(out)?;
 
-        let reader = if detailed_encodings {
-            let file = File::open(&self.file_path)?;
-            Some(SerializedFileReader::new(file)?)
-        } else {
-            None
-        };
-
         for rg in &self.row_groups {
             writeln!(out, "  {} {}", header("Row Group"), value(rg.index))?;
             writeln!(
@@ -711,14 +969,8 @@ impl ParquetInspector {
             }
 
             if include_stats || detailed_encodings {
-                let rg_reader = if let Some(ref r) = reader {
-                    r.get_row_group(rg.index).ok()
-                } else {
-                    None
-                };
-
                 writeln!(out)?;
-                for (col_idx, col) in rg.columns.iter().enumerate() {
+                for col in &rg.columns {
                     writeln!(
                         out,
                         "      {} {}",
@@ -726,10 +978,7 @@ impl ParquetInspector {
                         dim(format!("({})", col.compression))
                     )?;
 
-                    if detailed_encodings
-                        && let Some(ref rg_r) = rg_reader
-                        && let Some(pe) = read_page_encodings(rg_r.as_ref(), col_idx)
-                    {
+                    if detailed_encodings && let Some(pe) = &col.page_encodings {
                         if let Some(dict) = &pe.dictionary {
                             writeln!(
                                 out,
@@ -1115,39 +1364,32 @@ impl ParquetInspector {
         row_group_idx: usize,
         columns: Option<&[&str]>,
     ) -> Result<()> {
-        let file = File::open(&self.file_path)?;
-        let reader = SerializedFileReader::new(file)?;
-        let metadata = reader.metadata();
-
-        if row_group_idx >= metadata.num_row_groups() {
+        let Some(row_group) = self.row_groups.get(row_group_idx) else {
             writeln!(
                 out,
                 "Error: row group {} does not exist (file has {} row groups)",
                 row_group_idx,
-                metadata.num_row_groups()
+                self.row_groups.len()
             )?;
             return Ok(());
-        }
-
-        let rg_reader = reader.get_row_group(row_group_idx)?;
-        let rg_meta = metadata.row_group(row_group_idx);
-
-        let column_names: Vec<String> = (0..rg_meta.num_columns())
-            .map(|i| rg_meta.column(i).column_descr().name().to_string())
-            .collect();
-
-        let columns_to_show: Vec<usize> = match columns {
-            Some(names) => {
-                let mut indices = Vec::new();
-                for name in names {
-                    if let Some(idx) = column_names.iter().position(|n| n == name) {
-                        indices.push(idx);
-                    }
-                }
-                indices
-            }
-            None => (0..rg_meta.num_columns()).collect(),
         };
+
+        let column_names = row_group
+            .columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>();
+        let selected = self.resolve_columns(Some(row_group_idx), columns)?;
+        let columns_to_show = column_names
+            .iter()
+            .enumerate()
+            .filter_map(|(index, name)| {
+                selected
+                    .as_ref()
+                    .is_none_or(|selected| selected.contains(*name))
+                    .then_some(index)
+            })
+            .collect::<Vec<_>>();
 
         for col_idx in columns_to_show {
             let col_name = &column_names[col_idx];
@@ -1184,78 +1426,42 @@ impl ParquetInspector {
                 extra: String,
             }
 
-            let mut page_rows = Vec::new();
-            if let Ok(mut page_reader) = rg_reader.get_column_page_reader(col_idx) {
-                let mut page_idx = 0;
-                while let Ok(Some(page)) = page_reader.get_next_page() {
-                    let row = match &page {
-                        Page::DictionaryPage {
-                            buf,
-                            num_values,
-                            encoding: enc,
-                            is_sorted,
-                        } => PageRow {
-                            index: page_idx,
-                            page_type: "Dict".to_string(),
-                            encoding: encoding(&format!("{enc:?}")),
-                            num_values: format_number(u64::from(*num_values)),
-                            size: format_bytes(buf.len() as u64),
-                            rows: missing_value(),
-                            nulls: missing_value(),
-                            def_info: missing_value(),
-                            rep_info: missing_value(),
-                            extra: true_or_missing_display(*is_sorted),
+            let page_rows = row_group.columns[col_idx]
+                .pages
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(|page| PageRow {
+                    index: page.index,
+                    page_type: page.page_type.to_string(),
+                    encoding: encoding(&page.encoding),
+                    num_values: format_number(page.num_values),
+                    size: format_bytes(page.size),
+                    rows: page.rows.map_or_else(missing_value, format_number),
+                    nulls: page.nulls.map_or_else(missing_value, format_number),
+                    def_info: page.def_encoding.as_ref().map_or_else(
+                        || {
+                            page.def_levels_byte_len
+                                .map_or_else(missing_value, format_bytes)
                         },
-                        Page::DataPage {
-                            buf,
-                            num_values,
-                            encoding: enc,
-                            def_level_encoding,
-                            rep_level_encoding,
-                            ..
-                        } => PageRow {
-                            index: page_idx,
-                            page_type: "Data".to_string(),
-                            encoding: encoding(&format!("{enc:?}")),
-                            num_values: format_number(u64::from(*num_values)),
-                            size: format_bytes(buf.len() as u64),
-                            rows: missing_value(),
-                            nulls: missing_value(),
-                            def_info: encoding(&format!("{def_level_encoding:?}")),
-                            rep_info: encoding(&format!("{rep_level_encoding:?}")),
-                            extra: missing_value(),
+                        |value| encoding(value),
+                    ),
+                    rep_info: page.rep_encoding.as_ref().map_or_else(
+                        || {
+                            page.rep_levels_byte_len
+                                .map_or_else(missing_value, format_bytes)
                         },
-                        Page::DataPageV2 {
-                            buf,
-                            num_values,
-                            encoding: enc,
-                            num_nulls,
-                            num_rows,
-                            def_levels_byte_len,
-                            rep_levels_byte_len,
-                            is_compressed,
-                            ..
-                        } => PageRow {
-                            index: page_idx,
-                            page_type: "DataV2".to_string(),
-                            encoding: encoding(&format!("{enc:?}")),
-                            num_values: format_number(u64::from(*num_values)),
-                            size: format_bytes(buf.len() as u64),
-                            rows: format_number(u64::from(*num_rows)),
-                            nulls: format_number(u64::from(*num_nulls)),
-                            def_info: format_bytes(u64::from(*def_levels_byte_len)),
-                            rep_info: format_bytes(u64::from(*rep_levels_byte_len)),
-                            extra: if *is_compressed {
-                                dim("comp")
-                            } else {
-                                missing_value()
-                            },
-                        },
-                    };
-                    page_rows.push(row);
-                    page_idx += 1;
-                }
-            }
+                        |value| encoding(value),
+                    ),
+                    extra: if page.page_type == "Dict" {
+                        true_or_missing_display(page.is_sorted.unwrap_or(false))
+                    } else if page.is_compressed == Some(true) {
+                        dim("comp")
+                    } else {
+                        missing_value()
+                    },
+                })
+                .collect::<Vec<_>>();
 
             if page_rows.is_empty() {
                 writeln!(out, "  {}", dim("(no pages)"))?;
@@ -1271,11 +1477,12 @@ impl ParquetInspector {
     }
 
     /// Get JSON output including page-level details for specified columns.
-    pub fn to_json_with_pages(&self, columns: Option<&[&str]>) -> Value {
-        self.to_json_impl(true, columns)
+    pub fn to_json_with_pages(&self, columns: Option<&[&str]>) -> Result<Value> {
+        let columns = self.resolve_columns(None, columns)?;
+        Ok(self.to_json_impl(true, columns.as_ref()))
     }
 
-    fn to_json_impl(&self, include_pages: bool, columns_filter: Option<&[&str]>) -> Value {
+    fn to_json_impl(&self, include_pages: bool, columns_filter: Option<&HashSet<String>>) -> Value {
         // file_column_stats are Parquet leaf columns which don't map 1:1 to Arrow
         // schema fields for nested types, so we just output the stats without
         // trying to correlate with schema field metadata
@@ -1292,25 +1499,14 @@ impl ParquetInspector {
             })
             .collect();
 
-        let reader = if include_pages {
-            File::open(&self.file_path)
-                .ok()
-                .and_then(|f| SerializedFileReader::new(f).ok())
-        } else {
-            None
-        };
-
         let row_groups_json: Vec<Value> = self
             .row_groups
             .iter()
             .map(|rg| {
-                let rg_reader = reader.as_ref().and_then(|r| r.get_row_group(rg.index).ok());
-
                 let cols: Vec<Value> = rg
                     .columns
                     .iter()
-                    .enumerate()
-                    .map(|(col_idx, col)| {
+                    .map(|col| {
                         let stats_json = col.statistics.as_ref().map(|s| {
                             let mut stats = serde_json::Map::new();
                             if let Some(min) = &s.min {
@@ -1339,11 +1535,11 @@ impl ParquetInspector {
 
                         // read pages if requested and column matches filter
                         let pages_json = if include_pages
-                            && columns_filter.is_none_or(|cols| cols.contains(&col.name.as_str()))
+                            && columns_filter.is_none_or(|columns| columns.contains(&col.name))
                         {
-                            rg_reader
-                                .as_ref()
-                                .and_then(|r| read_pages_json(r.as_ref(), col_idx))
+                            col.pages.as_ref().map(|pages| {
+                                pages.iter().map(PageInfo::to_json).collect::<Vec<_>>()
+                            })
                         } else {
                             None
                         };
@@ -1416,20 +1612,6 @@ fn format_compression(c: Compression) -> &'static str {
 }
 
 impl Inspectable for ParquetInspector {
-    fn is_format(path: &Utf8Path) -> Result<bool> {
-        let mut file = File::open(path)?;
-
-        if !magic_bytes_match_start(&mut file, PARQUET_MAGIC)? {
-            return Ok(false);
-        }
-
-        if !magic_bytes_match_end(&mut file, PARQUET_MAGIC)? {
-            return Ok(false);
-        }
-
-        Ok(true)
-    }
-
     fn format_name(&self) -> &str {
         "Parquet"
     }
@@ -1456,98 +1638,5 @@ impl Inspectable for ParquetInspector {
 
     fn to_json(&self) -> Value {
         self.to_json_impl(false, None)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::Arc;
-    use tempfile::TempDir;
-
-    use arrow::array::{Int32Array, RecordBatch, StringArray};
-    use arrow::datatypes::{DataType, Field, Schema};
-    use parquet::arrow::ArrowWriter;
-
-    fn simple_schema() -> SchemaRef {
-        Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Int32, false),
-            Field::new("name", DataType::Utf8, false),
-        ]))
-    }
-
-    fn create_batch(schema: &SchemaRef) -> RecordBatch {
-        RecordBatch::try_new(
-            Arc::clone(schema),
-            vec![
-                Arc::new(Int32Array::from(vec![1, 2, 3])),
-                Arc::new(StringArray::from(vec!["a", "b", "c"])),
-            ],
-        )
-        .unwrap()
-    }
-
-    #[test]
-    fn test_is_format_parquet_file() {
-        let temp_dir = TempDir::new().unwrap();
-        let std_path = temp_dir.path().join("test.parquet");
-        let path = Utf8Path::from_path(&std_path).unwrap();
-
-        let schema = simple_schema();
-        let batch = create_batch(&schema);
-
-        let file = File::create(path).unwrap();
-        let mut writer = ArrowWriter::try_new(file, Arc::clone(&schema), None).unwrap();
-        writer.write(&batch).unwrap();
-        writer.close().unwrap();
-
-        assert!(ParquetInspector::is_format(path).unwrap());
-    }
-
-    #[test]
-    fn test_open_parquet_file() {
-        let temp_dir = TempDir::new().unwrap();
-        let std_path = temp_dir.path().join("test.parquet");
-        let path = Utf8Path::from_path(&std_path).unwrap();
-
-        let schema = simple_schema();
-        let batch = create_batch(&schema);
-
-        let file = File::create(path).unwrap();
-        let mut writer = ArrowWriter::try_new(file, Arc::clone(&schema), None).unwrap();
-        writer.write(&batch).unwrap();
-        writer.close().unwrap();
-
-        let inspector = ParquetInspector::open(path).unwrap();
-        assert_eq!(inspector.row_count(), Some(3));
-        assert_eq!(inspector.format_name(), "Parquet");
-    }
-
-    #[test]
-    fn test_is_format_non_parquet_file() {
-        let temp_dir = TempDir::new().unwrap();
-        let std_path = temp_dir.path().join("test.txt");
-        let path = Utf8Path::from_path(&std_path).unwrap();
-        std::fs::write(path, "not a parquet file").unwrap();
-
-        assert!(!ParquetInspector::is_format(path).unwrap());
-    }
-
-    #[test]
-    fn test_is_format_partial_magic_bytes() {
-        let temp_dir = TempDir::new().unwrap();
-        let std_path = temp_dir.path().join("test.parquet");
-        let path = Utf8Path::from_path(&std_path).unwrap();
-        // only start magic, no end magic
-        std::fs::write(path, b"PAR1garbage").unwrap();
-
-        assert!(!ParquetInspector::is_format(path).unwrap());
-    }
-
-    #[test]
-    fn test_is_format_nonexistent_file() {
-        let path = Utf8Path::new("/nonexistent/path/file.parquet");
-        let result = ParquetInspector::is_format(path);
-        assert!(result.is_err());
     }
 }

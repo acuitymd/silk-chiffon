@@ -13,9 +13,10 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 mod test_helpers {
-    use camino::Utf8Path;
     use parquet::file::reader::FileReader;
+    use silk_chiffon::StorageConfig;
     use silk_chiffon::inspection::parquet::ParquetInspector;
+    use silk_chiffon::storage::StorageContext;
     use std::path::Path;
 
     pub fn get_parquet_row_group_metadata(
@@ -27,8 +28,13 @@ mod test_helpers {
         reader.metadata().row_group(idx).clone()
     }
 
-    pub fn inspect(path: &Path) -> ParquetInspector {
-        ParquetInspector::open(Utf8Path::from_path(path).unwrap()).unwrap()
+    pub async fn inspect(path: &Path) -> ParquetInspector {
+        let storage = StorageContext::new(StorageConfig::default()).unwrap();
+        let input = storage
+            .resolve_input(path.to_string_lossy().as_ref())
+            .await
+            .unwrap();
+        ParquetInspector::open(&input).await.unwrap()
     }
 
     pub fn assert_has_dictionary(inspector: &ParquetInspector, col_name: &str) {
@@ -3010,7 +3016,7 @@ async fn test_dictionary_prefix_matches_nested_columns() {
     .await
     .unwrap();
 
-    let inspector = test_helpers::inspect(&output);
+    let inspector = test_helpers::inspect(&output).await;
     test_helpers::assert_no_dictionary(&inspector, "id");
     test_helpers::assert_has_dictionary(&inspector, "person.name");
     test_helpers::assert_has_dictionary(&inspector, "person.age");
@@ -3040,7 +3046,7 @@ async fn test_dictionary_specific_path_in_nested_column() {
     .await
     .unwrap();
 
-    let inspector = test_helpers::inspect(&output);
+    let inspector = test_helpers::inspect(&output).await;
     test_helpers::assert_no_dictionary(&inspector, "id");
     test_helpers::assert_has_dictionary(&inspector, "person.name");
     test_helpers::assert_no_dictionary(&inspector, "person.age");
@@ -3072,7 +3078,7 @@ async fn test_bloom_filter_prefix_matches_nested_columns() {
     .await
     .unwrap();
 
-    let inspector = test_helpers::inspect(&output);
+    let inspector = test_helpers::inspect(&output).await;
     test_helpers::assert_no_bloom_filter(&inspector, "id");
     test_helpers::assert_has_bloom_filter(&inspector, "person.name");
     test_helpers::assert_has_bloom_filter(&inspector, "person.age");
@@ -3105,7 +3111,7 @@ async fn test_bloom_filter_prefix_with_exclusion() {
     .await
     .unwrap();
 
-    let inspector = test_helpers::inspect(&output);
+    let inspector = test_helpers::inspect(&output).await;
     test_helpers::assert_no_bloom_filter(&inspector, "id");
     test_helpers::assert_has_bloom_filter(&inspector, "person.name");
     test_helpers::assert_no_bloom_filter(&inspector, "person.age");

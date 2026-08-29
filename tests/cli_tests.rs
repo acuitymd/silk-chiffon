@@ -1,12 +1,20 @@
 use assert_cmd::cargo;
-use camino::Utf8Path;
 use predicates::prelude::*;
+use silk_chiffon::StorageConfig;
 use silk_chiffon::inspection::parquet::ParquetInspector;
+use silk_chiffon::storage::StorageContext;
 use silk_chiffon::utils::test_data::{TestBatch, TestFile};
 use tempfile::TempDir;
 
 fn inspect(path: &std::path::Path) -> ParquetInspector {
-    ParquetInspector::open(Utf8Path::from_path(path).unwrap()).unwrap()
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let storage = StorageContext::new(StorageConfig::default()).unwrap();
+        let input = storage
+            .resolve_input(path.to_string_lossy().as_ref())
+            .await
+            .unwrap();
+        ParquetInspector::open(&input).await.unwrap()
+    })
 }
 
 #[test]

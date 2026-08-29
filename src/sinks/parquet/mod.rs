@@ -667,15 +667,19 @@ mod tests {
         utils::test_helpers::{file_helpers, test_data, verify},
     };
 
-    use camino::Utf8Path;
     use tempfile::tempdir;
 
     fn test_runtimes() -> Arc<ParquetRuntimes> {
         Arc::new(ParquetRuntimes::try_new(2, 1).unwrap())
     }
 
-    fn inspect(path: &std::path::Path) -> ParquetInspector {
-        ParquetInspector::open(Utf8Path::from_path(path).unwrap()).unwrap()
+    async fn inspect(path: &std::path::Path) -> ParquetInspector {
+        let storage = crate::storage::StorageContext::new(crate::StorageConfig::default()).unwrap();
+        let input = storage
+            .resolve_input(path.to_string_lossy().as_ref())
+            .await
+            .unwrap();
+        ParquetInspector::open(&input).await.unwrap()
     }
 
     fn assert_has_dictionary(inspector: &ParquetInspector, col_name: &str) {
@@ -2371,7 +2375,7 @@ mod tests {
             sink.write_batch(batch).await.unwrap();
             sink.finish().await.unwrap();
 
-            let inspector = inspect(&output_path);
+            let inspector = inspect(&output_path).await;
             assert_has_dictionary(&inspector, "outer.inner");
         }
 
@@ -2417,7 +2421,7 @@ mod tests {
             sink.write_batch(batch).await.unwrap();
             sink.finish().await.unwrap();
 
-            let inspector = inspect(&output_path);
+            let inspector = inspect(&output_path).await;
             assert_has_bloom_filter(&inspector, "outer.inner");
         }
 
@@ -2449,7 +2453,7 @@ mod tests {
             sink.write_batch(batch).await.unwrap();
             sink.finish().await.unwrap();
 
-            let inspector = inspect(&output_path);
+            let inspector = inspect(&output_path).await;
             assert_no_dictionary(&inspector, "outer.inner");
         }
 

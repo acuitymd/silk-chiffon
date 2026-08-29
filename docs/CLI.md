@@ -19,13 +19,25 @@ This document contains the help content for the `silk-chiffon` command-line prog
 
 Silky smooth conversion between columnar data formats 💝
 
-**Usage:** `silk-chiffon <COMMAND>`
+**Usage:** `silk-chiffon [OPTIONS] <COMMAND>`
 
 ###### **Subcommands:**
 
 - `transform` — Transform data between formats with optional filtering, sorting, merging, and partitioning.
 - `inspect` — Inspect file metadata and structure.
 - `completions` — Generate shell completions for your shell.
+
+###### **Options:**
+
+- `--object-store-max-requests <MAX_REQUESTS>` — Maximum concurrent requests to each remote object store
+
+  Default value: `64`
+- `--object-store-upload-part-size <UPLOAD_PART_SIZE>` — Part size for multipart object uploads
+
+  Default value: `10MiB`
+- `--object-store-upload-concurrency <UPLOAD_CONCURRENCY>` — Maximum concurrent upload requests for each output
+
+  Default value: `8`
 
 ## `silk-chiffon transform`
 
