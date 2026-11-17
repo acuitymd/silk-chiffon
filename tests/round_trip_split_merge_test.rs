@@ -8,29 +8,101 @@
 //!
 //! Tests arrow, parquet, and vortex formats to ensure data survives a split + merge round trip.
 
+use std::num::NonZeroUsize;
 use std::ops::Range;
 use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{Date32Array, Int16Array, Int32Array, RecordBatch};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
-use datafusion::prelude::SessionContext;
+use clap::Command;
+use datafusion::{datasource::file_format::options::ArrowReadOptions, prelude::SessionContext};
 use rand::rngs::SmallRng;
 use rand::{Rng, RngExt, SeedableRng};
-use silk_chiffon::sinks::arrow::{ArrowSink, ArrowSinkOptions};
-use silk_chiffon::sinks::data_sink::DataSink;
-use silk_chiffon::sinks::parquet::ParquetSink;
-use silk_chiffon::sinks::parquet::ParquetSinkOptions;
-use silk_chiffon::sinks::parquet::pools::ParquetRuntimes;
-use silk_chiffon::sinks::vortex::{VortexSink, VortexSinkOptions};
-use silk_chiffon::sources::arrow::ArrowDataSource;
-use silk_chiffon::sources::data_source::DataSource;
-use silk_chiffon::sources::parquet::ParquetDataSource;
-use silk_chiffon::sources::vortex::VortexDataSource;
+use silk_chiffon_core::{DataSink, FormatRegistry, OpenSinkMode, SinkBindingConfig};
+use silk_chiffon_test_support::prepared_local_output_target;
 use tempfile::TempDir;
 
 const NUM_ROWS: usize = 10_000_000;
 const BATCH_SIZE: usize = 500_000;
+
+async fn open_registered_arrow_sink(path: &Path, schema: &SchemaRef) -> Box<dyn DataSink> {
+    let registry = FormatRegistry::builder()
+        .register(silk_chiffon_format_arrow::definition())
+        .build()
+        .unwrap();
+    let matches = registry
+        .augment_transform_args(Command::new("test"))
+        .try_get_matches_from(["test"])
+        .unwrap();
+    let bindings = registry.bind_transform(&matches).unwrap();
+    let sink_binding = bindings
+        .get("arrow")
+        .unwrap()
+        .bind_sink(&SinkBindingConfig::new(
+            NonZeroUsize::new(1).unwrap(),
+            OpenSinkMode::OneAtATime,
+            Vec::new(),
+        ))
+        .await
+        .unwrap();
+    sink_binding
+        .open_sink(prepared_local_output_target(path), Arc::clone(schema))
+        .await
+        .unwrap()
+}
+
+async fn open_registered_parquet_sink(path: &Path, schema: &SchemaRef) -> Box<dyn DataSink> {
+    let registry = FormatRegistry::builder()
+        .register(silk_chiffon_format_parquet::definition())
+        .build()
+        .unwrap();
+    let matches = registry
+        .augment_transform_args(Command::new("test").arg(clap::Arg::new("sort_by").long("sort-by")))
+        .try_get_matches_from(["test"])
+        .unwrap();
+    let bindings = registry.bind_transform(&matches).unwrap();
+    let sink_binding = bindings
+        .get("parquet")
+        .unwrap()
+        .bind_sink(&SinkBindingConfig::new(
+            NonZeroUsize::new(1).unwrap(),
+            OpenSinkMode::OneAtATime,
+            Vec::new(),
+        ))
+        .await
+        .unwrap();
+    sink_binding
+        .open_sink(prepared_local_output_target(path), Arc::clone(schema))
+        .await
+        .unwrap()
+}
+
+async fn open_registered_vortex_sink(path: &Path, schema: &SchemaRef) -> Box<dyn DataSink> {
+    let registry = FormatRegistry::builder()
+        .register(silk_chiffon_format_vortex::definition())
+        .build()
+        .unwrap();
+    let matches = registry
+        .augment_transform_args(Command::new("test"))
+        .try_get_matches_from(["test"])
+        .unwrap();
+    let bindings = registry.bind_transform(&matches).unwrap();
+    let sink_binding = bindings
+        .get("vortex")
+        .unwrap()
+        .bind_sink(&SinkBindingConfig::new(
+            NonZeroUsize::new(1).unwrap(),
+            OpenSinkMode::OneAtATime,
+            Vec::new(),
+        ))
+        .await
+        .unwrap();
+    sink_binding
+        .open_sink(prepared_local_output_target(path), Arc::clone(schema))
+        .await
+        .unwrap()
+}
 
 fn rand_i32(rng: &mut impl Rng, range: Range<i32>, null_pct: f64) -> Option<i32> {
     if rng.random_bool(null_pct) {
@@ -165,39 +237,48 @@ async fn row_count(ctx: &SessionContext, table: &str) -> usize {
 }
 
 async fn register_table(ctx: &mut SessionContext, name: &str, path: &Path, ext: &str) {
-    let path_str = path.to_string_lossy().to_string();
-    let source: Box<dyn DataSource> = match ext {
-        "arrow" => Box::new(ArrowDataSource::new(path_str)),
-        "parquet" => Box::new(ParquetDataSource::new(path_str)),
-        "vortex" => Box::new(VortexDataSource::new(path_str)),
-        _ => panic!("unsupported format: {ext}"),
+    let arrow_path = if ext == "arrow" {
+        path.to_path_buf()
+    } else {
+        let arrow_path = path.with_extension(format!("{ext}.df.arrow"));
+        let silk_chiffon::Cli {
+            command: silk_chiffon::Command::Transform(command),
+        } = silk_chiffon::Cli::try_parse_from([
+            "silk-chiffon",
+            "transform",
+            "--from",
+            path.to_str().unwrap(),
+            "--to",
+            arrow_path.to_str().unwrap(),
+            "--output-format",
+            "arrow",
+        ])
+        .unwrap()
+        else {
+            unreachable!()
+        };
+        silk_chiffon::Command::Transform(command)
+            .execute()
+            .await
+            .unwrap();
+        arrow_path
     };
-    let provider = source.as_table_provider(ctx).await.unwrap();
-    ctx.register_table(name, provider).unwrap();
+    ctx.register_arrow(
+        name,
+        arrow_path.to_str().unwrap(),
+        ArrowReadOptions::default(),
+    )
+    .await
+    .unwrap();
 }
 
 async fn write_test_data(path: &Path, schema: &SchemaRef, ext: &str) {
     // SmallRng is like 5x faster(!!) than the default RNG (ChaChaRng)
     let mut rng = SmallRng::from_rng(&mut rand::rng());
     let mut sink: Box<dyn DataSink> = match ext {
-        "arrow" => Box::new(
-            ArrowSink::create(path.to_path_buf(), schema, ArrowSinkOptions::default()).unwrap(),
-        ),
-        "parquet" => {
-            let runtimes = Arc::new(ParquetRuntimes::try_default().unwrap());
-            Box::new(
-                ParquetSink::create(
-                    path.to_path_buf(),
-                    schema,
-                    &ParquetSinkOptions::default(),
-                    runtimes,
-                )
-                .unwrap(),
-            )
-        }
-        "vortex" => Box::new(
-            VortexSink::create(path.to_path_buf(), schema, VortexSinkOptions::default()).unwrap(),
-        ),
+        "arrow" => open_registered_arrow_sink(path, schema).await,
+        "parquet" => open_registered_parquet_sink(path, schema).await,
+        "vortex" => open_registered_vortex_sink(path, schema).await,
         _ => panic!("unsupported format: {ext}"),
     };
     let num_batches = NUM_ROWS.div_ceil(BATCH_SIZE);
@@ -221,35 +302,49 @@ async fn round_trip_split_merge(ext: &str) {
 
     // split by partition_key into target format
     let partition_template = format!("part_{{{{partition_key}}}}.{ext}");
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        from: Some(input.to_string_lossy().to_string()),
-        to_many: Some(
-            partition_dir
-                .join(&partition_template)
-                .to_string_lossy()
-                .to_string(),
-        ),
-        by: Some("partition_key".to_string()),
-        create_dirs: true,
-        ..Default::default()
-    })
-    .await
-    .unwrap();
+    let partition_target = partition_dir.join(&partition_template);
+    let silk_chiffon::Cli {
+        command: silk_chiffon::Command::Transform(command),
+    } = silk_chiffon::Cli::try_parse_from([
+        "silk-chiffon",
+        "transform",
+        "--from",
+        input.to_str().unwrap(),
+        "--to-many",
+        partition_target.to_str().unwrap(),
+        "--by",
+        "partition_key",
+    ])
+    .unwrap()
+    else {
+        unreachable!()
+    };
+    silk_chiffon::Command::Transform(command)
+        .execute()
+        .await
+        .unwrap();
 
     // merge partitions back
     let glob_pattern = format!("*.{ext}");
-    silk_chiffon::commands::transform::run(silk_chiffon::TransformCommand {
-        from_many: vec![
-            partition_dir
-                .join(&glob_pattern)
-                .to_string_lossy()
-                .to_string(),
-        ],
-        to: Some(output.to_string_lossy().to_string()),
-        ..Default::default()
-    })
-    .await
-    .unwrap();
+    let pattern = partition_dir.join(&glob_pattern);
+    let silk_chiffon::Cli {
+        command: silk_chiffon::Command::Transform(command),
+    } = silk_chiffon::Cli::try_parse_from([
+        "silk-chiffon",
+        "transform",
+        "--from-pattern",
+        pattern.to_str().unwrap(),
+        "--to",
+        output.to_str().unwrap(),
+    ])
+    .unwrap()
+    else {
+        unreachable!()
+    };
+    silk_chiffon::Command::Transform(command)
+        .execute()
+        .await
+        .unwrap();
 
     // register original and merged files as DataFusion tables
     let mut ctx = SessionContext::new();

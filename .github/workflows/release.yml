@@ -39,13 +39,11 @@ jobs:
       SILK_CHIFFON_WATCH_GIT_REF: "1"
       SILK_CHIFFON_VERSION_OVERRIDE: ${{ needs.version.outputs.binary_version }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-latest
-            os: linux
-          - target: aarch64-unknown-linux-gnu
-            runner: ubuntu-24.04-arm
             os: linux
           - target: aarch64-apple-darwin
             runner: macos-latest
@@ -64,7 +62,7 @@ jobs:
 
       - name: Install system dependencies
         if: matrix.os == 'linux'
-        run: sudo apt-get update && sudo apt-get install -y lld
+        run: sudo apt-get update && sudo apt-get install -y binutils lld
 
       - name: Install packages
         if: matrix.os == 'macos'
@@ -72,7 +70,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: "release-${{ matrix.runner }}"
+          shared-key: "release-${{ matrix.target }}"
 
       - name: Install cargo-zigbuild
         if: matrix.os == 'linux'
@@ -88,7 +86,7 @@ jobs:
         # links against older version of libc, makes it more compatible with older distros
         run: cargo zigbuild --locked --release --target ${{ matrix.target }}
 
-      - name: Test binary
+      - name: Test native binary
         run: |
           ACTUAL="$(./target/${{ matrix.target }}/release/silk-chiffon --version)"
           EXPECTED="silk-chiffon ${{ needs.version.outputs.binary_version }}"
