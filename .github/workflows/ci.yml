@@ -28,7 +28,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust toolchain from rust-toolchain.toml
+        run: rustup toolchain install
       - uses: taiki-e/install-action@v2
         with:
           tool: just,dprint
@@ -40,9 +41,8 @@ jobs:
 
       - uses: ./.github/workflows/actions/sccache-action
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
+      - name: Install Rust toolchain from rust-toolchain.toml
+        run: rustup toolchain install
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -57,10 +57,8 @@ jobs:
 
       - uses: ./.github/workflows/actions/sccache-action
 
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y lld
+      - name: Install Rust toolchain from rust-toolchain.toml
+        run: rustup toolchain install
 
       - uses: taiki-e/install-action@v2
         with:

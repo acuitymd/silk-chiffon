@@ -477,7 +477,7 @@ async fn registered_bqs_transforms_to_arrow_parquet_and_mixes_with_file_input() 
 
     let creates = fixture.service.creates.lock().unwrap();
     assert_eq!(creates.len(), 6);
-    for pair in creates.chunks_exact(2) {
+    for pair in creates.as_chunks::<2>().0 {
         let discovery = pair[0].read_session.as_ref().unwrap();
         let execution = pair[1].read_session.as_ref().unwrap();
         assert_eq!(discovery.table_modifiers, execution.table_modifiers);

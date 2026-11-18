@@ -280,8 +280,8 @@ fn decoded_matcher(raw_path: &str, input: &str) -> Result<String, StorageError> 
                 return Err(StorageError::InvalidPercentEncoding(input.to_owned()));
             }
             let mut decoded = Vec::with_capacity((index - start) / 3);
-            for encoded in bytes[start..index].chunks_exact(3) {
-                decoded.push(hex_value(encoded[1]) * 16 + hex_value(encoded[2]));
+            for &[_, high, low] in bytes[start..index].as_chunks::<3>().0 {
+                decoded.push(hex_value(high) * 16 + hex_value(low));
             }
             let decoded = std::str::from_utf8(&decoded)
                 .map_err(|_| StorageError::InvalidPercentEncoding(input.to_owned()))?;

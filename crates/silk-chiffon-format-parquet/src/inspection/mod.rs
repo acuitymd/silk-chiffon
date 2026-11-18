@@ -14,13 +14,12 @@ use anyhow::Result;
 use arrow::datatypes::SchemaRef;
 use bytes::Bytes;
 use chrono::{DateTime, NaiveDate, Utc};
+use datafusion::datasource::physical_plan::parquet::metadata::DFParquetMetadata;
 use num_format::{Locale, ToFormattedString};
-use object_store::ObjectStoreExt;
+use object_store::{ObjectMeta, ObjectStoreExt};
+use parquet::file::metadata::PageIndexPolicy;
 use parquet::{
-    arrow::{
-        async_reader::{AsyncFileReader, ParquetObjectReader},
-        parquet_to_arrow_schema,
-    },
+    arrow::parquet_to_arrow_schema,
     basic::{Compression, ConvertedType, LogicalType, TimeUnit},
     column::page::{Page, PageReader},
     errors::{ParquetError, Result as ParquetResult},
@@ -245,8 +244,8 @@ fn format_stat_value(
         }
         Statistics::Int64(s) => {
             let val = if is_min { *s.min_opt()? } else { *s.max_opt()? };
-            if let Some(LogicalType::Timestamp { unit, .. }) = logical_type {
-                return Some(format_timestamp_chrono(val, unit));
+            if let Some(LogicalType::Timestamp(timestamp)) = logical_type {
+                return Some(format_timestamp_chrono(val, &timestamp.unit));
             }
             // fallback to legacy converted types for timestamps
             match converted_type {
@@ -407,10 +406,15 @@ impl Inspector {
 
     async fn load(object: &InputObject) -> Result<Self> {
         let handle = object.input_handle();
-        let mut reader =
-            ParquetObjectReader::new(handle.object_store(), handle.object_path().clone())
-                .with_file_size(object.metadata().size);
-        let metadata = reader.get_metadata(None).await?;
+        let store = handle.object_store();
+        let object_meta = ObjectMeta {
+            location: handle.object_path().clone(),
+            ..object.metadata().clone()
+        };
+        let metadata = DFParquetMetadata::new(store.as_ref(), &object_meta)
+            .with_page_index_policy(Some(PageIndexPolicy::Skip))
+            .fetch_metadata()
+            .await?;
         let location = silk_chiffon_inspection_output::display_location(object)?;
         Self::from_metadata(
             &metadata,

@@ -16,28 +16,28 @@ apply_if = "^1.2.1"
 arrow.workspace = true
 async-stream = "^0.3.6"
 async-trait.workspace = true
-bytes = "^1.12.1"
-bytesize = "^2.4.2"
+bytes = "^1.12.2"
+bytesize = "^2.7.0"
 chrono = "^0.4.45"
 clap.workspace = true
 datafusion = { workspace = true, features = ["array_expressions", "default"] }
 futures.workspace = true
 num-format = "^0.4.4"
 object_store.workspace = true
-parquet = { version = "^58.4.0", features = ["default", "async", "json", "arrow_canonical_extension_types"] }
+parquet = { version = "^59.3.3", features = ["default", "async", "json", "arrow_canonical_extension_types"] }
 serde = { version = "^1.0.229", features = ["derive"] }
 serde_json.workspace = true
 silk-chiffon-core = { path = "../silk-chiffon-core" }
 silk-chiffon-inspection-output = { path = "../silk-chiffon-inspection-output" }
 silk-chiffon-storage = { path = "../silk-chiffon-storage", default-features = false }
-tabled = { version = "^0.21.0", features = ["ansi"] }
-tokio = { version = "^1.53.1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tabled = { version = "^0.22.0", features = ["ansi"] }
+tokio = { version = "^1.54.1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 tokio-util.workspace = true
 url.workspace = true
 
 [dev-dependencies]
 criterion = { version = "^0.8.2", features = ["html_reports"] }
-rand = "^0.10.2"
+rand = "^0.10.4"
 silk-chiffon-storage = { path = "../silk-chiffon-storage", default-features = false, features = ["local"] }
 silk-chiffon-test-support = { path = "../silk-chiffon-test-support" }
 tempfile = "^3.27.0"

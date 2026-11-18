@@ -124,7 +124,7 @@ impl ReadSessionSpec {
     ) -> Result<Self, ReadSessionSpecError> {
         if reference
             .expected_location()
-            .is_some_and(|expected| expected != discovered_location)
+            .is_some_and(|expected| !expected.eq_ignore_ascii_case(discovered_location))
         {
             return Err(ReadSessionSpecError::LocationMismatch);
         }
@@ -682,7 +682,8 @@ fn validate_session_name(
         ));
     };
     if project != &owner_project
-        || expected_location.is_some_and(|expected| expected != *location)
+        // BigQuery reports multi-regions as `US` in table metadata but `us` in session names
+        || expected_location.is_some_and(|expected| !expected.eq_ignore_ascii_case(location))
         || !valid_resource_id(location)
         || !valid_resource_id(session)
     {
@@ -984,6 +985,30 @@ mod tests {
         for session in cases {
             assert!(validate_response(&spec, session, Duration::ZERO, limit).is_err());
         }
+    }
+
+    #[test]
+    fn location_matches_regardless_of_case() {
+        let reference = BigQueryReference::parse(
+            "bqs:///projects/table-project/datasets/dataset/tables/table?location=US",
+        )
+        .unwrap();
+        let spec = ReadSessionSpec::discovery(&reference, snapshot(), "session-project").unwrap();
+        let limit = DecodeLimit::new(256 * 1024 * 1024).unwrap();
+        assert!(validate_response(&spec, response(&spec), Duration::ZERO, limit).is_ok());
+
+        let args = BigQueryInputArgs::for_test();
+        let execution = ReadSessionSpec::execution(
+            &reference,
+            snapshot(),
+            "session-project",
+            "us",
+            Vec::new(),
+            None,
+            1,
+            &args,
+        );
+        assert!(execution.is_ok());
     }
 
     #[test]

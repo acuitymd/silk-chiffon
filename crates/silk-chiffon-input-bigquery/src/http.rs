@@ -25,6 +25,8 @@ impl RestTransport {
         config: TransportConfig,
     ) -> Result<Self, RestTransportError> {
         let config = config.validate().map_err(RestTransportError::Config)?;
+        // reqwest is built without a rustls provider and panics if none is installed
+        crate::install_crypto_provider();
         let client = Client::builder()
             .connect_timeout(config.connect_timeout)
             .timeout(config.request_timeout)
@@ -233,6 +235,7 @@ mod tests {
 
     #[test]
     fn local_request_construction_is_not_a_retryable_transport_failure() {
+        crate::install_crypto_provider();
         let error = reqwest::Client::new()
             .get("://invalid")
             .build()

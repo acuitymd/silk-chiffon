@@ -9,10 +9,12 @@ use std::sync::Arc;
 use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
 use datafusion::catalog::TableProvider;
+use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::datasource::TableType;
 use datafusion::error::DataFusionError;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::physical_expr::EquivalenceProperties;
+use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
@@ -128,6 +130,13 @@ impl ChannelExec {
 }
 
 impl ExecutionPlan for ChannelExec {
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> datafusion::common::Result<TreeNodeRecursion>,
+    ) -> datafusion::common::Result<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
+    }
+
     fn name(&self) -> &str {
         "ChannelExec"
     }
@@ -399,6 +408,7 @@ mod tests {
     async fn test_channel_exec_with_children_error() {
         use datafusion::physical_plan::ExecutionPlan;
         use datafusion::physical_plan::empty::EmptyExec;
+        use datafusion::physical_plan::{ChildrenPropertiesMode, ReplaceChildrenOptions};
 
         let schema = test_schema();
         let (_tx, rx) = mpsc::channel::<RecordBatch>(4);
@@ -408,7 +418,12 @@ mod tests {
 
         // try to add a child - should fail
         let empty_child: Arc<dyn ExecutionPlan> = Arc::new(EmptyExec::new(Arc::clone(&schema)));
-        let err = exec.with_new_children(vec![empty_child]).unwrap_err();
+        let err = exec
+            .replace_children(
+                vec![empty_child],
+                ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+            )
+            .unwrap_err();
         assert!(err.to_string().contains("cannot have children"));
     }
 }

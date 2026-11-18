@@ -548,7 +548,7 @@ async fn test_dynamic_partition_extension_requires_explicit_format() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
     TestFile::write_arrow_batch(&input, &TestBatch::simple_with(&[1], &["a"]));
-    let template = temp_dir.path().join("{{name}}.{{ 'arrow' }}");
+    let template = temp_dir.path().join("{{name}}.{{ name }}");
 
     let result = run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
@@ -573,7 +573,7 @@ async fn test_dynamic_partition_extension_requires_explicit_format() {
     })
     .await
     .unwrap();
-    assert!(temp_dir.path().join("a.arrow").exists());
+    assert!(temp_dir.path().join("a.a").exists());
 }
 
 #[tokio::test]
@@ -4075,4 +4075,74 @@ async fn test_nosort_evict_partitioned_write() {
         }
     }
     assert_eq!(total_rows, 5);
+}
+
+#[tokio::test]
+async fn sorted_output_is_byte_identical_across_input_batching_and_partitions() {
+    const ROWS: i64 = 10_000;
+    // 7919 is coprime with ROWS, so this permutes 0..ROWS: shuffled input, every id unique
+    let ids: Vec<i64> = (0..ROWS).map(|i| (i * 7919) % ROWS).collect();
+    let names: Vec<String> = ids.iter().map(|id| format!("name-{}", id % 97)).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    let batch = TestBatch::builder()
+        .column_i64("id", &ids)
+        .column_string("name", &names)
+        .build();
+
+    let temp_dir = TempDir::new().unwrap();
+    let one_batch = temp_dir.path().join("one_batch.arrow");
+    TestFile::write_arrow_batch(&one_batch, &batch);
+    let many_batches = temp_dir.path().join("many_batches.arrow");
+    let mut slices = Vec::new();
+    let mut offset = 0;
+    for len in [1, 7, 333, 1024, 3001].into_iter().cycle() {
+        if offset == batch.num_rows() {
+            break;
+        }
+        let len = len.min(batch.num_rows() - offset);
+        slices.push(batch.slice(offset, len));
+        offset += len;
+    }
+    TestFile::write_arrow(&many_batches, &slices);
+
+    let cases: [(&str, &str, &[&str]); 4] = [
+        ("parquet", "parquet", &["--parquet-row-group-size", "1000"]),
+        ("arrow", "arrow", &["--arrow-record-batch-size", "1000"]),
+        (
+            "arrow",
+            "arrows",
+            &[
+                "--arrow-format",
+                "stream",
+                "--arrow-record-batch-size",
+                "1000",
+            ],
+        ),
+        ("vortex", "vortex", &["--vortex-record-batch-size", "1000"]),
+    ];
+    for (format, extension, format_args) in cases {
+        let mut outputs = Vec::new();
+        for (input, partitions) in [(&one_batch, 1), (&many_batches, 8)] {
+            let output = temp_dir
+                .path()
+                .join(format!("{extension}-{partitions}.{extension}"));
+            run_transform(TestTransformCommand {
+                from: Some(input.to_string_lossy().to_string()),
+                to: Some(output.to_string_lossy().to_string()),
+                output_format: Some(format.to_owned()),
+                sort_by: Some("id".parse().unwrap()),
+                target_partitions: Some(partitions),
+                ..transform_defaults_with(format_args.iter().copied())
+            })
+            .await
+            .unwrap();
+            outputs.push(std::fs::read(&output).unwrap());
+        }
+        assert!(
+            outputs[0] == outputs[1],
+            "{extension} output differs: {} vs {} bytes",
+            outputs[0].len(),
+            outputs[1].len()
+        );
+    }
 }

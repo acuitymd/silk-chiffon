@@ -11,7 +11,7 @@ use arrow::{
     ipc::{
         CompressionType, MetadataVersion,
         writer::{
-            CompressionContext, DictionaryTracker, IpcDataGenerator, IpcWriteOptions, write_message,
+            DictionaryTracker, IpcDataGenerator, IpcWriteContext, IpcWriteOptions, write_message,
         },
     },
 };
@@ -185,7 +185,7 @@ pub fn encode_batch(batch: &RecordBatch, compression: Option<CompressionType>) -
             batch,
             &mut tracker,
             &options,
-            &mut CompressionContext::default(),
+            &mut IpcWriteContext::default(),
         )
         .unwrap();
     assert!(dictionaries.is_empty());
@@ -218,7 +218,7 @@ pub fn encode_dictionary_message() -> Vec<u8> {
             &batch,
             &mut tracker,
             &options,
-            &mut CompressionContext::default(),
+            &mut IpcWriteContext::default(),
         )
         .unwrap();
     let mut output = Vec::new();

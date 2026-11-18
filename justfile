@@ -19,7 +19,7 @@ build:
     cargo build --release
 
 build-native:
-    RUSTFLAGS="-C link-arg=-fuse-ld=lld -C target-cpu=native" cargo build --profile native
+    RUSTFLAGS="-C target-cpu=native" cargo build --profile native
 
 build-profiling:
     cargo build --profile profiling

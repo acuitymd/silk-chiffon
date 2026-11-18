@@ -124,7 +124,7 @@ fn configure_leaf_encoding(
                     builder = builder
                         .set_column_bloom_filter_enabled(col_path.clone(), true)
                         .set_column_bloom_filter_fpp(col_path.clone(), fpp)
-                        .set_column_bloom_filter_ndv(col_path.clone(), n);
+                        .set_column_bloom_filter_max_ndv(col_path.clone(), n);
                 } else {
                     builder = builder.set_column_bloom_filter_enabled(col_path.clone(), false);
                 }

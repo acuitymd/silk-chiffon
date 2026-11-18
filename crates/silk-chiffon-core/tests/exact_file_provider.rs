@@ -2,6 +2,8 @@ use std::{fmt, sync::Arc};
 
 use arrow::datatypes::{DataType, Field, Schema};
 use async_trait::async_trait;
+use datafusion::common::tree_node::TreeNodeRecursion;
+use datafusion::physical_plan::apply_expression_roots;
 use datafusion::{
     catalog::Session,
     common::{ColumnStatistics, Result, Statistics, stats::Precision},
@@ -151,6 +153,13 @@ impl CapturingSource {
 }
 
 impl FileSource for CapturingSource {
+    fn apply_expressions(
+        &self,
+        f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> datafusion::common::Result<TreeNodeRecursion>,
+    ) -> datafusion::common::Result<TreeNodeRecursion> {
+        apply_expression_roots(self.projection.source.iter(), f)
+    }
+
     fn create_file_opener(
         &self,
         _object_store: Arc<dyn ObjectStore>,

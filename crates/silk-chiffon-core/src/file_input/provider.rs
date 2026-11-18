@@ -49,11 +49,13 @@ impl FileInputGroup {
             .with_context(|| {
                 format!("while inferring schema from representative {representative_url}")
             })?;
-        let concurrency = session
-            .state()
-            .config_options()
-            .execution
-            .meta_fetch_concurrency;
+        let concurrency = usize::from(
+            session
+                .state()
+                .config_options()
+                .execution
+                .meta_fetch_concurrency,
+        );
         let file_meta = futures::stream::iter(files.iter().cloned().enumerate())
             .map(|(index, file)| {
                 let store = Arc::clone(&store);

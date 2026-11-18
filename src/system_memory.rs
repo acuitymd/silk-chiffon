@@ -17,8 +17,7 @@ pub(crate) fn total_memory() -> usize {
         return limit;
     }
 
-    let sys = System::new_all();
-    sys.total_memory() as usize
+    System::new_all().map_or(0, |sys| sys.total_memory() as usize)
 }
 
 /// Returns available memory in bytes, respecting container cgroup limits.
@@ -33,7 +32,9 @@ pub(crate) fn available_memory() -> usize {
         return available;
     }
 
-    let sys = System::new_all();
+    let Ok(sys) = System::new_all() else {
+        return 0;
+    };
     let available = sys.available_memory() as usize;
 
     if available > 0 {

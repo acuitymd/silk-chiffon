@@ -949,6 +949,53 @@ mod parity_tests {
     }
 
     #[test]
+    fn test_vortex_stats_cover_non_nullable_struct_children() {
+        use arrow::array::{ArrayRef, Int32Array, StructArray};
+        use arrow::datatypes::{DataType, Field, Fields, Schema};
+
+        let temp_dir = TempDir::new().unwrap();
+        let file = temp_dir.path().join("nested.vortex");
+        let child = Arc::new(Field::new("b", DataType::Int32, false));
+        let column = StructArray::from(vec![(
+            Arc::clone(&child),
+            Arc::new(Int32Array::from(vec![1, 2, 3])) as ArrayRef,
+        )]);
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "a",
+            DataType::Struct(Fields::from(vec![child])),
+            false,
+        )]));
+        let batch =
+            RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(column) as ArrayRef]).unwrap();
+        // nested statistics skip a non-nullable struct's own entry, which a top-level lookup missed
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let bytes = runtime
+            .block_on(
+                silk_chiffon_test_support::vortex::encode_batches_with_nested_statistics(
+                    &schema,
+                    vec![batch],
+                ),
+            )
+            .unwrap();
+        std::fs::write(&file, bytes).unwrap();
+
+        let json = get_json_output(&[
+            "inspect",
+            "vortex",
+            file.to_str().unwrap(),
+            "--stats",
+            "--format",
+            "json",
+        ]);
+        let stats = json["statistics"].as_array().unwrap();
+        let child_stats = stats
+            .iter()
+            .find(|entry| entry["field"] == "a.b")
+            .unwrap_or_else(|| panic!("no stats entry for a.b in {stats:?}"));
+        assert!(!child_stats["stats"].as_object().unwrap().is_empty());
+    }
+
+    #[test]
     fn test_vortex_layout_parity() {
         let temp_dir = TempDir::new().unwrap();
         let file = temp_dir.path().join("test.vortex");
