@@ -20,7 +20,7 @@ use vortex::{
     VortexSessionDefault,
     array::stats::StatsSet,
     arrow::ArrowSessionExt,
-    dtype::FieldPath,
+    dtype::{Field, FieldPath},
     file::{OpenOptionsSessionExt, SegmentSpec},
     session::VortexSession,
 };
@@ -41,9 +41,8 @@ struct Inspector {
     schema: SchemaRef,
     num_rows: u64,
     location: String,
-    file_stats: Option<Arc<[StatsSet]>>,
+    file_stats: Option<Vec<(String, StatsSet)>>,
     segments: Arc<[SegmentSpec]>,
-    field_names: Vec<String>,
 }
 
 impl Inspector {
@@ -64,21 +63,15 @@ impl Inspector {
                 .to_arrow_schema(dtype)
                 .context("failed to convert Vortex type to Arrow schema")?,
         );
-        let field_names: Vec<String> = dtype
-            .as_struct_fields_opt()
-            .map(|fields| fields.names().iter().map(ToString::to_string).collect())
-            .unwrap_or_default();
-        // entries follow a nested post-order layout, so look top-level fields up by path
+        // Vortex records stats per nested field and skips a non-nullable struct's own entry,
+        // so list every recorded entry by its path instead of looking up top-level names
         let file_stats = file.file_stats().map(|stats| {
-            field_names
+            stats
+                .paths()
                 .iter()
-                .map(|name| {
-                    stats
-                        .get_by_path(&FieldPath::from_name(name.as_str()))
-                        .map(|(aggregates, _)| aggregates.to_stats_set())
-                        .unwrap_or_default()
-                })
-                .collect::<Arc<[StatsSet]>>()
+                .zip(stats.aggregates().iter())
+                .map(|(path, aggregates)| (stats_label(path), aggregates.to_stats_set()))
+                .collect::<Vec<_>>()
         });
         let segments = Arc::clone(file.footer().segment_map());
 
@@ -88,7 +81,6 @@ impl Inspector {
             location: display_location(object)?,
             file_stats,
             segments,
-            field_names,
         })
     }
 
@@ -147,12 +139,7 @@ impl Inspector {
         }
 
         writeln!(out)?;
-        for (index, stat_set) in stats.iter().enumerate() {
-            let field_name = self
-                .field_names
-                .get(index)
-                .map(String::as_str)
-                .unwrap_or("<unknown>");
+        for (field_name, stat_set) in stats {
             writeln!(out, "  {}", header(field_name))?;
             if stat_set.is_empty() {
                 writeln!(out, "    {}", dim("(no stats)"))?;
@@ -214,13 +201,7 @@ impl Inspector {
         let statistics = self.file_stats.as_ref().map(|stats| {
             stats
                 .iter()
-                .enumerate()
-                .map(|(index, stat_set)| {
-                    let field = self
-                        .field_names
-                        .get(index)
-                        .cloned()
-                        .unwrap_or_else(|| format!("field_{index}"));
+                .map(|(field, stat_set)| {
                     let stats = stat_set
                         .iter()
                         .map(|(stat, precision_value)| {
@@ -285,6 +266,21 @@ pub(crate) fn inspect<'a>(
         }
         Ok(InspectionOutput::Text(String::from_utf8(output)?))
     })
+}
+
+// FieldPath's Display prefixes names with `$`; inspection shows plain dotted paths
+fn stats_label(path: &FieldPath) -> String {
+    if path.is_root() {
+        return "<root>".to_owned();
+    }
+    path.parts()
+        .iter()
+        .map(|part| match part {
+            Field::Name(name) => name.to_string(),
+            Field::ElementType => "[]".to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join(".")
 }
 
 #[cfg(test)]

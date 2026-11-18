@@ -1,8 +1,7 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 
 use anyhow::{Context, Result, anyhow, bail};
 use arrow::util::display::{ArrayFormatter, FormatOptions};
-use minijinja::{AutoEscape, Environment, Value};
 use percent_encoding::{AsciiSet, CONTROLS, percent_decode_str, percent_encode};
 use silk_chiffon_storage::{Location, LocationInput};
 use url::Url;
@@ -32,9 +31,19 @@ enum OutputEnvelope {
     Url { base: Url },
 }
 
+/// One piece of a parsed object path template.
+enum Segment {
+    Literal(String),
+    Field { name: String, raw: bool },
+}
+
 /// A partition output template whose routing envelope is fixed before execution.
+///
+/// Templates are plain substitution: `{{ column }}` and `{{ column | raw }}`. Nothing
+/// else is evaluated, so a template cannot compute values that render differently
+/// from the partition data.
 pub(super) struct OutputTargetTemplate {
-    env: Environment<'static>,
+    segments: Vec<Segment>,
     object_path_template: String,
     envelope: OutputEnvelope,
 }
@@ -43,38 +52,11 @@ impl OutputTargetTemplate {
     pub(super) fn new(pattern: impl Into<String>) -> Result<Self> {
         let pattern = pattern.into();
         let (envelope, object_path_template) = parse_envelope(&pattern)?;
-        let protects_percent_encoding = matches!(envelope, OutputEnvelope::Url { .. });
-        let mut env = Environment::new();
-        env.set_auto_escape_callback(|_name| AutoEscape::Custom("hive".into()));
-        env.set_formatter(move |out, state, value| {
-            if !matches!(state.auto_escape(), AutoEscape::Custom(name) if name == "hive") {
-                return minijinja::escape_formatter(out, state, value);
-            }
-            let formatted = if value.is_safe() {
-                value.to_string()
-            } else {
-                hive_escape_path(&value.to_string())
-            };
-            if protects_percent_encoding {
-                out.write_str(&formatted.replace('%', "%25"))?;
-            } else {
-                out.write_str(&formatted)?;
-            }
-            Ok(())
-        });
-        env.add_filter("raw", |value: &str| -> Result<Value, minijinja::Error> {
-            let value = if value.is_empty() || value == HIVE_DEFAULT_PARTITION {
-                HIVE_DEFAULT_PARTITION.to_owned()
-            } else {
-                value.to_owned()
-            };
-            Ok(Value::from_safe_string(value))
-        });
-        env.template_from_str(&object_path_template)
+        let segments = parse_segments(&object_path_template)
             .with_context(|| format!("invalid output target template {pattern:?}"))?;
 
         Ok(Self {
-            env,
+            segments,
             object_path_template,
             envelope,
         })
@@ -82,10 +64,12 @@ impl OutputTargetTemplate {
 
     pub(super) fn referenced_fields(&self) -> Result<BTreeSet<String>> {
         Ok(self
-            .env
-            .template_from_str(&self.object_path_template)?
-            .undeclared_variables(false)
-            .into_iter()
+            .segments
+            .iter()
+            .filter_map(|segment| match segment {
+                Segment::Field { name, .. } => Some(name.clone()),
+                Segment::Literal(_) => None,
+            })
             .collect())
     }
 
@@ -100,44 +84,17 @@ impl OutputTargetTemplate {
     }
 
     pub(super) fn require_file_number(&self) -> Result<()> {
-        let mut depth = 0usize;
         let mut direct = false;
-        for tag in template_tags(&self.object_path_template)? {
-            match tag.kind {
-                TagKind::Expression => {
-                    if contains_identifier(tag.body, "file_number") {
-                        if tag.body.trim() == "file_number" && depth == 0 {
-                            direct = true;
-                        } else {
-                            bail!(
-                                "nosort-evict requires file_number as a direct unconditional interpolation"
-                            );
-                        }
-                    }
+        for segment in &self.segments {
+            if let Segment::Field { name, raw } = segment
+                && name == "file_number"
+            {
+                if *raw {
+                    bail!(
+                        "nosort-evict requires file_number as a direct unconditional interpolation"
+                    );
                 }
-                TagKind::Block => {
-                    if contains_identifier(tag.body, "file_number") {
-                        bail!("file_number cannot be shadowed or used in template control flow");
-                    }
-                    let keyword = tag.body.split_whitespace().next().unwrap_or_default();
-                    if keyword.starts_with("end") {
-                        depth = depth.saturating_sub(1);
-                    } else if matches!(
-                        keyword,
-                        "if" | "for"
-                            | "block"
-                            | "filter"
-                            | "macro"
-                            | "with"
-                            | "autoescape"
-                            | "call"
-                            | "raw"
-                    ) || keyword == "set" && !tag.body.contains('=')
-                    {
-                        depth += 1;
-                    }
-                }
-                TagKind::Comment => {}
+                direct = true;
             }
         }
         if !direct {
@@ -155,23 +112,44 @@ impl OutputTargetTemplate {
             bail!("partition field file_number is reserved for nosort-evict output templates");
         }
 
-        let mut context = HashMap::new();
-        for (column, value) in values {
-            let formatter = ArrayFormatter::try_new(
-                value,
-                &FormatOptions::default().with_null(HIVE_DEFAULT_PARTITION),
-            )?;
-            context.insert(column.as_str(), Value::from(formatter.value(0).to_string()));
+        let protects_percent_encoding = matches!(self.envelope, OutputEnvelope::Url { .. });
+        let mut rendered = String::new();
+        for segment in &self.segments {
+            let (name, raw) = match segment {
+                Segment::Literal(text) => {
+                    rendered.push_str(text);
+                    continue;
+                }
+                Segment::Field { name, raw } => (name, *raw),
+            };
+            let value = if name == "file_number" {
+                file_number
+                    .ok_or_else(|| anyhow!("file_number is only set for nosort-evict output"))?
+                    .to_string()
+            } else {
+                let column = values
+                    .get(name)
+                    .ok_or_else(|| anyhow!("output target template field {name:?} has no value"))?;
+                ArrayFormatter::try_new(
+                    column,
+                    &FormatOptions::default().with_null(HIVE_DEFAULT_PARTITION),
+                )?
+                .value(0)
+                .to_string()
+            };
+            let text = if !raw {
+                hive_escape_path(&value)
+            } else if value.is_empty() {
+                HIVE_DEFAULT_PARTITION.to_owned()
+            } else {
+                value
+            };
+            if protects_percent_encoding {
+                rendered.push_str(&text.replace('%', "%25"));
+            } else {
+                rendered.push_str(&text);
+            }
         }
-        if let Some(file_number) = file_number {
-            context.insert("file_number", Value::from(file_number));
-        }
-
-        let rendered = self
-            .env
-            .template_from_str(&self.object_path_template)?
-            .render(context)
-            .context("failed to render output target template")?;
         let object_path = match self.envelope {
             OutputEnvelope::Url { .. } => percent_decode_str(&rendered)
                 .decode_utf8()
@@ -260,6 +238,58 @@ fn mask_template_tags(source: &str) -> Result<String> {
     Ok(output)
 }
 
+fn parse_segments(source: &str) -> Result<Vec<Segment>> {
+    let mut segments = Vec::new();
+    let mut cursor = 0usize;
+    for tag in template_tags(source)? {
+        if tag.start > cursor {
+            segments.push(Segment::Literal(source[cursor..tag.start].to_owned()));
+        }
+        match tag.kind {
+            TagKind::Expression => segments.push(parse_field(tag.body)?),
+            TagKind::Block | TagKind::Comment => bail!(
+                "output templates support only {{{{ column }}}} and {{{{ column | raw }}}}, not {:?}",
+                &source[tag.start..tag.end]
+            ),
+        }
+        cursor = tag.end;
+    }
+    if cursor < source.len() {
+        segments.push(Segment::Literal(source[cursor..].to_owned()));
+    }
+    Ok(segments)
+}
+
+fn parse_field(body: &str) -> Result<Segment> {
+    let (name, filter) = match body.split_once('|') {
+        Some((name, filter)) => (name.trim(), Some(filter.trim())),
+        None => (body.trim(), None),
+    };
+    let raw = match filter {
+        None => false,
+        Some("raw") => true,
+        Some(other) => bail!("unsupported output template filter {other:?}; only raw is supported"),
+    };
+    if !is_identifier(name) {
+        bail!(
+            "output template expression {:?} must be a column name, optionally followed by | raw",
+            body.trim()
+        );
+    }
+    Ok(Segment::Field {
+        name: name.to_owned(),
+        raw,
+    })
+}
+
+fn is_identifier(name: &str) -> bool {
+    let mut characters = name.chars();
+    characters
+        .next()
+        .is_some_and(|first| first == '_' || first.is_ascii_alphabetic())
+        && characters.all(|character| character == '_' || character.is_ascii_alphanumeric())
+}
+
 fn validate_object_path(path: &str) -> Result<()> {
     if path.is_empty() {
         bail!("rendered output object path cannot be empty");
@@ -327,15 +357,6 @@ fn template_tags(source: &str) -> Result<Vec<TemplateTag<'_>>> {
         cursor = end;
     }
     Ok(tags)
-}
-
-fn contains_identifier(source: &str, identifier: &str) -> bool {
-    source.match_indices(identifier).any(|(start, _)| {
-        let before = source[..start].chars().next_back();
-        let after = source[start + identifier.len()..].chars().next();
-        !before.is_some_and(|character| character == '_' || character.is_alphanumeric())
-            && !after.is_some_and(|character| character == '_' || character.is_alphanumeric())
-    })
 }
 
 #[cfg(test)]
@@ -434,24 +455,49 @@ mod tests {
             .require_file_number()
             .unwrap();
 
-        let conditional = OutputTargetTemplate::new(
-            "out/{% if false %}{{ file_number }}{% endif %}.parquet".to_owned(),
-        )
-        .unwrap();
-        assert!(conditional.require_file_number().is_err());
-        let transformed =
-            OutputTargetTemplate::new("out/{{ file_number + 1 }}.parquet".to_owned()).unwrap();
-        assert!(transformed.require_file_number().is_err());
-        let captured = OutputTargetTemplate::new(
-            "out/{% set ignored %}{{ file_number }}{% endset %}.parquet".to_owned(),
-        )
-        .unwrap();
-        assert!(captured.require_file_number().is_err());
-        let raw = OutputTargetTemplate::new(
-            "out/{% raw %}{{ file_number }}{% endraw %}.parquet".to_owned(),
-        )
-        .unwrap();
+        let raw =
+            OutputTargetTemplate::new("out/{{ file_number | raw }}.parquet".to_owned()).unwrap();
         assert!(raw.require_file_number().is_err());
+        let missing = OutputTargetTemplate::new("out/{{ region }}.parquet".to_owned()).unwrap();
+        assert!(missing.require_file_number().is_err());
+    }
+
+    #[test]
+    fn templates_reject_anything_but_plain_substitution() {
+        for pattern in [
+            "out/{% if false %}{{ file_number }}{% endif %}.parquet",
+            "out/{% set ignored %}{{ file_number }}{% endset %}.parquet",
+            "out/{% raw %}{{ file_number }}{% endraw %}.parquet",
+            "out/{# note #}{{ region }}.parquet",
+            "out/{{ file_number + 1 }}.parquet",
+            "out/{{ region == 'west' }}.parquet",
+            "out/{{ 'parquet' }}.parquet",
+            "out/{{ region | upper }}.parquet",
+            "out/{{ region }.parquet",
+        ] {
+            assert!(
+                OutputTargetTemplate::new(pattern.to_owned()).is_err(),
+                "{pattern}"
+            );
+        }
+    }
+
+    #[test]
+    fn substitution_accepts_optional_spacing() {
+        let mut values = HashMap::new();
+        values.insert(
+            "region".to_string(),
+            Arc::new(StringArray::from(vec!["west/coast"])) as _,
+        );
+        for (pattern, expected) in [
+            ("out/{{region}}.parquet", "out/west%2Fcoast.parquet"),
+            ("out/{{ region }}.parquet", "out/west%2Fcoast.parquet"),
+            ("out/{{region|raw}}.parquet", "out/west/coast.parquet"),
+            ("out/{{ region | raw }}.parquet", "out/west/coast.parquet"),
+        ] {
+            let template = TestOutputTargetTemplate::new(pattern.to_string());
+            assert_eq!(template.render_path(&values), expected, "{pattern}");
+        }
     }
 
     #[test]
@@ -463,7 +509,7 @@ mod tests {
             Some("parquet")
         );
         assert_eq!(
-            OutputTargetTemplate::new("out/{{region}}.{{ 'parquet' }}".to_owned())
+            OutputTargetTemplate::new("out/{{region}}.{{ format }}".to_owned())
                 .unwrap()
                 .static_extension(),
             None

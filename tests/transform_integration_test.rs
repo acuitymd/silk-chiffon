@@ -548,7 +548,7 @@ async fn test_dynamic_partition_extension_requires_explicit_format() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");
     TestFile::write_arrow_batch(&input, &TestBatch::simple_with(&[1], &["a"]));
-    let template = temp_dir.path().join("{{name}}.{{ 'arrow' }}");
+    let template = temp_dir.path().join("{{name}}.{{ name }}");
 
     let result = run_transform(TestTransformCommand {
         from: Some(input.to_string_lossy().to_string()),
@@ -573,7 +573,7 @@ async fn test_dynamic_partition_extension_requires_explicit_format() {
     })
     .await
     .unwrap();
-    assert!(temp_dir.path().join("a.arrow").exists());
+    assert!(temp_dir.path().join("a.a").exists());
 }
 
 #[tokio::test]

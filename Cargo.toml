@@ -66,7 +66,6 @@ datafusion = { workspace = true, features = ["array_expressions", "default"] }
 futures.workspace = true
 lru = "^0.19.0"
 mimalloc = "^0.1.52"
-minijinja = "^3.1.0"
 owo-colors = "^4.4.0"
 percent-encoding = "^2.3.2"
 serde = { version = "^1.0.229", features = ["derive"] }

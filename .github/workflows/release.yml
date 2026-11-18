@@ -56,11 +56,10 @@ jobs:
 
       - uses: ./.github/workflows/actions/sccache-action
 
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          cache: false
-          rustflags: ""
-          target: ${{ matrix.target }}
+      - name: Install Rust toolchain from rust-toolchain.toml
+        run: |
+          rustup toolchain install
+          rustup target add ${{ matrix.target }}
 
       - name: Install system dependencies
         if: matrix.os == 'linux'

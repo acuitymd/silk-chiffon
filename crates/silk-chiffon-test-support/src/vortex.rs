@@ -10,6 +10,22 @@ use vortex::{
 
 /// Encodes batches as one Vortex file without using Silk Chiffon's sink.
 pub async fn encode_batches(schema: &SchemaRef, batches: Vec<RecordBatch>) -> Result<Vec<u8>> {
+    encode(schema, batches, false).await
+}
+
+/// Like [`encode_batches`], but also writes Vortex's per-nested-field statistics.
+pub async fn encode_batches_with_nested_statistics(
+    schema: &SchemaRef,
+    batches: Vec<RecordBatch>,
+) -> Result<Vec<u8>> {
+    encode(schema, batches, true).await
+}
+
+async fn encode(
+    schema: &SchemaRef,
+    batches: Vec<RecordBatch>,
+    nested_statistics: bool,
+) -> Result<Vec<u8>> {
     let session = VortexSession::default();
     let (dtype, arrays) = {
         let arrow = session.arrow();
@@ -21,6 +37,10 @@ pub async fn encode_batches(schema: &SchemaRef, batches: Vec<RecordBatch>) -> Re
     };
     let stream = ArrayStreamAdapter::new(dtype, stream::iter(arrays.into_iter().map(Ok)));
     let mut bytes = Vec::new();
-    session.write_options().write(&mut bytes, stream).await?;
+    let mut options = session.write_options();
+    if nested_statistics {
+        options = options.include_nested_statistics();
+    }
+    options.write(&mut bytes, stream).await?;
     Ok(bytes)
 }
