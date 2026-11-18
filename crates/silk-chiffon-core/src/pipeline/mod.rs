@@ -325,7 +325,7 @@ fn total_memory() -> usize {
     if let Some(limit) = cgroup_total_memory() {
         return limit;
     }
-    System::new_all().total_memory() as usize
+    System::new_all().map_or(0, |system| system.total_memory() as usize)
 }
 
 #[cfg(target_os = "linux")]

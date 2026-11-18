@@ -18,8 +18,7 @@ use silk_chiffon_storage::{ObjectUpload, ObjectUploadTask, PreparedOutputTarget}
 use tokio::sync::mpsc;
 use vortex::{
     array::{ArrayRef, stream::ArrayStreamAdapter},
-    arrow::{FromArrowArray, FromArrowType},
-    dtype::DType,
+    arrow::ArrowSessionExt,
     file::WriteOptionsSessionExt,
     io::{IoBuf, VortexWrite},
     session::VortexSession,
@@ -81,6 +80,7 @@ struct Sink {
     coalescer: BatchCoalescer,
     sender: Option<mpsc::Sender<ArrayRef>>,
     task: Option<ObjectUploadTask<()>>,
+    session: VortexSession,
 }
 
 impl Sink {
@@ -96,10 +96,16 @@ impl Sink {
         let mut upload = ObjectUpload::new(target);
         let writer = UploadWriter::new(upload.writer()?, upload.part_size().get());
         let writer_schema = Arc::clone(&schema);
+        let writer_session = session.clone();
         let task = ObjectUploadTask::spawn("Vortex writer", upload, move |cancellation| {
             tokio::spawn(async move {
                 cancellation
-                    .run_until_cancelled(write_file(writer, writer_schema, receiver, session))
+                    .run_until_cancelled(write_file(
+                        writer,
+                        writer_schema,
+                        receiver,
+                        writer_session,
+                    ))
                     .await
                     .ok_or_else(|| anyhow!("Vortex writer was cancelled"))?
             })
@@ -111,13 +117,17 @@ impl Sink {
             coalescer,
             sender: Some(sender),
             task: Some(task),
+            session,
         })
     }
 
     async fn flush_completed_batches(&mut self) -> Result<()> {
         while let Some(completed_batch) = self.coalescer.next_completed_batch() {
             let rows = u64::try_from(completed_batch.num_rows())?;
-            let vortex_array = ArrayRef::from_arrow(completed_batch, false)?;
+            let vortex_array = self
+                .session
+                .arrow()
+                .from_arrow_record_batch(completed_batch, &self.schema)?;
             let sender = self
                 .sender
                 .as_ref()
@@ -175,7 +185,7 @@ async fn write_file<W>(
 where
     W: FuturesSink<Bytes, Error = futures::channel::mpsc::SendError> + Send + Unpin,
 {
-    let dtype = DType::from_arrow(schema);
+    let dtype = session.arrow().from_arrow_schema(&schema)?;
     let arrays = ArrayStreamAdapter::new(
         dtype,
         stream::poll_fn(move |context| receiver.poll_recv(context).map(|item| item.map(Ok))),
@@ -202,7 +212,7 @@ impl<W> UploadWriter<W> {
 
 impl<W> VortexWrite for UploadWriter<W>
 where
-    W: FuturesSink<Bytes, Error = futures::channel::mpsc::SendError> + Unpin,
+    W: FuturesSink<Bytes, Error = futures::channel::mpsc::SendError> + Send + Unpin,
 {
     async fn write_all<B: IoBuf>(&mut self, buffer: B) -> io::Result<B> {
         for chunk in buffer.as_slice().chunks(self.part_size) {

@@ -177,7 +177,7 @@ impl TableProvider for ExactFileTableProvider {
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let source = self
             .format
-            .file_source(TableSchema::new(Arc::clone(&self.schema), Vec::new()));
+            .file_source(TableSchema::from(Arc::clone(&self.schema)));
         let config = FileScanConfigBuilder::new(self.object_store_url.clone(), source)
             .with_file_group(self.files.clone().into())
             .with_statistics(self.statistics.clone())

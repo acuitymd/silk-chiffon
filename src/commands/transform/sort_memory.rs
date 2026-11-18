@@ -1,6 +1,8 @@
 //! Final-plan sort memory tuning.
 
-use datafusion::physical_plan::{ExecutionPlan, sorts::sort::SortExec};
+use datafusion::physical_plan::{
+    ExecutionPlan, StatisticsArgs, StatisticsContext, sorts::sort::SortExec,
+};
 
 const MIN_SORT_SPILL_RESERVATION: usize = 10 * 1024 * 1024;
 
@@ -10,6 +12,7 @@ pub(super) fn sort_spill_reservation_from_plan(
     memory_per_partition: usize,
     batch_size: usize,
 ) -> Option<usize> {
+    let statistics_context = StatisticsContext::new();
     let mut reservations = Vec::new();
     let mut pending = vec![std::sync::Arc::clone(plan)];
     while let Some(plan) = pending.pop() {
@@ -20,8 +23,11 @@ pub(super) fn sort_spill_reservation_from_plan(
             let fallback = (maximum >= MIN_SORT_SPILL_RESERVATION)
                 .then(|| (memory_per_partition / 10).clamp(MIN_SORT_SPILL_RESERVATION, maximum));
             for partition in 0..partition_count {
-                let reservation = input
-                    .partition_statistics(Some(partition))
+                let reservation = statistics_context
+                    .compute(
+                        input.as_ref(),
+                        &StatisticsArgs::new().with_partition(Some(partition)),
+                    )
                     .ok()
                     .and_then(|statistics| {
                         let rows = *statistics.num_rows.get_value()?;

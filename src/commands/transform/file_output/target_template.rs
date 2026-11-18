@@ -45,9 +45,9 @@ impl OutputTargetTemplate {
         let (envelope, object_path_template) = parse_envelope(&pattern)?;
         let protects_percent_encoding = matches!(envelope, OutputEnvelope::Url { .. });
         let mut env = Environment::new();
-        env.set_auto_escape_callback(|_name| AutoEscape::Custom("hive"));
+        env.set_auto_escape_callback(|_name| AutoEscape::Custom("hive".into()));
         env.set_formatter(move |out, state, value| {
-            if !matches!(state.auto_escape(), AutoEscape::Custom("hive")) {
+            if !matches!(state.auto_escape(), AutoEscape::Custom(name) if name == "hive") {
                 return minijinja::escape_formatter(out, state, value);
             }
             let formatted = if value.is_safe() {

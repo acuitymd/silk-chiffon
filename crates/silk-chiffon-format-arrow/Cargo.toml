@@ -16,10 +16,10 @@ anyhow.workspace = true
 arrow = { workspace = true, features = ["ipc_compression"] }
 async-stream = "^0.3.6"
 async-trait.workspace = true
-bytes = "^1.12.1"
+bytes = "^1.12.2"
 clap.workspace = true
 datafusion = { workspace = true, features = ["array_expressions", "default"] }
-datafusion-datasource = "=54.1.0"
+datafusion-datasource = "=55.3.0"
 futures.workspace = true
 object_store.workspace = true
 parking_lot.workspace = true
@@ -27,8 +27,8 @@ serde_json.workspace = true
 silk-chiffon-core = { path = "../silk-chiffon-core" }
 silk-chiffon-inspection-output = { path = "../silk-chiffon-inspection-output" }
 silk-chiffon-storage = { path = "../silk-chiffon-storage", default-features = false }
-tabled = { version = "^0.21.0", features = ["ansi"] }
-tokio = { version = "^1.53.1", features = ["rt", "sync"] }
+tabled = { version = "^0.22.0", features = ["ansi"] }
+tokio = { version = "^1.54.1", features = ["rt", "sync"] }
 tokio-util.workspace = true
 url.workspace = true
 

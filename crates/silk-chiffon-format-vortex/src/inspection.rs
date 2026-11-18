@@ -19,7 +19,8 @@ use tabled::Tabled;
 use vortex::{
     VortexSessionDefault,
     array::stats::StatsSet,
-    arrow::ToArrowType,
+    arrow::ArrowSessionExt,
+    dtype::FieldPath,
     file::{OpenOptionsSessionExt, SegmentSpec},
     session::VortexSession,
 };
@@ -53,23 +54,33 @@ impl Inspector {
         let file = session
             .open_options()
             .with_file_size(object.metadata().size)
-            .open_object_store(&store, handle.object_path().as_ref())
+            .open_object_store(&store, handle.object_path().clone())
             .await
             .with_context(|| format!("failed to open Vortex input {}", handle.url()))?;
         let dtype = file.dtype();
         let schema = Arc::new(
-            dtype
-                .to_arrow_schema()
+            session
+                .arrow()
+                .to_arrow_schema(dtype)
                 .context("failed to convert Vortex type to Arrow schema")?,
         );
-        let file_stats = file
-            .file_stats()
-            .map(|stats| Arc::clone(stats.stats_sets()));
-        let segments = Arc::clone(file.footer().segment_map());
-        let field_names = dtype
+        let field_names: Vec<String> = dtype
             .as_struct_fields_opt()
             .map(|fields| fields.names().iter().map(ToString::to_string).collect())
             .unwrap_or_default();
+        // entries follow a nested post-order layout, so look top-level fields up by path
+        let file_stats = file.file_stats().map(|stats| {
+            field_names
+                .iter()
+                .map(|name| {
+                    stats
+                        .get_by_path(&FieldPath::from_name(name.as_str()))
+                        .map(|(aggregates, _)| aggregates.to_stats_set())
+                        .unwrap_or_default()
+                })
+                .collect::<Arc<[StatsSet]>>()
+        });
+        let segments = Arc::clone(file.footer().segment_map());
 
         Ok(Self {
             schema,
@@ -185,7 +196,7 @@ impl Inspector {
                 index,
                 offset: segment.offset,
                 length: segment.length,
-                alignment: *segment.alignment,
+                alignment: segment.alignment.as_usize(),
             })
             .collect::<Vec<_>>();
         writeln!(out, "{}", rounded_table(rows))?;
@@ -232,7 +243,7 @@ impl Inspector {
                     "index": index,
                     "offset": segment.offset,
                     "length": segment.length,
-                    "alignment": *segment.alignment,
+                    "alignment": segment.alignment.as_usize(),
                 })
             })
             .collect::<Vec<_>>();

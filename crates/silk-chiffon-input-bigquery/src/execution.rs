@@ -3,6 +3,8 @@
 use std::{fmt, sync::Arc};
 
 use arrow::datatypes::SchemaRef;
+use datafusion::common::tree_node::TreeNodeRecursion;
+use datafusion::physical_expr::PhysicalExpr;
 use datafusion::{
     common::{DataFusionError, Statistics, stats::Precision},
     execution::{SendableRecordBatchStream, TaskContext},
@@ -72,6 +74,13 @@ fn plan_properties(schema: SchemaRef, partition_count: usize) -> PlanProperties 
 }
 
 impl ExecutionPlan for BigQueryReadExec {
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> datafusion::common::Result<TreeNodeRecursion>,
+    ) -> datafusion::common::Result<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
+    }
+
     fn name(&self) -> &str {
         "BigQueryReadExec"
     }

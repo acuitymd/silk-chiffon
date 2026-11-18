@@ -48,7 +48,7 @@ fn generate_protos() -> Result<(), Box<dyn Error>> {
         let compiler_copy = fs::read(protoc_include.join(relative))?;
         if vendored != compiler_copy {
             return Err(
-                format!("vendored {relative} differs from protoc-bin-vendored 3.2.0").into(),
+                format!("vendored {relative} differs from protoc-bin-vendored 3.3.0").into(),
             );
         }
     }

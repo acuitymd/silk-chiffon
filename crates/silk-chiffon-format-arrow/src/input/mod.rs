@@ -18,6 +18,9 @@ use arrow::{
 };
 use async_trait::async_trait;
 use bytes::Bytes;
+use datafusion::common::tree_node::TreeNodeRecursion;
+use datafusion::physical_expr::PhysicalExpr;
+use datafusion::physical_plan::apply_expression_roots;
 use datafusion::{
     catalog::{Session, TableProvider},
     common::{ColumnStatistics, Statistics, internal_datafusion_err, stats::Precision},
@@ -247,6 +250,13 @@ struct IpcFileSource {
 }
 
 impl FileSource for IpcFileSource {
+    fn apply_expressions(
+        &self,
+        f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> datafusion::common::Result<TreeNodeRecursion>,
+    ) -> datafusion::common::Result<TreeNodeRecursion> {
+        apply_expression_roots(self.projection.source.iter(), f)
+    }
+
     fn create_file_opener(
         &self,
         object_store: Arc<dyn ObjectStore>,
@@ -1243,7 +1253,7 @@ mod tests {
 
     fn source(variant: IpcVariant) -> IpcFileSource {
         let schema = Arc::new(Schema::new(vec![Field::new("value", DataType::Null, true)]));
-        let table_schema = TableSchema::new(schema, Vec::new());
+        let table_schema = TableSchema::from(schema);
         IpcFileSource {
             variant,
             table_schema: table_schema.clone(),

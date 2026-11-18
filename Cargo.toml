@@ -23,18 +23,18 @@ rust-version = "1.95"
 
 [workspace.dependencies]
 anyhow = "^1.0.104"
-arrow = { version = "^58.4.0", features = ["default"] }
-async-trait = "^0.1.91"
-clap = { version = "^4.6.4", features = ["default", "derive"] }
-datafusion = { version = "^54.1.0", default-features = false }
-futures = "^0.3.33"
+arrow = { version = "^59.3.3", features = ["default"] }
+async-trait = "^0.1.92"
+clap = { version = "^4.6.8", features = ["default", "derive"] }
+datafusion = { version = "^55.3.0", default-features = false }
+futures = "^0.3.34"
 glob = "^0.3.4"
 humantime = "^2.4.0"
 object_store = { version = "^0.13.2", default-features = false }
-parking_lot = "^0.12.5"
-serde_json = "^1.0.151"
-thiserror = "^2.0.19"
-tokio-util = { version = "^0.7.19", features = ["rt"] }
+parking_lot = "^0.13.0"
+serde_json = "^1.0.154"
+thiserror = "^2.0.21"
+tokio-util = { version = "^0.7.20", features = ["rt"] }
 url = "^2.5.8"
 
 [package]
@@ -57,17 +57,17 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 arrow = { workspace = true, features = ["ipc_compression"] }
-bytesize = "^2.4.2"
-camino = { version = "^1.2.4", features = ["serde1"] }
+bytesize = "^2.7.0"
+camino = { version = "^1.2.6", features = ["serde1"] }
 clap.workspace = true
 clap-markdown = { version = "^0.1.5", optional = true }
-clap_complete = "^4.6.7"
+clap_complete = "^4.6.12"
 datafusion = { workspace = true, features = ["array_expressions", "default"] }
 futures.workspace = true
-lru = "^0.18.1"
+lru = "^0.19.0"
 mimalloc = "^0.1.52"
-minijinja = "^2.21.0"
-owo-colors = "^4.3.0"
+minijinja = "^3.1.0"
+owo-colors = "^4.4.0"
 percent-encoding = "^2.3.2"
 serde = { version = "^1.0.229", features = ["derive"] }
 serde_json.workspace = true
@@ -79,10 +79,10 @@ silk-chiffon-input-bigquery = { path = "crates/silk-chiffon-input-bigquery", opt
 silk-chiffon-inspection-output = { path = "crates/silk-chiffon-inspection-output" }
 silk-chiffon-storage = { path = "crates/silk-chiffon-storage", default-features = false }
 strum_macros = "^0.28.0"
-sysinfo = "^0.39.6"
-tabled = { version = "^0.21.0", features = ["ansi"] }
+sysinfo = "^0.40.4"
+tabled = { version = "^0.22.0", features = ["ansi"] }
 thiserror.workspace = true
-tokio = { version = "^1.53.1", features = ["rt-multi-thread", "macros", "io-util", "fs", "sync"] }
+tokio = { version = "^1.54.1", features = ["rt-multi-thread", "macros", "io-util", "fs", "sync"] }
 url.workspace = true
 
 [build-dependencies]
@@ -105,20 +105,20 @@ docs = ["dep:clap-markdown"]
 assert_cmd = "^2.2.2"
 async-trait.workspace = true
 axum = "^0.8.9"
-bytes = "^1.12.1"
+bytes = "^1.12.2"
 criterion = { version = "^0.8.2", features = ["html_reports"] }
-http = "^1.4.2"
+http = "^1.5.0"
 humantime.workspace = true
 object_store.workspace = true
-parquet = { version = "^58.4.0", features = ["default", "async", "json", "arrow_canonical_extension_types"] }
+parquet = { version = "^59.3.3", features = ["default", "async", "json", "arrow_canonical_extension_types"] }
 predicates = "^3.1.4"
-prost = "^0.14.4"
-prost-types = "^0.14.4"
-rand = "^0.10.2"
+prost = "^0.14.6"
+prost-types = "^0.14.6"
+rand = "^0.10.4"
 silk-chiffon-test-support = { path = "crates/silk-chiffon-test-support" }
 tempfile = "^3.27.0"
-tonic = { version = "^0.14.6", features = ["router"] }
-tonic-prost = "^0.14.6"
+tonic = { version = "^0.14.9", features = ["router"] }
+tonic-prost = "^0.14.9"
 
 [[bench]]
 name = "partitioning"
