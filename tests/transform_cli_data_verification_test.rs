@@ -1405,6 +1405,59 @@ fn test_non_spillable_reserve_fixed_bytes() {
 }
 
 #[test]
+fn test_max_spill_size_stops_a_spilling_sort() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let output = temp_dir.path().join("output.arrow");
+
+    // ~8 MiB of rows against a 32 MB budget forces a single-partition sort to spill
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int32, false),
+        Field::new("payload", DataType::Utf8, false),
+    ]));
+    let batches: Vec<RecordBatch> = (0..40)
+        .rev()
+        .map(|chunk| {
+            let ids: Vec<i32> = (chunk * 8192..(chunk + 1) * 8192).rev().collect();
+            let payloads: Vec<String> = ids.iter().map(|id| format!("{id:020}")).collect();
+            RecordBatch::try_new(
+                Arc::clone(&schema),
+                vec![
+                    Arc::new(Int32Array::from(ids)),
+                    Arc::new(StringArray::from(payloads)),
+                ],
+            )
+            .unwrap()
+        })
+        .collect();
+    TestFile::write_arrow(&input, &batches);
+
+    cargo::cargo_bin_cmd!("silk-chiffon")
+        .args([
+            "transform",
+            "--from",
+            input.to_str().unwrap(),
+            "--to",
+            output.to_str().unwrap(),
+            "--sort-by",
+            "id",
+            "--target-partitions",
+            "1",
+            "--memory-budget",
+            "32MB",
+            "--spill-path",
+            temp_dir.path().to_str().unwrap(),
+            "--max-spill-size",
+            "1KB",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "spilling exceeded the 1000 B disk limit; raise it with --max-spill-size",
+        ));
+}
+
+#[test]
 fn test_memory_pool_top_consumers_flag() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");

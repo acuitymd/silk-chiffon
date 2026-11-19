@@ -223,7 +223,7 @@ silk-chiffon transform \
   --list-outputs text
 ```
 
-A large sort spills to disk instead of holding everything in the memory budget, so this works on inputs bigger than memory. `--memory-budget` and `--spill-path` control it. The [full reference](docs/CLI.md) has the details.
+A large sort spills to disk instead of holding everything in the memory budget, so this works on inputs bigger than memory. `--memory-budget` and `--spill-path` control it, and `--max-spill-size` caps the disk space spill files may use (100 GiB by default). The [full reference](docs/CLI.md) has the details.
 
 ## Inspecting files
 

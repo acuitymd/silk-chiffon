@@ -3,10 +3,17 @@ use std::{num::NonZeroUsize, sync::Arc};
 use crate::{PartitionStrategy, SortSpec, TransformCommand, default_thread_budget};
 use anyhow::{Result, anyhow};
 use camino::Utf8Path;
-use datafusion::catalog::TableProvider;
+use datafusion::{
+    catalog::TableProvider,
+    error::DataFusionError,
+    execution::disk_manager::DEFAULT_MAX_TEMP_DIRECTORY_SIZE,
+    physical_plan::{SendableRecordBatchStream, stream::RecordBatchStreamAdapter},
+};
+use futures::TryStreamExt;
 use owo_colors::OwoColorize;
 use silk_chiffon_core::{
-    OpenSinkMode, Pipeline, PresentationMode, SinkBindingConfig, union_input_providers_by_name,
+    OpenSinkMode, Pipeline, PreparedPipeline, PresentationMode, SinkBindingConfig,
+    union_input_providers_by_name,
 };
 use tabled::{builder::Builder, settings::Style};
 
@@ -52,6 +59,7 @@ pub(crate) async fn run(args: TransformCommand) -> Result<()> {
         thread_budget,
         spill_path,
         spill_compression,
+        max_spill_size,
         formats,
         storage,
         service_inputs,
@@ -110,7 +118,8 @@ pub(crate) async fn run(args: TransformCommand) -> Result<()> {
         .with_memory_pool_top_consumers(memory_pool_top_consumers)
         .with_target_partitions(effective_target_partitions)
         .with_spill_path(spill_path)
-        .with_spill_compression(spill_compression);
+        .with_spill_compression(spill_compression)
+        .with_max_spill_size(max_spill_size);
     let session = pipeline.create_session_context()?;
 
     let file_inputs = FileInputPreparer::new(&storage, &formats, input_format.as_deref(), &session);
@@ -250,7 +259,7 @@ pub(crate) async fn run(args: TransformCommand) -> Result<()> {
                     validate_excluded_columns(&schema, &exclude_columns)?;
                     projection_indices_excluding(&schema, &exclude_columns)
                 };
-                let mut stream = prepared.begin_execution()?.into_sendable_stream();
+                let mut stream = begin_execution(prepared, max_spill_size)?;
                 if let Some(indices) = projection {
                     stream = project_stream(stream, indices)?;
                 }
@@ -318,8 +327,10 @@ pub(crate) async fn run(args: TransformCommand) -> Result<()> {
         .bind(target, &sink_context, &prepared.output_schema())
         .await?;
 
-    let execution = prepared.begin_execution()?;
-    let report = match output.write(execution.into_sendable_stream()).await {
+    let report = match output
+        .write(begin_execution(prepared, max_spill_size)?)
+        .await
+    {
         Ok(report) => report,
         Err(failure) => {
             if let Some(mode) = list_outputs_mode
@@ -432,6 +443,35 @@ fn to_title_case(s: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn begin_execution(
+    prepared: PreparedPipeline,
+    max_spill_size: Option<usize>,
+) -> Result<SendableRecordBatchStream> {
+    let limit = max_spill_size.map_or(DEFAULT_MAX_TEMP_DIRECTORY_SIZE, |size| size as u64);
+    let stream = prepared.begin_execution()?.into_sendable_stream();
+    Ok(Box::pin(RecordBatchStreamAdapter::new(
+        stream.schema(),
+        stream.map_err(move |error| explain_spill_limit(error, limit)),
+    )))
+}
+
+// DataFusion's message tells the user to raise a session config key that only
+// --max-spill-size reaches, and the message is the only way to tell this
+// failure apart from memory exhaustion.
+fn explain_spill_limit(error: DataFusionError, limit: u64) -> DataFusionError {
+    match error.find_root() {
+        DataFusionError::ResourcesExhausted(message)
+            if message.contains("max_temp_directory_size") =>
+        {
+            DataFusionError::ResourcesExhausted(format!(
+                "spilling exceeded the {} disk limit; raise it with --max-spill-size",
+                bytesize::ByteSize::b(limit),
+            ))
+        }
+        _ => error,
+    }
 }
 
 pub(super) fn with_cleanup_error(primary: anyhow::Error, cleanup: anyhow::Error) -> anyhow::Error {
