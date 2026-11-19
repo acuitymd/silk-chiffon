@@ -111,7 +111,7 @@ impl Pipeline {
     }
 
     /// Caps the total bytes of spill files live at once, replacing DataFusion's
-    /// 100 GiB default. Execution fails once spill files exceed the cap.
+    /// 100 GiB default. Execution fails when a spill write would exceed the cap.
     pub fn with_max_spill_size(mut self, max_spill_size: Option<usize>) -> Self {
         self.config.max_spill_size = max_spill_size;
         self

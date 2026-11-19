@@ -457,21 +457,17 @@ fn begin_execution(
     )))
 }
 
-// DataFusion's message tells the user to raise a session config key that only
-// --max-spill-size reaches, and the message is the only way to tell this
-// failure apart from memory exhaustion.
+// DataFusion reports the spill limit as a generic I/O error, nested under
+// whatever wrapped the spill writer, telling the user to raise a session config
+// key that only --max-spill-size reaches. Its message is the only marker.
 fn explain_spill_limit(error: DataFusionError, limit: u64) -> DataFusionError {
-    match error.find_root() {
-        DataFusionError::ResourcesExhausted(message)
-            if message.contains("max_temp_directory_size") =>
-        {
-            DataFusionError::ResourcesExhausted(format!(
-                "spilling exceeded the {} disk limit; raise it with --max-spill-size",
-                bytesize::ByteSize::b(limit),
-            ))
-        }
-        _ => error,
+    if !error.to_string().contains("max_temp_directory_size") {
+        return error;
     }
+    DataFusionError::ResourcesExhausted(format!(
+        "spilling exceeded the {} disk limit; raise it with --max-spill-size",
+        bytesize::ByteSize::b(limit),
+    ))
 }
 
 pub(super) fn with_cleanup_error(primary: anyhow::Error, cleanup: anyhow::Error) -> anyhow::Error {
