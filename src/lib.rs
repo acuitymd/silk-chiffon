@@ -40,6 +40,15 @@ fn parse_at_least_one(s: &str) -> Result<usize> {
     Ok(n)
 }
 
+fn parse_at_least_two(s: &str) -> Result<usize> {
+    let n: usize = s.parse().map_err(anyhow::Error::new)?;
+
+    if n < 2 {
+        anyhow::bail!("value must be at least 2");
+    }
+    Ok(n)
+}
+
 /// Parse a human-readable byte size (e.g., "512MB", "2GB") that must be greater than 0.
 #[allow(clippy::cast_possible_truncation)]
 fn parse_nonzero_byte_size(s: &str) -> Result<usize> {
@@ -757,6 +766,31 @@ struct TransformArgs {
     #[arg(long, help_heading = "Execution", value_parser = parse_nonzero_byte_size)]
     pub max_spill_size: Option<usize>,
 
+    /// Maximum number of spill files merged in one pass of a spilled sort.
+    ///
+    /// When a sort partition runs out of memory, it sorts the rows it has buffered and
+    /// writes them to disk as a spill file. After its input ends, it merges its spill
+    /// files. Each spill file in a merge pass reserves memory that cannot be spilled,
+    /// up to four times the file's largest batch. Without a limit, a pass reserves room
+    /// for as many spill files as the memory pool has free and holds that memory until
+    /// the pass ends. One partition's merge can then take most of the pool, and another
+    /// partition's merge can fail with "Additional allocation failed for
+    /// ExternalSorterMerge".
+    ///
+    /// With a limit, a pass merges at most this many spill files into a new spill file,
+    /// repeating until the rest fit in one pass. A lower limit sets a smaller cap on
+    /// merge memory and, when a sort has more spill files than the limit, writes the
+    /// data to disk more times.
+    ///
+    /// The limit does not apply to the merge a partition runs over its buffered
+    /// batches to write each spill file. That merge can fail with the same error.
+    /// --non-spillable-reserve keeps part of the pool out of reach of buffered sort
+    /// input, which makes that failure less likely.
+    ///
+    /// Must be at least 2. Default: no limit.
+    #[arg(long, help_heading = "Execution", value_parser = parse_at_least_two)]
+    pub max_spill_merge_fan_in: Option<usize>,
+
     /// Preserve the row order from the input file in the output.
     ///
     /// By default, DataFusion reads files using multiple partitions for parallelism,
@@ -837,6 +871,7 @@ pub struct TransformCommand {
     spill_path: Option<Utf8PathBuf>,
     spill_compression: SpillCompression,
     max_spill_size: Option<usize>,
+    max_spill_merge_fan_in: Option<usize>,
     preserve_input_order: bool,
     by: Option<String>,
     partition_strategy: PartitionStrategy,
@@ -888,6 +923,7 @@ impl TransformCommand {
             spill_path,
             spill_compression,
             max_spill_size,
+            max_spill_merge_fan_in,
             preserve_input_order,
             by,
             partition_strategy,
@@ -922,6 +958,7 @@ impl TransformCommand {
             spill_path,
             spill_compression,
             max_spill_size,
+            max_spill_merge_fan_in,
             preserve_input_order,
             by,
             partition_strategy,
