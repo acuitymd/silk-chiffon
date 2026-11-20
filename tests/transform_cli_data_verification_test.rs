@@ -1458,6 +1458,33 @@ fn test_max_spill_size_stops_a_spilling_sort() {
 }
 
 #[test]
+fn test_cast_error_quoting_the_spill_config_key_is_not_rewritten() {
+    use predicates::prelude::*;
+
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let output = temp_dir.path().join("output.arrow");
+
+    let batch = TestBatch::simple_with(&[1], &["max_temp_directory_size"]);
+    TestFile::write_arrow_batch(&input, &batch);
+
+    cargo::cargo_bin_cmd!("silk-chiffon")
+        .args([
+            "transform",
+            "--from",
+            input.to_str().unwrap(),
+            "--to",
+            output.to_str().unwrap(),
+            "--query",
+            "SELECT CAST(name AS INT) AS n FROM data",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("Cast error"))
+        .stderr(predicates::str::contains("spilling exceeded").not());
+}
+
+#[test]
 fn test_memory_pool_top_consumers_flag() {
     let temp_dir = TempDir::new().unwrap();
     let input = temp_dir.path().join("input.arrow");

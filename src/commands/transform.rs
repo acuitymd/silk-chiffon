@@ -457,17 +457,25 @@ fn begin_execution(
     )))
 }
 
-// DataFusion reports the spill limit as a generic I/O error, nested under
-// whatever wrapped the spill writer, telling the user to raise a session config
-// key that only --max-spill-size reaches. Its message is the only marker.
+// DataFusion reports the spill limit as an I/O error from its spill writer,
+// nested under whatever wrapped that writer, telling the user to raise a session
+// config key that only --max-spill-size reaches. Its message is the only marker,
+// so only an I/O error counts: a data error can quote the key from a value.
 fn explain_spill_limit(error: DataFusionError, limit: u64) -> DataFusionError {
-    if !error.to_string().contains("max_temp_directory_size") {
-        return error;
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(&error);
+    while let Some(current) = source {
+        if current
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.to_string().contains("max_temp_directory_size"))
+        {
+            return DataFusionError::ResourcesExhausted(format!(
+                "spilling exceeded the {} disk limit; raise it with --max-spill-size",
+                bytesize::ByteSize::b(limit),
+            ));
+        }
+        source = current.source();
     }
-    DataFusionError::ResourcesExhausted(format!(
-        "spilling exceeded the {} disk limit; raise it with --max-spill-size",
-        bytesize::ByteSize::b(limit),
-    ))
+    error
 }
 
 pub(super) fn with_cleanup_error(primary: anyhow::Error, cleanup: anyhow::Error) -> anyhow::Error {
