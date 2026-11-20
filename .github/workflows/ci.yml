@@ -44,6 +44,17 @@ jobs:
       - name: Install Rust toolchain from rust-toolchain.toml
         run: rustup toolchain install
 
+      - name: Remove other Rust toolchains
+        # rust-cache hashes every installed toolchain into its key, so the runner
+        # image's preinstalled stable would change the key on each image update
+        run: |
+          active="$(rustup show active-toolchain | cut -d' ' -f1)"
+          for toolchain in $(rustup toolchain list --quiet); do
+            if [ "$toolchain" != "$active" ]; then
+              rustup toolchain uninstall "$toolchain"
+            fi
+          done
+
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: "ci-ubuntu-latest"
@@ -59,6 +70,17 @@ jobs:
 
       - name: Install Rust toolchain from rust-toolchain.toml
         run: rustup toolchain install
+
+      - name: Remove other Rust toolchains
+        # rust-cache hashes every installed toolchain into its key, so the runner
+        # image's preinstalled stable would change the key on each image update
+        run: |
+          active="$(rustup show active-toolchain | cut -d' ' -f1)"
+          for toolchain in $(rustup toolchain list --quiet); do
+            if [ "$toolchain" != "$active" ]; then
+              rustup toolchain uninstall "$toolchain"
+            fi
+          done
 
       - uses: taiki-e/install-action@v2
         with:
