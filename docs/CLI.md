@@ -128,6 +128,11 @@ Examples:
 
   Possible values: `none`, `lz4`, `zstd`
 
+- `--max-spill-size <MAX_SPILL_SIZE>` — Maximum disk space for spilled intermediate data.
+
+  Caps the combined size of the spill files that exist at one time, after compression. A transform that needs more fails instead of filling the disk. Accepts a byte size (e.g. "500GB", "1TiB").
+
+  Default: 100 GiB.
 - `--preserve-input-order` — Preserve the row order from the input file in the output.
 
   By default, DataFusion reads files using multiple partitions for parallelism, which can interleave rows. This flag forces single-partition reading to maintain the original row order. Only valid for single-file-to-single-file transforms without queries or sorting.

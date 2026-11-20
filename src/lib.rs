@@ -747,6 +747,16 @@ struct TransformArgs {
     #[arg(long, value_enum, default_value_t = SpillCompression::default(), help_heading = "Execution")]
     pub spill_compression: SpillCompression,
 
+    /// Maximum disk space for spilled intermediate data.
+    ///
+    /// Caps the combined size of the spill files that exist at one time, after
+    /// compression. A transform that needs more fails instead of filling the disk.
+    /// Accepts a byte size (e.g. "500GB", "1TiB").
+    ///
+    /// Default: 100 GiB.
+    #[arg(long, help_heading = "Execution", value_parser = parse_nonzero_byte_size)]
+    pub max_spill_size: Option<usize>,
+
     /// Preserve the row order from the input file in the output.
     ///
     /// By default, DataFusion reads files using multiple partitions for parallelism,
@@ -826,6 +836,7 @@ pub struct TransformCommand {
     target_partitions: Option<usize>,
     spill_path: Option<Utf8PathBuf>,
     spill_compression: SpillCompression,
+    max_spill_size: Option<usize>,
     preserve_input_order: bool,
     by: Option<String>,
     partition_strategy: PartitionStrategy,
@@ -876,6 +887,7 @@ impl TransformCommand {
             target_partitions,
             spill_path,
             spill_compression,
+            max_spill_size,
             preserve_input_order,
             by,
             partition_strategy,
@@ -909,6 +921,7 @@ impl TransformCommand {
             target_partitions,
             spill_path,
             spill_compression,
+            max_spill_size,
             preserve_input_order,
             by,
             partition_strategy,

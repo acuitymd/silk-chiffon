@@ -41,6 +41,7 @@ struct PipelineConfig {
     target_partitions: Option<usize>,
     spill_path: Option<Utf8PathBuf>,
     spill_compression: SpillCompression,
+    max_spill_size: Option<usize>,
     sort_spill_reservation_bytes: Option<usize>,
     non_spillable_reserve: Option<usize>,
     memory_pool_top_consumers: usize,
@@ -54,6 +55,7 @@ impl Default for PipelineConfig {
             target_partitions: None,
             spill_path: None,
             spill_compression: SpillCompression::default(),
+            max_spill_size: None,
             sort_spill_reservation_bytes: None,
             non_spillable_reserve: None,
             memory_pool_top_consumers: 10,
@@ -105,6 +107,13 @@ impl Pipeline {
     /// Selects the compression used for DataFusion spill files.
     pub fn with_spill_compression(mut self, spill_compression: SpillCompression) -> Self {
         self.config.spill_compression = spill_compression;
+        self
+    }
+
+    /// Caps the total bytes of spill files live at once, replacing DataFusion's
+    /// 100 GiB default. Execution fails when a spill write would exceed the cap.
+    pub fn with_max_spill_size(mut self, max_spill_size: Option<usize>) -> Self {
+        self.config.max_spill_size = max_spill_size;
         self
     }
 
@@ -177,10 +186,13 @@ impl Pipeline {
                 top_n,
             )),
         };
-        let runtime = datafusion::execution::runtime_env::RuntimeEnvBuilder::default()
+        let mut runtime = datafusion::execution::runtime_env::RuntimeEnvBuilder::default()
             .with_temp_file_path(&spill_path)
-            .with_memory_pool(pool)
-            .build()?;
+            .with_memory_pool(pool);
+        if let Some(max_spill_size) = self.config.max_spill_size {
+            runtime = runtime.with_max_temp_directory_size(max_spill_size as u64);
+        }
+        let runtime = runtime.build()?;
         Ok(SessionContext::new_with_config_rt(
             config,
             Arc::new(runtime),
