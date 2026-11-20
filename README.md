@@ -223,7 +223,7 @@ silk-chiffon transform \
   --list-outputs text
 ```
 
-A large sort spills to disk instead of holding everything in the memory budget, so this works on inputs bigger than memory. `--memory-budget` and `--spill-path` control it, and `--max-spill-size` caps the disk space spill files may use (100 GiB by default). The [full reference](docs/CLI.md) has the details.
+A large sort spills to disk instead of holding everything in the memory budget, so this works on inputs bigger than memory. `--memory-budget` and `--spill-path` control it, and `--max-spill-size` caps the disk space spill files may use (100 GiB by default). If a spilling sort fails with `Additional allocation failed for ExternalSorterMerge`, try `--non-spillable-reserve`, which keeps part of the memory pool free of buffered sort input (a reserve that is too large leaves the sort too little memory to buffer), and `--max-spill-merge-fan-in`, which caps how many spill files one merge pass reserves memory for. The [full reference](docs/CLI.md) has the details.
 
 ## Inspecting files
 
