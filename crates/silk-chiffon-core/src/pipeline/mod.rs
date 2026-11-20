@@ -42,6 +42,7 @@ struct PipelineConfig {
     spill_path: Option<Utf8PathBuf>,
     spill_compression: SpillCompression,
     max_spill_size: Option<usize>,
+    max_spill_merge_fan_in: Option<usize>,
     sort_spill_reservation_bytes: Option<usize>,
     non_spillable_reserve: Option<usize>,
     memory_pool_top_consumers: usize,
@@ -56,6 +57,7 @@ impl Default for PipelineConfig {
             spill_path: None,
             spill_compression: SpillCompression::default(),
             max_spill_size: None,
+            max_spill_merge_fan_in: None,
             sort_spill_reservation_bytes: None,
             non_spillable_reserve: None,
             memory_pool_top_consumers: 10,
@@ -114,6 +116,14 @@ impl Pipeline {
     /// 100 GiB default. Execution fails when a spill write would exceed the cap.
     pub fn with_max_spill_size(mut self, max_spill_size: Option<usize>) -> Self {
         self.config.max_spill_size = max_spill_size;
+        self
+    }
+
+    /// Caps how many spill files one sort merge pass reads, replacing DataFusion's
+    /// unlimited default. Each file in a pass holds non-spillable memory, so the cap
+    /// bounds merge memory at the cost of extra passes through disk.
+    pub fn with_max_spill_merge_fan_in(mut self, fan_in: Option<usize>) -> Self {
+        self.config.max_spill_merge_fan_in = fan_in;
         self
     }
 
@@ -191,6 +201,9 @@ impl Pipeline {
             .with_memory_pool(pool);
         if let Some(max_spill_size) = self.config.max_spill_size {
             runtime = runtime.with_max_temp_directory_size(max_spill_size as u64);
+        }
+        if let Some(fan_in) = self.config.max_spill_merge_fan_in {
+            runtime = runtime.with_max_spill_merge_fan_in(fan_in);
         }
         let runtime = runtime.build()?;
         Ok(SessionContext::new_with_config_rt(
