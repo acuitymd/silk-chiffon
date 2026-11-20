@@ -1,3 +1,0 @@
-# Ignore dist changes
-dist/setup/index.js -diff
-dist/show_stats/index.js -diff
