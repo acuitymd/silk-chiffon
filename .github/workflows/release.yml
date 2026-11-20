@@ -20,6 +20,8 @@ jobs:
       release_version: ${{ steps.version.outputs.release_version }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Generate version
         id: version
@@ -51,6 +53,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain from rust-toolchain.toml
         run: |
@@ -108,6 +112,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Download artifacts
         uses: actions/download-artifact@v8
