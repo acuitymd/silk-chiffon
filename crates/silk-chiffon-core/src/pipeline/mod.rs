@@ -119,9 +119,9 @@ impl Pipeline {
         self
     }
 
-    /// Caps how many spill files one sort merge pass reads, replacing DataFusion's
-    /// unlimited default. Each file in a pass holds non-spillable memory, so the cap
-    /// bounds merge memory at the cost of extra passes through disk.
+    /// Caps how many spill files one sort or aggregation merge pass reads, replacing
+    /// DataFusion's unlimited default. Each file in a pass holds non-spillable memory, so
+    /// the cap bounds merge memory at the cost of extra passes through disk.
     pub fn with_max_spill_merge_fan_in(mut self, fan_in: Option<usize>) -> Self {
         self.config.max_spill_merge_fan_in = fan_in;
         self
@@ -403,6 +403,18 @@ mod tests {
 
         assert_eq!(from_new, from_default);
         assert!(from_default.contains("num_of_top_consumers: 10"));
+    }
+
+    #[test]
+    fn spill_settings_reach_the_disk_manager_together() {
+        let mut pipeline = Pipeline::new()
+            .with_max_spill_size(Some(1 << 30))
+            .with_max_spill_merge_fan_in(Some(2));
+        let session = pipeline.create_session_context().unwrap();
+        let disk_manager = &session.runtime_env().disk_manager;
+
+        assert_eq!(disk_manager.max_spill_merge_fan_in(), 2);
+        assert_eq!(disk_manager.max_temp_directory_size(), 1 << 30);
     }
 
     #[test]

@@ -766,7 +766,7 @@ struct TransformArgs {
     #[arg(long, help_heading = "Execution", value_parser = parse_nonzero_byte_size)]
     pub max_spill_size: Option<usize>,
 
-    /// Maximum number of spill files merged in one pass of a spilled sort.
+    /// Maximum number of spill files merged in one pass of a spilled sort or aggregation.
     ///
     /// When a sort partition runs out of memory, it sorts the rows it has buffered and
     /// writes them to disk as a spill file. After its input ends, it merges its spill
@@ -780,12 +780,17 @@ struct TransformArgs {
     /// With a limit, a pass merges at most this many spill files into a new spill file,
     /// repeating until the rest fit in one pass. A lower limit sets a smaller cap on
     /// merge memory and, when a sort has more spill files than the limit, writes the
-    /// data to disk more times.
+    /// data to disk more times. Each extra pass writes its new spill file while the
+    /// files it merges are still on disk, so those passes also raise the peak disk
+    /// space spill files use and can hit --max-spill-size where an unlimited merge
+    /// would not.
     ///
     /// The limit does not apply to the merge a partition runs over its buffered
     /// batches to write each spill file. That merge can fail with the same error.
     /// --non-spillable-reserve keeps part of the pool out of reach of buffered sort
-    /// input, which makes that failure less likely.
+    /// input, which makes that failure less likely. It also leaves sorts less memory
+    /// to buffer, so a reserve that is too large can make them fail with "Not enough
+    /// memory to continue external sort" instead.
     ///
     /// Must be at least 2. Default: no limit.
     #[arg(long, help_heading = "Execution", value_parser = parse_at_least_two)]
