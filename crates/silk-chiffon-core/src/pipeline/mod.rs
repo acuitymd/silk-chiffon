@@ -196,7 +196,7 @@ impl Pipeline {
         let reserve = self
             .config
             .non_spillable_reserve
-            .unwrap_or(memory_limit / DEFAULT_RESERVE_DIVISOR);
+            .unwrap_or_else(|| default_non_spillable_reserve(memory_limit));
         let pool: Arc<dyn MemoryPool> = Arc::new(TrackConsumersPool::new(
             ReservedSpillPool::new(memory_limit, reserve),
             top_n,
@@ -349,6 +349,12 @@ impl fmt::Debug for PipelineExecution {
 /// given: a fifth. Input readers and merges that cannot spill then find room
 /// however full the sorts keep the rest.
 const DEFAULT_RESERVE_DIVISOR: usize = 5;
+
+/// The reserve a pool of `memory_limit` bytes keeps for consumers that cannot
+/// spill when the caller sets none. Spillable consumers share the rest.
+pub fn default_non_spillable_reserve(memory_limit: usize) -> usize {
+    memory_limit / DEFAULT_RESERVE_DIVISOR
+}
 
 /// 80% of the machine's memory.
 fn default_memory_limit() -> usize {
