@@ -219,7 +219,17 @@ pub(crate) async fn run(args: TransformCommand) -> Result<()> {
         PartitionStrategy::NosortMulti | PartitionStrategy::NosortEvict => SortSpec::default(),
     };
 
-    let user_sort_spec = sort_by.clone().unwrap_or(SortSpec::default());
+    if let Some(q) = &query {
+        input = apply_query(&session, input, q).await?;
+    }
+
+    // names are resolved before they are compared, so that `--sort-by REGION`
+    // and `--by region` name one column
+    let input_schema = input.schema().as_arrow().clone();
+    let mut user_sort_spec = SortSpec::default();
+    user_sort_spec.extend(&SortSpec {
+        columns: sort_columns(&sort_by.clone().unwrap_or_default().columns, &input_schema),
+    });
 
     let user_sort_spec_without_partition_cols =
         user_sort_spec.without_columns_named(&partition_columns);
@@ -227,13 +237,8 @@ pub(crate) async fn run(args: TransformCommand) -> Result<()> {
     let mut full_sort_spec = partition_sort_spec.clone();
     full_sort_spec.extend(&user_sort_spec_without_partition_cols);
 
-    if let Some(q) = &query {
-        input = apply_query(&session, input, q).await?;
-    }
-
-    let input_schema = input.schema().as_arrow().clone();
     let mut prepared = pipeline
-        .with_sort(sort_columns(&full_sort_spec.columns, &input_schema))
+        .with_sort(full_sort_spec.columns.clone())
         .with_sort_engine(sort_engine)
         .prepare(input, session)
         .await?;
@@ -304,10 +309,7 @@ pub(crate) async fn run(args: TransformCommand) -> Result<()> {
         }
     }
 
-    let output_ordering = sort_columns(
-        &user_sort_spec_without_partition_cols.columns,
-        &input_schema,
-    );
+    let output_ordering = user_sort_spec_without_partition_cols.columns.clone();
     // DataFusion's sort merges while the output is written, so it shares the
     // CPUs with encoding. The parallel sort has done its heavy work by then.
     // What was planned decides, not --sort-engine: the parallel engine falls
