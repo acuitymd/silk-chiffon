@@ -57,15 +57,21 @@ COLUMNS = (
 )
 
 
-
 def sql_string(path: Path) -> str:
     """A path as a SQL string literal, for statements that take no parameters."""
     return "'" + str(path).replace("'", "''") + "'"
+
 
 def generate(args: argparse.Namespace) -> None:
     import duckdb
 
     args.out.mkdir(parents=True, exist_ok=True)
+    # `run` reads every Parquet file here, so files left from another run would be
+    # sorted and counted too
+    if any(args.out.glob("*.parquet")):
+        raise SystemExit(
+            f"{args.out} already holds Parquet files; give an empty directory"
+        )
     con = duckdb.connect()
     con.execute(
         f"""
@@ -150,7 +156,8 @@ def check(args: argparse.Namespace) -> None:
     con = duckdb.connect()
     # the path goes in as a parameter, never into the SQL text
     rows, digest = con.execute(
-        f"SELECT count(*), sum(hash({COLUMNS}) >> 8) FROM read_parquet(?)", [str(args.path)]
+        f"SELECT count(*), sum(hash({COLUMNS}) >> 8) FROM read_parquet(?)",
+        [str(args.path)],
     ).fetchone()
     checked = {"rows": rows, "digest": str(digest)}
     if args.order:
@@ -172,6 +179,7 @@ def validate(path: Path, key: str, check_order: bool) -> dict:
 
 def run(args: argparse.Namespace) -> None:
     label, binary = args.bin.split("=", 1)
+    failures: list[str] = []
     keys = args.keys.split(",")
     budgets = args.memory_budget.split(",")
     reserves = args.reserve.split(",")
@@ -228,6 +236,10 @@ def run(args: argparse.Namespace) -> None:
                 # the order check is the slow part, so only the smallest budget gets it
                 check_order = args.validate and budget == budgets[-1]
                 measurement |= validate(out, KEYS[key], check_order=check_order)
+                if measurement.get("out_of_order", 0) > 0:
+                    failures.append(
+                        f"{settings}: {measurement['out_of_order']} rows out of order"
+                    )
             checks = " ".join(
                 f"{name}={measurement[name]}"
                 for name in ("rows", "digest", "out_of_order")
@@ -246,8 +258,13 @@ def run(args: argparse.Namespace) -> None:
                 f" ({exit_code}) {tail[0][:140]}",
                 flush=True,
             )
+            failures.append(f"{settings}: exit {exit_code}")
         measurements.append(measurement)
         args.results.write_text(json.dumps(measurements, indent=1))
+    for failure in failures:
+        print(f"FAILED: {failure}")
+    if failures:
+        raise SystemExit(1)
 
 
 def main() -> None:

@@ -152,10 +152,10 @@ class Measurement:
     command: list[str] = field(default_factory=list)
 
 
-
 def sql_string(path: Path) -> str:
     """A path as a SQL string literal, for statements that take no parameters."""
     return "'" + str(path).replace("'", "''") + "'"
+
 
 def transform_command(
     build: Build, stage: str, source: Source, settings: Settings, out: Path, spill: Path
@@ -281,6 +281,10 @@ def run_matrix(
         for build in builds
         if settings.sort_engine is None or build.has_sort_engine
     ]
+    if not cases:
+        raise SystemExit(
+            "no case to run: every build given lacks the --sort-engine flag that was asked for"
+        )
     total = len(cases) * repeats
     done = 0
     for repeat in range(repeats):
