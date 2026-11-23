@@ -19,9 +19,14 @@ pub(super) fn sort_spill_reservation_from_plan(
         if let Some(sort) = plan.downcast_ref::<SortExec>() {
             let input = sort.input();
             let partition_count = input.properties().partitioning.partition_count().max(1);
+            // the merge reservation cannot spill, so it comes out of the
+            // sorts' own room. Half of a partition's memory at most leaves
+            // every sort a share, where DataFusion's default of 10 MiB a
+            // partition could take all of a small pool
             let maximum = memory_per_partition / 2;
-            let fallback = (maximum >= MIN_SORT_SPILL_RESERVATION)
-                .then(|| (memory_per_partition / 10).clamp(MIN_SORT_SPILL_RESERVATION, maximum));
+            let fallback = Some(
+                (memory_per_partition / 10).clamp(MIN_SORT_SPILL_RESERVATION.min(maximum), maximum),
+            );
             for partition in 0..partition_count {
                 let reservation = statistics_context
                     .compute(
@@ -61,15 +66,12 @@ fn estimate_sort_spill_reservation(
         return None;
     }
     let maximum = memory_per_partition / 2;
-    if maximum < MIN_SORT_SPILL_RESERVATION {
-        return None;
-    }
     let spill_files = total_in_memory_bytes
         .checked_div(memory_per_partition)
         .unwrap_or(1)
         .max(1);
     let reservation = spill_files.saturating_mul(batch_size.saturating_mul(average_row_bytes));
-    Some(reservation.clamp(MIN_SORT_SPILL_RESERVATION, maximum))
+    Some(reservation.clamp(MIN_SORT_SPILL_RESERVATION.min(maximum), maximum))
 }
 
 #[cfg(test)]
@@ -122,6 +124,16 @@ mod tests {
         assert_eq!(
             sort_spill_reservation_from_plan(&plan, 200_000_000, 8192),
             Some(20_000_000)
+        );
+    }
+
+    #[test]
+    fn a_small_partition_keeps_its_merge_within_half_its_memory() {
+        let schema = Schema::new(vec![Field::new("value", DataType::Int64, false)]);
+        let plan = sort_with_statistics(Statistics::new_unknown(&schema));
+        assert_eq!(
+            sort_spill_reservation_from_plan(&plan, 10 * 1024 * 1024, 8192),
+            Some(5 * 1024 * 1024)
         );
     }
 
