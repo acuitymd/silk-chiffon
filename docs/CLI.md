@@ -84,7 +84,7 @@ Examples:
   Format: A comma-separated list like `col_a,col_b:desc,col_c`.
 - `--sort-engine <SORT_ENGINE>` — The sort implementation, for --sort-by and for --by with the sort-single strategy.
 
-  `parallel` splits the rows it has buffered by key range, sorts the ranges on --target-partitions threads, and writes them out in order. When the memory pool is full it writes what it has sorted to the spill path and continues, so a small --memory-budget slows the sort. It never takes more than the pool grants, and fails only when the pool is too small for the memory it needs to start, which the error gives.
+  `parallel` splits the rows it has buffered by key range, sorts the ranges on --target-partitions threads, and writes them out in order. When the memory pool is full it writes what it has sorted to the spill path and continues, so a small --memory-budget slows the sort. It never takes more than the pool grants. It fails only when the pool is too small for the memory it needs to start, for one batch, or, after spilling a great deal, for the least it needs to merge beside the index of what it spilled, and the error says how much it needed.
 
   `parallel` keeps each row as one run of bytes in Arrow's row format, and is slower when a column cannot be kept that way. It then keeps the input batches whole, and merges what it spills in a few large stretches of the key range, one at a time when memory is short. The columns are dictionaries whose values are lists, structs, maps, unions, booleans, durations, intervals, dictionaries, or run-end encoded, and dictionaries in columns that may not be null, alone or nested in another column. --explain-analyze shows `rows=batches` on the `ParallelSortExec` line of such a sort.
 
@@ -94,7 +94,7 @@ Examples:
 
   Possible values:
   - `parallel`:
-    Splits rows by key range and sorts the ranges in parallel. Spills when the memory pool refuses more memory, and never takes more than the pool grants: it fails only when the pool is too small to start it
+    Splits rows by key range and sorts the ranges in parallel. Spills when the memory pool refuses more memory, and never takes more than the pool grants: it fails only when the pool is too small for the memory it needs to start, for one batch, or for the least it needs to merge beside the index of what it spilled
   - `datafusion`:
     DataFusion's sort: one sorter per partition, merged on one thread
 
@@ -102,7 +102,7 @@ Examples:
 
   Accepts a byte size (e.g. "8GB"), "total[:pct]" for a percentage of total RAM, "available[:pct]" for a percentage of free RAM, or "reserve:<size>" to use total RAM minus a reserved amount. All keyword modes (total, available, reserve) support an optional minimum: "total:80:min:4GB". Examples: "total:90", "available:60%", "reserve:2GB:min:1GB", "4GB".
 
-  The memory pool, which sorts and DataFusion's operators reserve from, is 75% of the budget when the transform sorts and 25% when it does not, and never grants more than that. Input readers and output writers do not reserve from the pool, which is what can take the process over the budget.
+  The memory pool, which sorts and DataFusion's operators reserve from, is 75% of the budget when the transform sorts and 25% when it does not, and never grants more than that when asked. Output writers, and most input readers, do not reserve from the pool, which is what can take the process over the budget.
 
   Setting this too low fails the transform. The sort needs memory to start, which grows with --target-partitions and the width of the rows, and the error says how much.
 
@@ -111,7 +111,7 @@ Examples:
   Default value: `total:80%`
 - `--non-spillable-reserve <NON_SPILLABLE_RESERVE>` — Reserve memory for operators that cannot spill.
 
-  Keeps spillable operators (sorts, aggregations) out of part of the memory pool, so that consumers that cannot spill, such as input readers and the `datafusion` sort engine's merge, find it free. The pool never grants more than its size, so such a consumer that finds the pool full fails the transform. A larger reserve makes that less likely, and leaves the sort less to buffer, so it spills sooner.
+  Keeps spillable operators (sorts, aggregations) out of part of the memory pool, so that consumers that cannot spill, such as input readers and the `datafusion` sort engine's merge, find it free. The pool grants no more than its size when asked, so such a consumer that finds the pool full fails the transform. A larger reserve makes that less likely, and leaves the sort less to buffer, so it spills sooner.
 
   The pool is 75% of `--memory-budget` when the transform sorts and 25% when it does not.
 

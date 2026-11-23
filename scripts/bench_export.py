@@ -45,7 +45,8 @@ their first 58. A partition of the input starts at a row group, so every partiti
 batch has only short keys. A sort whose records hold as much of a key as the first batch's
 keys needed then holds the same few bytes of every long path, and has to read both whole
 keys from row format to compare two of them. Its one stage, `path`, sorts by `path,id`
-and writes one LZ4 Parquet file. `generate` makes every value a hash of the row number.
+and writes one LZ4 Parquet file. `generate` derives every value from the file and row
+number, so any machine writes the same rows.
 
 `run` times each stage for each build. Every option that takes a list runs each
 combination: `--memory-budget 60GiB,4GiB,256MiB` checks that a sort still finishes as the

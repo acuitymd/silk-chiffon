@@ -7,10 +7,12 @@
 //! megabytes. This pool keeps a reserve that spillable consumers cannot use,
 //! so those requests find it free.
 //!
-//! The pool's size is a limit: what it grants never adds up to more. A
-//! consumer that cannot spill is refused when the pool is full, and should be
-//! given a reserve large enough that it is not. A consumer that can spill is
-//! refused past its share, and spills.
+//! The pool's size is a limit: what it grants through `try_grow` never adds up
+//! to more. A consumer that cannot spill is refused when the pool is full, and
+//! should be given a reserve large enough that it is not. A consumer that can
+//! spill is refused past its share, and spills. `grow`, which some DataFusion
+//! operators call where they cannot take a refusal, is counted and never
+//! refused.
 
 use datafusion::common::{Result, resources_datafusion_err};
 use datafusion::execution::memory_pool::{

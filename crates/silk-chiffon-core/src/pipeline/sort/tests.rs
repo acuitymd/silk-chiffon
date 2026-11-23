@@ -758,6 +758,35 @@ async fn sorts_a_required_dictionary_that_names_a_null_value() {
     }
 }
 
+/// A session batch size below the fewest rows the sort would otherwise put
+/// in a batch of output still sorts, in memory and spilled.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sorts_with_batches_smaller_than_the_fewest_output_rows() {
+    let mut random = Random(103);
+    let input: Vec<_> = (0..2)
+        .map(|partition| batches(&mut random, 4, 300, partition * 1_000_000, random_code))
+        .collect();
+    let schema = schema_of(&input);
+    for memory_limit in [AMPLE, 1024 * 1024] {
+        let source = MemorySourceConfig::try_new_exec(&input, Arc::clone(&schema), None).unwrap();
+        let plan: Arc<dyn ExecutionPlan> = Arc::new(
+            ParallelSortExec::try_new(
+                source,
+                ordering(&schema, &EXPORT_KEY),
+                options(2, 64 * 1024),
+            )
+            .unwrap(),
+        );
+        let context = Arc::new(
+            TaskContext::default()
+                .with_session_config(SessionConfig::new().with_batch_size(64))
+                .with_runtime(runtime(memory_limit)),
+        );
+        let sorted = collect(plan, context).await.unwrap();
+        assert_sorted(&input, &sorted, &EXPORT_KEY);
+    }
+}
+
 /// A pool too small for the sort's floor fails the sort, saying how much it
 /// needs, and keeps nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

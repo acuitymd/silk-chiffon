@@ -99,14 +99,20 @@ const ZSTD_CONTEXT_BYTES: usize = 128 * 1024;
 
 /// What a zstd compressor at the level flushes are written at holds besides
 /// the blocks it reads and fills, for a block of `block` bytes. It sizes
-/// itself to the block: it measured 37 KB for 1 KiB blocks, 218 KB for 16 KiB,
-/// 304 KB for 64 KiB, and 583 KB for 256 KiB and anything larger.
+/// itself to the block in steps at powers of two: it measured 37 KB for 1 KiB
+/// blocks, 110 KB for 5 KiB, 191 KB for 9 KiB, 218 KB for 16 KiB, 304 KB for
+/// 64 KiB, and 583 KB for anything over 128 KiB.
 fn zstd_compress_context_bytes(block: usize) -> usize {
-    if block <= 16 * 1024 {
-        32 * 1024 + 12 * block
-    } else {
-        (224 * 1024 + block + block / 2).min(640 * 1024)
-    }
+    const STEPS: [(usize, usize); 4] = [
+        (4 * 1024, 80 * 1024),
+        (8 * 1024, 128 * 1024),
+        (16 * 1024, 224 * 1024),
+        (64 * 1024, 320 * 1024),
+    ];
+    STEPS
+        .iter()
+        .find(|(up_to, _)| block <= *up_to)
+        .map_or(600 * 1024, |(_, bytes)| *bytes)
 }
 
 /// The fewest records in a block. The index keeps a record and 40 bytes for

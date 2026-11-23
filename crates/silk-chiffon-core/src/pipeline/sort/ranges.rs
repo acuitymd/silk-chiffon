@@ -37,6 +37,13 @@ const MAX_RANGES: usize = 16 * 1024;
 /// Each thread reuses the chunks it has emptied, so the only memory beyond
 /// the records is the chunk each thread is filling for each range.
 const CHUNKS_PER_SHARE: usize = 16;
+
+/// Buffered records are counted with one part in this many more, which is
+/// what a split fills beyond them when it makes as many ranges as fit in the
+/// scratch memory: a chunk of each range on each thread, each a sixteenth of
+/// that thread's share of the range. The split then has its chunks however
+/// full the pool is when the run is flushed.
+pub(super) const SPLIT_HEADROOM_SHARE: usize = CHUNKS_PER_SHARE;
 const MIN_CHUNK_WORDS: usize = 256;
 const MAX_CHUNK_WORDS: usize = 64 * 1024;
 

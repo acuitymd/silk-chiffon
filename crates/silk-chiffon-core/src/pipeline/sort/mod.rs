@@ -23,8 +23,9 @@
 //!   input, to split and merge more at once, and to hold the index of what it
 //!   spilled, and uses only what the pool grants. A refusal to buffer means
 //!   "write what is buffered to disk". The sort fails only when the pool will
-//!   not give it its floor, or room for one batch with nothing else buffered,
-//!   and then says how much it needed: see `Budget`.
+//!   not give it its floor, room for one batch with nothing else buffered, or
+//!   the least a merge needs beside the index of what it spilled, and then
+//!   says how much it needed: see `Budget`.
 //! - **Spilling.** Rows held in row format are written to disk as they are,
 //!   in blocks, and a flush keeps the first key of each block it wrote. The
 //!   merge of the flushes is cut into slices from those, and the slices merge
@@ -109,7 +110,7 @@ use parking_lot::Mutex;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
 use keys::{Contents, RowEncoder};
-use ranges::Ranges;
+use ranges::{Ranges, SPLIT_HEADROOM_SHARE};
 use record::Words;
 use run::{Buffered, Grant, Lane, Splitters};
 use spill::{BatchFlush, BlockFlush, Segment, Slices, Spill};
@@ -193,7 +194,8 @@ pub struct ParallelSortOptions {
     pub parallelism: usize,
     /// The least buffered before a flush, capped at a quarter of the pool. The
     /// sort holds this from its first batch, so however full other consumers
-    /// keep the pool, it buffers this much before it writes a run to disk.
+    /// keep the pool, it buffers this much, less the index of what it has
+    /// spilled, before it writes a run to disk.
     pub min_run_bytes: usize,
     /// Spill files kept at once, and read at once across every merge in
     /// flight.
@@ -457,8 +459,9 @@ impl SortMetrics {
 /// first batch arrives: memory to sort ranges in, to write a flush with, and a
 /// credit that is room to buffer rows until the first flush and, once rows are
 /// flushed, room to merge them. Memory used within the floor is never asked of
-/// the pool, so a flush or a merge always has what it needs to start. Memory
-/// beyond the floor is asked of the pool, and only what it grants is used.
+/// the pool, so a flush always has what it needs to start, and a merge does
+/// until the index of what was spilled takes the credit. Memory beyond the
+/// floor is asked of the pool, and only what it grants is used.
 ///
 /// Jobs on the sort's threads hold the budget too, so a sort whose output is
 /// dropped gives its memory back when its last job stops, not before.
@@ -584,7 +587,8 @@ struct Floor {
     /// Memory in use the whole time: scratch, writers, and buffers being
     /// filled.
     fixed: usize,
-    /// Room to buffer rows until a flush, and to merge them after.
+    /// Room to buffer rows until a flush, and to merge them after. The index
+    /// of what is spilled takes from it too.
     credit: usize,
 }
 
@@ -750,9 +754,9 @@ impl Sorter {
     /// the sort's floor. `keys` are the keys of a batch, and `row_bytes` about
     /// what one of its rows takes besides its record.
     ///
-    /// The shape is sized from the pool first, and smaller while the pool
-    /// refuses the floor that goes with it. A pool that refuses the floor of
-    /// the smallest shape is too small for the sort.
+    /// The shape is sized from the pool first, and smaller while the floor that
+    /// goes with it is more than half the pool or the pool refuses it. A pool
+    /// that refuses the floor of the smallest shape is too small for the sort.
     ///
     /// Must be called inside the runtime that the sort's input runs on.
     fn shape_for(&self, keys: &Rows, row_bytes: usize) -> Result<Arc<Shape>> {
@@ -870,22 +874,23 @@ impl Sorter {
     /// the pool refused more memory, so it seldom has room for wider records
     /// of its own rows: those are then written as they are, and the rows
     /// buffered after the flush are the first to be wider.
-    fn widen_if_cut(&self, buffered: &mut Buffered) {
-        let Some(layout) = self
+    ///
+    /// Returns the wider layout, the chunk size of its buffers, and the bytes
+    /// it takes, when the pool granted them: the caller rebuilds the records
+    /// with [`Buffered::widen`] on the sort's threads.
+    fn widening_for(&self, buffered: &Buffered) -> Option<(Words, usize, usize)> {
+        let layout = self
             .encoder
-            .wider_layout(buffered.words.layout, &buffered.key_widths)
-        else {
-            return;
-        };
+            .wider_layout(buffered.words.layout, &buffered.key_widths)?;
         let words = Words::new(layout);
-        let extra = buffered.num_rows() * (words.record_bytes() - buffered.words.record_bytes());
+        let wider = buffered.num_rows() * (words.record_bytes() - buffered.words.record_bytes());
+        let extra = wider + wider / SPLIT_HEADROOM_SHARE;
         if !self.budget.grant(extra) {
             *self.wider.lock() = Some(words);
-            return;
+            return None;
         }
         let shape = self.reshape(words);
-        let freed = buffered.widen(words, shape.chunk, extra);
-        self.budget.release(freed);
+        Some((words, shape.chunk, extra))
     }
 
     /// Lays out every batch buffered from now on as `words`, in the scratch
@@ -1029,12 +1034,12 @@ impl Sorter {
     ///
     /// A split fills a chunk for each range on each thread at once, beyond
     /// the chunks the records were in. The floor holds that for one range per
-    /// thread, and more ranges are made only as far as the pool grants the
-    /// chunks for them. Ranges too large for the scratch memory are sorted in
-    /// pieces of it.
+    /// thread, the rows were buffered with room for it for as many ranges as
+    /// fit in the scratch memory, and more ranges are made only as far as the
+    /// pool grants the chunks for them. Ranges too large for the scratch
+    /// memory are sorted in pieces of it.
     async fn prepare(self: &Arc<Self>, mut buffered: Buffered) -> Result<Ranges> {
-        self.widen_if_cut(&mut buffered);
-        self.metrics.cut_keys.add(buffered.cut_keys);
+        let widening = self.widening_for(&buffered);
         let shape = self.shape();
         let parallelism = self.options.parallelism;
         let wanted = ranges::wanted(
@@ -1044,13 +1049,22 @@ impl Sorter {
             shape.scratch_bytes,
         );
         let per_range = parallelism * shape.chunk_bytes();
-        let split_bytes = self
-            .budget
-            .take_up_to(wanted.saturating_sub(parallelism) * per_range, 0)?;
-        let at_most = parallelism + split_bytes / per_range;
+        // the rows were counted with room for a split into as many ranges as
+        // fit in the scratch memory, and more ranges than that ask the pool
+        let headroom = buffered.num_rows() * shape.words.record_bytes() / SPLIT_HEADROOM_SHARE;
+        let split_bytes = self.budget.take_up_to(
+            (wanted.saturating_sub(parallelism) * per_range).saturating_sub(headroom),
+            0,
+        )?;
+        let at_most = parallelism + (headroom + split_bytes) / per_range;
         let sorter = Arc::clone(self);
         self.on_pool(move || {
             let _timer = sorter.metrics.sort_time.timer();
+            if let Some((words, chunk, extra)) = widening {
+                let freed = buffered.widen(words, chunk, extra, &sorter.workers);
+                sorter.budget.release(freed);
+            }
+            sorter.metrics.cut_keys.add(buffered.cut_keys);
             let ranges = Ranges::split(
                 buffered,
                 wanted.min(at_most),
@@ -1224,8 +1238,8 @@ impl Sorter {
     }
 
     /// Merges flushes in blocks a pass at a time, `fan_in` at once, until at
-    /// most `fan_in` are left. Each pass writes one file on one thread, from
-    /// memory the caller holds.
+    /// most `fan_in` are left. Each pass writes up to a file per sort thread,
+    /// one at a time on one thread, from memory the caller holds.
     async fn reduce_flushes(
         self: &Arc<Self>,
         mut flushes: Vec<BlockFlush>,
@@ -1333,7 +1347,8 @@ impl Sorter {
         let range_batches = ranges.num_rows() / count / self.batch_size + 2;
         let wanted = self.options.parallelism * range_batches * self.batch_size * row_bytes;
         let floor = 2 * MIN_OUTPUT_ROWS * row_bytes;
-        // the floor's credit holds the rows, so the window is all from the pool
+        // the window takes what the floor's credit has left beside the rows,
+        // then the pool
         let mut bytes = wanted.max(floor);
         while !self.budget.grant(bytes) {
             if bytes == floor {
@@ -1446,7 +1461,8 @@ impl Sorter {
             (slice_batches, self.batch_size)
         } else {
             let spare = bytes.saturating_sub(inputs);
-            let batch_rows = (spare / 2 / row_bytes).clamp(MIN_OUTPUT_ROWS, self.batch_size);
+            let batch_rows = (spare / 2 / row_bytes)
+                .clamp(MIN_OUTPUT_ROWS.min(self.batch_size), self.batch_size);
             (
                 (spare / (batch_rows * row_bytes)).clamp(2, slice_batches),
                 batch_rows,
@@ -1737,7 +1753,8 @@ impl Window {
         let batch_bytes = (batch_size * row_bytes).max(1);
         let range_bytes = range_batches * batch_bytes;
         let ranges = (bytes / range_bytes).clamp(1, parallelism);
-        let batch_rows = (bytes / 2 / row_bytes.max(1)).clamp(MIN_OUTPUT_ROWS, batch_size);
+        let batch_rows =
+            (bytes / 2 / row_bytes.max(1)).clamp(MIN_OUTPUT_ROWS.min(batch_size), batch_size);
         let batches = if ranges > 1 {
             range_batches
         } else {

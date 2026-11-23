@@ -31,8 +31,8 @@ const ROW_HEADER: usize = 8;
 /// The least a block holds, as a multiple of its first key. The index keeps
 /// the first key of every block in memory for as long as the flush exists, so
 /// this keeps the index to a small share of what is spilled however long the
-/// keys are. Blocks of 1 KiB with keys of 300 bytes made an index a third the
-/// size of the flush.
+/// keys are. A block of 1 KiB holds about four rows with keys of 300 bytes,
+/// so the index of such a flush would be about a quarter of its size.
 pub(super) const BLOCK_KEY_MULTIPLE: usize = 64;
 
 fn length(bytes: &[u8]) -> usize {

@@ -23,6 +23,7 @@ use datafusion::error::Result;
 use parking_lot::Mutex;
 
 use super::keys::{Contents, KeyWidths, Keys, RowEncoder, cut_buckets, key_width_bucket};
+use super::ranges::SPLIT_HEADROOM_SHARE;
 use super::record::{MAX_WORDS, Order, Words};
 use super::workers::Workers;
 
@@ -99,7 +100,8 @@ impl Lane {
             (Contents::Source, Some(payload)) => (payload.size(), Vec::new()),
             (Contents::Source, None) => new_buffers(batch, &self.kept_buffers),
         };
-        let bytes = encoded.num_rows() * words.record_bytes() + source_bytes + key_bytes;
+        let records = encoded.num_rows() * words.record_bytes();
+        let bytes = records + records / SPLIT_HEADROOM_SHARE + source_bytes + key_bytes;
         if !grant.grant(bytes) {
             return false;
         }
@@ -287,13 +289,26 @@ impl Buffered {
     /// beyond the ones they replace, which the caller has granted. Returns the
     /// bytes of whole keys no longer kept, for the caller to release: once no
     /// key is cut, the records alone order the rows.
-    pub(super) fn widen(&mut self, words: Words, chunk: usize, extra: usize) -> usize {
+    ///
+    /// Each buffer is laid out again on its own, in parallel on `workers`.
+    pub(super) fn widen(
+        &mut self,
+        words: Words,
+        chunk: usize,
+        extra: usize,
+        workers: &Workers,
+    ) -> usize {
         let old = self.words;
+        let buffers: Vec<Mutex<Vec<u64>>> = std::mem::take(&mut self.buffers)
+            .into_iter()
+            .map(Mutex::new)
+            .collect();
         let order = Order::new(old, &self.rows);
-        let mut key_bytes = [0_u8; 8 * MAX_WORDS];
-        let mut cut_keys = 0;
-        let mut widened: Vec<Vec<u64>> = Vec::new();
-        for buffer in std::mem::take(&mut self.buffers) {
+        let widened = workers.map(buffers.len(), &|index| {
+            let buffer = std::mem::take(&mut *buffers[index].lock());
+            let mut key_bytes = [0_u8; 8 * MAX_WORDS];
+            let mut cut_keys = 0;
+            let mut widened: Vec<Vec<u64>> = Vec::new();
             for record in buffer.chunks_exact(old.record) {
                 let (batch, row) = Words::source(record);
                 let key = if old.is_cut(record) {
@@ -320,8 +335,16 @@ impl Buffered {
                 }
                 words.push(widened.last_mut().expect("pushed above"), key, batch, row);
             }
-        }
-        self.buffers = widened;
+            (widened, cut_keys)
+        });
+        let mut cut_keys = 0;
+        self.buffers = widened
+            .into_iter()
+            .flat_map(|(chunks, cut)| {
+                cut_keys += cut;
+                chunks
+            })
+            .collect();
         self.words = words;
         self.cut_keys = cut_keys;
         self.held += extra;
