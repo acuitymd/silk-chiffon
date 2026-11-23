@@ -1,4 +1,10 @@
-use std::sync::Arc;
+use std::{
+    fmt,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
 use arrow::{
     array::{
@@ -10,10 +16,11 @@ use arrow::{
     datatypes::{DataType, Field, Int32Type, Schema, SchemaRef},
 };
 use datafusion::{
+    common::Result,
     config::SpillCompression,
     execution::{
         TaskContext,
-        memory_pool::FairSpillPool,
+        memory_pool::{FairSpillPool, MemoryConsumer, MemoryLimit, MemoryPool, MemoryReservation},
         runtime_env::{RuntimeEnv, RuntimeEnvBuilder},
     },
     physical_expr::{LexOrdering, PhysicalSortExpr, expressions::Column},
@@ -124,10 +131,71 @@ fn ordering(schema: &SchemaRef, columns: &[(&str, SortOptions)]) -> LexOrdering 
 fn runtime(memory_limit: usize) -> Arc<RuntimeEnv> {
     Arc::new(
         RuntimeEnvBuilder::new()
-            .with_memory_pool(Arc::new(FairSpillPool::new(memory_limit)))
+            .with_memory_pool(Arc::new(PeakPool {
+                inner: FairSpillPool::new(memory_limit),
+                peak: AtomicUsize::new(0),
+            }))
             .build()
             .unwrap(),
     )
+}
+
+/// A pool that remembers the most it ever had reserved, so a test can check
+/// that the sort kept within it.
+#[derive(Debug)]
+struct PeakPool {
+    inner: FairSpillPool,
+    peak: AtomicUsize,
+}
+
+impl PeakPool {
+    fn note(&self) {
+        self.peak
+            .fetch_max(self.inner.reserved(), Ordering::Relaxed);
+    }
+}
+
+impl fmt::Display for PeakPool {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "peak({})", self.inner)
+    }
+}
+
+impl MemoryPool for PeakPool {
+    fn name(&self) -> &str {
+        "peak"
+    }
+
+    fn register(&self, consumer: &MemoryConsumer) {
+        self.inner.register(consumer);
+    }
+
+    fn unregister(&self, consumer: &MemoryConsumer) {
+        self.inner.unregister(consumer);
+    }
+
+    fn grow(&self, reservation: &MemoryReservation, additional: usize) {
+        self.inner.grow(reservation, additional);
+        self.note();
+    }
+
+    fn shrink(&self, reservation: &MemoryReservation, shrink: usize) {
+        self.inner.shrink(reservation, shrink);
+    }
+
+    fn try_grow(&self, reservation: &MemoryReservation, additional: usize) -> Result<()> {
+        self.inner.try_grow(reservation, additional)?;
+        self.note();
+        Ok(())
+    }
+
+    fn reserved(&self) -> usize {
+        self.inner.reserved()
+    }
+
+    fn memory_limit(&self) -> MemoryLimit {
+        self.inner.memory_limit()
+    }
 }
 
 struct Sorted {
@@ -143,6 +211,8 @@ struct Sorted {
     record_bytes: usize,
     /// Rows whose keys were too long for their records.
     cut_keys: usize,
+    /// Times the records were made wider.
+    widenings: usize,
 }
 
 /// The schema of the input, which is [`schema`] or [`narrow`]'s part of it.
@@ -256,10 +326,20 @@ async fn sort_compressed(
     let batches = collect(Arc::clone(&plan), Arc::clone(&context))
         .await
         .unwrap();
+    let pool = &context.runtime_env().memory_pool;
     assert_eq!(
-        context.runtime_env().memory_pool.reserved(),
+        pool.reserved(),
         0,
         "the sort returns every byte it reserved"
+    );
+    let peak = pool
+        .downcast_ref::<PeakPool>()
+        .expect("the tests' pool")
+        .peak
+        .load(Ordering::Relaxed);
+    assert!(
+        peak <= memory_limit,
+        "the sort reserved {peak} bytes of a {memory_limit}-byte pool"
     );
     let metrics = plan.metrics().unwrap();
     Sorted {
@@ -282,6 +362,9 @@ async fn sort_compressed(
             .map_or(0, |value| value.as_usize()),
         cut_keys: metrics
             .sum_by_name("cut_keys")
+            .map_or(0, |value| value.as_usize()),
+        widenings: metrics
+            .sum_by_name("record_widenings")
             .map_or(0, |value| value.as_usize()),
     }
 }
@@ -478,10 +561,10 @@ async fn holds_variable_width_keys_whole_in_records() {
     }
 }
 
-/// Keys longer than the first batch's are cut to fit their records, and
-/// ordered through the row format where what the records hold is the same.
+/// Keys longer than the first batch's make the records wider before the rows
+/// are sorted, so that the records alone order them.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn sorts_keys_longer_than_the_first_batch_had() {
+async fn keys_longer_than_the_first_batch_had_widen_the_records() {
     let mut random = Random(73);
     let key = [("name", DESCENDING_NULLS_LAST), ("row", ASCENDING)];
     // one partition, so that the first batch is the one that arrives first
@@ -491,9 +574,17 @@ async fn sorts_keys_longer_than_the_first_batch_had() {
         *batch = with_longer_names(batch, "a name that outgrew the first batch: ");
     }
     let input = vec![input];
-    for memory_limit in [AMPLE, 2 * 1024 * 1024] {
+    // in memory every key is sorted in wider records. A spilled sort widens
+    // the records from the second run on, and of the 10,000 long names only
+    // those in its first run are cut
+    for (memory_limit, cut_at_most) in [(AMPLE, 0), (2 * 1024 * 1024, 9_999)] {
         let sorted = sort(input.clone(), &key, options(3, 256 * 1024), memory_limit).await;
-        assert!(sorted.cut_keys > 5000, "{} cut keys", sorted.cut_keys);
+        assert!(sorted.widenings > 0);
+        assert!(
+            sorted.cut_keys <= cut_at_most,
+            "{} cut keys",
+            sorted.cut_keys
+        );
         assert_sorted(&input, &sorted.batches, &key);
     }
 }
@@ -533,10 +624,10 @@ async fn spills_variable_width_keys() {
     assert_sorted(&input, &sorted.batches, &key);
 }
 
-/// A pool that refuses nearly everything still sorts: the sort overdraws it up
-/// to the minimum flush, and merges the many small flushes a few at a time.
+/// A pool barely larger than the sort's floor still sorts: it flushes many
+/// small runs and merges them a few at a time.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_pool_smaller_than_one_batch_still_sorts() {
+async fn a_pool_little_larger_than_the_floor_still_sorts() {
     let mut random = Random(19);
     let input: Vec<_> = (0..3)
         .map(|partition| batches(&mut random, 30, 1000, partition * 1_000_000, random_code))
@@ -544,8 +635,8 @@ async fn a_pool_smaller_than_one_batch_still_sorts() {
     let sorted = sort(
         input.clone(),
         &EXPORT_KEY,
-        options(2, 128 * 1024),
-        16 * 1024,
+        options(2, 16 * 1024),
+        256 * 1024,
     )
     .await;
     assert!(sorted.spill_files > 8, "{} spill files", sorted.spill_files);
@@ -554,7 +645,9 @@ async fn a_pool_smaller_than_one_batch_still_sorts() {
 
 /// Where the pool lets one merge read fewer flushes than there are, they are
 /// merged down to that before the output starts, whether they are rows in
-/// blocks or Arrow batches in groups.
+/// blocks or Arrow batches in groups. A merge of zstd blocks holds a
+/// decompressor for every flush it reads, and one of Arrow batches several
+/// batches of each, which is what keeps these merges narrow.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn merges_flushes_in_passes_when_the_pool_is_tight() {
     let mut random = Random(23);
@@ -562,11 +655,26 @@ async fn merges_flushes_in_passes_when_the_pool_is_tight() {
     let input: Vec<_> = (0..3)
         .map(|partition| batches(&mut random, 30, 1000, partition * 1_000_000, random_code))
         .collect();
-    for input in [input.clone(), with_unencodable_column(input)] {
-        let sorted = sort(input.clone(), &key, options(3, 128 * 1024), 16 * 1024).await;
+    let cases = [
+        (input.clone(), 1024 * 1024, SpillCompression::Zstd),
+        (
+            with_unencodable_column(input),
+            768 * 1024,
+            SpillCompression::Uncompressed,
+        ),
+    ];
+    for (input, memory_limit, compression) in cases {
+        let sorted = sort_compressed(
+            input.clone(),
+            &key,
+            options(3, 16 * 1024),
+            memory_limit,
+            compression,
+        )
+        .await;
         assert!(
             sorted.merge_fan_in < sorted.flushes,
-            "{} flushes at once of {}",
+            "{compression:?}: {} flushes at once of {}",
             sorted.merge_fan_in,
             sorted.flushes
         );
@@ -650,21 +758,33 @@ async fn sorts_a_required_dictionary_that_names_a_null_value() {
     }
 }
 
-/// A pool too small for any batch still sorts: each batch is taken by force
-/// and written out on its own.
+/// A pool too small for the sort's floor fails the sort, saying how much it
+/// needs, and keeps nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_pool_of_one_byte_still_sorts() {
+async fn a_pool_too_small_for_the_floor_fails_and_says_what_it_needs() {
     let mut random = Random(101);
     let input: Vec<_> = (0..2)
         .map(|partition| batches(&mut random, 3, 200, partition * 1_000_000, random_code))
         .collect();
-    let sorted = tokio::time::timeout(
-        std::time::Duration::from_secs(60),
-        sort(input.clone(), &EXPORT_KEY, ParallelSortOptions::new(2), 1),
-    )
-    .await
-    .expect("the sort finished");
-    assert_sorted(&input, &sorted.batches, &EXPORT_KEY);
+    let schema = schema_of(&input);
+    let source = MemorySourceConfig::try_new_exec(&input, Arc::clone(&schema), None).unwrap();
+    let plan: Arc<dyn ExecutionPlan> = Arc::new(
+        ParallelSortExec::try_new(
+            source,
+            ordering(&schema, &EXPORT_KEY),
+            ParallelSortOptions::new(2),
+        )
+        .unwrap(),
+    );
+    let context = Arc::new(TaskContext::default().with_runtime(runtime(1024)));
+    let error = collect(plan, Arc::clone(&context)).await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("the memory pool is too small for this sort, which needs"),
+        "{error}"
+    );
+    assert_eq!(context.runtime_env().memory_pool.reserved(), 0);
 }
 
 /// A plan says which of the three ways its sort holds rows, which is how a
@@ -721,9 +841,13 @@ async fn many_flushes_are_compacted_to_bound_open_files() {
     let input: Vec<_> = (0..3)
         .map(|partition| batches(&mut random, 250, 40, partition * 1_000_000, random_code))
         .collect();
-    // the pool is smaller than any batch, so the 750 batches become several
-    // hundred flushes of one file each, past the limit of 256 files
-    let sorted = sort(input.clone(), &EXPORT_KEY, options(4, 1024), 2 * 1024).await;
+    // the 750 batches become dozens of flushes of one file each, past the
+    // limit of eight files
+    let options = ParallelSortOptions {
+        max_open_files: 8,
+        ..options(4, 16 * 1024)
+    };
+    let sorted = sort(input.clone(), &EXPORT_KEY, options, 512 * 1024).await;
     assert!(sorted.compactions > 0, "{} spill files", sorted.spill_files);
     assert_sorted(&input, &sorted.batches, &EXPORT_KEY);
 }

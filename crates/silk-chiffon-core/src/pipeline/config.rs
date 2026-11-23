@@ -79,7 +79,8 @@ impl From<SpillCompression> for datafusion::config::SpillCompression {
 #[value(rename_all = "lowercase")]
 pub enum SortEngine {
     /// Splits rows by key range and sorts the ranges in parallel. Spills when
-    /// the memory pool refuses more memory, and does not fail for lack of it.
+    /// the memory pool refuses more memory, and never takes more than the pool
+    /// grants: it fails only when the pool is too small to start it.
     #[default]
     Parallel,
     /// DataFusion's sort: one sorter per partition, merged on one thread.

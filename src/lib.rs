@@ -682,8 +682,9 @@ struct TransformArgs {
     /// `parallel` splits the rows it has buffered by key range, sorts the ranges
     /// on --target-partitions threads, and writes them out in order. When the
     /// memory pool is full it writes what it has sorted to the spill path and
-    /// continues, so a small --memory-budget slows the sort but does not fail it.
-    /// It needs no --non-spillable-reserve.
+    /// continues, so a small --memory-budget slows the sort. It never takes more
+    /// than the pool grants, and fails only when the pool is too small for the
+    /// memory it needs to start, which the error gives.
     ///
     /// `parallel` keeps each row as one run of bytes in Arrow's row format, and is
     /// slower when a column cannot be kept that way. It then keeps the input
@@ -709,9 +710,14 @@ struct TransformArgs {
     /// support an optional minimum: "total:80:min:4GB". Examples: "total:90", "available:60%",
     /// "reserve:2GB:min:1GB", "4GB".
     ///
-    /// Setting this too low may cause out-of-memory errors, since some
-    /// internal buffers cannot spill to disk. The minimum depends on schema
-    /// width, batch size, and parallelism — there is no fixed floor.
+    /// The memory pool, which sorts and DataFusion's operators reserve from, is
+    /// 75% of the budget when the transform sorts and 25% when it does not, and
+    /// never grants more than that. Input readers and output writers do not
+    /// reserve from the pool, which is what can take the process over the budget.
+    ///
+    /// Setting this too low fails the transform. The sort needs memory to start,
+    /// which grows with --target-partitions and the width of the rows, and the
+    /// error says how much.
     ///
     /// Default: 80% of total memory, container-aware on Linux.
     #[arg(long, help_heading = "Execution", value_parser = MemoryBudgetSpec::from_str, default_value = "total:80%")]
@@ -721,19 +727,18 @@ struct TransformArgs {
     ///
     /// Keeps spillable operators (sorts, aggregations) out of part of the memory
     /// pool, so that consumers that cannot spill, such as input readers and the
-    /// `datafusion` sort engine's merge, find it free.
+    /// `datafusion` sort engine's merge, find it free. The pool never grants more
+    /// than its size, so such a consumer that finds the pool full fails the
+    /// transform. A larger reserve makes that less likely, and leaves the sort
+    /// less to buffer, so it spills sooner.
     ///
-    /// Without a reserve those consumers are still served when spillable
-    /// operators have filled the pool: they may overdraw it by up to a quarter
-    /// of its size, and the spillable operators are refused more memory until
-    /// they spill or finish and give it back. The default `parallel` sort engine
-    /// needs no reserve. A reserve only shrinks the memory it may use, so it
-    /// spills sooner.
+    /// The pool is 75% of `--memory-budget` when the transform sorts and 25% when
+    /// it does not.
     ///
     /// Accepts a percentage (e.g. "10%", "10") or a fixed byte size (e.g. "200MB").
     /// Percentages are resolved against the memory pool size.
     ///
-    /// Default: no reserve.
+    /// Default: 20% of the pool.
     #[arg(long, help_heading = "Execution", value_parser = PoolReserveSpec::from_str)]
     pub non_spillable_reserve: Option<PoolReserveSpec>,
 

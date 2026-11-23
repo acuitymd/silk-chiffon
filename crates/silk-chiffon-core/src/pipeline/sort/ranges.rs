@@ -9,7 +9,7 @@
 //! The ranges are chosen again for everything buffered between two flushes,
 //! so input that arrives in key order still splits evenly.
 
-use std::sync::Arc;
+use std::{collections::VecDeque, sync::Arc};
 
 use arrow::{array::RecordBatch, row::Rows};
 use datafusion::{error::Result, physical_plan::metrics::Count};
@@ -65,6 +65,17 @@ pub(super) fn chunk_words(words: Words, scratch_bytes: usize, threads: usize) ->
     ((power_of_two - UNDER_POWER_OF_TWO_WORDS) / words.record).max(1) * words.record
 }
 
+/// How many ranges `rows` buffered rows are best split into, aiming for
+/// `ranges` when there are rows enough: more when that is what keeps each
+/// range within `scratch_bytes`, with room for the sample being off by half.
+pub(super) fn wanted(rows: usize, ranges: usize, words: Words, scratch_bytes: usize) -> usize {
+    let fitting = (2 * rows * sort_bytes(words)).div_ceil(scratch_bytes.max(1));
+    (rows / MIN_ROWS_PER_RANGE)
+        .clamp(1, ranges)
+        .max(fitting)
+        .min(MAX_RANGES)
+}
+
 /// Everything buffered between two flushes, split into key ranges and sorted.
 pub(super) struct Ranges {
     encoder: Arc<RowEncoder>,
@@ -90,17 +101,18 @@ pub(super) struct Ranges {
 }
 
 impl Ranges {
-    /// Splits buffered rows into ranges and sorts every range, in parallel on
-    /// `workers`. `ranges` is how many to aim for when there are rows enough,
-    /// and `chunk` is the capacity of the buffers that the rows
-    /// were buffered in, from [`chunk_words`].
+    /// Splits buffered rows into `ranges` ranges and sorts every range, in
+    /// parallel on `workers`. `chunk` is the capacity of the buffers that the
+    /// rows were buffered in, from [`chunk_words`], and `split_bytes` what the
+    /// caller took for the chunks a split fills at once, which these ranges
+    /// hold until they are released.
     ///
     /// A range is sorted through a 16-byte entry per record and copied out in
     /// order, so one thread needs a range's records and entries again while it
-    /// sorts it. There are more ranges than `ranges` when that is what keeps
-    /// this within `scratch_bytes`, with room for the sample being off by
-    /// half. Rows in ranges that still do not fit are counted in `oversized`:
-    /// those ranges are sorted the same way, in more memory than planned.
+    /// sorts it, which [`wanted`] fits in `scratch_bytes`. Rows in ranges that
+    /// still do not fit, because the sample was off or there were fewer ranges
+    /// than wanted, are counted in `oversized`: those ranges are sorted in
+    /// pieces that fit, and the pieces merged.
     ///
     /// All of the sorting is done here, before any row is written or sent.
     /// The threads that encode the output then have the machine to
@@ -111,6 +123,7 @@ impl Ranges {
         ranges: usize,
         chunk: usize,
         scratch_bytes: usize,
+        split_bytes: usize,
         oversized: &Count,
         workers: &Workers,
     ) -> Self {
@@ -119,11 +132,7 @@ impl Ranges {
         }
         let words = buffered.words;
         let rows_total = buffered.rows_total;
-        let fitting = (2 * rows_total * sort_bytes(words)).div_ceil(scratch_bytes.max(1));
-        let ranges = (rows_total / MIN_ROWS_PER_RANGE)
-            .clamp(1, ranges)
-            .max(fitting)
-            .min(MAX_RANGES);
+        let ranges = ranges.max(1);
         let buffers = std::mem::take(&mut buffered.buffers);
         let (splitters, ranges) = {
             let order = Order::new(words, &buffered.rows).settled(buffered.settled);
@@ -147,11 +156,14 @@ impl Ranges {
             let ranges: Vec<Vec<Vec<u64>>> = workers.map(unsorted.len(), &|range| {
                 let chunks = std::mem::take(&mut *unsorted[range].lock());
                 let rows = chunks.iter().map(Vec::len).sum::<usize>() / words.record;
-                if rows * sort_bytes(words) > scratch_bytes {
-                    oversized.add(rows);
-                }
                 let mut spare = spares.lock().pop().unwrap_or_default();
-                let sorted = sort_range(chunks, order, chunk, &mut spare);
+                let fitting_rows = scratch_bytes / sort_bytes(words);
+                let sorted = if rows > fitting_rows {
+                    oversized.add(rows);
+                    sort_in_pieces(chunks, order, chunk, fitting_rows.max(1), &mut spare)
+                } else {
+                    sort_range(chunks, order, chunk, &mut spare)
+                };
                 spares.lock().push(spare);
                 sorted
             });
@@ -170,7 +182,7 @@ impl Ranges {
                 .map(|chunks| chunks.iter().map(Vec::len).sum::<usize>() / words.record)
                 .collect(),
             ranges,
-            held: buffered.held,
+            held: buffered.held + split_bytes,
             source_bytes: buffered.source_bytes,
             rows_total,
         }
@@ -414,6 +426,96 @@ fn sort_range(
     // more than the next range can use is not worth keeping
     spare.truncate(sorted.len() + 1);
     sorted
+}
+
+/// Puts the records of a range too large for the scratch memory in order:
+/// sorts pieces of up to `piece_rows` records one at a time, which fits, and
+/// merges the sorted pieces. The merge fills chunks from the ones it has
+/// emptied, so beyond the records it holds only a chunk of each piece and the
+/// one it is filling.
+fn sort_in_pieces(
+    chunks: Vec<Vec<u64>>,
+    order: Order<'_>,
+    chunk: usize,
+    piece_rows: usize,
+    spare: &mut Vec<Vec<u64>>,
+) -> Vec<Vec<u64>> {
+    let width = order.words().record;
+    let mut pieces: Vec<VecDeque<Vec<u64>>> = Vec::new();
+    let mut piece = Vec::new();
+    let mut rows = 0;
+    for chunk_records in chunks {
+        let chunk_rows = chunk_records.len() / width;
+        if rows + chunk_rows > piece_rows && !piece.is_empty() {
+            pieces.push(sort_range(std::mem::take(&mut piece), order, chunk, spare).into());
+            rows = 0;
+        }
+        rows += chunk_rows;
+        piece.push(chunk_records);
+    }
+    if !piece.is_empty() {
+        pieces.push(sort_range(piece, order, chunk, spare).into());
+    }
+    pieces.retain(|piece| !piece.is_empty());
+    if pieces.len() <= 1 {
+        return pieces.pop().map(Vec::from).unwrap_or_default();
+    }
+    // where each piece is in its first chunk
+    let mut at = vec![0_usize; pieces.len()];
+    let before = |pieces: &[VecDeque<Vec<u64>>], at: &[usize], left: usize, right: usize| {
+        let next = |piece: usize| &pieces[piece][0][at[piece]..][..width];
+        order.compare(next(left), next(right)).is_lt()
+    };
+    // a binary heap of piece indexes, ordered by each piece's next record
+    let mut heap: Vec<usize> = (0..pieces.len()).collect();
+    for start in (0..heap.len() / 2).rev() {
+        sift_down(&mut heap, start, |left, right| {
+            before(&pieces, &at, left, right)
+        });
+    }
+    let mut sorted: Vec<Vec<u64>> = Vec::new();
+    while let Some(&first) = heap.first() {
+        let record = &pieces[first][0][at[first]..][..width];
+        with_room(&mut sorted, spare, chunk).extend_from_slice(record);
+        at[first] += width;
+        if at[first] == pieces[first][0].len() {
+            let mut emptied = pieces[first].pop_front().expect("the piece had a chunk");
+            emptied.clear();
+            spare.push(emptied);
+            at[first] = 0;
+            if pieces[first].is_empty() {
+                let last = heap.pop().expect("the heap holds this piece");
+                if heap.is_empty() {
+                    break;
+                }
+                heap[0] = last;
+            }
+        }
+        sift_down(&mut heap, 0, |left, right| {
+            before(&pieces, &at, left, right)
+        });
+    }
+    spare.truncate(sorted.len() + 1);
+    sorted
+}
+
+/// Moves the entry at `start` down a binary min-heap ordered by `before`.
+fn sift_down(heap: &mut [usize], mut start: usize, before: impl Fn(usize, usize) -> bool) {
+    loop {
+        let (left, right) = (2 * start + 1, 2 * start + 2);
+        let mut least = start;
+        if left < heap.len() && before(heap[left], heap[least]) {
+            least = left;
+        }
+        if right < heap.len() && before(heap[right], heap[least]) {
+            least = right;
+        }
+        if least == start {
+            return;
+        }
+        heap.swap(start, least);
+        start = least;
+    }
 }
 
 /// The records that divide the key space into ranges.
@@ -768,8 +870,6 @@ mod tests {
         fn grant(&self, _bytes: usize) -> bool {
             true
         }
-
-        fn force(&self, _bytes: usize) {}
     }
 
     /// Sorts strings, one input partition per list, and returns them in the
@@ -813,7 +913,6 @@ mod tests {
                 words,
                 chunk,
                 &Always,
-                false
             ));
             values.push(strings.clone());
         }
@@ -824,6 +923,7 @@ mod tests {
             4,
             chunk,
             scratch_bytes,
+            0,
             &Count::new(),
             &Workers::try_new(2).unwrap(),
         );
@@ -957,6 +1057,26 @@ mod tests {
                 .count();
             assert_eq!(splitters.range_of(record, order), expected, "{record:x?}");
         }
+    }
+
+    #[test]
+    fn a_range_larger_than_the_scratch_is_sorted_in_pieces_and_merged() {
+        let mut random = Random(0x9E37_79B9_7F4A_7C15);
+        let words = words();
+        let order = Order::new(words, &[]);
+        let chunk = 50 * width();
+        let records = records(&mut random, 1000);
+        let mut expected: Vec<&[u64]> = records.chunks_exact(width()).collect();
+        expected.sort_unstable();
+
+        let chunks: Vec<Vec<u64>> = records.chunks(chunk).map(<[u64]>::to_vec).collect();
+        let mut spare = Vec::new();
+        let sorted = sort_in_pieces(chunks, order, chunk, 120, &mut spare);
+        let sorted: Vec<&[u64]> = sorted
+            .iter()
+            .flat_map(|chunk| chunk.chunks_exact(width()))
+            .collect();
+        assert_eq!(sorted, expected);
     }
 
     #[test]

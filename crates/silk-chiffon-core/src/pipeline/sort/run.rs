@@ -22,7 +22,7 @@ use arrow::{
 use datafusion::error::Result;
 use parking_lot::Mutex;
 
-use super::keys::{Contents, Keys, RowEncoder};
+use super::keys::{Contents, KeyWidths, Keys, RowEncoder, cut_buckets, key_width_bucket};
 use super::record::{MAX_WORDS, Order, Words};
 use super::workers::Workers;
 
@@ -34,8 +34,6 @@ const KEY_SPAN: usize = 256;
 /// first.
 pub(super) trait Grant {
     fn grant(&self, bytes: usize) -> bool;
-    /// Grants unconditionally, for work that cannot wait.
-    fn force(&self, bytes: usize);
 }
 
 /// What one input partition has buffered since the last flush.
@@ -61,6 +59,8 @@ pub(super) struct Lane {
     buffered_rows: usize,
     /// Rows whose keys were too long for their records.
     cut_keys: usize,
+    /// The widths of the keys buffered, when records fit their keys.
+    key_widths: KeyWidths,
     /// The allocations behind the batches kept so far. Batches read from one
     /// Parquet page share its buffers, and each is counted once.
     kept_buffers: HashSet<usize>,
@@ -79,15 +79,17 @@ impl Lane {
         words: Words,
         chunk: usize,
         grant: &impl Grant,
-        force: bool,
     ) -> bool {
         let encoded = rows.as_ref().expect("rows are encoded before inserting");
         let layout = words.layout;
+        let mut widths = KeyWidths::default();
         let cut_keys = match layout.keys {
-            Keys::Fitted => encoded
-                .iter()
-                .filter(|key| key.data().len() >= layout.inline)
-                .count(),
+            Keys::Fitted => {
+                for key in encoded.iter() {
+                    widths[key_width_bucket(key.data().len())] += 1;
+                }
+                widths[cut_buckets(layout.inline)].iter().sum()
+            }
             Keys::Whole | Keys::Prefix => 0,
         };
         let keeps_keys = layout.keys == Keys::Prefix || cut_keys > 0;
@@ -98,9 +100,7 @@ impl Lane {
             (Contents::Source, None) => new_buffers(batch, &self.kept_buffers),
         };
         let bytes = encoded.num_rows() * words.record_bytes() + source_bytes + key_bytes;
-        if force {
-            grant.force(bytes);
-        } else if !grant.grant(bytes) {
+        if !grant.grant(bytes) {
             return false;
         }
         let id = match layout.contents {
@@ -122,6 +122,9 @@ impl Lane {
         self.source_bytes += source_bytes;
         self.buffered_rows += batch.num_rows();
         self.cut_keys += cut_keys;
+        for (total, width) in self.key_widths.iter_mut().zip(widths) {
+            *total += width;
+        }
         // the sort rejects batches with more rows than fit in 32 bits
         for (row, key) in (0_u32..).zip(encoded.iter()) {
             words.push(self.buffer_with_room(chunk), key.data(), id, row);
@@ -208,6 +211,8 @@ pub(super) struct Buffered {
     pub(super) rows_total: usize,
     /// Rows whose keys were too long for their records.
     pub(super) cut_keys: usize,
+    /// The widths of the keys buffered, when records fit their keys.
+    pub(super) key_widths: KeyWidths,
 }
 
 impl Buffered {
@@ -230,11 +235,15 @@ impl Buffered {
         }
         let mut buffers = Vec::new();
         let (mut held, mut source_bytes, mut rows_total, mut cut_keys) = (0, 0, 0, 0);
+        let mut key_widths = KeyWidths::default();
         for lane in lanes {
             held += lane.held;
             source_bytes += lane.source_bytes;
             rows_total += lane.buffered_rows;
             cut_keys += lane.cut_keys;
+            for (total, width) in key_widths.iter_mut().zip(lane.key_widths) {
+                *total += width;
+            }
             for (id, batch) in lane.batches {
                 batches[id as usize] = Some(batch);
             }
@@ -269,7 +278,65 @@ impl Buffered {
             source_bytes,
             rows_total,
             cut_keys,
+            key_widths,
         }
+    }
+
+    /// Lays the records out as `words`, a wider layout of fitted keys, in
+    /// buffers of `chunk` words. `extra` is the budget the wider records take
+    /// beyond the ones they replace, which the caller has granted. Returns the
+    /// bytes of whole keys no longer kept, for the caller to release: once no
+    /// key is cut, the records alone order the rows.
+    pub(super) fn widen(&mut self, words: Words, chunk: usize, extra: usize) -> usize {
+        let old = self.words;
+        let order = Order::new(old, &self.rows);
+        let mut key_bytes = [0_u8; 8 * MAX_WORDS];
+        let mut cut_keys = 0;
+        let mut widened: Vec<Vec<u64>> = Vec::new();
+        for buffer in std::mem::take(&mut self.buffers) {
+            for record in buffer.chunks_exact(old.record) {
+                let (batch, row) = Words::source(record);
+                let key = if old.is_cut(record) {
+                    order.full_key(record)
+                } else {
+                    for (bytes, word) in key_bytes
+                        .as_chunks_mut::<8>()
+                        .0
+                        .iter_mut()
+                        .zip(&record[..old.key])
+                    {
+                        bytes.copy_from_slice(&word.to_be_bytes());
+                    }
+                    old.fitted_key(&key_bytes).expect("a key that was not cut")
+                };
+                if key.len() >= words.layout.inline {
+                    cut_keys += 1;
+                }
+                let full = widened
+                    .last()
+                    .is_none_or(|last| last.len() + words.record > last.capacity());
+                if full {
+                    widened.push(Vec::with_capacity(chunk.max(words.record)));
+                }
+                words.push(widened.last_mut().expect("pushed above"), key, batch, row);
+            }
+        }
+        self.buffers = widened;
+        self.words = words;
+        self.cut_keys = cut_keys;
+        self.held += extra;
+        if cut_keys > 0 {
+            return 0;
+        }
+        self.settled = true;
+        let freed: usize = self
+            .rows
+            .iter_mut()
+            .filter_map(Option::take)
+            .map(|rows| rows.size())
+            .sum();
+        self.held -= freed;
+        freed
     }
 
     pub(super) fn held(&self) -> usize {

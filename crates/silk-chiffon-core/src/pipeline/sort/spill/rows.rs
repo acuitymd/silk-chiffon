@@ -28,6 +28,13 @@ use crate::pipeline::sort::{
 /// of it, each a little-endian `u32`.
 const ROW_HEADER: usize = 8;
 
+/// The least a block holds, as a multiple of its first key. The index keeps
+/// the first key of every block in memory for as long as the flush exists, so
+/// this keeps the index to a small share of what is spilled however long the
+/// keys are. Blocks of 1 KiB with keys of 300 bytes made an index a third the
+/// size of the flush.
+pub(super) const BLOCK_KEY_MULTIPLE: usize = 64;
+
 fn length(bytes: &[u8]) -> usize {
     u32::from_le_bytes(bytes.try_into().expect("four bytes")) as usize
 }
@@ -43,6 +50,7 @@ impl Spill {
             blocks: self.block_writer(what)?,
             block: Vec::with_capacity(self.row_block_bytes),
             block_rows: 0,
+            block_end: self.row_block_bytes,
             index: WrittenIndex::default(),
             rows: 0,
         })
@@ -82,6 +90,8 @@ pub(super) struct RowWriter<'a> {
     /// The block being filled.
     block: Vec<u8>,
     block_rows: usize,
+    /// Where the block being filled ends: see [`BLOCK_KEY_MULTIPLE`].
+    block_end: usize,
     index: WrittenIndex,
     rows: usize,
 }
@@ -143,13 +153,18 @@ impl RowWriter<'_> {
     fn start_row(&mut self, key: &[u8]) {
         if self.block.is_empty() {
             self.index.firsts.extend_from_slice(key);
+            self.block_end = self
+                .blocks
+                .spill
+                .row_block_bytes
+                .max(BLOCK_KEY_MULTIPLE * key.len());
         }
     }
 
     fn end_row(&mut self) -> Result<()> {
         self.block_rows += 1;
         self.rows += 1;
-        if self.block.len() >= self.blocks.spill.row_block_bytes {
+        if self.block.len() >= self.block_end {
             self.write_block()?;
         }
         Ok(())

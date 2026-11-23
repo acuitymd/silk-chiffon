@@ -39,6 +39,31 @@ const MAX_INLINE: usize = 120;
 /// in 4 GiB and 1 GiB.
 const MAX_FITTED: usize = 248;
 
+/// Buckets of [`KeyWidths`]: one for each multiple of eight bytes that a
+/// fitted key and its length byte can take, and one for keys too long for any.
+pub(super) const KEY_WIDTH_BUCKETS: usize = MAX_FITTED / 8 + 1;
+
+/// How many keys took each multiple of eight bytes, with the byte for their
+/// length: bucket `n` counts the keys that a fitted record holds whole when
+/// its key is `8 * (n + 1)` bytes wide, and the last bucket the keys no record
+/// holds whole.
+pub(super) type KeyWidths = [usize; KEY_WIDTH_BUCKETS];
+
+/// The bucket of [`KeyWidths`] a key of `bytes` falls in.
+pub(super) fn key_width_bucket(bytes: usize) -> usize {
+    ((bytes + 1).div_ceil(8) - 1).min(KEY_WIDTH_BUCKETS - 1)
+}
+
+/// The buckets of [`KeyWidths`] whose keys are cut in a fitted record of
+/// `inline` bytes.
+pub(super) fn cut_buckets(inline: usize) -> std::ops::RangeFrom<usize> {
+    inline / 8..
+}
+
+/// Records are made wider when more than one key in this many was cut, as
+/// wide as leaves no more than that cut.
+const CUT_KEY_SHARE: usize = 16;
+
 /// How much of its key a record holds.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::pipeline) enum Keys {
@@ -351,6 +376,40 @@ impl RowEncoder {
         } else {
             self.layout
         }
+    }
+
+    /// A wider layout than `current` for keys whose widths are `widths`, when
+    /// more than one in [`CUT_KEY_SHARE`] of them were cut: the narrowest that
+    /// cuts no more than that, or the widest there is.
+    ///
+    /// The first batch to arrive decides how wide records are, and can be one
+    /// of short or null keys before long ones. Most comparisons of cut keys
+    /// read both whole keys from row format, which is far slower than
+    /// comparing records, and cut keys keep those whole keys in memory besides.
+    pub(super) fn wider_layout(
+        &self,
+        current: RecordLayout,
+        widths: &KeyWidths,
+    ) -> Option<RecordLayout> {
+        if current.keys != Keys::Fitted {
+            return None;
+        }
+        let keys: usize = widths.iter().sum();
+        let cut: usize = widths[cut_buckets(current.inline)].iter().sum();
+        if cut * CUT_KEY_SHARE <= keys {
+            return None;
+        }
+        let mut uncut = 0;
+        let bucket = (0..KEY_WIDTH_BUCKETS - 1)
+            .find(|bucket| {
+                uncut += widths[*bucket];
+                (keys - uncut) * CUT_KEY_SHARE <= keys
+            })
+            .unwrap_or(KEY_WIDTH_BUCKETS - 2);
+        let inline = 8 * (bucket + 1);
+        (inline > current.inline)
+            .then(|| RecordLayout::fitted(inline - 1))
+            .flatten()
     }
 
     /// What records hold besides their keys.

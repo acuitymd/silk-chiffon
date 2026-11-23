@@ -32,9 +32,9 @@
 //!   and they are sent in key order.
 //! - **Memory.** DataFusion's merge reserves memory for the batches it holds,
 //!   and fails when the pool refuses. So the sort sizes the merges from its
-//!   own budget before they start, and gives them a pool that never refuses.
-//!   Where the budget does not cover reading a group's segments at once, the
-//!   group is first merged down in passes.
+//!   own budget before they start, and gives each a pool of what it set aside
+//!   for that merge's inputs. Where the budget does not cover reading a
+//!   group's segments at once, the group is first merged down in passes.
 //!
 //! This is slower than merging blocks in slices, because the groups are few,
 //! large, and fixed:
@@ -64,7 +64,7 @@ use datafusion::{
     execution::{
         SendableRecordBatchStream, SpillFile, SpillWriter,
         disk_manager::DiskManager,
-        memory_pool::{MemoryConsumer, MemoryPool, UnboundedMemoryPool},
+        memory_pool::{GreedyMemoryPool, MemoryConsumer, MemoryPool},
         runtime_env::RuntimeEnv,
     },
     physical_expr::LexOrdering,
@@ -82,7 +82,7 @@ use super::{
     run::{Batcher, Input, Kept, merge_rounds},
     workers::Workers,
 };
-use rows::RowBatcher;
+use rows::{BLOCK_KEY_MULTIPLE, RowBatcher};
 
 /// Batches one input of a merge of Arrow files holds at once: the reader's
 /// two buffered batches, the one it is decoding, the one the merge is reading,
@@ -93,8 +93,29 @@ const MERGE_INPUT_BATCHES: usize = 6;
 /// each a little-endian `u32`.
 const BLOCK_HEADER: usize = 8;
 
-/// What a zstd decompressor holds besides the block it fills.
-const ZSTD_CONTEXT_BYTES: usize = 256 * 1024;
+/// What a zstd decompressor holds besides the block it fills. It measured
+/// 96 KB.
+const ZSTD_CONTEXT_BYTES: usize = 128 * 1024;
+
+/// What a zstd compressor at the level flushes are written at holds besides
+/// the blocks it reads and fills, for a block of `block` bytes. It sizes
+/// itself to the block: it measured 37 KB for 1 KiB blocks, 218 KB for 16 KiB,
+/// 304 KB for 64 KiB, and 583 KB for 256 KiB and anything larger.
+fn zstd_compress_context_bytes(block: usize) -> usize {
+    if block <= 16 * 1024 {
+        32 * 1024 + 12 * block
+    } else {
+        (224 * 1024 + block + block / 2).min(640 * 1024)
+    }
+}
+
+/// The fewest records in a block. The index keeps a record and 40 bytes for
+/// every block in memory, which this keeps to a few percent of a flush.
+const MIN_BLOCK_RECORDS: usize = 64;
+
+/// Batches a writer of Arrow batches holds: the batch it is given, that batch
+/// encoded, and the encoding compressed.
+const BATCH_WRITER_BATCHES: usize = 3;
 
 /// One group of one flush of Arrow batches, on disk.
 #[derive(Clone)]
@@ -248,6 +269,12 @@ impl BlockFlush {
             flush.largest_block = flush.largest_block.max(index.largest_block);
             flush.parts.push(part);
         }
+        // the index is held for as long as the flush exists, and counted by
+        // what it holds
+        flush.blocks.shrink_to_fit();
+        flush.block_rows.shrink_to_fit();
+        flush.firsts.shrink_to_fit();
+        flush.first_ends.shrink_to_fit();
         flush
     }
 }
@@ -349,10 +376,6 @@ pub(super) struct Spill {
     /// The threads that the jobs calling into this run on.
     workers: Arc<Workers>,
     merge_metrics: ExecutionPlanMetricsSet,
-    /// DataFusion's merge reserves memory for each batch it holds and fails if
-    /// refused. The sort decides the fan-in up front from its own budget
-    /// instead, so the merge reserves from a pool that never refuses.
-    unlimited: Arc<dyn MemoryPool>,
 }
 
 impl Spill {
@@ -381,7 +404,7 @@ impl Spill {
             words,
             ordering,
             batch_size,
-            block_records: block_records.max(1),
+            block_records: block_records.max(MIN_BLOCK_RECORDS),
             row_block_bytes: row_block_bytes.max(1),
             compression,
             disk: Arc::clone(&environment.disk_manager),
@@ -397,12 +420,16 @@ impl Spill {
             // the merges' own row and time counts would be added to the
             // sort's, which already counts what it reads and emits
             merge_metrics: ExecutionPlanMetricsSet::new(),
-            unlimited: Arc::new(UnboundedMemoryPool::default()),
         }
     }
 
     fn words(&self) -> Words {
         self.words
+    }
+
+    /// Records in one block of a flush of records.
+    pub(super) fn block_records(&self) -> usize {
+        self.block_records
     }
 
     fn block_bytes(&self) -> usize {
@@ -416,10 +443,29 @@ impl Spill {
     /// in the worst case. A block of rows also needs where each row starts.
     pub(super) fn input_bytes(&self, flushes: &[BlockFlush]) -> usize {
         let largest = |of: fn(&BlockFlush) -> usize| flushes.iter().map(of).max().unwrap_or(0);
-        let block = match self.kind {
-            BlockKind::Records => self.block_bytes(),
-            BlockKind::Rows => largest(|flush| flush.largest_block),
-        };
+        match self.kind {
+            BlockKind::Records => self.input_bytes_of(self.block_bytes(), 0),
+            BlockKind::Rows => self.input_bytes_of(
+                largest(|flush| flush.largest_block),
+                largest(BlockFlush::largest_block_rows),
+            ),
+        }
+    }
+
+    /// [`Self::input_bytes`] for flushes not yet written, whose blocks are
+    /// the planned size and hold rows of `row_bytes` with keys of `key_bytes`.
+    pub(super) fn planned_input_bytes(&self, row_bytes: usize, key_bytes: usize) -> usize {
+        match self.kind {
+            BlockKind::Records => self.input_bytes_of(self.block_bytes(), 0),
+            BlockKind::Rows => {
+                // a block ends with the row that fills it
+                let block = self.row_block_bytes.max(BLOCK_KEY_MULTIPLE * key_bytes) + row_bytes;
+                self.input_bytes_of(block, block / row_bytes.max(1))
+            }
+        }
+    }
+
+    fn input_bytes_of(&self, block: usize, block_rows: usize) -> usize {
         let stored = match self.compression {
             SpillCompression::Uncompressed => 0,
             SpillCompression::Lz4Frame => block,
@@ -429,10 +475,35 @@ impl Spill {
             // the block as read, its records restored from it, their copy in
             // a round, and what sorting the round moves aside
             BlockKind::Records => 4 * block + stored,
-            BlockKind::Rows => {
-                block + size_of::<usize>() * (largest(BlockFlush::largest_block_rows) + 1) + stored
-            }
+            BlockKind::Rows => block + size_of::<usize>() * (block_rows + 1) + stored,
         }
+    }
+
+    /// Memory one writer of blocks holds besides what it writes: the block
+    /// being filled, the block as stored, for records the block transposed,
+    /// and with zstd the compressor.
+    pub(super) fn writer_bytes(&self) -> usize {
+        let (block, copies) = match self.kind {
+            BlockKind::Records => (self.block_bytes(), 3),
+            BlockKind::Rows => (self.row_block_bytes, 2),
+        };
+        let context = match self.compression {
+            SpillCompression::Zstd => zstd_compress_context_bytes(block),
+            SpillCompression::Lz4Frame | SpillCompression::Uncompressed => 0,
+        };
+        // the stored block can be a little larger than the block
+        copies * (block + BLOCK_HEADER + block / 64) + context
+    }
+
+    /// Memory one writer of Arrow batches of `batch_bytes` holds.
+    pub(super) fn batch_writer_bytes(&self, batch_bytes: usize) -> usize {
+        BATCH_WRITER_BATCHES * batch_bytes
+    }
+
+    /// What a merge of Arrow segments whose batches are `batch_bytes` needs
+    /// for each segment it reads.
+    pub(super) fn batch_input_bytes(batch_bytes: usize) -> usize {
+        MERGE_INPUT_BATCHES * batch_bytes
     }
 
     /// Writes one flush as `parts` files, in parallel. `fill` pushes a file's
@@ -480,29 +551,23 @@ impl Spill {
             .collect()
     }
 
-    /// Calls `emit` with one slice's rows as sorted batches.
+    /// Calls `emit` with one slice's rows as sorted batches of `batch_rows`.
     pub(super) fn merge_slice(
         &self,
         slices: &Slices,
         slice: usize,
+        batch_rows: usize,
         emit: impl FnMut(RecordBatch) -> Result<()>,
     ) -> Result<()> {
         match self.kind {
             BlockKind::Records => {
-                let mut batcher = Batcher::new(
-                    &self.encoder,
-                    self.words,
-                    &[],
-                    &[],
-                    &[],
-                    self.batch_size,
-                    emit,
-                );
+                let mut batcher =
+                    Batcher::new(&self.encoder, self.words, &[], &[], &[], batch_rows, emit);
                 self.visit_slice(slices, slice, |records| batcher.push(records))?;
                 batcher.finish()
             }
             BlockKind::Rows => {
-                let mut batcher = RowBatcher::new(&self.encoder, self.batch_size, emit);
+                let mut batcher = RowBatcher::new(&self.encoder, batch_rows, emit);
                 self.visit_row_slice(slices, slice, |row| batcher.push(row))?;
                 batcher.finish()
             }
@@ -564,43 +629,55 @@ impl Spill {
     }
 
     /// Calls `emit` with the rows of segments of Arrow batches, merged.
+    /// `memory` is what DataFusion's merge may reserve.
     pub(super) fn merge(
         &self,
         segments: &[Segment],
+        memory: usize,
         emit: impl FnMut(RecordBatch) -> Result<()>,
     ) -> Result<()> {
         if segments.is_empty() {
             return Ok(());
         }
-        self.merge_batches(segments, emit)
+        self.merge_batches(segments, memory, emit)
     }
 
     /// Merges segments into fewer, larger ones until at most `fan_in` remain.
-    pub(super) fn reduce(&self, mut segments: Vec<Segment>, fan_in: usize) -> Result<Vec<Segment>> {
+    pub(super) fn reduce(
+        &self,
+        mut segments: Vec<Segment>,
+        fan_in: usize,
+        memory: usize,
+    ) -> Result<Vec<Segment>> {
         let fan_in = fan_in.max(2);
         while segments.len() > fan_in {
             // leave exactly `fan_in` when one pass can
             let group = fan_in.min(segments.len() - fan_in + 1);
             let merged: Vec<Segment> = segments.drain(..group).collect();
-            segments.extend(self.merge_to_file(&merged)?);
+            segments.extend(self.merge_to_file(&merged, memory)?);
         }
         Ok(segments)
     }
 
     /// Merges segments into one, a few at a time when there are more than
     /// `fan_in`.
-    pub(super) fn compact(&self, segments: Vec<Segment>, fan_in: usize) -> Result<Option<Segment>> {
-        let mut segments = self.reduce(segments, fan_in)?;
+    pub(super) fn compact(
+        &self,
+        segments: Vec<Segment>,
+        fan_in: usize,
+        memory: usize,
+    ) -> Result<Option<Segment>> {
+        let mut segments = self.reduce(segments, fan_in, memory)?;
         if segments.len() > 1 {
-            return self.merge_to_file(&segments);
+            return self.merge_to_file(&segments, memory);
         }
         Ok(segments.pop())
     }
 
     /// Merges segments into one new spill file.
-    fn merge_to_file(&self, segments: &[Segment]) -> Result<Option<Segment>> {
+    fn merge_to_file(&self, segments: &[Segment], memory: usize) -> Result<Option<Segment>> {
         self.write_batches("sort merge pass", |push| {
-            self.merge_batches(segments, |batch| push(&batch))
+            self.merge_batches(segments, memory, |batch| push(&batch))
         })
     }
 
@@ -659,12 +736,13 @@ impl Spill {
     fn merge_batches(
         &self,
         segments: &[Segment],
+        memory: usize,
         mut emit: impl FnMut(RecordBatch) -> Result<()>,
     ) -> Result<()> {
         let mut merged = {
             // reading a spill file starts a task
             let _runtime = self.runtime.enter();
-            self.batch_stream(segments)?
+            self.batch_stream(segments, memory)?
         };
         // one batch at a time, so that `emit` may block: it is outside the
         // runtime between batches
@@ -674,7 +752,13 @@ impl Spill {
         Ok(())
     }
 
-    fn batch_stream(&self, segments: &[Segment]) -> Result<SendableRecordBatchStream> {
+    /// The merge of `segments`, which may reserve `memory`: what the sort set
+    /// aside for it from its own budget.
+    fn batch_stream(
+        &self,
+        segments: &[Segment],
+        memory: usize,
+    ) -> Result<SendableRecordBatchStream> {
         let mut inputs = segments
             .iter()
             .map(|segment| {
@@ -692,7 +776,10 @@ impl Spill {
             .with_metrics(BaselineMetrics::new(&self.merge_metrics, 0))
             .with_batch_size(self.batch_size)
             .with_fetch(None)
-            .with_reservation(MemoryConsumer::new("ParallelSortMerge").register(&self.unlimited))
+            .with_reservation({
+                let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(memory.max(1)));
+                MemoryConsumer::new("ParallelSortMerge").register(&pool)
+            })
             .build()
     }
 }
