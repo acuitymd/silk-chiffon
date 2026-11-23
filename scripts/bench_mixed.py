@@ -57,6 +57,11 @@ COLUMNS = (
 )
 
 
+
+def sql_string(path: Path) -> str:
+    """A path as a SQL string literal, for statements that take no parameters."""
+    return "'" + str(path).replace("'", "''") + "'"
+
 def generate(args: argparse.Namespace) -> None:
     import duckdb
 
@@ -88,7 +93,7 @@ def generate(args: argparse.Namespace) -> None:
                 CASE WHEN hash(i, 16) % 3 = 0 THEN NULL
                      ELSE repeat('n', 10 + CAST(hash(i, 17) % 50 AS INTEGER)) END AS note
             FROM range({args.rows}) AS t(i)
-        ) TO '{args.out}' (FORMAT parquet, COMPRESSION zstd, PER_THREAD_OUTPUT true,
+        ) TO {sql_string(args.out)} (FORMAT parquet, COMPRESSION zstd, PER_THREAD_OUTPUT true,
                            OVERWRITE_OR_IGNORE true)
         """
     )
@@ -99,18 +104,24 @@ def generate(args: argparse.Namespace) -> None:
     )
 
 
-def out_of_order_sql(path: Path, key: str) -> str:
-    """Counts rows that sort before the row above them. `col` is ascending with nulls
-    last and `col:desc` is descending with nulls first, as silk-chiffon reads --sort-by."""
+def quoted(name: str) -> str:
+    """A column name as a DuckDB identifier, whatever characters it holds."""
+    return '"' + name.replace('"', '""') + '"'
+
+
+def out_of_order_sql(key: str) -> str:
+    """Counts rows that sort before the row above them, in the file given as the one
+    parameter. `col` is ascending with nulls last and `col:desc` is descending with
+    nulls first, as silk-chiffon reads --sort-by."""
     columns = [part.split(":") for part in key.split(",")]
     lags = ", ".join(
-        f'lag("{name}") OVER (ORDER BY file_row_number) AS "p_{name}"'
+        f"lag({quoted(name)}) OVER (ORDER BY file_row_number) AS {quoted('p_' + name)}"
         for name, *_ in columns
     )
     cases = []
     for name, *direction in columns:
         descending = direction == ["desc"]
-        cur, prev = f'"{name}"', f'"p_{name}"'
+        cur, prev = quoted(name), quoted(f"p_{name}")
         # 1 when the row above belongs after this one by this column, -1 when before
         null_above, null_here = (-1, 1) if descending else (1, -1)
         above_greater = -1 if descending else 1
@@ -127,8 +138,8 @@ def out_of_order_sql(path: Path, key: str) -> str:
     )
     return f"""
         SELECT count(*) FROM (
-            SELECT file_row_number, {", ".join(f'"{name}"' for name, *_ in columns)}, {lags}
-            FROM read_parquet('{path}', file_row_number = true)
+            SELECT file_row_number, {", ".join(quoted(name) for name, *_ in columns)}, {lags}
+            FROM read_parquet(?, file_row_number = true)
         ) WHERE file_row_number > 0 AND ({first_difference} ELSE 0 END) = 1
     """
 
@@ -137,13 +148,14 @@ def check(args: argparse.Namespace) -> None:
     import duckdb
 
     con = duckdb.connect()
+    # the path goes in as a parameter, never into the SQL text
     rows, digest = con.execute(
-        f"SELECT count(*), sum(hash({COLUMNS}) >> 8) FROM read_parquet('{args.path}')"
+        f"SELECT count(*), sum(hash({COLUMNS}) >> 8) FROM read_parquet(?)", [str(args.path)]
     ).fetchone()
     checked = {"rows": rows, "digest": str(digest)}
     if args.order:
         checked["out_of_order"] = con.execute(
-            out_of_order_sql(args.path, args.key)
+            out_of_order_sql(args.key), [str(args.path)]
         ).fetchone()[0]
     print(json.dumps(checked))
 

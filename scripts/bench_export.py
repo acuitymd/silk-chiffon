@@ -152,6 +152,11 @@ class Measurement:
     command: list[str] = field(default_factory=list)
 
 
+
+def sql_string(path: Path) -> str:
+    """A path as a SQL string literal, for statements that take no parameters."""
+    return "'" + str(path).replace("'", "''") + "'"
+
 def transform_command(
     build: Build, stage: str, source: Source, settings: Settings, out: Path, spill: Path
 ) -> list[str]:
@@ -251,7 +256,8 @@ def summarize_output(out: Path) -> tuple[int, int, int]:
         duckdb.connect()
         .execute(
             f"SELECT count(*), coalesce(sum(hash({COLUMNS}) >> 8), 0)"
-            f" FROM read_parquet('{out}/**/*.parquet', hive_partitioning = false)"
+            " FROM read_parquet(?, hive_partitioning = false)",
+            [f"{out}/**/*.parquet"],
         )
         .fetchone()
     )
@@ -486,7 +492,7 @@ def generate(args: argparse.Namespace) -> None:
                 CAST({args.first_category} AS BIGINT) AS batch_id
             FROM draws
             ORDER BY category_id, event_date
-        ) TO '{out}' (FORMAT parquet, COMPRESSION zstd, PER_THREAD_OUTPUT true)
+        ) TO {sql_string(out)} (FORMAT parquet, COMPRESSION zstd, PER_THREAD_OUTPUT true)
         """
     )
     files = sorted(out.glob("*.parquet"))
