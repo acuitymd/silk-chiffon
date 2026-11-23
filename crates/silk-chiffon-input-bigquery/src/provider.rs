@@ -53,8 +53,13 @@ async fn create_table_provider(
             .await
             .context("failed to pin the BigQuery snapshot")?,
     };
-    let discovery_spec = ReadSessionSpec::discovery(&reference, snapshot, &owner_project)
-        .context("invalid BigQuery discovery session")?;
+    let discovery_spec = ReadSessionSpec::discovery(
+        &reference,
+        snapshot,
+        &owner_project,
+        args.row_restriction.clone(),
+    )
+    .context("invalid BigQuery discovery session")?;
     let discovery = resources
         .sessions
         .open(&discovery_spec)
@@ -782,6 +787,10 @@ mod tests {
         let discovery = creates[0].read_session.as_ref().unwrap();
         let execution = creates[1].read_session.as_ref().unwrap();
         assert_eq!(discovery.table_modifiers, execution.table_modifiers);
+        assert_eq!(
+            discovery.read_options.as_ref().unwrap().row_restriction,
+            "`string` IS NOT NULL"
+        );
         assert_eq!(creates[1].max_stream_count, 1);
         let options = execution.read_options.as_ref().unwrap();
         assert_eq!(options.selected_fields, ["string"]);
