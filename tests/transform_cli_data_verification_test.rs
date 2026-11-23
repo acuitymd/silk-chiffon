@@ -1617,6 +1617,48 @@ fn test_the_datafusion_sort_engine_sorts_the_same_rows() {
     assert_eq!(TestExtract::i32_all(&batches, "id"), vec![1, 2, 3, 5, 8]);
 }
 
+/// `--sort-by` reads a name as DataFusion reads an identifier, folding case
+/// unless it is quoted, and takes a name that is a column exactly as it is.
+#[test]
+fn test_sort_by_reads_names_as_identifiers_and_exact_names_as_they_are() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let batch = TestBatch::simple_with(&[5, 2, 8, 1, 3], &["e", "b", "h", "a", "c"]);
+    TestFile::write_arrow_batch(&input, &batch);
+
+    for (engine, name) in [
+        ("parallel", "ID"),
+        ("datafusion", "ID"),
+        ("parallel", "\"id\""),
+        ("parallel", "id"),
+    ] {
+        let output = temp_dir
+            .path()
+            .join(format!("{engine}-{}.arrow", name.len()));
+        cargo::cargo_bin_cmd!("silk-chiffon")
+            .args([
+                "transform",
+                "--from",
+                input.to_str().unwrap(),
+                "--to",
+                output.to_str().unwrap(),
+                "--sort-by",
+                name,
+                "--sort-engine",
+                engine,
+                "--overwrite",
+            ])
+            .assert()
+            .success();
+        let batches = TestFile::read_arrow(&output);
+        assert_eq!(
+            TestExtract::i32_all(&batches, "id"),
+            vec![1, 2, 3, 5, 8],
+            "{engine} {name}"
+        );
+    }
+}
+
 #[test]
 fn test_spill_merge_fan_in_merges_in_several_passes() {
     let temp_dir = TempDir::new().unwrap();

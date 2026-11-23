@@ -4,6 +4,7 @@ use crate::{PartitionStrategy, SortSpec, TransformCommand, default_thread_budget
 use anyhow::{Result, anyhow};
 use camino::Utf8Path;
 use datafusion::{
+    arrow::datatypes::Schema,
     catalog::TableProvider,
     error::DataFusionError,
     execution::disk_manager::DEFAULT_MAX_TEMP_DIRECTORY_SIZE,
@@ -15,7 +16,7 @@ use datafusion::{
 use futures::TryStreamExt;
 use owo_colors::OwoColorize;
 use silk_chiffon_core::{
-    OpenSinkMode, Pipeline, PreparedPipeline, PresentationMode, SinkBindingConfig, SortEngine,
+    OpenSinkMode, Pipeline, PreparedPipeline, PresentationMode, SinkBindingConfig, SortColumn,
     union_input_providers_by_name,
 };
 use tabled::{builder::Builder, settings::Style};
@@ -230,8 +231,9 @@ pub(crate) async fn run(args: TransformCommand) -> Result<()> {
         input = apply_query(&session, input, q).await?;
     }
 
+    let input_schema = input.schema().as_arrow().clone();
     let mut prepared = pipeline
-        .with_sort(full_sort_spec.columns.clone())
+        .with_sort(sort_columns(&full_sort_spec.columns, &input_schema))
         .with_sort_engine(sort_engine)
         .prepare(input, session)
         .await?;
@@ -302,10 +304,16 @@ pub(crate) async fn run(args: TransformCommand) -> Result<()> {
         }
     }
 
-    let output_ordering = user_sort_spec_without_partition_cols.columns.clone();
+    let output_ordering = sort_columns(
+        &user_sort_spec_without_partition_cols.columns,
+        &input_schema,
+    );
     // DataFusion's sort merges while the output is written, so it shares the
     // CPUs with encoding. The parallel sort has done its heavy work by then.
-    let output_threads = if has_sort && sort_engine == SortEngine::DataFusion {
+    // What was planned decides, not --sort-engine: the parallel engine falls
+    // back to DataFusion's sort for keys it cannot encode.
+    let sorts_in_parallel = prepared.execution_plan().name() == "ParallelSortExec";
+    let output_threads = if has_sort && !sorts_in_parallel {
         (usable_cpus / 4).max(1)
     } else {
         three_quarter_cpus
@@ -370,6 +378,23 @@ pub(crate) async fn run(args: TransformCommand) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// The columns a sort names. A name that is a column exactly is taken as it
+/// is. Any other is read as DataFusion reads an identifier, folded to lower
+/// case unless it is quoted, which is how `--sort-by` has always read names.
+fn sort_columns(columns: &[SortColumn], schema: &Schema) -> Vec<SortColumn> {
+    columns
+        .iter()
+        .map(|column| {
+            let name = if schema.field_with_name(column.name()).is_ok() {
+                column.name().to_owned()
+            } else {
+                datafusion::common::Column::from_qualified_name(column.name()).name
+            };
+            SortColumn::new(name, column.direction(), column.null_placement())
+        })
+        .collect()
 }
 
 /// What `--explain-analyze` reports once the output is complete.

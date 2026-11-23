@@ -657,6 +657,10 @@ async fn finish_sink(
 /// and closing it. With hundreds of small files that wait is most of the work,
 /// so the sorted writer hands each finished sink here and goes on to the next
 /// partition. Outputs are reported in the order they were handed over.
+///
+/// Each sink completing keeps its own buffers until it is done, as an open sink
+/// does, so up to [`Self::LIMIT`] of them are in memory at once beside the one
+/// being written.
 struct FinishingSinks {
     partition_fields: Arc<[String]>,
     tasks: VecDeque<AbortOnDropHandle<Result<CompletedFileOutput>>>,

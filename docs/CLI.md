@@ -86,9 +86,9 @@ Examples:
 
   `parallel` splits the rows it has buffered by key range, sorts the ranges on --target-partitions threads, and writes them out in order. When the memory pool is full it writes what it has sorted to the spill path and continues, so a small --memory-budget slows the sort but does not fail it. It needs no --non-spillable-reserve.
 
-  `parallel` keeps each row as one run of bytes in Arrow's row format, and is slower when a column cannot be kept that way. It then keeps the input batches whole, and merges what it spills in a few large stretches of the key range, one at a time when memory is short. The columns are dictionaries whose values are lists, structs, maps, unions, booleans, durations, intervals, dictionaries, or run-end encoded, alone or nested in another column. --explain-analyze shows `rows=batches` on the `ParallelSortExec` line of such a sort.
+  `parallel` keeps each row as one run of bytes in Arrow's row format, and is slower when a column cannot be kept that way. It then keeps the input batches whole, and merges what it spills in a few large stretches of the key range, one at a time when memory is short. The columns are dictionaries whose values are lists, structs, maps, unions, booleans, durations, intervals, dictionaries, or run-end encoded, and dictionaries in columns that may not be null, alone or nested in another column. --explain-analyze shows `rows=batches` on the `ParallelSortExec` line of such a sort.
 
-  `datafusion` sorts each partition separately and merges them on one thread. It can fail with "Failed to allocate ... ExternalSorterMerge" when the pool is full. A sort whose key is a dictionary of lists, structs, maps, or unions uses it whatever this is set to.
+  `datafusion` sorts each partition separately and merges them on one thread. It can fail with "Additional allocation failed for ExternalSorterMerge" when the pool is full. A sort whose key is a dictionary of lists, structs, maps, or unions uses it whatever this is set to.
 
   Default value: `parallel`
 
@@ -409,7 +409,7 @@ Examples:
 
   Controls the rayon thread pool size for encoding columns within row groups. Column encoding is CPU-intensive and benefits from parallelism.
 
-  Default: 75% of available CPU cores, or 25% when the output is sorted with --sort-engine datafusion, whose merge runs while the output is encoded.
+  Default: 75% of available CPU cores, or 25% when DataFusion's sort orders the output, whose merge runs while the output is encoded. That is with --sort-engine datafusion, or when the default engine hands a sort it cannot do to DataFusion's.
 - `--parquet-ingestion-queue-size <PARQUET_INGESTION_QUEUE_SIZE>` — Queue size for record batches waiting to be assembled into row groups.
 
   Controls backpressure between the data source and ingestion stage. Higher values allow the source to stay ahead of row group assembly.
