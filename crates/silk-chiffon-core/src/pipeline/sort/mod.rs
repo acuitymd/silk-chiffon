@@ -12,7 +12,8 @@
 //! - **Keys as integers.** A row's sort key is its Arrow row format, stored as
 //!   native 64-bit words, so a comparison is a few integer comparisons. A
 //!   record holds its key whole when it can: keys of variable width set how
-//!   wide records are when the first batch arrives.
+//!   wide records are when the first batch arrives, and a run that had to cut
+//!   many of its keys makes them wider for the runs after it.
 //! - **Rows beside their keys.** Rows of a few narrow fixed-width columns
 //!   are held whole in the records that are sorted. Other rows are kept in
 //!   row format beside the records, one run of bytes each, and decoded when
@@ -690,8 +691,8 @@ struct Sorter {
     spill_metrics: SpillMetrics,
     /// Set by the first batch to arrive: see [`Self::shape_for`].
     shape: parking_lot::RwLock<Option<Arc<Shape>>>,
-    /// Wider records that a flush found its rows needed and the pool had no
-    /// room for, to buffer later rows in once the flush is written.
+    /// Wider records that a run's keys needed, to buffer the rows after it in
+    /// once its flush is written.
     wider: Mutex<Option<Words>>,
     /// Inserts hold this shared. Flushing and finishing hold it exclusively,
     /// which stops every lane between batches.
@@ -876,38 +877,29 @@ impl Sorter {
         }
     }
 
-    /// Makes records wider, for these rows and those buffered after them,
-    /// when the first batch's keys made them too narrow for many of the keys
-    /// that came after: see [`RowEncoder::wider_layout`]. Needs the gate held
-    /// exclusively.
+    /// Notes that records should be wider for the rows buffered after this
+    /// run, when the first batch's keys made them too narrow for many of the
+    /// keys that came after: see [`RowEncoder::wider_layout`]. The flush that
+    /// writes this run makes them wider once it is written.
     ///
-    /// The rows of a flush on disk carry their whole keys, so flushes of
-    /// different widths merge as they are. A flush is usually written because
-    /// the pool refused more memory, so it seldom has room for wider records
-    /// of its own rows: those are then written as they are, and the rows
-    /// buffered after the flush are the first to be wider.
-    ///
-    /// Returns the wider layout, the chunk size of its buffers, and the bytes
-    /// it takes, when the pool granted them: the caller rebuilds the records
-    /// with [`Buffered::widen`] on the sort's threads.
-    fn widening_for(&self, buffered: &Buffered) -> Option<(Words, usize, usize)> {
-        let layout = self
+    /// The run itself is sorted as it was buffered. Rebuilding its records
+    /// wider in place cost as much as it saved: 50M rows of the late-keys
+    /// data sorted in memory in 8.05 s that way and in 7.51 s as they were. A
+    /// flush on disk carries its rows' whole keys, so flushes of different
+    /// widths merge as they are, and every run after the first is buffered
+    /// wide from its first row, with no whole keys kept beside it.
+    fn note_cut_keys(&self, buffered: &Buffered) {
+        if let Some(layout) = self
             .encoder
-            .wider_layout(buffered.words.layout, &buffered.key_widths)?;
-        let words = Words::new(layout);
-        let wider = buffered.num_rows() * (words.record_bytes() - buffered.words.record_bytes());
-        let extra = wider + wider / SPLIT_HEADROOM_SHARE;
-        if !self.budget.grant(extra) {
-            *self.wider.lock() = Some(words);
-            return None;
+            .wider_layout(buffered.words.layout, &buffered.key_widths)
+        {
+            *self.wider.lock() = Some(Words::new(layout));
         }
-        let shape = self.reshape(words);
-        Some((words, shape.chunk, extra))
     }
 
     /// Lays out every batch buffered from now on as `words`, in the scratch
     /// memory the sort already holds.
-    fn reshape(&self, words: Words) -> Arc<Shape> {
+    fn reshape(&self, words: Words) {
         self.metrics.widenings.add(1);
         let mut slot = self.shape.write();
         let old = slot
@@ -916,8 +908,7 @@ impl Sorter {
         let scratch_rows = (old.scratch_bytes / (2 * words.record_bytes())).max(1);
         let shape = Arc::new(self.shape_of(words, scratch_rows, old.spill_batch_rows));
         self.metrics.record_bytes.set(words.record_bytes());
-        *slot = Some(Arc::clone(&shape));
-        shape
+        *slot = Some(shape);
     }
 
     fn shape(&self) -> Arc<Shape> {
@@ -1050,8 +1041,8 @@ impl Sorter {
     /// fit in the scratch memory, and more ranges are made only as far as the
     /// pool grants the chunks for them. Ranges too large for the scratch
     /// memory are sorted in pieces of it.
-    async fn prepare(self: &Arc<Self>, mut buffered: Buffered) -> Result<Ranges> {
-        let widening = self.widening_for(&buffered);
+    async fn prepare(self: &Arc<Self>, buffered: Buffered) -> Result<Ranges> {
+        self.note_cut_keys(&buffered);
         let shape = self.shape();
         let parallelism = self.options.parallelism;
         let wanted = ranges::wanted(
@@ -1072,10 +1063,6 @@ impl Sorter {
         let sorter = Arc::clone(self);
         self.on_pool(move || {
             let _timer = sorter.metrics.sort_time.timer();
-            if let Some((words, chunk, extra)) = widening {
-                let freed = buffered.widen(words, chunk, extra, &sorter.workers);
-                sorter.budget.release(freed);
-            }
             sorter.metrics.cut_keys.add(buffered.cut_keys);
             let ranges = Ranges::split(
                 buffered,

@@ -561,10 +561,10 @@ async fn holds_variable_width_keys_whole_in_records() {
     }
 }
 
-/// Keys longer than the first batch's make the records wider before the rows
-/// are sorted, so that the records alone order them.
+/// Keys longer than the first batch's make the records wider for the runs
+/// after the first, so that the records alone order those.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn keys_longer_than_the_first_batch_had_widen_the_records() {
+async fn keys_longer_than_the_first_batch_had_widen_later_runs() {
     let mut random = Random(73);
     let key = [("name", DESCENDING_NULLS_LAST), ("row", ASCENDING)];
     // one partition, so that the first batch is the one that arrives first
@@ -574,19 +574,21 @@ async fn keys_longer_than_the_first_batch_had_widen_the_records() {
         *batch = with_longer_names(batch, "a name that outgrew the first batch: ");
     }
     let input = vec![input];
-    // in memory every key is sorted in wider records. A spilled sort widens
-    // the records from the second run on, and of the 10,000 long names only
-    // those in its first run are cut
-    for (memory_limit, cut_at_most) in [(AMPLE, 0), (2 * 1024 * 1024, 9_999)] {
-        let sorted = sort(input.clone(), &key, options(3, 256 * 1024), memory_limit).await;
-        assert!(sorted.widenings > 0);
-        assert!(
-            sorted.cut_keys <= cut_at_most,
-            "{} cut keys",
-            sorted.cut_keys
-        );
-        assert_sorted(&input, &sorted.batches, &key);
-    }
+    // in memory the one run is sorted as it was buffered, with the long names
+    // cut. A spilled sort widens the records from the second run on, and cuts
+    // only the long names in its first run
+    let in_memory = sort(input.clone(), &key, options(3, 256 * 1024), AMPLE).await;
+    assert_eq!(in_memory.widenings, 0);
+    assert!(in_memory.cut_keys > 5000, "{} cut keys", in_memory.cut_keys);
+    assert_sorted(&input, &in_memory.batches, &key);
+    let spilled = sort(input.clone(), &key, options(3, 256 * 1024), 2 * 1024 * 1024).await;
+    assert!(spilled.widenings > 0);
+    assert!(
+        spilled.cut_keys < in_memory.cut_keys,
+        "{} cut keys",
+        spilled.cut_keys
+    );
+    assert_sorted(&input, &spilled.batches, &key);
 }
 
 /// Keys too long for any record are sorted by a prefix that is respelled for
