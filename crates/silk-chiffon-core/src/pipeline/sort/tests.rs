@@ -816,6 +816,44 @@ async fn a_pool_too_small_for_the_floor_fails_and_says_what_it_needs() {
     assert_eq!(context.runtime_env().memory_pool.reserved(), 0);
 }
 
+/// A key whose dictionary values are long is a copy of a long value for every
+/// row in row format, so the merge of what such a sort spilled as Arrow
+/// batches holds far more for each batch's keys than the batch itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn merges_spilled_batches_whose_keys_are_long_dictionary_values() {
+    let mut random = Random(107);
+    let values = Arc::new(StringArray::from_iter_values((0..4).map(|value| {
+        format!(
+            "{value}{}",
+            "a long value that every row repeats ".repeat(30)
+        )
+    })));
+    let input: Vec<_> = (0..3)
+        .map(|partition| {
+            batches(&mut random, 20, 500, partition * 1_000_000, random_code)
+                .into_iter()
+                .map(|batch| {
+                    let keys: Int32Array = (0..batch.num_rows())
+                        .map(|row| Some(i32::try_from((row * 7) % 4).unwrap()))
+                        .collect();
+                    let tags =
+                        DictionaryArray::try_new(keys, Arc::clone(&values) as ArrayRef).unwrap();
+                    let mut fields = batch.schema().fields().to_vec();
+                    fields.push(Arc::new(Field::new("tag", tags.data_type().clone(), true)));
+                    let mut columns = batch.columns().to_vec();
+                    columns.push(Arc::new(tags));
+                    RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap()
+                })
+                .collect()
+        })
+        .collect();
+    let input = with_unencodable_column(input);
+    let key = [("tag", ASCENDING), ("row", ASCENDING)];
+    let sorted = sort(input.clone(), &key, options(3, 64 * 1024), 8 * 1024 * 1024).await;
+    assert!(sorted.spill_files > 1, "{} spill files", sorted.spill_files);
+    assert_sorted(&input, &sorted.batches, &key);
+}
+
 /// A plan says which of the three ways its sort holds rows, which is how a
 /// sort that fell back to keeping batches is told from the others.
 #[test]

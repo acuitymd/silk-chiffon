@@ -113,7 +113,7 @@ use keys::{Contents, RowEncoder};
 use ranges::{Ranges, SPLIT_HEADROOM_SHARE};
 use record::Words;
 use run::{Buffered, Grant, Lane, Splitters};
-use spill::{BatchFlush, BlockFlush, Segment, Slices, Spill};
+use spill::{BatchFlush, BlockFlush, MergeMemory, Segment, Slices, Spill};
 use workers::Workers;
 
 /// The operator's name in plans.
@@ -556,6 +556,18 @@ impl Budget {
         Ok(floor)
     }
 
+    /// Takes `bytes` without asking the pool, for DataFusion code that grows a
+    /// reservation where it cannot take a refusal. The sort itself never
+    /// does.
+    fn take_unchecked(&self, bytes: usize) {
+        let mut state = self.state.lock();
+        state.used += bytes;
+        let size = self.reservation.size();
+        if state.used > size {
+            self.reservation.grow(state.used - size);
+        }
+    }
+
     /// Gives everything back, at the sort's end.
     fn close(&self) {
         let mut state = self.state.lock();
@@ -843,7 +855,7 @@ impl Sorter {
             let batch_bytes = shape.spill_batch_rows * output_row_bytes;
             (
                 spill.batch_writer_bytes(batch_bytes),
-                Spill::batch_input_bytes(batch_bytes),
+                Spill::batch_input_bytes(batch_bytes, shape.spill_batch_rows * key_bytes),
             )
         } else {
             (
@@ -1280,7 +1292,10 @@ impl Sorter {
             return Ok(None);
         };
         let workers = Arc::clone(&self.workers);
-        let memory = plan.merge_memory(&grouped);
+        let memory = MergeMemory {
+            budget: Arc::clone(&self.budget),
+            planned: plan.merge_memory(&grouped),
+        };
         let compacted = self
             .on_pool(move || {
                 let groups = grouped.by_group.len();
@@ -1294,7 +1309,7 @@ impl Sorter {
                         let Some((group, segments)) = next else {
                             return;
                         };
-                        match spill.compact(segments, plan.fan_in, memory) {
+                        match spill.compact(segments, plan.fan_in, &memory) {
                             Ok(segment) => compacted.lock()[group] = segment,
                             Err(error) => *failure.lock() = Some(error),
                         }
@@ -1537,19 +1552,21 @@ impl Sorter {
             let spare = plan.bytes.saturating_sub(plan.fan_in * grouped.input_bytes);
             (spare / grouped.batch_bytes.max(1)).clamp(2, group_batches)
         };
-        let memory = plan.merge_memory(&grouped);
+        let memory = MergeMemory {
+            budget: Arc::clone(&self.budget),
+            planned: plan.merge_memory(&grouped),
+        };
         let result = emit_in_order(groups, plan.concurrent, &output, &self.metrics, |group| {
             let (sender, receiver) = mpsc::channel(batches);
             let segments = std::mem::take(&mut grouped.by_group[group]);
             let spill = Arc::clone(&spill);
-            let budget = Arc::clone(&self.budget);
+            let memory = memory.clone();
             self.workers.spawn(move || {
-                let _budget = budget;
                 if sender.is_closed() {
                     // the output was dropped before this group's turn
                     return;
                 }
-                let sent = spill.merge(&segments, memory, |batch| send(&sender, Ok(batch)));
+                let sent = spill.merge(&segments, &memory, |batch| send(&sender, Ok(batch)));
                 if let Err(error) = sent {
                     // the receiver is gone when the output was dropped
                     let _ = send(&sender, Err(error));
@@ -1587,7 +1604,10 @@ impl Sorter {
         let writer = spill.batch_writer_bytes(grouped.batch_bytes);
         let at_once = (plan.bytes / (widest_pass * grouped.input_bytes + writer).max(1))
             .clamp(1, self.options.parallelism);
-        let memory = plan.merge_memory(grouped);
+        let memory = MergeMemory {
+            budget: Arc::clone(&self.budget),
+            planned: plan.merge_memory(grouped),
+        };
         let groups = std::mem::take(&mut grouped.by_group);
         let workers = Arc::clone(&self.workers);
         grouped.by_group = self
@@ -1595,7 +1615,7 @@ impl Sorter {
                 let mut reduced = Vec::with_capacity(groups.len());
                 for together in groups.chunks(at_once) {
                     let passes = workers.map(together.len(), &|group| {
-                        spill.reduce(together[group].clone(), plan.fan_in, memory)
+                        spill.reduce(together[group].clone(), plan.fan_in, &memory)
                     });
                     for segments in passes {
                         reduced.push(segments?);

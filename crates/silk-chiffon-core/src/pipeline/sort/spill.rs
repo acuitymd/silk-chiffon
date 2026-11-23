@@ -32,8 +32,9 @@
 //!   and they are sent in key order.
 //! - **Memory.** DataFusion's merge reserves memory for the batches it holds,
 //!   and fails when the pool refuses. So the sort sizes the merges from its
-//!   own budget before they start, and gives each a pool of what it set aside
-//!   for that merge's inputs. Where the budget does not cover reading a
+//!   own budget before they start, and gives each a pool that grants what it
+//!   set aside for that merge's inputs and, beyond it, what the sort's budget
+//!   grants: see [`MergeMemory`]. Where the budget does not cover reading a
 //!   group's segments at once, the group is first merged down in passes.
 //!
 //! This is slower than merging blocks in slices, because the groups are few,
@@ -52,6 +53,7 @@
 mod rows;
 
 use std::{
+    fmt,
     fs::File,
     io::{Read, Seek, SeekFrom, Write},
     sync::Arc,
@@ -64,7 +66,7 @@ use datafusion::{
     execution::{
         SendableRecordBatchStream, SpillFile, SpillWriter,
         disk_manager::DiskManager,
-        memory_pool::{GreedyMemoryPool, MemoryConsumer, MemoryPool},
+        memory_pool::{MemoryConsumer, MemoryLimit, MemoryPool, MemoryReservation},
         runtime_env::RuntimeEnv,
     },
     physical_expr::LexOrdering,
@@ -77,6 +79,7 @@ use datafusion::{
 use futures::StreamExt;
 
 use super::keys::{Contents, RowEncoder};
+use super::{Budget, run::Grant};
 use super::{
     record::{Order, Words},
     run::{Batcher, Input, Kept, merge_rounds},
@@ -86,8 +89,14 @@ use rows::{BLOCK_KEY_MULTIPLE, RowBatcher};
 
 /// Batches one input of a merge of Arrow files holds at once: the reader's
 /// two buffered batches, the one it is decoding, the one the merge is reading,
-/// and that batch's keys in row format, which can be larger than the batch.
+/// and room besides.
 const MERGE_INPUT_BATCHES: usize = 6;
+
+/// Batches of keys in row format that one input of such a merge holds: those
+/// of the batch the merge is reading, and of the next. They can be far larger
+/// than the batch, as for a dictionary of long values, so they are measured
+/// as the segment is written.
+const MERGE_INPUT_KEY_BATCHES: usize = 2;
 
 /// Bytes before each block: the block's length, then its length as stored,
 /// each a little-endian `u32`.
@@ -122,6 +131,122 @@ const MIN_BLOCK_RECORDS: usize = 64;
 /// Batches a writer of Arrow batches holds: the batch it is given, that batch
 /// encoded, and the encoding compressed.
 const BATCH_WRITER_BATCHES: usize = 3;
+
+/// The memory a merge of Arrow segments may reserve: `planned` bytes that the
+/// sort set aside for it, and beyond them what the sort's budget grants.
+///
+/// DataFusion's merge keeps each batch it reads with that batch's keys in row
+/// format, which can be far larger than the batch: a dictionary of long
+/// values is a copy of a value for every row. So no share fixed in advance
+/// fits every merge, and one that did not would fail a sort the pool has
+/// room for.
+#[derive(Clone)]
+pub(super) struct MergeMemory {
+    pub(super) budget: Arc<Budget>,
+    pub(super) planned: usize,
+}
+
+/// The pool a merge of Arrow segments reserves from: see [`MergeMemory`].
+struct MergePool {
+    memory: MergeMemory,
+    state: parking_lot::Mutex<MergeState>,
+}
+
+#[derive(Default)]
+struct MergeState {
+    /// What the merge holds.
+    reserved: usize,
+    /// The part of `reserved` beyond `planned`, taken from the sort's budget.
+    borrowed: usize,
+}
+
+impl MergePool {
+    /// Gives back what is borrowed beyond what the merge holds.
+    fn settle(&self, state: &mut MergeState) {
+        let needed = state.reserved.saturating_sub(self.memory.planned);
+        if state.borrowed > needed {
+            self.memory.budget.release(state.borrowed - needed);
+            state.borrowed = needed;
+        }
+    }
+}
+
+impl fmt::Debug for MergePool {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("MergePool").finish_non_exhaustive()
+    }
+}
+
+impl fmt::Display for MergePool {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "ParallelSortMerge({} planned)",
+            self.memory.planned
+        )
+    }
+}
+
+impl MemoryPool for MergePool {
+    fn name(&self) -> &str {
+        "ParallelSortMerge"
+    }
+
+    fn grow(&self, _reservation: &MemoryReservation, additional: usize) {
+        let mut state = self.state.lock();
+        state.reserved += additional;
+        let over = state
+            .reserved
+            .saturating_sub(self.memory.planned + state.borrowed);
+        if over > 0 {
+            // DataFusion's merge asks with `try_grow`, and this is only for a
+            // caller that cannot take a refusal
+            self.memory.budget.take_unchecked(over);
+            state.borrowed += over;
+        }
+    }
+
+    fn shrink(&self, _reservation: &MemoryReservation, shrink: usize) {
+        let mut state = self.state.lock();
+        state.reserved -= shrink;
+        self.settle(&mut state);
+    }
+
+    fn try_grow(&self, _reservation: &MemoryReservation, additional: usize) -> Result<()> {
+        let mut state = self.state.lock();
+        let over =
+            (state.reserved + additional).saturating_sub(self.memory.planned + state.borrowed);
+        if over > 0 {
+            if !self.memory.budget.grant(over) {
+                return Err(DataFusionError::ResourcesExhausted(format!(
+                    "the memory pool is too small for this sort to merge what it spilled, which \
+                     needs {over} bytes more than the {} it set aside",
+                    self.memory.planned
+                )));
+            }
+            state.borrowed += over;
+        }
+        state.reserved += additional;
+        Ok(())
+    }
+
+    fn reserved(&self) -> usize {
+        self.state.lock().reserved
+    }
+
+    fn memory_limit(&self) -> MemoryLimit {
+        MemoryLimit::Infinite
+    }
+}
+
+impl Drop for MergePool {
+    fn drop(&mut self) {
+        let state = self.state.get_mut();
+        state.reserved = 0;
+        let borrowed = std::mem::take(&mut state.borrowed);
+        self.memory.budget.release(borrowed);
+    }
+}
 
 /// One group of one flush of Arrow batches, on disk.
 #[derive(Clone)]
@@ -508,8 +633,9 @@ impl Spill {
 
     /// What a merge of Arrow segments whose batches are `batch_bytes` needs
     /// for each segment it reads.
-    pub(super) fn batch_input_bytes(batch_bytes: usize) -> usize {
-        MERGE_INPUT_BATCHES * batch_bytes
+    /// `key_bytes` is what the keys of one such batch take in row format.
+    pub(super) fn batch_input_bytes(batch_bytes: usize, key_bytes: usize) -> usize {
+        MERGE_INPUT_BATCHES * batch_bytes + MERGE_INPUT_KEY_BATCHES * key_bytes
     }
 
     /// Writes one flush as `parts` files, in parallel. `fill` pushes a file's
@@ -639,7 +765,7 @@ impl Spill {
     pub(super) fn merge(
         &self,
         segments: &[Segment],
-        memory: usize,
+        memory: &MergeMemory,
         emit: impl FnMut(RecordBatch) -> Result<()>,
     ) -> Result<()> {
         if segments.is_empty() {
@@ -653,7 +779,7 @@ impl Spill {
         &self,
         mut segments: Vec<Segment>,
         fan_in: usize,
-        memory: usize,
+        memory: &MergeMemory,
     ) -> Result<Vec<Segment>> {
         let fan_in = fan_in.max(2);
         while segments.len() > fan_in {
@@ -671,7 +797,7 @@ impl Spill {
         &self,
         segments: Vec<Segment>,
         fan_in: usize,
-        memory: usize,
+        memory: &MergeMemory,
     ) -> Result<Option<Segment>> {
         let mut segments = self.reduce(segments, fan_in, memory)?;
         if segments.len() > 1 {
@@ -681,7 +807,7 @@ impl Spill {
     }
 
     /// Merges segments into one new spill file.
-    fn merge_to_file(&self, segments: &[Segment], memory: usize) -> Result<Option<Segment>> {
+    fn merge_to_file(&self, segments: &[Segment], memory: &MergeMemory) -> Result<Option<Segment>> {
         self.write_batches("sort merge pass", |push| {
             self.merge_batches(segments, memory, |batch| push(&batch))
         })
@@ -724,16 +850,18 @@ impl Spill {
         fill: impl FnOnce(&mut dyn FnMut(&RecordBatch) -> Result<()>) -> Result<()>,
     ) -> Result<Option<Segment>> {
         let mut writer = self.batches.create_in_progress_file(what)?;
-        let (mut max_batch_bytes, mut rows) = (0, 0);
+        let (mut max_batch_bytes, mut max_key_bytes, mut rows) = (0, 0, 0);
         fill(&mut |batch| {
             rows += batch.num_rows();
             max_batch_bytes = max_batch_bytes.max(writer.append_batch(batch)?);
+            max_key_bytes = max_key_bytes.max(self.encoder.encode(batch)?.size());
             Ok(())
         })?;
         Ok(writer.finish()?.map(|file| Segment {
             file,
             rows,
-            input_bytes: max_batch_bytes * MERGE_INPUT_BATCHES,
+            input_bytes: max_batch_bytes * MERGE_INPUT_BATCHES
+                + max_key_bytes * MERGE_INPUT_KEY_BATCHES,
             batch_bytes: max_batch_bytes,
         }))
     }
@@ -742,7 +870,7 @@ impl Spill {
     fn merge_batches(
         &self,
         segments: &[Segment],
-        memory: usize,
+        memory: &MergeMemory,
         mut emit: impl FnMut(RecordBatch) -> Result<()>,
     ) -> Result<()> {
         let mut merged = {
@@ -758,12 +886,11 @@ impl Spill {
         Ok(())
     }
 
-    /// The merge of `segments`, which may reserve `memory`: what the sort set
-    /// aside for it from its own budget.
+    /// The merge of `segments`, which reserves from `memory`.
     fn batch_stream(
         &self,
         segments: &[Segment],
-        memory: usize,
+        memory: &MergeMemory,
     ) -> Result<SendableRecordBatchStream> {
         let mut inputs = segments
             .iter()
@@ -783,7 +910,10 @@ impl Spill {
             .with_batch_size(self.batch_size)
             .with_fetch(None)
             .with_reservation({
-                let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(memory.max(1)));
+                let pool: Arc<dyn MemoryPool> = Arc::new(MergePool {
+                    memory: memory.clone(),
+                    state: parking_lot::Mutex::new(MergeState::default()),
+                });
                 MemoryConsumer::new("ParallelSortMerge").register(&pool)
             })
             .build()

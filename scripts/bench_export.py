@@ -726,13 +726,16 @@ def generate_mixed(con, args: argparse.Namespace, rows: int) -> None:
 def generate_late_keys(con, args: argparse.Namespace, rows: int) -> None:
     """One file at a time, in row order, so that every row group starts with its short
     paths."""
-    per_file = max(1, rows // LATE_KEY_FILES)
-    for file in range(LATE_KEY_FILES):
+    files = max(1, min(LATE_KEY_FILES, rows))
+    first = 0
+    for file in range(files):
+        # the first files take one row more when the rows do not divide evenly
+        file_rows = rows // files + (1 if file < rows % files else 0)
         con.execute(
             f"""
             COPY (
                 SELECT
-                    CAST({file * per_file} + i AS BIGINT) AS id,
+                    CAST({first} + i AS BIGINT) AS id,
                     CASE WHEN i % {LATE_KEY_ROW_GROUP} < {LATE_KEY_SHORT_ROWS}
                          THEN CASE WHEN i % 2 = 0 THEN NULL ELSE '' END
                          ELSE '{LATE_KEY_PREFIX}'
@@ -740,12 +743,13 @@ def generate_late_keys(con, args: argparse.Namespace, rows: int) -> None:
                          END AS path,
                     CAST((hash({file}, i, 1) % 100000000) / 100.0 AS DECIMAL(18, 2)) AS amount,
                     repeat('n', 10 + CAST(hash({file}, i, 2) % 30 AS INTEGER)) AS note
-                FROM range({per_file}) AS t(i)
+                FROM range({file_rows}) AS t(i)
                 ORDER BY i
             ) TO {sql_string(args.out / f"data_{file:02}.parquet")}
                 (FORMAT parquet, COMPRESSION zstd, ROW_GROUP_SIZE {LATE_KEY_ROW_GROUP})
             """
         )
+        first += file_rows
 
 
 def generate(args: argparse.Namespace) -> None:
