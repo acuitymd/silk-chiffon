@@ -26,7 +26,9 @@ google-cloud-auth = { version = "=1.19.0", default-features = false }
 http = "^1.5.0"
 humantime.workspace = true
 hyper = { version = "^1.12.0", default-features = false, features = ["client", "http1", "http2"] }
-lz4_flex = "^0.14.2"
+# no default features: they include `safe-encode` and `safe-decode`, which would
+# also switch arrow-ipc and parquet to the slower implementation they opted out of
+lz4_flex = { version = "^0.14.2", default-features = false, features = ["frame", "std"] }
 percent-encoding = "^2.3.2"
 prost = "^0.14.6"
 prost-types = "^0.14.6"

@@ -4,6 +4,7 @@ mod config;
 mod error;
 mod input;
 mod memory_pool;
+mod sort;
 
 use std::{
     fmt,
@@ -22,16 +23,23 @@ use datafusion::{
         TaskContext,
         memory_pool::{MemoryPool, TrackConsumersPool},
     },
-    physical_plan::{ExecutionPlan, RecordBatchStream, SendableRecordBatchStream, execute_stream},
-    prelude::{DataFrame, SessionConfig, SessionContext},
+    physical_expr::{LexOrdering, PhysicalSortExpr, expressions::Column},
+    physical_plan::{
+        ExecutionPlan, ExecutionPlanProperties, RecordBatchStream, SendableRecordBatchStream,
+        execute_stream,
+    },
+    prelude::{DataFrame, SessionConfig, SessionContext, col},
 };
 use futures::Stream;
 use sysinfo::System;
 use tempfile::TempDir;
 
 use memory_pool::ReservedSpillPool;
+use sort::{ParallelSortExec, ParallelSortOptions};
 
-pub use config::{QueryDialect, SpillCompression};
+use crate::{NullPlacement, SortColumn, SortDirection};
+
+pub use config::{QueryDialect, SortEngine, SpillCompression};
 pub use error::{PipelineExecutionStartError, PipelinePreparationError};
 pub use input::union_input_providers_by_name;
 
@@ -46,6 +54,8 @@ struct PipelineConfig {
     sort_spill_reservation_bytes: Option<usize>,
     non_spillable_reserve: Option<usize>,
     memory_pool_top_consumers: usize,
+    sort: Vec<SortColumn>,
+    sort_engine: SortEngine,
 }
 
 impl Default for PipelineConfig {
@@ -61,6 +71,8 @@ impl Default for PipelineConfig {
             sort_spill_reservation_bytes: None,
             non_spillable_reserve: None,
             memory_pool_top_consumers: 10,
+            sort: Vec::new(),
+            sort_engine: SortEngine::default(),
         }
     }
 }
@@ -152,6 +164,18 @@ impl Pipeline {
         self
     }
 
+    /// Sorts the final plan's output by these columns. Empty means unsorted.
+    pub fn with_sort(mut self, columns: Vec<SortColumn>) -> Self {
+        self.config.sort = columns;
+        self
+    }
+
+    /// Selects the operator that performs [`Self::with_sort`].
+    pub fn with_sort_engine(mut self, engine: SortEngine) -> Self {
+        self.config.sort_engine = engine;
+        self
+    }
+
     /// Creates the session shared by input-provider construction, planning, and execution.
     pub fn create_session_context(
         &mut self,
@@ -219,7 +243,7 @@ impl Pipeline {
         input: DataFrame,
         session: SessionContext,
     ) -> std::result::Result<PreparedPipeline, PipelinePreparationError> {
-        self.prepare_inner(input)
+        self.prepare_inner(input, &session)
             .await
             .map_err(PipelinePreparationError::new)
             .map(|plan| PreparedPipeline {
@@ -230,13 +254,87 @@ impl Pipeline {
             })
     }
 
-    async fn prepare_inner(&mut self, data_frame: DataFrame) -> Result<Arc<dyn ExecutionPlan>> {
-        let plan = data_frame.create_physical_plan().await?;
+    async fn prepare_inner(
+        &mut self,
+        data_frame: DataFrame,
+        session: &SessionContext,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        let plan = self.plan_with_sort(data_frame, session).await?;
         if plan.properties().boundedness.is_unbounded() {
             anyhow::bail!("current outputs require a bounded final plan");
         }
         Ok(plan)
     }
+
+    async fn plan_with_sort(
+        &self,
+        data_frame: DataFrame,
+        session: &SessionContext,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        let columns = &self.config.sort;
+        if columns.is_empty() {
+            return Ok(data_frame.create_physical_plan().await?);
+        }
+        if self.config.sort_engine == SortEngine::Parallel {
+            let unsorted = data_frame.clone().create_physical_plan().await?;
+            // an input that is already in order needs no sort, and DataFusion's
+            // planner is what knows how to keep that order
+            if let Some(ordering) = physical_ordering(&unsorted, columns)
+                && !unsorted
+                    .equivalence_properties()
+                    .ordering_satisfy(ordering.clone())?
+                && ParallelSortExec::supports(&unsorted, &ordering)
+            {
+                let parallelism = self
+                    .config
+                    .target_partitions
+                    .unwrap_or_else(|| session.state().config().target_partitions());
+                return Ok(Arc::new(ParallelSortExec::try_new(
+                    unsorted,
+                    ordering,
+                    ParallelSortOptions::new(parallelism),
+                )?));
+            }
+        }
+        Ok(sort_data_frame(data_frame, columns)?
+            .create_physical_plan()
+            .await?)
+    }
+}
+
+fn sort_data_frame(data_frame: DataFrame, columns: &[SortColumn]) -> Result<DataFrame> {
+    Ok(data_frame.sort(
+        columns
+            .iter()
+            .map(|column| {
+                col(column.name()).sort(
+                    column.direction() == SortDirection::Ascending,
+                    column.null_placement() == NullPlacement::First,
+                )
+            })
+            .collect(),
+    )?)
+}
+
+/// The sort as an ordering over the plan's own columns. `None` when a column
+/// is not in the plan's schema under that exact name, which leaves resolving
+/// the name to DataFusion's planner.
+fn physical_ordering(plan: &Arc<dyn ExecutionPlan>, columns: &[SortColumn]) -> Option<LexOrdering> {
+    let schema = plan.schema();
+    let expressions = columns
+        .iter()
+        .map(|column| {
+            let expression = Column::new_with_schema(column.name(), &schema).ok()?;
+            Some(PhysicalSortExpr::new(
+                Arc::new(expression),
+                arrow::compute::SortOptions {
+                    descending: column.direction() == SortDirection::Descending,
+                    nulls_first: column.null_placement() == NullPlacement::First,
+                },
+            ))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    LexOrdering::new(expressions)
 }
 
 /// A validated physical plan awaiting execution.
@@ -389,10 +487,80 @@ fn parse_cgroup_v1_limit(content: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use arrow::datatypes::Schema;
+    use arrow::{
+        array::Int32Array,
+        datatypes::{DataType, Field, Schema},
+    };
     use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+    use futures::TryStreamExt;
 
     use super::*;
+
+    /// Sorts one nullable column through a whole pipeline and returns the plan's
+    /// top operator with the sorted values.
+    async fn sorted_ids(engine: SortEngine, column: SortColumn) -> (String, Vec<Option<i32>>) {
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, true)]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Int32Array::from(vec![
+                Some(3),
+                None,
+                Some(1),
+                None,
+                Some(2),
+            ]))],
+        )
+        .unwrap();
+        let mut pipeline = Pipeline::new()
+            .with_sort(vec![column])
+            .with_sort_engine(engine);
+        let session = pipeline.create_session_context().unwrap();
+        let input = session.read_batch(batch).unwrap();
+        let prepared = pipeline.prepare(input, session).await.unwrap();
+        let operator = prepared.execution_plan().name().to_owned();
+        let batches: Vec<RecordBatch> = prepared
+            .begin_execution()
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        let ids = batches
+            .iter()
+            .flat_map(|batch| {
+                batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<Int32Array>()
+                    .unwrap()
+                    .iter()
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        (operator, ids)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn every_sort_engine_honors_direction_and_null_placement() {
+        for (engine, operator) in [
+            (SortEngine::Parallel, "ParallelSortExec"),
+            (SortEngine::DataFusion, "SortExec"),
+        ] {
+            let (planned, ascending) = sorted_ids(
+                engine,
+                SortColumn::new("id", SortDirection::Ascending, NullPlacement::First),
+            )
+            .await;
+            assert_eq!(planned, operator);
+            assert_eq!(ascending, vec![None, None, Some(1), Some(2), Some(3)]);
+
+            let (_, descending) = sorted_ids(
+                engine,
+                SortColumn::new("id", SortDirection::Descending, NullPlacement::Last),
+            )
+            .await;
+            assert_eq!(descending, vec![Some(3), Some(2), Some(1), None, None]);
+        }
+    }
 
     #[test]
     fn new_and_default_sessions_use_the_same_memory_diagnostics() {
