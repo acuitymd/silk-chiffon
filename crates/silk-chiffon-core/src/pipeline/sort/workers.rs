@@ -8,6 +8,10 @@
 use datafusion::error::{DataFusionError, Result};
 use rayon::prelude::*;
 
+/// No panic handler is set, so a job that panics aborts the process. With one,
+/// a job sending a part of the output would drop its sender, which the output
+/// reads as the end of that part, and the sort would end short without an
+/// error.
 pub(super) struct Workers {
     pool: rayon::ThreadPool,
 }

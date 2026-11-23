@@ -72,7 +72,7 @@ use std::{
     ops::Range,
     sync::{
         Arc, OnceLock,
-        atomic::{AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering},
     },
     time::Instant,
 };
@@ -151,9 +151,10 @@ const ROW_BLOCK_SCRATCH_SHARE: usize = 32;
 const MIN_ROW_BLOCK_BYTES: usize = 1024;
 const MAX_ROW_BLOCK_BYTES: usize = 256 * 1024;
 
-/// Spill files kept at once where a process may open 1024 files, which is the
-/// common default. Each spill file is an open file descriptor for as long as
-/// it exists.
+/// Spill files kept at once where the process's open-file limit cannot be
+/// read: a quarter of 1024, the common default. Each spill file is an open
+/// file descriptor for as long as it exists.
+#[cfg(not(unix))]
 const MIN_OPEN_FILES: usize = 256;
 
 /// The most spill files kept at once, however many the process may open.
@@ -175,7 +176,8 @@ fn open_file_limit() -> usize {
         });
     #[cfg(not(unix))]
     let allowed = MIN_OPEN_FILES;
-    allowed.clamp(MIN_OPEN_FILES, MAX_OPEN_FILES)
+    // a merge reads two at least; a lower limit than that cannot be helped
+    allowed.clamp(2, MAX_OPEN_FILES)
 }
 
 /// Settings for [`ParallelSortExec`].
@@ -216,8 +218,8 @@ pub struct ParallelSortExec {
 impl ParallelSortExec {
     /// Whether this operator can sort `input` by `ordering`. It needs every sort
     /// column to have a row-format encoding.
-    pub fn supports(input: &Arc<dyn ExecutionPlan>, ordering: &LexOrdering) -> bool {
-        keys::supports(ordering, &input.schema())
+    pub fn supports(schema: &SchemaRef, ordering: &LexOrdering) -> bool {
+        keys::supports(ordering, schema)
     }
 
     /// Creates the sort. Check [`Self::supports`] first.
@@ -227,6 +229,9 @@ impl ParallelSortExec {
         options: ParallelSortOptions,
     ) -> Result<Self> {
         let mut equivalence = input.equivalence_properties().clone();
+        // the input's partitions become one, where a value constant within
+        // each partition need not be constant
+        equivalence.clear_per_partition_constants();
         equivalence.reorder(ordering.clone())?;
         let boundedness = match input.boundedness() {
             Boundedness::Unbounded { .. } => Boundedness::Unbounded {
@@ -440,6 +445,9 @@ struct Budget {
     /// The part of the reservation held for sorting ranges, from the first
     /// batch to the end.
     scratch: OnceLock<usize>,
+    /// The part held for the indexes of flushes on disk, which are not rows
+    /// buffered for the next flush.
+    index: AtomicUsize,
 }
 
 impl Grant for Budget {
@@ -457,7 +465,20 @@ impl Budget {
         Self {
             reservation,
             scratch: OnceLock::new(),
+            index: AtomicUsize::new(0),
         }
+    }
+
+    /// Takes memory for the indexes of flushes, which cannot wait for the
+    /// pool: the flushes are already written.
+    fn hold_index(&self, bytes: usize) {
+        self.reservation.grow(bytes);
+        self.index.fetch_add(bytes, Ordering::AcqRel);
+    }
+
+    fn release_index(&self, bytes: usize) {
+        self.index.fetch_sub(bytes, Ordering::AcqRel);
+        self.reservation.shrink(bytes);
     }
 
     /// Takes the scratch memory, once.
@@ -471,9 +492,12 @@ impl Budget {
         self.scratch.get().copied().unwrap_or(0)
     }
 
-    /// Bytes held beyond the scratch memory.
+    /// Bytes held for rows buffered since the last flush, and for work on
+    /// them: beyond the scratch memory and the indexes.
     fn held(&self) -> usize {
-        self.reservation.size().saturating_sub(self.scratch())
+        self.reservation
+            .size()
+            .saturating_sub(self.scratch() + self.index.load(Ordering::Acquire))
     }
 
     fn release(&self, bytes: usize) {
@@ -493,6 +517,11 @@ impl Budget {
         self.force(floor);
         floor
     }
+}
+
+/// Bytes that the indexes of `flushes` hold in memory.
+fn index_bytes(flushes: &[BlockFlush]) -> usize {
+    flushes.iter().map(BlockFlush::index_bytes).sum()
 }
 
 /// Divides `ranges` key ranges into at most `files` stretches of consecutive
@@ -600,8 +629,11 @@ impl Sorter {
             batch_size: context.session_config().batch_size(),
             options,
             // more than half the pool would leave no room for the consumers
-            // that cannot spill, which the pool serves by overdrawing
-            min_run_bytes: options.min_run_bytes.min(pool_bytes / 2),
+            // that cannot spill, which the pool serves by overdrawing. At
+            // least a byte: with nothing buffered, a pool too small for any
+            // batch then takes one by force, where it would flush nothing
+            // forever
+            min_run_bytes: options.min_run_bytes.min(pool_bytes / 2).max(1),
             pool_bytes,
             spill_compression: context.session_config().spill_compression(),
             spill_metrics: SpillMetrics::new(&plan.metrics, 0),
@@ -751,7 +783,9 @@ impl Sorter {
                 force = true;
                 continue;
             }
-            self.flush().await?;
+            // with nothing buffered to write, the pool is full of other
+            // things, and waiting for it would wait forever
+            force = !self.flush().await?;
         }
     }
 
@@ -814,11 +848,11 @@ impl Sorter {
 
     /// Sorts everything buffered and writes it to disk. Needs the gate held
     /// exclusively.
-    async fn flush(self: &Arc<Self>) -> Result<()> {
+    async fn flush(self: &Arc<Self>) -> Result<bool> {
         let buffered = self.take_buffered();
         if buffered.num_rows() == 0 {
             self.budget.release(buffered.held());
-            return Ok(());
+            return Ok(false);
         }
         let _timer = self.metrics.flush_time.timer();
         self.metrics.flushes.add(1);
@@ -834,7 +868,7 @@ impl Sorter {
             self.compact().await?;
         }
         self.flush_count.fetch_add(1, Ordering::AcqRel);
-        Ok(())
+        Ok(true)
     }
 
     /// Writes sorted ranges to disk as one flush of up to `files` files. Runs
@@ -868,6 +902,8 @@ impl Sorter {
                 self.metrics
                     .flush_files
                     .set_max(new.iter().map(BlockFlush::files).max().unwrap_or(0));
+                // the index stays in memory until the flush is merged
+                self.budget.hold_index(index_bytes(&new));
                 all.extend(new);
             }
             (Flushes::Batches(all), Flushes::Batches(new)) => {
@@ -890,9 +926,11 @@ impl Sorter {
         };
         match on_disk {
             Flushes::Blocks(flushes) => {
+                let index = index_bytes(&flushes);
                 let merged = self
                     .merge_block_flushes(flushes, self.options.parallelism)
                     .await?;
+                self.budget.release_index(index);
                 self.keep(Flushes::Blocks(vec![merged]));
             }
             Flushes::Batches(flushes) => {
@@ -1074,12 +1112,25 @@ impl Sorter {
             // leave exactly `fan_in` when one pass can
             let count = fan_in.min(flushes.len() - fan_in + 1);
             let merged: Vec<BlockFlush> = flushes.drain(..count).collect();
+            let merged_index = index_bytes(&merged);
             let merged = self.on_pool({
                 let (spill, files) = (Arc::clone(&self.shape().spill), self.options.parallelism);
                 move || spill.merge_flushes(merged, files, 1)
             });
-            flushes.push(merged.await??);
+            match merged.await.and_then(|merged| merged) {
+                Ok(merged) => {
+                    self.budget.hold_index(merged.index_bytes());
+                    self.budget.release_index(merged_index);
+                    flushes.push(merged);
+                }
+                Err(error) => {
+                    self.budget.release(bytes);
+                    return Err(error);
+                }
+            }
         }
+        // a merged flush can have larger blocks than the ones it replaced
+        let input_bytes = shape.spill.input_bytes(&flushes);
         let inputs = flushes.len() * input_bytes;
         let concurrent = (bytes / (inputs + slice_batches * batch_bytes)).clamp(1, at_most);
         // one slice alone buffers what is left of the grant after its inputs
@@ -1090,6 +1141,7 @@ impl Sorter {
         };
         self.metrics.merge_concurrency.set_max(concurrent);
         self.metrics.merge_fan_in.set_max(flushes.len());
+        let index = index_bytes(&flushes);
         let slices = Arc::new(Slices::new(flushes, slice_rows));
         let result = emit_in_order(slices.len(), concurrent, &output, &self.metrics, |slice| {
             let (sender, receiver) = mpsc::channel(batches);
@@ -1109,6 +1161,7 @@ impl Sorter {
         })
         .await;
         self.budget.release(bytes);
+        self.budget.release_index(index);
         result
     }
 

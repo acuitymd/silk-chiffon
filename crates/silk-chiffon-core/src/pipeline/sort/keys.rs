@@ -11,7 +11,7 @@ use std::sync::Arc;
 use arrow::{
     array::{ArrayRef, RecordBatch, new_null_array},
     compute::cast,
-    datatypes::{DataType, SchemaRef},
+    datatypes::{DataType, Field, SchemaRef},
     row::{Row, RowConverter, RowParser, Rows, SortField},
 };
 use datafusion::{
@@ -157,7 +157,7 @@ struct Payload {
 impl Payload {
     /// `None` when rows cannot be kept in row format. The sort then keeps the
     /// batches they arrived in, which is slower: see the module docs of
-    /// [`super`]. Two kinds of column cause it, and both are dictionaries.
+    /// [`super`]. Three kinds of column cause it, and all are dictionaries.
     ///
     /// - **The row format cannot encode it:** a dictionary whose values are
     ///   nested, which is a list of any kind, a struct, a map, or a union.
@@ -167,12 +167,14 @@ impl Payload {
     ///   cast back to a dictionary. Arrow has no such cast for values that
     ///   are booleans, durations, intervals, dictionaries, or run-end
     ///   encoded. The cast is tried here, on a batch of no rows.
+    /// - **The cast back may not be exact:** a dictionary in a field that may
+    ///   not be null: see `loses_dictionary`.
     ///
-    /// Either kind counts wherever it is in a column's type: a list of
+    /// Any of them counts wherever it is in a column's type: a list of
     /// dictionaries of booleans is one. Sort keys count too, as output takes
     /// the key columns back from the keys. This holds no list of types of its
-    /// own, so which types these are follows the Arrow version in use, and
-    /// those above are Arrow 59's.
+    /// own for the first two, so which types those are follows the Arrow
+    /// version in use, and those above are Arrow 59's.
     fn try_new(
         ordering: &LexOrdering,
         schema: &SchemaRef,
@@ -203,7 +205,10 @@ impl Payload {
             .iter()
             .map(|index| SortField::new(schema.field(*index).data_type().clone()))
             .collect();
-        if fields.is_empty() || !RowConverter::supports_fields(&fields) {
+        if fields.is_empty()
+            || !RowConverter::supports_fields(&fields)
+            || schema.fields().iter().any(|field| loses_dictionary(field))
+        {
             return Ok(None);
         }
         let converter = RowConverter::new(fields)?;
@@ -492,6 +497,26 @@ impl RowEncoder {
     }
 }
 
+/// Whether a column is, or holds, a dictionary that its values in row format
+/// may not rebuild exactly. The row format holds a dictionary as its values,
+/// and output casts them back. A field that may not be null can still have a
+/// key that names a null value, which comes back as a null key.
+fn loses_dictionary(field: &Field) -> bool {
+    match field.data_type() {
+        DataType::Dictionary(..) => !field.is_nullable(),
+        DataType::List(child)
+        | DataType::LargeList(child)
+        | DataType::ListView(child)
+        | DataType::LargeListView(child)
+        | DataType::FixedSizeList(child, _)
+        | DataType::Map(child, _) => loses_dictionary(child),
+        DataType::Struct(children) => children.iter().any(|child| loses_dictionary(child)),
+        DataType::Union(children, _) => children.iter().any(|(_, child)| loses_dictionary(child)),
+        DataType::RunEndEncoded(_, values) => loses_dictionary(values),
+        _ => false,
+    }
+}
+
 /// Whether the row format can encode this ordering. Planning falls back to
 /// DataFusion's sort when it cannot, which in Arrow 59 is when a sort key is,
 /// or holds, a dictionary of nested values.
@@ -706,6 +731,19 @@ mod tests {
         };
         assert!(keeps_rows(dictionary(DataType::Utf8)));
         assert!(keeps_rows(dictionary(DataType::Int64)));
+        // a field that may not be null can still name null values
+        let required: SchemaRef = Arc::new(Schema::new(vec![
+            Field::new("k", DataType::Int32, true),
+            Field::new("c", dictionary(DataType::Utf8), false),
+        ]));
+        assert!(
+            !RowEncoder::try_new(
+                &ordering(&required, &[("k", SortOptions::default())]),
+                &required
+            )
+            .unwrap()
+            .keeps_rows()
+        );
         for values in [
             DataType::Boolean,
             DataType::Duration(TimeUnit::Millisecond),

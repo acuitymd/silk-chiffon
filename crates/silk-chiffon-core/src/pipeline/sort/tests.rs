@@ -610,6 +610,63 @@ async fn sorts_a_dictionary_column_arrow_cannot_rebuild() {
     }
 }
 
+/// A dictionary in a field that may not be null, with keys that name a null
+/// value. Its rows are kept as batches, which keep the keys as they are.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sorts_a_required_dictionary_that_names_a_null_value() {
+    let mut random = Random(103);
+    let values: ArrayRef = Arc::new(StringArray::from(vec![Some("x"), None]));
+    let input: Vec<Vec<RecordBatch>> = (0..2)
+        .map(|partition| {
+            batches(&mut random, 6, 500, partition * 1_000_000, random_code)
+                .into_iter()
+                .map(|batch| {
+                    let keys: Int32Array = (0..batch.num_rows())
+                        .map(|row| Some(i32::try_from(row % 2).unwrap()))
+                        .collect();
+                    let tags = DictionaryArray::try_new(keys, Arc::clone(&values)).unwrap();
+                    let mut fields = batch.schema().fields().to_vec();
+                    fields.push(Arc::new(Field::new(
+                        "tags",
+                        tags.data_type().clone(),
+                        false,
+                    )));
+                    let mut columns = batch.columns().to_vec();
+                    columns.push(Arc::new(tags));
+                    RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap()
+                })
+                .collect()
+        })
+        .collect();
+    for memory_limit in [AMPLE, 512 * 1024] {
+        let sorted = sort(
+            input.clone(),
+            &EXPORT_KEY,
+            options(2, 64 * 1024),
+            memory_limit,
+        )
+        .await;
+        assert_sorted(&input, &sorted.batches, &EXPORT_KEY);
+    }
+}
+
+/// A pool too small for any batch still sorts: each batch is taken by force
+/// and written out on its own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pool_of_one_byte_still_sorts() {
+    let mut random = Random(101);
+    let input: Vec<_> = (0..2)
+        .map(|partition| batches(&mut random, 3, 200, partition * 1_000_000, random_code))
+        .collect();
+    let sorted = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        sort(input.clone(), &EXPORT_KEY, ParallelSortOptions::new(2), 1),
+    )
+    .await
+    .expect("the sort finished");
+    assert_sorted(&input, &sorted.batches, &EXPORT_KEY);
+}
+
 /// A plan says which of the three ways its sort holds rows, which is how a
 /// sort that fell back to keeping batches is told from the others.
 #[test]

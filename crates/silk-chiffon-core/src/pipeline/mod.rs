@@ -28,7 +28,7 @@ use datafusion::{
         ExecutionPlan, ExecutionPlanProperties, RecordBatchStream, SendableRecordBatchStream,
         execute_stream,
     },
-    prelude::{DataFrame, SessionConfig, SessionContext, col},
+    prelude::{DataFrame, SessionConfig, SessionContext, ident},
 };
 use futures::Stream;
 use sysinfo::System;
@@ -138,6 +138,9 @@ impl Pipeline {
     /// Caps how many spill files one sort or aggregation merge pass reads, replacing
     /// DataFusion's unlimited default. Each file in a pass holds non-spillable memory, so
     /// the cap bounds merge memory at the cost of extra passes through disk.
+    ///
+    /// It applies to DataFusion's sort and aggregations. The parallel sort sizes its
+    /// own merges from the memory pool and the open-file limit, and does not read it.
     pub fn with_max_spill_merge_fan_in(mut self, fan_in: Option<usize>) -> Self {
         self.config.max_spill_merge_fan_in = fan_in;
         self
@@ -275,15 +278,21 @@ impl Pipeline {
         if columns.is_empty() {
             return Ok(data_frame.create_physical_plan().await?);
         }
-        if self.config.sort_engine == SortEngine::Parallel {
+        // the names and key types are checked before planning, since planning
+        // twice can do remote work twice, such as opening a read session
+        let logical_schema = Arc::new(data_frame.schema().as_arrow().clone());
+        if self.config.sort_engine == SortEngine::Parallel
+            && physical_ordering(&logical_schema, columns)
+                .is_some_and(|ordering| ParallelSortExec::supports(&logical_schema, &ordering))
+        {
             let unsorted = data_frame.clone().create_physical_plan().await?;
             // an input that is already in order needs no sort, and DataFusion's
             // planner is what knows how to keep that order
-            if let Some(ordering) = physical_ordering(&unsorted, columns)
+            if let Some(ordering) = physical_ordering(&unsorted.schema(), columns)
                 && !unsorted
                     .equivalence_properties()
                     .ordering_satisfy(ordering.clone())?
-                && ParallelSortExec::supports(&unsorted, &ordering)
+                && ParallelSortExec::supports(&unsorted.schema(), &ordering)
             {
                 let parallelism = self
                     .config
@@ -307,7 +316,9 @@ fn sort_data_frame(data_frame: DataFrame, columns: &[SortColumn]) -> Result<Data
         columns
             .iter()
             .map(|column| {
-                col(column.name()).sort(
+                // the name as it is: `col` would fold its case and split it at
+                // dots, where the parallel sort takes the name exactly
+                ident(column.name()).sort(
                     column.direction() == SortDirection::Ascending,
                     column.null_placement() == NullPlacement::First,
                 )
@@ -316,15 +327,14 @@ fn sort_data_frame(data_frame: DataFrame, columns: &[SortColumn]) -> Result<Data
     )?)
 }
 
-/// The sort as an ordering over the plan's own columns. `None` when a column
-/// is not in the plan's schema under that exact name, which leaves resolving
-/// the name to DataFusion's planner.
-fn physical_ordering(plan: &Arc<dyn ExecutionPlan>, columns: &[SortColumn]) -> Option<LexOrdering> {
-    let schema = plan.schema();
+/// The sort as an ordering over the columns of `schema`. `None` when a column
+/// is not in it under that exact name, which leaves resolving the name to
+/// DataFusion's planner.
+fn physical_ordering(schema: &SchemaRef, columns: &[SortColumn]) -> Option<LexOrdering> {
     let expressions = columns
         .iter()
         .map(|column| {
-            let expression = Column::new_with_schema(column.name(), &schema).ok()?;
+            let expression = Column::new_with_schema(column.name(), schema).ok()?;
             Some(PhysicalSortExpr::new(
                 Arc::new(expression),
                 arrow::compute::SortOptions {
@@ -537,6 +547,53 @@ mod tests {
             })
             .collect();
         (operator, ids)
+    }
+
+    /// A column whose name has capitals is sorted by both engines, where
+    /// DataFusion's would fold the name to lower case.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn every_sort_engine_takes_a_column_name_as_it_is() {
+        for engine in [SortEngine::Parallel, SortEngine::DataFusion] {
+            let schema = Arc::new(Schema::new(vec![Field::new(
+                "UserId",
+                DataType::Int32,
+                true,
+            )]));
+            let batch = RecordBatch::try_new(
+                schema,
+                vec![Arc::new(Int32Array::from(vec![Some(2), None, Some(1)]))],
+            )
+            .unwrap();
+            let mut pipeline = Pipeline::new()
+                .with_sort(vec![SortColumn::new(
+                    "UserId",
+                    SortDirection::Ascending,
+                    NullPlacement::Last,
+                )])
+                .with_sort_engine(engine);
+            let session = pipeline.create_session_context().unwrap();
+            let input = session.read_batch(batch).unwrap();
+            let prepared = pipeline.prepare(input, session).await.unwrap();
+            let batches: Vec<RecordBatch> = prepared
+                .begin_execution()
+                .unwrap()
+                .try_collect()
+                .await
+                .unwrap();
+            let ids: Vec<Option<i32>> = batches
+                .iter()
+                .flat_map(|batch| {
+                    batch
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<Int32Array>()
+                        .unwrap()
+                        .iter()
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            assert_eq!(ids, vec![Some(1), Some(2), None], "{engine}");
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

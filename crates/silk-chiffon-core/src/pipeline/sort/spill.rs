@@ -178,6 +178,24 @@ impl BlockFlush {
         self.bytes
     }
 
+    /// Bytes this flush's index of its blocks holds in memory, where a block
+    /// of rows with long keys keeps a long first key.
+    pub(super) fn index_bytes(&self) -> usize {
+        self.firsts.capacity()
+            + size_of::<(usize, usize)>() * self.blocks.capacity()
+            + size_of::<usize>() * (self.block_rows.capacity() + self.first_ends.capacity())
+            + self
+                .parts
+                .iter()
+                .map(|part| size_of::<u64>() * part.offsets.capacity())
+                .sum::<usize>()
+    }
+
+    /// Rows in the largest block.
+    fn largest_block_rows(&self) -> usize {
+        self.block_rows.iter().copied().max().unwrap_or(0)
+    }
+
     fn first(&self, block: usize) -> &[u8] {
         let start = block
             .checked_sub(1)
@@ -393,17 +411,14 @@ impl Spill {
 
     /// Memory a merge needs for one of `flushes`: the block being read, and
     /// the block as it is stored when that is different. A block of records
-    /// also needs the records it adds to a round of the merge, which are
-    /// copied and then sorted with as much again in the worst case. A block
-    /// of rows also needs where its rows start.
+    /// also needs its records restored from it, and the records it adds to a
+    /// round of the merge, which are copied and then sorted with as much again
+    /// in the worst case. A block of rows also needs where each row starts.
     pub(super) fn input_bytes(&self, flushes: &[BlockFlush]) -> usize {
+        let largest = |of: fn(&BlockFlush) -> usize| flushes.iter().map(of).max().unwrap_or(0);
         let block = match self.kind {
             BlockKind::Records => self.block_bytes(),
-            BlockKind::Rows => flushes
-                .iter()
-                .map(|flush| flush.largest_block)
-                .max()
-                .unwrap_or(0),
+            BlockKind::Rows => largest(|flush| flush.largest_block),
         };
         let stored = match self.compression {
             SpillCompression::Uncompressed => 0,
@@ -411,8 +426,12 @@ impl Spill {
             SpillCompression::Zstd => block + ZSTD_CONTEXT_BYTES,
         };
         match self.kind {
-            BlockKind::Records => 3 * block + stored,
-            BlockKind::Rows => block + block / 4 + stored,
+            // the block as read, its records restored from it, their copy in
+            // a round, and what sorting the round moves aside
+            BlockKind::Records => 4 * block + stored,
+            BlockKind::Rows => {
+                block + size_of::<usize>() * (largest(BlockFlush::largest_block_rows) + 1) + stored
+            }
         }
     }
 
