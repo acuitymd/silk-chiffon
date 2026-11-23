@@ -86,18 +86,22 @@ Examples:
 
   Accepts a byte size (e.g. "8GB"), "total[:pct]" for a percentage of total RAM, "available[:pct]" for a percentage of free RAM, or "reserve:<size>" to use total RAM minus a reserved amount. All keyword modes (total, available, reserve) support an optional minimum: "total:80:min:4GB". Examples: "total:90", "available:60%", "reserve:2GB:min:1GB", "4GB".
 
+  The memory pool, which sorts and DataFusion's operators reserve from, is 75% of the budget when the transform sorts and 25% when it does not, and never grants more than that when asked. Output writers, and most input readers, do not reserve from the pool, which is what can take the process over the budget.
+
   Setting this too low may cause out-of-memory errors, since some internal buffers cannot spill to disk. The minimum depends on schema width, batch size, and parallelism — there is no fixed floor.
 
   Default: 80% of total memory, container-aware on Linux.
 
   Default value: `total:80%`
-- `--non-spillable-reserve <NON_SPILLABLE_RESERVE>` — Reserve memory for non-spillable operations (sort merge phases, etc.).
+- `--non-spillable-reserve <NON_SPILLABLE_RESERVE>` — Reserve memory for operators that cannot spill.
 
-  Enables an alternative memory pool that prevents spillable operators (sorts, aggregations) from consuming the entire pool, guaranteeing headroom for non-spillable consumers that would otherwise fail.
+  Keeps spillable operators (sorts, aggregations) out of part of the memory pool, so that consumers that cannot spill, such as input readers and a sort's merge, find it free. The pool grants no more than its size when asked, so such a consumer that finds the pool full fails the transform. A larger reserve makes that less likely, and leaves the sorts less to buffer, so they spill sooner.
+
+  The pool is 75% of `--memory-budget` when the transform sorts and 25% when it does not.
 
   Accepts a percentage (e.g. "10%", "10") or a fixed byte size (e.g. "200MB"). Percentages are resolved against the memory pool size.
 
-  When not set, the default DataFusion FairSpillPool is used instead.
+  Default: 20% of the pool.
 - `--memory-pool-top-consumers <MEMORY_POOL_TOP_CONSUMERS>` — Number of top memory consumers to report in out-of-memory error messages.
 
   When a memory allocation fails, the error message includes the N largest memory consumers to help diagnose what is using the pool. Set to 0 to report all consumers.

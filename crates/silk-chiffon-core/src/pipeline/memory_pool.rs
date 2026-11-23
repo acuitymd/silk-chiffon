@@ -1,16 +1,25 @@
-//! A memory pool that reserves capacity for non-spillable consumers.
+//! A memory pool that keeps part of itself for consumers that cannot spill.
 //!
 //! DataFusion's built-in `FairSpillPool` divides memory evenly among spillable
-//! consumers, but when spillable consumers have already consumed most of the
-//! pool, non-spillable consumers (like sort merge phases) can fail to allocate
-//! even small amounts. This pool solves that by maintaining a reserve that only
-//! non-spillable consumers can use.
+//! consumers, and refuses a non-spillable consumer whenever the pool is full.
+//! A sort that has filled the pool with data it could write to disk therefore
+//! makes an input reader, or the sort's own merge, fail for lack of a few
+//! megabytes. This pool keeps a reserve that spillable consumers cannot use,
+//! so those requests find it free.
+//!
+//! The pool's size is a limit: what it grants through `try_grow` never adds up
+//! to more. A consumer that cannot spill is refused when the pool is full, and
+//! should be given a reserve large enough that it is not. A consumer that can
+//! spill is refused past its share, and spills. `grow`, which some DataFusion
+//! operators call where they cannot take a refusal, is counted and never
+//! refused.
 
 use datafusion::common::{Result, resources_datafusion_err};
 use datafusion::execution::memory_pool::{
     MemoryConsumer, MemoryLimit, MemoryPool, MemoryReservation, human_readable_size,
 };
 use parking_lot::Mutex;
+use std::collections::HashMap;
 use std::fmt::{self, Display, Formatter};
 
 /// A [`MemoryPool`] that guarantees a portion of capacity for non-spillable consumers.
@@ -33,8 +42,13 @@ use std::fmt::{self, Display, Formatter};
 ///
 /// - **Spillable consumers** can only use `pool_size - reserve_for_non_spillable`,
 ///   divided evenly among all registered spillable consumers (like `FairSpillPool`).
-/// - **Non-spillable consumers** can use the entire pool (spillable region + reserve),
-///   allocated first-come first-served.
+///   The region shrinks while non-spillable consumers hold more than the reserve.
+///   A consumer's share counts every reservation it has, including ones split
+///   off another, and the region is never granted past its size, even when a
+///   consumer that registered later finds the others over their new shares.
+/// - **Non-spillable consumers** can use whatever of the pool is free,
+///   first-come first-served. Spillable consumers never hold the reserve, so it
+///   is free for them unless they hold it themselves.
 #[derive(Debug)]
 pub struct ReservedSpillPool {
     pool_size: usize,
@@ -48,6 +62,9 @@ struct PoolState {
     num_spill: usize,
     spillable: usize,
     non_spillable: usize,
+    /// What each spillable consumer holds, by consumer id, across all of its
+    /// reservations.
+    held: HashMap<usize, usize>,
 }
 
 impl ReservedSpillPool {
@@ -73,6 +90,7 @@ impl ReservedSpillPool {
                 num_spill: 0,
                 spillable: 0,
                 non_spillable: 0,
+                held: HashMap::new(),
             }),
         }
     }
@@ -85,7 +103,9 @@ impl MemoryPool for ReservedSpillPool {
 
     fn register(&self, consumer: &MemoryConsumer) {
         if consumer.can_spill() {
-            self.state.lock().num_spill += 1;
+            let mut state = self.state.lock();
+            state.num_spill += 1;
+            state.held.insert(consumer.id(), 0);
         }
     }
 
@@ -93,82 +113,90 @@ impl MemoryPool for ReservedSpillPool {
         if consumer.can_spill() {
             let mut state = self.state.lock();
             state.num_spill = state.num_spill.checked_sub(1).unwrap();
+            state.held.remove(&consumer.id());
         }
     }
 
     fn grow(&self, reservation: &MemoryReservation, additional: usize) {
         let mut state = self.state.lock();
-        match reservation.consumer().can_spill() {
-            true => state.spillable += additional,
-            false => state.non_spillable += additional,
+        let consumer = reservation.consumer();
+        if consumer.can_spill() {
+            state.spillable += additional;
+            *state.held.entry(consumer.id()).or_default() += additional;
+        } else {
+            state.non_spillable += additional;
         }
     }
 
     fn shrink(&self, reservation: &MemoryReservation, shrink: usize) {
         let mut state = self.state.lock();
-        match reservation.consumer().can_spill() {
-            true => {
-                state.spillable = state
-                    .spillable
-                    .checked_sub(shrink)
-                    .expect("spillable underflow: shrink exceeds tracked spillable usage");
-            }
-            false => {
-                state.non_spillable = state
-                    .non_spillable
-                    .checked_sub(shrink)
-                    .expect("non-spillable underflow: shrink exceeds tracked non-spillable usage");
-            }
+        let consumer = reservation.consumer();
+        if consumer.can_spill() {
+            state.spillable = state
+                .spillable
+                .checked_sub(shrink)
+                .expect("spillable underflow: shrink exceeds tracked spillable usage");
+            let held = state.held.entry(consumer.id()).or_default();
+            *held = held
+                .checked_sub(shrink)
+                .expect("spillable underflow: shrink exceeds what the consumer holds");
+        } else {
+            state.non_spillable = state
+                .non_spillable
+                .checked_sub(shrink)
+                .expect("non-spillable underflow: shrink exceeds tracked non-spillable usage");
         }
     }
 
     fn try_grow(&self, reservation: &MemoryReservation, additional: usize) -> Result<()> {
         let mut state = self.state.lock();
+        let consumer = reservation.consumer();
 
-        match reservation.consumer().can_spill() {
-            true => {
-                // spillable consumers share the spillable region evenly,
-                // dynamically reduced when non-spillable usage exceeds the reserve
-                let spill_capacity = self
-                    .pool_size
-                    .saturating_sub(state.non_spillable.max(self.reserve_for_non_spillable));
-                let per_consumer = spill_capacity
-                    .checked_div(state.num_spill)
-                    .unwrap_or(spill_capacity);
+        if consumer.can_spill() {
+            // spillable consumers share the spillable region evenly,
+            // dynamically reduced when non-spillable usage exceeds the reserve
+            let spill_capacity = self
+                .pool_size
+                .saturating_sub(state.non_spillable.max(self.reserve_for_non_spillable));
+            let per_consumer = spill_capacity
+                .checked_div(state.num_spill)
+                .unwrap_or(spill_capacity);
+            let held = state.held.get(&consumer.id()).copied().unwrap_or(0);
+            let available = per_consumer
+                .saturating_sub(held)
+                .min(spill_capacity.saturating_sub(state.spillable));
 
-                if reservation.size() + additional > per_consumer {
-                    return Err(resources_datafusion_err!(
-                        "Failed to allocate additional {} for {} with {} already allocated \
-                         for this reservation - {} remain available for this consumer's \
-                         fair share ({} per consumer, {} spillable capacity)",
-                        human_readable_size(additional),
-                        reservation.consumer().name(),
-                        human_readable_size(reservation.size()),
-                        human_readable_size(per_consumer.saturating_sub(reservation.size())),
-                        human_readable_size(per_consumer),
-                        human_readable_size(spill_capacity)
-                    ));
-                }
-                state.spillable += additional;
+            if additional > available {
+                return Err(resources_datafusion_err!(
+                    "Failed to allocate additional {} for {} with {} already allocated \
+                     for this consumer - {} remain available for this consumer's \
+                     fair share ({} per consumer, {} spillable capacity)",
+                    human_readable_size(additional),
+                    consumer.name(),
+                    human_readable_size(held),
+                    human_readable_size(available),
+                    human_readable_size(per_consumer),
+                    human_readable_size(spill_capacity)
+                ));
             }
-            false => {
-                // non-spillable consumers can use the full pool
-                let available = self
-                    .pool_size
-                    .saturating_sub(state.non_spillable + state.spillable);
+            state.spillable += additional;
+            *state.held.entry(consumer.id()).or_default() += additional;
+        } else {
+            let available = self
+                .pool_size
+                .saturating_sub(state.non_spillable + state.spillable);
 
-                if available < additional {
-                    return Err(resources_datafusion_err!(
-                        "Failed to allocate additional {} for {} with {} already allocated \
-                         for this reservation - {} remain available for the total pool",
-                        human_readable_size(additional),
-                        reservation.consumer().name(),
-                        human_readable_size(reservation.size()),
-                        human_readable_size(available)
-                    ));
-                }
-                state.non_spillable += additional;
+            if available < additional {
+                return Err(resources_datafusion_err!(
+                    "Failed to allocate additional {} for {} with {} already allocated \
+                     for this reservation - {} remain available for the total pool",
+                    human_readable_size(additional),
+                    consumer.name(),
+                    human_readable_size(reservation.size()),
+                    human_readable_size(available)
+                ));
             }
+            state.non_spillable += additional;
         }
         Ok(())
     }
@@ -308,21 +336,74 @@ mod tests {
     }
 
     #[test]
-    fn non_spillable_denied_when_pool_full() {
+    fn non_spillable_denied_when_nothing_can_spill() {
         let pool = Arc::new(ReservedSpillPool::new(100, 20)) as Arc<dyn MemoryPool>;
 
-        let s1 = MemoryConsumer::new("spiller")
-            .with_can_spill(true)
-            .register(&pool);
-        s1.try_grow(80).unwrap();
-
         let ns1 = MemoryConsumer::new("merger").register(&pool);
-        ns1.try_grow(20).unwrap();
+        ns1.try_grow(100).unwrap();
 
-        // pool is full (100/100), second non-spillable allocation fails
+        // the pool is full
         let ns2 = MemoryConsumer::new("merger2").register(&pool);
         let err = ns2.try_grow(1).unwrap_err().strip_backtrace();
         assert!(err.contains("Failed to allocate"), "{err}");
+    }
+
+    #[test]
+    fn non_spillable_is_refused_when_spillable_consumers_filled_the_pool() {
+        let pool = Arc::new(ReservedSpillPool::new(100, 0)) as Arc<dyn MemoryPool>;
+
+        let sorter = MemoryConsumer::new("sorter")
+            .with_can_spill(true)
+            .register(&pool);
+        sorter.try_grow(100).unwrap();
+
+        let reader = MemoryConsumer::new("reader").register(&pool);
+        let err = reader.try_grow(1).unwrap_err().strip_backtrace();
+        assert!(err.contains("Failed to allocate"), "{err}");
+        assert_eq!(pool.reserved(), 100);
+    }
+
+    #[test]
+    fn a_share_counts_every_reservation_of_a_consumer() {
+        let pool = Arc::new(ReservedSpillPool::new(100, 20)) as Arc<dyn MemoryPool>;
+
+        let sorter = MemoryConsumer::new("sorter")
+            .with_can_spill(true)
+            .register(&pool);
+        sorter.try_grow(60).unwrap();
+        let lent = sorter.split(60);
+        assert_eq!(sorter.size(), 0);
+
+        // the 60 handed to a job still counts against the sorter's 80
+        sorter.try_grow(20).unwrap();
+        let err = sorter.try_grow(1).unwrap_err().strip_backtrace();
+        assert!(err.contains("Failed to allocate"), "{err}");
+
+        drop(lent);
+        sorter.try_grow(60).unwrap();
+        assert_eq!(pool.reserved(), 80);
+    }
+
+    #[test]
+    fn spillable_consumers_never_take_the_pool_past_its_size() {
+        let pool = Arc::new(ReservedSpillPool::new(100, 20)) as Arc<dyn MemoryPool>;
+
+        let first = MemoryConsumer::new("first")
+            .with_can_spill(true)
+            .register(&pool);
+        first.try_grow(80).unwrap();
+
+        // the second's share is 40, but the region is full until the first
+        // gives back what is now over its share
+        let second = MemoryConsumer::new("second")
+            .with_can_spill(true)
+            .register(&pool);
+        let err = second.try_grow(1).unwrap_err().strip_backtrace();
+        assert!(err.contains("Failed to allocate"), "{err}");
+
+        first.shrink(40);
+        second.try_grow(40).unwrap();
+        assert_eq!(pool.reserved(), 80);
     }
 
     #[test]
