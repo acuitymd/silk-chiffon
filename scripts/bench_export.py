@@ -6,8 +6,9 @@
 # ///
 """Benchmark silk-chiffon transforms that sort, across builds, sort engines, and memory budgets.
 
-Two data sets cover two of the three ways the sort holds rows. --data picks one for
-`generate` and for `run`.
+Three data sets, which --data picks for `generate` and for `run`. `export` and `mixed`
+cover two of the three ways the sort holds rows. `late-keys` is made to be slow for a sort
+that sizes its records by the keys of the first batch it is given.
 
 export: eight integer and date columns, of which a `--query` keeps seven and casts them
 to narrower types on the way in. The sort holds rows like these whole in the records it
@@ -37,6 +38,14 @@ file:
 
 `generate` makes every value a hash of the row number, so any machine writes the same
 rows.
+
+late-keys: an id, a path, an amount, and a note. Each row group starts with 16,384 rows
+whose path is empty or null, and the rest of its rows have paths of 70 bytes that share
+their first 58. A partition of the input starts at a row group, so every partition's first
+batch has only short keys. A sort whose records hold as much of a key as the first batch's
+keys needed then holds the same few bytes of every long path, and has to read both whole
+keys from row format to compare two of them. Its one stage, `path`, sorts by `path,id`
+and writes one LZ4 Parquet file. `generate` makes every value a hash of the row number.
 
 `run` times each stage for each build. Every option that takes a list runs each
 combination: `--memory-budget 60GiB,4GiB,256MiB` checks that a sort still finishes as the
@@ -153,7 +162,19 @@ DATA_SETS = {
         " score, active, quantity, note",
         rows=100_000_000,
     ),
+    "late-keys": DataSet(
+        stages={"path": Stage(sort_by="path,id")},
+        columns="id, path, amount, note",
+        rows=50_000_000,
+    ),
 }
+
+# every long path starts with these 58 bytes
+LATE_KEY_PREFIX = "/archive/regions/north-america/accounts/item-records/2024/"
+# rows in a row group of the late-keys data, and the short paths that start each one
+LATE_KEY_ROW_GROUP = 122_880
+LATE_KEY_SHORT_ROWS = 16_384
+LATE_KEY_FILES = 16
 
 
 def output_template(partition_by: str) -> str:
@@ -701,6 +722,31 @@ def generate_mixed(con, args: argparse.Namespace, rows: int) -> None:
     )
 
 
+def generate_late_keys(con, args: argparse.Namespace, rows: int) -> None:
+    """One file at a time, in row order, so that every row group starts with its short
+    paths."""
+    per_file = max(1, rows // LATE_KEY_FILES)
+    for file in range(LATE_KEY_FILES):
+        con.execute(
+            f"""
+            COPY (
+                SELECT
+                    CAST({file * per_file} + i AS BIGINT) AS id,
+                    CASE WHEN i % {LATE_KEY_ROW_GROUP} < {LATE_KEY_SHORT_ROWS}
+                         THEN CASE WHEN i % 2 = 0 THEN NULL ELSE '' END
+                         ELSE '{LATE_KEY_PREFIX}'
+                              || lpad(CAST(hash({file}, i) % 1000000000000 AS VARCHAR), 12, '0')
+                         END AS path,
+                    CAST((hash({file}, i, 1) % 100000000) / 100.0 AS DECIMAL(18, 2)) AS amount,
+                    repeat('n', 10 + CAST(hash({file}, i, 2) % 30 AS INTEGER)) AS note
+                FROM range({per_file}) AS t(i)
+                ORDER BY i
+            ) TO {sql_string(args.out / f"data_{file:02}.parquet")}
+                (FORMAT parquet, COMPRESSION zstd, ROW_GROUP_SIZE {LATE_KEY_ROW_GROUP})
+            """
+        )
+
+
 def generate(args: argparse.Namespace) -> None:
     """Write synthetic input for one data set as ZSTD Parquet."""
     import duckdb
@@ -719,6 +765,8 @@ def generate(args: argparse.Namespace) -> None:
             generate_export(con, args, rows)
         case "mixed":
             generate_mixed(con, args, rows)
+        case "late-keys":
+            generate_late_keys(con, args, rows)
     files = sorted(out.glob("*.parquet"))
     size = sum(f.stat().st_size for f in files)
     print(f"wrote {rows} rows to {len(files)} files, {size / 2**30:.2f} GiB, in {out}")
@@ -807,7 +855,7 @@ def main() -> None:
     gen.add_argument(
         "--rows",
         type=int,
-        help="default: 36000000 for export, 100000000 for mixed",
+        help="default: 36000000 for export, 100000000 for mixed, 50000000 for late-keys",
     )
     gen.add_argument(
         "--first-category",
