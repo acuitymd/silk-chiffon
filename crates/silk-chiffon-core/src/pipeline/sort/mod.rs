@@ -1591,9 +1591,11 @@ impl Sorter {
         let writer = spill.batch_writer_bytes(grouped.batch_bytes);
         let at_once = (plan.bytes / (widest_pass * grouped.input_bytes + writer).max(1))
             .clamp(1, self.options.parallelism);
+        // each pass reads at most the widest pass's inputs, which is what the
+        // passes at once were sized for
         let memory = MergeMemory {
             budget: Arc::clone(&self.budget),
-            planned: plan.merge_memory(grouped),
+            planned: widest_pass * grouped.input_bytes,
         };
         let groups = std::mem::take(&mut grouped.by_group);
         let workers = Arc::clone(&self.workers);
