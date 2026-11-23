@@ -100,9 +100,10 @@ pub(crate) async fn run(args: TransformCommand) -> Result<()> {
 
     let total_budget = memory_budget.resolve();
 
-    // the pool's default reserve is a fifth of it, so a sort may buffer 60% of
-    // the budget and a transform without one 20%. The rest of the budget is
-    // for the writers, which do not reserve from the pool
+    // the pool's default reserve is a fifth of it, so a sort may buffer up to
+    // 60% of the budget and a transform without one up to 20%, less what
+    // consumers that cannot spill hold. The rest of the budget is for the
+    // writers, which do not reserve from the pool
     let effective_memory_limit = if has_sort {
         Some(total_budget * SORT_POOL_PERCENT / 100)
     } else {

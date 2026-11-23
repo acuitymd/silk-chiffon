@@ -704,12 +704,14 @@ struct TransformArgs {
 
     /// Reserve memory for operators that cannot spill.
     ///
-    /// Keeps spillable operators (sorts, aggregations) out of part of the memory
-    /// pool, so that consumers that cannot spill, such as input readers and a
-    /// sort's merge, find it free. The pool grants no more than its size when
-    /// asked, so such a consumer that finds the pool full fails the transform.
-    /// A larger reserve makes that less likely, and leaves the sorts less to
-    /// buffer, so they spill sooner.
+    /// Keeps part of the memory pool free for consumers that cannot spill, such
+    /// as input readers and a sort's merge, beside what they already hold.
+    /// Spillable operators (sorts, aggregations) that hold memory are refused
+    /// more once it would leave less than the reserve free, and spill instead.
+    /// The pool grants no more than its size when asked, so a consumer that
+    /// cannot spill and finds the pool full fails the transform. A larger
+    /// reserve makes that less likely, and leaves the sorts less to buffer, so
+    /// they spill sooner.
     ///
     /// The pool is 75% of `--memory-budget` when the transform sorts and 25% when
     /// it does not.

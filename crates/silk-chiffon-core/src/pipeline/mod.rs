@@ -137,10 +137,11 @@ impl Pipeline {
         self
     }
 
-    /// Reserves pool capacity for operators that cannot spill. Spillable
-    /// operators, such as sorts, never hold it, so a reader or a merge that
-    /// cannot spill finds it free. Without one, the reserve is a fifth of the
-    /// pool.
+    /// Reserves pool capacity for operators that cannot spill. The pool keeps
+    /// it free beside what those operators already hold, so a reader or a
+    /// merge that cannot spill finds room. A spillable operator, such as a
+    /// sort, gets none of it through `try_grow` unless it holds nothing yet.
+    /// Without one, the reserve is a fifth of the pool.
     pub fn with_non_spillable_reserve(mut self, reserve: Option<usize>) -> Self {
         self.config.non_spillable_reserve = reserve;
         self
@@ -172,8 +173,9 @@ impl Pipeline {
             config = config.with_target_partitions(target_partitions);
         }
 
-        // a pool of no bytes refuses every request, which is the caller's to
-        // see as an error, where ReservedSpillPool would panic
+        // ReservedSpillPool panics on a pool of no bytes, so a zero limit
+        // becomes one byte, which refuses any request larger than a byte and
+        // leaves the caller an error to see
         let memory_limit = self
             .config
             .memory_limit
@@ -350,8 +352,8 @@ impl fmt::Debug for PipelineExecution {
 /// however full the sorts keep the rest.
 const DEFAULT_RESERVE_DIVISOR: usize = 5;
 
-/// The reserve a pool of `memory_limit` bytes keeps for consumers that cannot
-/// spill when the caller sets none. Spillable consumers share the rest.
+/// The reserve a pool of `memory_limit` bytes keeps free for consumers that
+/// cannot spill when the caller sets none.
 pub fn default_non_spillable_reserve(memory_limit: usize) -> usize {
     memory_limit / DEFAULT_RESERVE_DIVISOR
 }
