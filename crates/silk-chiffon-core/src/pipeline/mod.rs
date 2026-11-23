@@ -90,9 +90,9 @@ impl Pipeline {
 
     /// Sets the DataFusion memory-pool limit in bytes.
     ///
-    /// Consumers that cannot spill may take the pool up to a quarter over this
-    /// while spillable consumers hold memory, which those then give back by
-    /// spilling. Size the limit with that room left over.
+    /// Consumers that cannot spill may take the pool's reservations up to a
+    /// quarter over this while spillable consumers hold memory. Size the limit
+    /// with that room left over.
     pub fn with_memory_limit(mut self, memory_limit: Option<usize>) -> Self {
         self.config.memory_limit = memory_limit;
         self

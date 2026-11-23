@@ -4,11 +4,16 @@
 //! consumers, and refuses a non-spillable consumer whenever the pool is full.
 //! A sort that has filled the pool with data it could write to disk therefore
 //! makes an input reader, or the sort's own merge, fail for lack of a few
-//! megabytes. This pool grants those requests instead, up to a quarter of the
-//! pool over its size, and takes the memory back from the spillable consumers:
-//! each is refused its next request until it is within its share again, which
-//! a consumer that can spill does by spilling. Until they ask again, the pool
-//! stays over its size.
+//! megabytes. This pool grants those requests instead, while the pool's
+//! reservations stay within a quarter over its size, and takes the memory back
+//! from the spillable consumers: each one over its share, which the grant made
+//! smaller, is refused until it is within its share again, and a consumer that
+//! can spill gets there by spilling. Until they ask again, the pool stays over
+//! its size.
+//!
+//! The quarter bounds what consumers that cannot spill are granted, not the
+//! pool. A spillable consumer under its share may still grow while the pool is
+//! over, as it may in `FairSpillPool`.
 
 use datafusion::common::{Result, resources_datafusion_err};
 use datafusion::execution::memory_pool::{
@@ -46,9 +51,9 @@ const OVERDRAFT_DIVISOR: usize = 4;
 ///   The region shrinks while non-spillable consumers hold more than the reserve.
 /// - **Non-spillable consumers** can use the entire pool, first-come first-served.
 ///   When spillable consumers already hold part of it, a non-spillable request is
-///   still granted, up to a quarter of the pool over its size. The spillable
-///   consumers are then over their share, so their next request is refused and
-///   they spill.
+///   still granted while the reservations stay within a quarter over the pool.
+///   Spillable consumers over their new, smaller share are then refused until
+///   they are back within it.
 #[derive(Debug)]
 pub struct ReservedSpillPool {
     pool_size: usize,
