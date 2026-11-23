@@ -684,9 +684,10 @@ struct TransformArgs {
     /// memory pool is full it writes what it has sorted to the spill path and
     /// continues, so a small --memory-budget slows the sort. It never takes more
     /// than the pool grants. It fails only when the pool is too small for the
-    /// memory it needs to start, for one batch, or, after spilling a great
-    /// deal, for the least it needs to merge beside the index of what it
-    /// spilled, and the error says how much it needed.
+    /// memory it needs to start, for one batch, or for the least it needs to
+    /// merge what it spilled, which grows with the index of a large spill and
+    /// with rows wider than the first batch's. The error says what it could not
+    /// get.
     ///
     /// `parallel` keeps each row as one run of bytes in Arrow's row format, and is
     /// slower when a column cannot be kept that way. It then keeps the input

@@ -84,7 +84,7 @@ Examples:
   Format: A comma-separated list like `col_a,col_b:desc,col_c`.
 - `--sort-engine <SORT_ENGINE>` — The sort implementation, for --sort-by and for --by with the sort-single strategy.
 
-  `parallel` splits the rows it has buffered by key range, sorts the ranges on --target-partitions threads, and writes them out in order. When the memory pool is full it writes what it has sorted to the spill path and continues, so a small --memory-budget slows the sort. It never takes more than the pool grants. It fails only when the pool is too small for the memory it needs to start, for one batch, or, after spilling a great deal, for the least it needs to merge beside the index of what it spilled, and the error says how much it needed.
+  `parallel` splits the rows it has buffered by key range, sorts the ranges on --target-partitions threads, and writes them out in order. When the memory pool is full it writes what it has sorted to the spill path and continues, so a small --memory-budget slows the sort. It never takes more than the pool grants. It fails only when the pool is too small for the memory it needs to start, for one batch, or for the least it needs to merge what it spilled, which grows with the index of a large spill and with rows wider than the first batch's. The error says what it could not get.
 
   `parallel` keeps each row as one run of bytes in Arrow's row format, and is slower when a column cannot be kept that way. It then keeps the input batches whole, and merges what it spills in a few large stretches of the key range, one at a time when memory is short. The columns are dictionaries whose values are lists, structs, maps, unions, booleans, durations, intervals, dictionaries, or run-end encoded, and dictionaries in columns that may not be null, alone or nested in another column. --explain-analyze shows `rows=batches` on the `ParallelSortExec` line of such a sort.
 
@@ -94,7 +94,7 @@ Examples:
 
   Possible values:
   - `parallel`:
-    Splits rows by key range and sorts the ranges in parallel. Spills when the memory pool refuses more memory, and never takes more than the pool grants: it fails only when the pool is too small for the memory it needs to start, for one batch, or for the least it needs to merge beside the index of what it spilled
+    Splits rows by key range and sorts the ranges in parallel. Spills when the memory pool refuses more memory, and never takes more than the pool grants: it fails only when the pool is too small for the memory it needs to start, for one batch, or for the least it needs to merge what it spilled
   - `datafusion`:
     DataFusion's sort: one sorter per partition, merged on one thread
 

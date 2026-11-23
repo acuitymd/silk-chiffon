@@ -25,8 +25,9 @@
 //!   spilled, and uses only what the pool grants. A refusal to buffer means
 //!   "write what is buffered to disk". The sort fails only when the pool will
 //!   not give it its floor, room for one batch with nothing else buffered, or
-//!   the least a merge needs beside the index of what it spilled, and then
-//!   says how much it needed: see `Budget`.
+//!   the least it needs to merge what it spilled, which grows with the index
+//!   of a large spill and with rows wider than the first batch's: see
+//!   `Budget`.
 //! - **Spilling.** Rows held in row format are written to disk as they are,
 //!   in blocks, and a flush keeps the first key of each block it wrote. The
 //!   merge of the flushes is cut into slices from those, and the slices merge
@@ -156,8 +157,9 @@ const MERGE_SLICE_BLOCKS: usize = 256;
 /// The index of a flush keeps the first key of every block, and 40 bytes more,
 /// in memory for as long as the flush exists, so small blocks make a larger
 /// index. Blocks sized from the pool, a thousandth of it, kept the index small
-/// at small budgets, but left a merge room for a tenth of the flushes at
-/// once: 100M rows sorted in 1 GiB took 27 s where they took 20 s.
+/// at small budgets, but were eight times larger at 1 GiB and left a merge
+/// room for an eighth of the flushes at once: 100M rows sorted in 1 GiB took
+/// 27 s where they took 20 s.
 const ROW_BLOCK_SCRATCH_SHARE: usize = 32;
 const MIN_ROW_BLOCK_BYTES: usize = 4 * 1024;
 const MAX_ROW_BLOCK_BYTES: usize = 256 * 1024;
@@ -467,9 +469,11 @@ impl SortMetrics {
 /// first batch arrives: memory to sort ranges in, to write a flush with, and a
 /// credit that is room to buffer rows until the first flush and, once rows are
 /// flushed, room to merge them. Memory used within the floor is never asked of
-/// the pool, so a flush always has what it needs to start, and a merge does
-/// until the index of what was spilled takes the credit. Memory beyond the
-/// floor is asked of the pool, and only what it grants is used.
+/// the pool, so a flush always has what it needs to start. A merge does too,
+/// unless the index of what was spilled has taken the credit, or the rows
+/// spilled are wider than the first batch's, which the credit was sized from.
+/// Memory beyond the floor is asked of the pool, and only what it grants is
+/// used.
 ///
 /// Jobs on the sort's threads hold the budget too, so a sort whose output is
 /// dropped gives its memory back when its last job stops, not before.
@@ -896,7 +900,8 @@ impl Sorter {
     /// data sorted in memory in 8.05 s that way and in 7.51 s as they were. A
     /// flush on disk carries its rows' whole keys, so flushes of different
     /// widths merge as they are, and every run after the first is buffered
-    /// wide from its first row, with no whole keys kept beside it.
+    /// wide from its first row, keeping whole keys only for batches with a key
+    /// the wider records still cut.
     fn note_cut_keys(&self, buffered: &Buffered) {
         if let Some(layout) = self
             .encoder

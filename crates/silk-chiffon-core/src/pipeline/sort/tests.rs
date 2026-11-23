@@ -769,13 +769,13 @@ async fn sorts_with_batches_smaller_than_the_fewest_output_rows() {
         .map(|partition| batches(&mut random, 4, 300, partition * 1_000_000, random_code))
         .collect();
     let schema = schema_of(&input);
-    for memory_limit in [AMPLE, 1024 * 1024] {
+    for (memory_limit, spills) in [(AMPLE, false), (160 * 1024, true)] {
         let source = MemorySourceConfig::try_new_exec(&input, Arc::clone(&schema), None).unwrap();
         let plan: Arc<dyn ExecutionPlan> = Arc::new(
             ParallelSortExec::try_new(
                 source,
                 ordering(&schema, &EXPORT_KEY),
-                options(2, 64 * 1024),
+                options(2, 16 * 1024),
             )
             .unwrap(),
         );
@@ -784,8 +784,20 @@ async fn sorts_with_batches_smaller_than_the_fewest_output_rows() {
                 .with_session_config(SessionConfig::new().with_batch_size(64))
                 .with_runtime(runtime(memory_limit)),
         );
-        let sorted = collect(plan, context).await.unwrap();
+        let sorted = collect(Arc::clone(&plan), Arc::clone(&context))
+            .await
+            .unwrap();
         assert_sorted(&input, &sorted, &EXPORT_KEY);
+        let spill_files = plan.metrics().unwrap().spill_count().unwrap_or(0);
+        assert_eq!(spill_files > 0, spills, "{spill_files} spill files");
+        let pool = &context.runtime_env().memory_pool;
+        assert_eq!(pool.reserved(), 0);
+        let peak = pool
+            .downcast_ref::<PeakPool>()
+            .unwrap()
+            .peak
+            .load(Ordering::Relaxed);
+        assert!(peak <= memory_limit, "{peak} of {memory_limit}");
     }
 }
 

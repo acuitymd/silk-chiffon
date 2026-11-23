@@ -81,8 +81,8 @@ pub enum SortEngine {
     /// Splits rows by key range and sorts the ranges in parallel. Spills when
     /// the memory pool refuses more memory, and never takes more than the pool
     /// grants: it fails only when the pool is too small for the memory it needs
-    /// to start, for one batch, or for the least it needs to merge beside the
-    /// index of what it spilled.
+    /// to start, for one batch, or for the least it needs to merge what it
+    /// spilled.
     #[default]
     Parallel,
     /// DataFusion's sort: one sorter per partition, merged on one thread.
