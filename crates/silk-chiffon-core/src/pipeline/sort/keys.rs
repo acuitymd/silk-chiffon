@@ -502,19 +502,26 @@ impl RowEncoder {
 /// and output casts them back. A field that may not be null can still have a
 /// key that names a null value, which comes back as a null key.
 fn loses_dictionary(field: &Field) -> bool {
-    match field.data_type() {
-        DataType::Dictionary(..) => !field.is_nullable(),
-        DataType::List(child)
-        | DataType::LargeList(child)
-        | DataType::ListView(child)
-        | DataType::LargeListView(child)
-        | DataType::FixedSizeList(child, _)
-        | DataType::Map(child, _) => loses_dictionary(child),
-        DataType::Struct(children) => children.iter().any(|child| loses_dictionary(child)),
-        DataType::Union(children, _) => children.iter().any(|(_, child)| loses_dictionary(child)),
-        DataType::RunEndEncoded(_, values) => loses_dictionary(values),
-        _ => false,
+    // a stack, not recursion: a schema's nesting is input
+    let mut pending = vec![field];
+    while let Some(field) = pending.pop() {
+        match field.data_type() {
+            DataType::Dictionary(..) if !field.is_nullable() => return true,
+            DataType::List(child)
+            | DataType::LargeList(child)
+            | DataType::ListView(child)
+            | DataType::LargeListView(child)
+            | DataType::FixedSizeList(child, _)
+            | DataType::Map(child, _) => pending.push(child),
+            DataType::Struct(children) => pending.extend(children.iter().map(AsRef::as_ref)),
+            DataType::Union(children, _) => {
+                pending.extend(children.iter().map(|(_, child)| child.as_ref()));
+            }
+            DataType::RunEndEncoded(_, values) => pending.push(values),
+            _ => {}
+        }
     }
+    false
 }
 
 /// Whether the row format can encode this ordering. Planning falls back to
