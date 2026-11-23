@@ -1410,7 +1410,8 @@ fn test_max_spill_size_stops_a_spilling_sort() {
     let input = temp_dir.path().join("input.arrow");
     let output = temp_dir.path().join("output.arrow");
 
-    // ~8 MiB of rows against a 32 MB budget forces a single-partition sort to spill
+    // the sort buffers about 14 MiB for these rows; a 12 MB budget gives it a
+    // 7.2 MB pool, so it writes a run once it holds its 8 MiB minimum
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Int32, false),
         Field::new("payload", DataType::Utf8, false),
@@ -1441,10 +1442,12 @@ fn test_max_spill_size_stops_a_spilling_sort() {
             output.to_str().unwrap(),
             "--sort-by",
             "id",
+            "--sort-engine",
+            "parallel",
             "--target-partitions",
             "1",
             "--memory-budget",
-            "32MB",
+            "12MB",
             "--spill-path",
             temp_dir.path().to_str().unwrap(),
             "--max-spill-size",
@@ -1455,6 +1458,163 @@ fn test_max_spill_size_stops_a_spilling_sort() {
         .stderr(predicates::str::contains(
             "spilling exceeded the 1000 B disk limit; raise it with --max-spill-size",
         ));
+}
+
+/// Rows with only fixed-width columns are spilled as records, by the sort's
+/// own writer, which has to honor the limit too.
+#[test]
+fn test_max_spill_size_stops_a_spilling_sort_of_fixed_width_rows() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let output = temp_dir.path().join("output.arrow");
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int32, false),
+        Field::new("value", DataType::Int64, false),
+    ]));
+    // about 16 MiB of records against a 7.2 MB pool
+    let batches: Vec<RecordBatch> = (0..120)
+        .rev()
+        .map(|chunk| {
+            let ids: Vec<i32> = (chunk * 8192..(chunk + 1) * 8192).rev().collect();
+            let values: Vec<i64> = ids.iter().map(|id| i64::from(*id) * 3).collect();
+            RecordBatch::try_new(
+                Arc::clone(&schema),
+                vec![
+                    Arc::new(Int32Array::from(ids)),
+                    Arc::new(arrow::array::Int64Array::from(values)),
+                ],
+            )
+            .unwrap()
+        })
+        .collect();
+    TestFile::write_arrow(&input, &batches);
+
+    cargo::cargo_bin_cmd!("silk-chiffon")
+        .args([
+            "transform",
+            "--from",
+            input.to_str().unwrap(),
+            "--to",
+            output.to_str().unwrap(),
+            "--sort-by",
+            "id",
+            "--sort-engine",
+            "parallel",
+            "--target-partitions",
+            "1",
+            "--memory-budget",
+            "12MB",
+            "--spill-path",
+            temp_dir.path().to_str().unwrap(),
+            "--max-spill-size",
+            "1KB",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "spilling exceeded the 1000 B disk limit; raise it with --max-spill-size",
+        ));
+}
+
+/// Rows that do not fit the memory budget, in descending order across four
+/// input partitions' worth of batches.
+fn write_spilling_sort_input(path: &std::path::Path) -> usize {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int32, false),
+        Field::new("payload", DataType::Utf8, false),
+    ]));
+    let batches: Vec<RecordBatch> = (0..120)
+        .rev()
+        .map(|chunk| {
+            let ids: Vec<i32> = (chunk * 8192..(chunk + 1) * 8192).rev().collect();
+            let payloads: Vec<String> = ids.iter().map(|id| format!("{id:020}")).collect();
+            RecordBatch::try_new(
+                Arc::clone(&schema),
+                vec![
+                    Arc::new(Int32Array::from(ids)),
+                    Arc::new(StringArray::from(payloads)),
+                ],
+            )
+            .unwrap()
+        })
+        .collect();
+    TestFile::write_arrow(path, &batches);
+    120 * 8192
+}
+
+#[test]
+fn test_a_sort_larger_than_the_memory_budget_spills_and_stays_sorted() {
+    use predicates::prelude::*;
+
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let output = temp_dir.path().join("output.arrow");
+    let rows = write_spilling_sort_input(&input);
+
+    // the rows need about 43 MiB and the budget leaves the sort 9.6 MB
+    cargo::cargo_bin_cmd!("silk-chiffon")
+        .args([
+            "transform",
+            "--from",
+            input.to_str().unwrap(),
+            "--to",
+            output.to_str().unwrap(),
+            "--sort-by",
+            "id",
+            "--sort-engine",
+            "parallel",
+            "--target-partitions",
+            "4",
+            "--memory-budget",
+            "16MB",
+            "--spill-path",
+            temp_dir.path().to_str().unwrap(),
+            "--explain-analyze",
+        ])
+        .assert()
+        .success()
+        // the report shows the sort wrote to disk
+        .stderr(predicate::str::is_match("ParallelSortExec.*spilled_runs=[1-9]").unwrap());
+
+    let ids = TestExtract::i32_all(&TestFile::read_arrow(&output), "id");
+    assert_eq!(ids.len(), rows);
+    assert!(ids.iter().copied().eq(0..i32::try_from(rows).unwrap()));
+}
+
+#[test]
+fn test_the_datafusion_sort_engine_sorts_the_same_rows() {
+    use predicates::prelude::*;
+
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let output = temp_dir.path().join("output.arrow");
+
+    let batch = TestBatch::simple_with(&[5, 2, 8, 1, 3], &["e", "b", "h", "a", "c"]);
+    TestFile::write_arrow_batch(&input, &batch);
+
+    cargo::cargo_bin_cmd!("silk-chiffon")
+        .args([
+            "transform",
+            "--from",
+            input.to_str().unwrap(),
+            "--to",
+            output.to_str().unwrap(),
+            "--sort-by",
+            "id",
+            "--sort-engine",
+            "datafusion",
+            "--explain-analyze",
+        ])
+        .assert()
+        .success()
+        .stderr(
+            predicate::str::contains("SortExec")
+                .and(predicate::str::contains("ParallelSortExec").not()),
+        );
+
+    let batches = TestFile::read_arrow(&output);
+    assert_eq!(TestExtract::i32_all(&batches, "id"), vec![1, 2, 3, 5, 8]);
 }
 
 #[test]
@@ -1496,6 +1656,9 @@ fn test_spill_merge_fan_in_merges_in_several_passes() {
             output.to_str().unwrap(),
             "--sort-by",
             "id",
+            // the limit is for DataFusion's merges: the default sort sizes its own
+            "--sort-engine",
+            "datafusion",
             "--target-partitions",
             "1",
             "--memory-budget",

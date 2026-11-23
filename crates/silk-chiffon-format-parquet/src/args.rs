@@ -861,8 +861,9 @@ pub(crate) struct TransformArgs {
     /// Controls the rayon thread pool size for encoding columns within row groups.
     /// Column encoding is CPU-intensive and benefits from parallelism.
     ///
-    /// Default: auto-detected based on workload. With sorting (--sort-by or --by): 25%
-    /// of available CPU cores. Without sorting: 75% of available CPU cores.
+    /// Default: 75% of available CPU cores, or 25% when the output is sorted
+    /// with --sort-engine datafusion, whose merge runs while the output is
+    /// encoded.
     #[arg(long, help_heading = "Parquet Tuning Options", value_parser = parse_positive)]
     pub(crate) parquet_column_encoding_threads: Option<usize>,
 

@@ -1,4 +1,4 @@
-use std::{num::NonZeroUsize, sync::Arc};
+use std::{num::NonZeroUsize, sync::Arc, time::Instant};
 
 use crate::{PartitionStrategy, SortSpec, TransformCommand, default_thread_budget};
 use anyhow::{Result, anyhow};
@@ -7,12 +7,15 @@ use datafusion::{
     catalog::TableProvider,
     error::DataFusionError,
     execution::disk_manager::DEFAULT_MAX_TEMP_DIRECTORY_SIZE,
-    physical_plan::{SendableRecordBatchStream, stream::RecordBatchStreamAdapter},
+    physical_plan::{
+        ExecutionPlan, SendableRecordBatchStream, display::DisplayableExecutionPlan,
+        stream::RecordBatchStreamAdapter,
+    },
 };
 use futures::TryStreamExt;
 use owo_colors::OwoColorize;
 use silk_chiffon_core::{
-    OpenSinkMode, Pipeline, PreparedPipeline, PresentationMode, SinkBindingConfig,
+    OpenSinkMode, Pipeline, PreparedPipeline, PresentationMode, SinkBindingConfig, SortEngine,
     union_input_providers_by_name,
 };
 use tabled::{builder::Builder, settings::Style};
@@ -22,7 +25,6 @@ mod file_output;
 mod projection;
 mod query;
 mod scheme;
-mod sort;
 mod sort_memory;
 
 use file_input::FileInputPreparer;
@@ -30,9 +32,9 @@ use file_output::{FileOutputBinder, FileOutputReport, FileOutputRequest};
 use projection::project_stream;
 use query::apply_query;
 use scheme::explicit_scheme;
-use sort::apply_sort;
 
 pub(crate) async fn run(args: TransformCommand) -> Result<()> {
+    let started = Instant::now();
     let TransformCommand {
         inputs,
         to,
@@ -48,6 +50,7 @@ pub(crate) async fn run(args: TransformCommand) -> Result<()> {
         query,
         dialect,
         sort_by,
+        sort_engine,
         memory_budget,
         non_spillable_reserve,
         memory_pool_top_consumers,
@@ -60,6 +63,7 @@ pub(crate) async fn run(args: TransformCommand) -> Result<()> {
         spill_path,
         spill_compression,
         max_spill_size,
+        explain_analyze,
         max_spill_merge_fan_in,
         formats,
         storage,
@@ -173,6 +177,7 @@ pub(crate) async fn run(args: TransformCommand) -> Result<()> {
         anyhow::bail!("no inputs were selected");
     }
     let mut input = union_input_providers_by_name(&session, providers)?;
+    let inputs_opened = Instant::now();
 
     let list_outputs_mode = list_outputs;
 
@@ -225,11 +230,18 @@ pub(crate) async fn run(args: TransformCommand) -> Result<()> {
         input = apply_query(&session, input, q).await?;
     }
 
-    if !full_sort_spec.is_empty() {
-        input = apply_sort(input, &full_sort_spec.columns)?;
-    }
+    let mut prepared = pipeline
+        .with_sort(full_sort_spec.columns.clone())
+        .with_sort_engine(sort_engine)
+        .prepare(input, session)
+        .await?;
 
-    let mut prepared = pipeline.prepare(input, session).await?;
+    let analysis = explain_analyze.then(|| ExecutionAnalysis {
+        plan: Arc::clone(prepared.execution_plan()),
+        started,
+        inputs_opened,
+        planned: Instant::now(),
+    });
 
     if has_sort {
         let memory_limit = effective_memory_limit.unwrap_or(total_budget * 60 / 100);
@@ -266,6 +278,9 @@ pub(crate) async fn run(args: TransformCommand) -> Result<()> {
                     stream = project_stream(stream, indices)?;
                 }
                 service_outputs[*index].consume(target, stream).await?;
+                if let Some(analysis) = analysis {
+                    analysis.print();
+                }
                 return Ok(());
             }
             Some(crate::registration::OutputSchemeOwner::FileOutput) => {}
@@ -288,7 +303,9 @@ pub(crate) async fn run(args: TransformCommand) -> Result<()> {
     }
 
     let output_ordering = user_sort_spec_without_partition_cols.columns.clone();
-    let output_threads = if has_sort {
+    // DataFusion's sort merges while the output is written, so it shares the
+    // CPUs with encoding. The parallel sort has done its heavy work by then.
+    let output_threads = if has_sort && sort_engine == SortEngine::DataFusion {
         (usable_cpus / 4).max(1)
     } else {
         three_quarter_cpus
@@ -348,8 +365,36 @@ pub(crate) async fn run(args: TransformCommand) -> Result<()> {
     if let Some(mode) = list_outputs_mode {
         print_output_files(&report, mode, list_outputs_file.as_deref())?;
     }
+    if let Some(analysis) = analysis {
+        analysis.print();
+    }
 
     Ok(())
+}
+
+/// What `--explain-analyze` reports once the output is complete.
+struct ExecutionAnalysis {
+    plan: Arc<dyn ExecutionPlan>,
+    started: Instant,
+    inputs_opened: Instant,
+    planned: Instant,
+}
+
+impl ExecutionAnalysis {
+    fn print(&self) {
+        let finished = Instant::now();
+        eprintln!(
+            "transform took {:.3}s: {:.3}s opening inputs, {:.3}s planning, {:.3}s executing",
+            (finished - self.started).as_secs_f64(),
+            (self.inputs_opened - self.started).as_secs_f64(),
+            (self.planned - self.inputs_opened).as_secs_f64(),
+            (finished - self.planned).as_secs_f64(),
+        );
+        eprintln!(
+            "{}",
+            DisplayableExecutionPlan::with_metrics(self.plan.as_ref()).indent(true)
+        );
+    }
 }
 
 fn print_output_files(

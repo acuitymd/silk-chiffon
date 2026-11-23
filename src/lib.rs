@@ -7,7 +7,8 @@ use camino::Utf8PathBuf;
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use silk_chiffon_core::{
-    NullPlacement, PresentationMode, QueryDialect, SortColumn, SortDirection, SpillCompression,
+    NullPlacement, PresentationMode, QueryDialect, SortColumn, SortDirection, SortEngine,
+    SpillCompression,
 };
 use std::{
     collections::HashSet,
@@ -521,10 +522,6 @@ impl From<Vec<String>> for SortSpec {
 }
 
 impl SortSpec {
-    pub(crate) fn is_empty(&self) -> bool {
-        self.columns.is_empty()
-    }
-
     pub(crate) fn without_columns_named(&self, column_names: &[String]) -> Self {
         Self {
             columns: self
@@ -680,6 +677,30 @@ struct TransformArgs {
     #[arg(short, long, help_heading = "Transformations")]
     pub sort_by: Option<SortSpec>,
 
+    /// The sort implementation, for --sort-by and for --by with the sort-single strategy.
+    ///
+    /// `parallel` splits the rows it has buffered by key range, sorts the ranges
+    /// on --target-partitions threads, and writes them out in order. When the
+    /// memory pool is full it writes what it has sorted to the spill path and
+    /// continues, so a small --memory-budget slows the sort but does not fail it.
+    /// It needs no --non-spillable-reserve.
+    ///
+    /// `parallel` keeps each row as one run of bytes in Arrow's row format, and is
+    /// slower when a column cannot be kept that way. It then keeps the input
+    /// batches whole, and merges what it spills in a few large stretches of the
+    /// key range, one at a time when memory is short. The columns are
+    /// dictionaries whose values are lists, structs, maps, unions, booleans,
+    /// durations, intervals, dictionaries, or run-end encoded, alone or nested in
+    /// another column. --explain-analyze shows `rows=batches` on the
+    /// `ParallelSortExec` line of such a sort.
+    ///
+    /// `datafusion` sorts each partition separately and merges them on one thread.
+    /// It can fail with "Failed to allocate ... ExternalSorterMerge" when the pool
+    /// is full. A sort whose key is a dictionary of lists, structs, maps, or unions
+    /// uses it whatever this is set to.
+    #[arg(long, value_enum, default_value_t, help_heading = "Execution")]
+    pub sort_engine: SortEngine,
+
     /// Target memory budget. Best-effort, not a hard limit.
     ///
     /// Accepts a byte size (e.g. "8GB"), "total[:pct]" for a percentage of total RAM,
@@ -696,17 +717,18 @@ struct TransformArgs {
     #[arg(long, help_heading = "Execution", value_parser = MemoryBudgetSpec::from_str, default_value = "total:80%")]
     pub memory_budget: MemoryBudgetSpec,
 
-    /// Reserve memory for non-spillable operations (sort merge phases, etc.).
+    /// Reserve memory for operators that cannot spill.
     ///
     /// Keeps spillable operators (sorts, aggregations) out of part of the memory
-    /// pool, so that consumers that cannot spill find it free.
+    /// pool, so that consumers that cannot spill, such as input readers and the
+    /// `datafusion` sort engine's merge, find it free.
     ///
     /// Without a reserve those consumers are still served when spillable
     /// operators have filled the pool: they may overdraw it by up to a quarter
     /// of its size, and the spillable operators are refused more memory until
-    /// they spill or finish and give it back.
-    /// A reserve also shrinks the memory spillable operators may use, so they
-    /// spill sooner.
+    /// they spill or finish and give it back. The default `parallel` sort engine
+    /// needs no reserve. A reserve only shrinks the memory it may use, so it
+    /// spills sooner.
     ///
     /// Accepts a percentage (e.g. "10%", "10") or a fixed byte size (e.g. "200MB").
     /// Percentages are resolved against the memory pool size.
@@ -740,7 +762,8 @@ struct TransformArgs {
 
     /// Number of partitions for query execution parallelism.
     ///
-    /// Controls how DataFusion partitions data during queries (aggregations, joins, sorts).
+    /// Controls how DataFusion partitions data during queries (aggregations, joins, sorts),
+    /// and how many threads the `parallel` sort engine sorts on.
     /// Higher values increase parallelism but use more memory.
     ///
     /// Default: auto-detected based on workload. With sorting (--sort-by or --by): 75%
@@ -798,9 +821,22 @@ struct TransformArgs {
     /// to buffer, so a reserve that is too large can make them fail with "Not enough
     /// memory to continue external sort" instead.
     ///
+    /// This applies to sorts with --sort-engine datafusion and to aggregations. The
+    /// default sort sizes its own merges from the memory pool and ignores it.
+    ///
     /// Must be at least 2. Default: no limit.
     #[arg(long, help_heading = "Execution", value_parser = parse_at_least_two)]
     pub max_spill_merge_fan_in: Option<usize>,
+
+    /// Print where the transform spent its time, to stderr, when it finishes.
+    ///
+    /// Shows how long the inputs took to open, how long planning and execution
+    /// took, and the executed plan with each operator's metrics. For a sort, the
+    /// metrics separate time waiting for input (`input_wait_time`) from time
+    /// waiting for the output to be written (`output_wait_time`). Time metrics
+    /// are summed over an operator's partitions, so they can exceed the wall time.
+    #[arg(long, help_heading = "Execution")]
+    pub explain_analyze: bool,
 
     /// Preserve the row order from the input file in the output.
     ///
@@ -874,6 +910,7 @@ pub struct TransformCommand {
     exclude_columns: Vec<String>,
     query: Option<String>,
     sort_by: Option<SortSpec>,
+    sort_engine: SortEngine,
     memory_budget: MemoryBudgetSpec,
     non_spillable_reserve: Option<PoolReserveSpec>,
     memory_pool_top_consumers: usize,
@@ -882,6 +919,7 @@ pub struct TransformCommand {
     spill_path: Option<Utf8PathBuf>,
     spill_compression: SpillCompression,
     max_spill_size: Option<usize>,
+    explain_analyze: bool,
     max_spill_merge_fan_in: Option<usize>,
     preserve_input_order: bool,
     by: Option<String>,
@@ -926,6 +964,7 @@ impl TransformCommand {
             exclude_columns,
             query,
             sort_by,
+            sort_engine,
             memory_budget,
             non_spillable_reserve,
             memory_pool_top_consumers,
@@ -934,6 +973,7 @@ impl TransformCommand {
             spill_path,
             spill_compression,
             max_spill_size,
+            explain_analyze,
             max_spill_merge_fan_in,
             preserve_input_order,
             by,
@@ -961,6 +1001,7 @@ impl TransformCommand {
             exclude_columns,
             query,
             sort_by,
+            sort_engine,
             memory_budget,
             non_spillable_reserve,
             memory_pool_top_consumers,
@@ -969,6 +1010,7 @@ impl TransformCommand {
             spill_path,
             spill_compression,
             max_spill_size,
+            explain_analyze,
             max_spill_merge_fan_in,
             preserve_input_order,
             by,

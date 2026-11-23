@@ -223,7 +223,16 @@ silk-chiffon transform \
   --list-outputs text
 ```
 
-A large sort spills to disk instead of holding everything in the memory budget, so this works on inputs bigger than memory. `--memory-budget` and `--spill-path` control it, and `--max-spill-size` caps the disk space spill files may use (100 GiB by default). If a spilling sort fails with `Additional allocation failed for ExternalSorterMerge`, try `--non-spillable-reserve`, which keeps part of the memory pool free of buffered sort input (a reserve that is too large leaves the sort too little memory to buffer), and `--max-spill-merge-fan-in`, which caps how many spill files one merge pass reserves memory for. The [full reference](docs/CLI.md) has the details.
+A large sort spills to disk instead of holding everything in the memory budget, so this works on inputs bigger than memory. `--memory-budget` and `--spill-path` control it, and `--max-spill-size` caps the disk space spill files may use (100 GiB by default). The [full reference](docs/CLI.md) has the details.
+
+The sort runs on `--target-partitions` threads. When its memory runs out, it writes what it has sorted to the spill path as a run, carries on, and merges the runs at the end. A smaller `--memory-budget` therefore makes a sort slower, but the sort does not fail for lack of memory. `--sort-engine datafusion` selects DataFusion's own sort, which merges on one thread and can fail when the memory pool is full. If it fails with `Additional allocation failed for ExternalSorterMerge`, try `--non-spillable-reserve`, which keeps part of the memory pool free of buffered sort input (a reserve that is too large leaves the sort too little memory to buffer), and `--max-spill-merge-fan-in`, which caps how many spill files one merge pass reserves memory for.
+
+The default sort keeps each row as one run of bytes in Arrow's row format, and a few dictionary columns cannot be kept that way: a dictionary whose values are lists, structs, maps, unions, booleans, durations, intervals, dictionaries, or run-end encoded. One nested in another column counts, such as a list of dictionaries of booleans. Dictionaries of strings, binary, numbers, decimals, dates, times, and timestamps are kept in row format like any other column.
+
+- **A sort key is a dictionary of lists, structs, maps, or unions:** the row format cannot order it, so DataFusion's sort is used whatever `--sort-engine` says. `--explain-analyze` shows `SortExec` where `ParallelSortExec` would be.
+- **Any other column is one of those, sort key or not:** the sort keeps the input batches whole. It still sorts in parallel and still spills when its memory runs out, but it is slower: it gathers the output from the batches a column at a time, and merges what it spilled in a few large stretches of the key range, one at a time when memory is short. `--explain-analyze` shows `rows=batches` on the `ParallelSortExec` line.
+
+To see where a transform spent its time, add `--explain-analyze`. When the transform finishes, it prints to stderr how long the inputs took to open and the executed plan with each operator's metrics. For a sort, `input_wait_time` is time spent waiting for the input and `output_wait_time` is time spent waiting for the output to be written.
 
 ## Inspecting files
 
