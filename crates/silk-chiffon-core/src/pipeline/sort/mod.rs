@@ -933,11 +933,11 @@ impl Sorter {
                 self.budget.release_index(index);
                 self.keep(Flushes::Blocks(vec![merged]));
             }
-            Flushes::Batches(flushes) => {
-                if let Some(merged) = self.compact_batches(&flushes).await? {
-                    self.keep(Flushes::Batches(vec![merged]));
-                }
-            }
+            Flushes::Batches(flushes) => match self.compact_batches(&flushes).await? {
+                Some(merged) => self.keep(Flushes::Batches(vec![merged])),
+                // nothing was merged, so the flushes are still what holds the rows
+                None => self.keep(Flushes::Batches(flushes)),
+            },
         }
         Ok(())
     }
@@ -1313,7 +1313,12 @@ impl GroupedFlushes {
             .collect();
         let segments = || by_group.iter().flatten();
         Self {
-            input_bytes: segments().map(Segment::input_bytes).max().unwrap_or(0),
+            // at least a byte, which the merges are sized by dividing by
+            input_bytes: segments()
+                .map(Segment::input_bytes)
+                .max()
+                .unwrap_or(0)
+                .max(1),
             batch_bytes: segments().map(Segment::batch_bytes).max().unwrap_or(0),
             rows: segments().map(Segment::rows).sum(),
             by_group,
@@ -1345,9 +1350,6 @@ impl MergePlan {
         buffered: usize,
     ) -> Option<Self> {
         let widest = grouped.by_group.iter().map(Vec::len).max()?;
-        if grouped.input_bytes == 0 {
-            return None;
-        }
         let groups = grouped.by_group.len().min(parallelism).max(1);
         let floor = 2 * grouped.input_bytes;
         let fan_in = widest.clamp(2, (max_open_files / groups).max(2));
