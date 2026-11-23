@@ -82,6 +82,7 @@ sysinfo = "^0.40.4"
 tabled = { version = "^0.22.0", features = ["ansi"] }
 thiserror.workspace = true
 tokio = { version = "^1.54.1", features = ["rt-multi-thread", "macros", "io-util", "fs", "sync"] }
+tokio-util.workspace = true
 url.workspace = true
 
 [build-dependencies]

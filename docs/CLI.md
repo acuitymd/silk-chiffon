@@ -82,20 +82,36 @@ Examples:
 - `-s`, `--sort-by <SORT_BY>` — Sort the data by one or more columns before writing.
 
   Format: A comma-separated list like `col_a,col_b:desc,col_c`.
+- `--sort-engine <SORT_ENGINE>` — The sort implementation, for --sort-by and for --by with the sort-single strategy.
+
+  `parallel` splits the rows it has buffered by key range, sorts the ranges on --target-partitions threads, and writes them out in order. When the memory pool is full it writes what it has sorted to the spill path and continues, so a small --memory-budget slows the sort. It never takes more than the pool grants. It fails only when the pool is too small for the memory it needs to start, for one batch, or for the least it needs to merge what it spilled, which grows with the index of a large spill and with rows wider than the first batch's. The error says what it could not get.
+
+  `parallel` keeps each row as one run of bytes in Arrow's row format, and is slower when a column cannot be kept that way. It then keeps the input batches whole, and merges what it spills in a few large stretches of the key range, one at a time when memory is short. The columns are dictionaries whose values are lists, structs, maps, unions, booleans, durations, intervals, dictionaries, or run-end encoded, and dictionaries in columns that may not be null, alone or nested in another column. --explain-analyze shows `rows=batches` on the `ParallelSortExec` line of such a sort.
+
+  `datafusion` sorts each partition separately and merges them on one thread. It can fail with "Additional allocation failed for ExternalSorterMerge" when the pool is full. A sort whose key is a dictionary of lists, structs, maps, or unions uses it whatever this is set to.
+
+  Default value: `parallel`
+
+  Possible values:
+  - `parallel`:
+    Splits rows by key range and sorts the ranges in parallel. Spills when the memory pool refuses more memory, and never takes more than the pool grants: it fails only when the pool is too small for the memory it needs to start, for one batch, or for the least it needs to merge what it spilled
+  - `datafusion`:
+    DataFusion's sort: one sorter per partition, merged on one thread
+
 - `--memory-budget <MEMORY_BUDGET>` — Target memory budget. Best-effort, not a hard limit.
 
   Accepts a byte size (e.g. "8GB"), "total[:pct]" for a percentage of total RAM, "available[:pct]" for a percentage of free RAM, or "reserve:<size>" to use total RAM minus a reserved amount. All keyword modes (total, available, reserve) support an optional minimum: "total:80:min:4GB". Examples: "total:90", "available:60%", "reserve:2GB:min:1GB", "4GB".
 
   The memory pool, which sorts and DataFusion's operators reserve from, is 75% of the budget when the transform sorts and 25% when it does not, and never grants more than that when asked. Output writers, and most input readers, do not reserve from the pool, which is what can take the process over the budget.
 
-  Setting this too low may cause out-of-memory errors, since some internal buffers cannot spill to disk. The minimum depends on schema width, batch size, and parallelism — there is no fixed floor.
+  Setting this too low fails the transform. The sort needs memory to start, which grows with --target-partitions and the width of the rows, and the error says how much.
 
   Default: 80% of total memory, container-aware on Linux.
 
   Default value: `total:80%`
 - `--non-spillable-reserve <NON_SPILLABLE_RESERVE>` — Reserve memory for operators that cannot spill.
 
-  Keeps part of the memory pool free for consumers that cannot spill, such as input readers and a sort's merge, beside what they already hold. Spillable operators (sorts, aggregations) that hold memory are refused more once it would leave less than the reserve free, and spill instead. The pool grants no more than its size when asked, so a consumer that cannot spill and finds the pool full fails the transform. A larger reserve makes that less likely, and leaves the sorts less to buffer, so they spill sooner.
+  Keeps part of the memory pool free for consumers that cannot spill, such as input readers and the `datafusion` sort engine's merge, beside what they already hold. Spillable operators (sorts, aggregations) that hold memory are refused more once it would leave less than the reserve free, and spill instead. The pool grants no more than its size when asked, so a consumer that cannot spill and finds the pool full fails the transform. A larger reserve makes that less likely, and leaves the sort less to buffer, so it spills sooner.
 
   The pool is 75% of `--memory-budget` when the transform sorts and 25% when it does not.
 
@@ -118,7 +134,7 @@ Examples:
   Default: all CPU cores.
 - `--target-partitions <TARGET_PARTITIONS>` — Number of partitions for query execution parallelism.
 
-  Controls how DataFusion partitions data during queries (aggregations, joins, sorts). Higher values increase parallelism but use more memory.
+  Controls how DataFusion partitions data during queries (aggregations, joins, sorts), and how many threads the `parallel` sort engine sorts on. Higher values increase parallelism but use more memory.
 
   Default: auto-detected based on workload. With sorting (--sort-by or --by): 75% of available CPU cores. Without sorting: DataFusion default.
 - `--spill-path <SPILL_PATH>` — Directory for spilling intermediate data when memory limit is exceeded.
@@ -145,7 +161,12 @@ Examples:
 
   The limit does not apply to the merge a partition runs over its buffered batches to write each spill file. That merge can fail with the same error. --non-spillable-reserve keeps part of the pool out of reach of buffered sort input, which makes that failure less likely. It also leaves sorts less memory to buffer, so a reserve that is too large can make them fail with "Not enough memory to continue external sort" instead.
 
+  This applies to sorts with --sort-engine datafusion and to aggregations. The default sort sizes its own merges from the memory pool and ignores it.
+
   Must be at least 2. Default: no limit.
+- `--explain-analyze` — Print where the transform spent its time, to stderr, when it finishes.
+
+  Shows how long the inputs took to open, how long planning and execution took, and the executed plan with each operator's metrics. For a sort, the metrics separate time waiting for input (`input_wait_time`) from time waiting for the output to be written (`output_wait_time`). Time metrics are summed over an operator's partitions, so they can exceed the wall time.
 - `--preserve-input-order` — Preserve the row order from the input file in the output.
 
   By default, DataFusion reads files using multiple partitions for parallelism, which can interleave rows. This flag forces single-partition reading to maintain the original row order. Only valid for single-file-to-single-file transforms without queries or sorting.
@@ -390,7 +411,7 @@ Examples:
 
   Controls the rayon thread pool size for encoding columns within row groups. Column encoding is CPU-intensive and benefits from parallelism.
 
-  Default: auto-detected based on workload. With sorting (--sort-by or --by): 25% of available CPU cores. Without sorting: 75% of available CPU cores.
+  Default: 75% of available CPU cores, or 25% when DataFusion's sort orders the output, whose merge runs while the output is encoded. That is with --sort-engine datafusion, or when the default engine hands a sort it cannot do to DataFusion's.
 - `--parquet-ingestion-queue-size <PARQUET_INGESTION_QUEUE_SIZE>` — Queue size for record batches waiting to be assembled into row groups.
 
   Controls backpressure between the data source and ingestion stage. Higher values allow the source to stay ahead of row group assembly.

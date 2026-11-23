@@ -223,7 +223,28 @@ silk-chiffon transform \
   --list-outputs text
 ```
 
-A large sort spills to disk instead of holding everything in the memory budget, so this works on inputs bigger than memory. `--memory-budget` and `--spill-path` control it, and `--max-spill-size` caps the disk space spill files may use (100 GiB by default). If a spilling sort fails with `Additional allocation failed for ExternalSorterMerge`, try `--non-spillable-reserve`, which keeps part of the memory pool free of buffered sort input (a reserve that is too large leaves the sort too little memory to buffer), and `--max-spill-merge-fan-in`, which caps how many spill files one merge pass reserves memory for. The [full reference](docs/CLI.md) has the details.
+A large sort spills to disk instead of holding everything in the memory budget, so this works on inputs bigger than memory. `--memory-budget` and `--spill-path` control it, and `--max-spill-size` caps the disk space spill files may use (100 GiB by default). The [full reference](docs/CLI.md) has the details.
+
+The sort runs on `--target-partitions` threads. When its memory runs out, it writes what it has sorted to the spill path as a run, carries on, and merges the runs at the end. A smaller `--memory-budget` therefore makes a sort slower. The sort reserves its memory from a pool that is 75% of the budget, of which a fifth is kept for operators that cannot spill (`--non-spillable-reserve`), and never takes more than the pool grants. It fails only when the pool is too small for it: for the memory it needs to start, which grows with `--target-partitions` and the width of the rows, for one batch, or for the least it needs to merge what it spilled, which grows with the index of a large spill and with rows wider than the first batch's. The error says what it could not get. `--sort-engine datafusion` selects DataFusion's own sort, which merges on one thread and can fail when the memory pool is full. If it fails with `Additional allocation failed for ExternalSorterMerge`, try `--non-spillable-reserve`, which keeps part of the memory pool free of buffered sort input (a reserve that is too large leaves the sort too little memory to buffer), and `--max-spill-merge-fan-in`, which caps how many spill files one merge pass reserves memory for.
+
+The default sort keeps each row as one run of bytes in Arrow's row format, and a few dictionary columns cannot be kept that way: a dictionary whose values are lists, structs, maps, unions, booleans, durations, intervals, dictionaries, or run-end encoded, and a dictionary in a column that may not be null, which can still name a null value. One nested in another column counts, such as a list of dictionaries of booleans. Dictionaries of strings, binary, numbers, decimals, dates, times, and timestamps are kept in row format like any other column.
+
+- **A sort key is a dictionary of lists, structs, maps, or unions:** the row format cannot order it, so DataFusion's sort is used whatever `--sort-engine` says. `--explain-analyze` shows `SortExec` where `ParallelSortExec` would be.
+- **Any other column is one of those, sort key or not:** the sort keeps the input batches whole. It still sorts in parallel and still spills when its memory runs out, but it is slower: it gathers the output from the batches a column at a time, and merges what it spilled in a few large stretches of the key range, one at a time when memory is short. `--explain-analyze` shows `rows=batches` on the `ParallelSortExec` line.
+
+How the two sorts compare, on a 30-vCPU cloud VM with 15 cores and `--target-partitions 24`: 100 million synthetic rows of 13 columns, read from zstd Parquet and written as one lz4 Parquet file, sorted by four keys. `ints5` is five fixed-width columns, `mixed6` six columns of strings, a date, a decimal, and a timestamp in mixed directions, `strings5` four string columns and an integer, one of the strings with a 17-byte prefix that every row shares, and `wide8` eight columns of seven types. Each cell is the median wall time of three runs, the default sort first and `--sort-engine datafusion` second, in seconds.
+
+| `--memory-budget`   | `ints5`      | `mixed6`     | `strings5`   | `wide8`      |
+| ------------------- | ------------ | ------------ | ------------ | ------------ |
+| 60 GiB              | 13.1 / 27.2  | 14.7 / 31.0  | 17.7 / 35.0  | 14.9 / 32.1  |
+| 60 GiB, 50% reserve | 17.7 / 28.1  | 18.9 / 31.9  | 22.2 / 35.8  | 19.6 / 33.3  |
+| 16 GiB              | 17.7 / 29.9  | 19.2 / 33.6  | 20.9 / 38.0  | 18.9 / 35.0  |
+| 4 GiB               | 17.5 / fails | 19.3 / fails | 20.9 / fails | 20.2 / fails |
+| 1 GiB               | 19.5 / fails | 21.2 / fails | 23.0 / fails | 20.9 / fails |
+
+The default sort takes about half the time when the rows fit in memory, and 37 to 46% less when both spill at 16 GiB. At 4 GiB and 1 GiB DataFusion's sort stops with an allocation error, and the default sort still finishes. These runs are of an earlier version of this sort; later changes took up to a further 9% off some of its times, and the table was not rerun after them.
+
+To see where a transform spent its time, add `--explain-analyze`. When the transform finishes, it prints to stderr how long the inputs took to open and the executed plan with each operator's metrics. For a sort, `input_wait_time` is time spent waiting for the input and `output_wait_time` is time spent waiting for the output to be written.
 
 ## Inspecting files
 
