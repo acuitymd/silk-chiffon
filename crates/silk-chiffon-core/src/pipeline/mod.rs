@@ -100,11 +100,8 @@ impl Pipeline {
         self
     }
 
-    /// Sets the DataFusion memory-pool limit in bytes.
-    ///
-    /// Consumers that cannot spill may take the pool's reservations up to a
-    /// quarter over this while spillable consumers hold memory. Size the limit
-    /// with that room left over.
+    /// Sets the DataFusion memory-pool limit in bytes. The pool never grants
+    /// more than this. Without one, the limit is 80% of the machine's memory.
     pub fn with_memory_limit(mut self, memory_limit: Option<usize>) -> Self {
         self.config.memory_limit = memory_limit;
         self
@@ -155,7 +152,10 @@ impl Pipeline {
         self
     }
 
-    /// Reserves pool capacity for operators that cannot spill.
+    /// Reserves pool capacity for operators that cannot spill. Spillable
+    /// operators, such as sorts, never hold it, so a reader or a merge that
+    /// cannot spill finds it free. Without one, the reserve is a fifth of the
+    /// pool.
     pub fn with_non_spillable_reserve(mut self, reserve: Option<usize>) -> Self {
         self.config.non_spillable_reserve = reserve;
         self
@@ -220,8 +220,12 @@ impl Pipeline {
             0 => NonZeroUsize::MAX,
             count => NonZeroUsize::new(count).expect("nonzero by match"),
         };
+        let reserve = self
+            .config
+            .non_spillable_reserve
+            .unwrap_or(memory_limit / DEFAULT_RESERVE_DIVISOR);
         let pool: Arc<dyn MemoryPool> = Arc::new(TrackConsumersPool::new(
-            ReservedSpillPool::new(memory_limit, self.config.non_spillable_reserve.unwrap_or(0)),
+            ReservedSpillPool::new(memory_limit, reserve),
             top_n,
         ));
         let mut runtime = datafusion::execution::runtime_env::RuntimeEnvBuilder::default()
@@ -449,10 +453,14 @@ impl fmt::Debug for PipelineExecution {
     }
 }
 
-/// 64% of the machine's memory, so that the pool and the quarter consumers
-/// that cannot spill may overdraw it come to 80%.
+/// The pool's share kept for consumers that cannot spill when no reserve is
+/// given: a fifth. Input readers and merges that cannot spill then find room
+/// however full the sorts keep the rest.
+const DEFAULT_RESERVE_DIVISOR: usize = 5;
+
+/// 80% of the machine's memory.
 fn default_memory_limit() -> usize {
-    total_memory() * 16 / 25
+    total_memory() * 4 / 5
 }
 
 #[allow(clippy::cast_possible_truncation)]

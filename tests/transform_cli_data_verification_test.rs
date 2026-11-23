@@ -1552,7 +1552,9 @@ fn test_a_sort_larger_than_the_memory_budget_spills_and_stays_sorted() {
     let output = temp_dir.path().join("output.arrow");
     let rows = write_spilling_sort_input(&input);
 
-    // the rows need about 43 MiB and the budget leaves the sort 9.6 MB
+    // the rows need about 43 MiB and the budget leaves the sort 7.2 MB. The
+    // four input readers cannot spill and take about 2.7 MB, more than the
+    // default fifth of a 12 MB pool
     cargo::cargo_bin_cmd!("silk-chiffon")
         .args([
             "transform",
@@ -1568,6 +1570,8 @@ fn test_a_sort_larger_than_the_memory_budget_spills_and_stays_sorted() {
             "4",
             "--memory-budget",
             "16MB",
+            "--non-spillable-reserve",
+            "40%",
             "--spill-path",
             temp_dir.path().to_str().unwrap(),
             "--explain-analyze",
