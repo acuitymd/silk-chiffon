@@ -14,7 +14,6 @@ description = "Parquet format support for Silk Chiffon"
 anyhow.workspace = true
 apply_if = "^1.2.1"
 arrow.workspace = true
-async-stream = "^0.3.6"
 async-trait.workspace = true
 bytes = "^1.12.2"
 bytesize = "^2.7.0"

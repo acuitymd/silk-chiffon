@@ -5121,7 +5121,6 @@ dependencies = [
  "anyhow",
  "apply_if",
  "arrow",
- "async-stream",
  "async-trait",
  "bytes",
  "bytesize",
