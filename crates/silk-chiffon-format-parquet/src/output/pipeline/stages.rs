@@ -21,12 +21,16 @@
 //!    is the batches it was gathered from, cut where it ends, and not a copy
 //!    of them: one task copying every row was all that the encoders behind
 //!    it could be fed by. Copying 100M rows of 13 columns from one Parquet
-//!    file to another took 8.9 s with that copy and takes 7.5 s without it.
+//!    file to another, on 24 threads, took 8.9 s with that copy and takes
+//!    7.5 s without it. Only batches under [`MIN_PIECE_ROWS`] rows are still
+//!    copied, together, since each piece of a row group costs a call per
+//!    column to encode.
 //!
 //! 3. **Encoder Coordinator** (1 task): Uses `FuturesOrdered` to spawn tasks on
 //!    the encoding runtime, up to `max_row_group_concurrency`. Results remain
-//!    ordered. A row group's task first analyzes its `dictionary: auto`
-//!    columns, a task per column, then encodes it, also a task per column.
+//!    ordered. A row group's task first analyzes the columns whose encoding
+//!    depends on their cardinality, a task per column, then encodes it, also
+//!    a task per column.
 //!
 //! 4. **Writing** (1 task): Receives encoded row groups in order and feeds the
 //!    object-upload bridge.
@@ -43,6 +47,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result, anyhow};
 use arrow::array::RecordBatch;
+use arrow::compute::concat_batches;
 use arrow::datatypes::SchemaRef;
 use futures::StreamExt;
 use futures::stream::FuturesOrdered;
@@ -259,6 +264,12 @@ pub(super) async fn settle_pipeline_tasks(
     result
 }
 
+/// Batches with fewer rows than this are copied together before they join a
+/// row group. Every piece of a row group costs the encoders a call per column,
+/// and holds an array per column, and partitioned output can hand a file
+/// batches of a row or two.
+const MIN_PIECE_ROWS: usize = 1024;
+
 async fn ingestion_task(
     mut ingestion_rx: mpsc::Receiver<RecordBatch>,
     encoding_tx: mpsc::Sender<RowGroupWork>,
@@ -267,27 +278,57 @@ async fn ingestion_task(
     let row_group_rows = encoding.config.max_row_group_size.max(1);
     let mut batches = Vec::new();
     let mut num_rows = 0;
+    let mut small = Vec::new();
+    let mut small_rows = 0;
 
-    while let Some(mut batch) = ingestion_rx.recv().await {
-        // a batch that reaches past the row group's end is cut there, which
-        // copies nothing
-        while num_rows + batch.num_rows() >= row_group_rows {
-            let fitting = row_group_rows - num_rows;
-            batches.push(batch.slice(0, fitting));
-            batch = batch.slice(fitting, batch.num_rows() - fitting);
-            let work = RowGroupWork {
-                batches: std::mem::take(&mut batches),
-                num_rows: row_group_rows,
-                encoding: Arc::clone(&encoding),
-            };
-            num_rows = 0;
-            if encoding_tx.send(work).await.is_err() {
-                return Ok(());
+    loop {
+        let received = ingestion_rx.recv().await;
+        let mut pieces = Vec::with_capacity(2);
+        match received {
+            Some(batch) if batch.num_rows() < MIN_PIECE_ROWS => {
+                small_rows += batch.num_rows();
+                small.push(batch);
+                // never past the row group's end, so that a row group goes to
+                // the encoders as soon as it is full
+                if small_rows >= MIN_PIECE_ROWS.min(row_group_rows - num_rows) {
+                    pieces.push(concat_batches(&encoding.schema, &small)?);
+                    (small, small_rows) = (Vec::new(), 0);
+                }
+            }
+            received => {
+                // the small batches before it go first, to keep the rows in order
+                if !small.is_empty() {
+                    pieces.push(concat_batches(&encoding.schema, &small)?);
+                    (small, small_rows) = (Vec::new(), 0);
+                }
+                pieces.extend(received);
             }
         }
-        if batch.num_rows() > 0 {
-            num_rows += batch.num_rows();
-            batches.push(batch);
+        let finished = pieces.is_empty() && small.is_empty();
+        for mut batch in pieces {
+            // a batch that reaches past the row group's end is cut there,
+            // which copies nothing
+            while num_rows + batch.num_rows() >= row_group_rows {
+                let fitting = row_group_rows - num_rows;
+                batches.push(batch.slice(0, fitting));
+                batch = batch.slice(fitting, batch.num_rows() - fitting);
+                let work = RowGroupWork {
+                    batches: std::mem::take(&mut batches),
+                    num_rows: row_group_rows,
+                    encoding: Arc::clone(&encoding),
+                };
+                num_rows = 0;
+                if encoding_tx.send(work).await.is_err() {
+                    return Ok(());
+                }
+            }
+            if batch.num_rows() > 0 {
+                num_rows += batch.num_rows();
+                batches.push(batch);
+            }
+        }
+        if finished {
+            break;
         }
     }
 
@@ -604,6 +645,77 @@ mod tests {
 
         assert!(error.to_string().contains("task panicked"));
         assert!(sibling_dropped.load(Ordering::SeqCst));
+    }
+
+    /// Gathers batches of `sizes` rows, numbered in order, into row groups of
+    /// `row_group_rows`, and returns each row group's pieces' row counts and
+    /// its values.
+    async fn gather(sizes: &[usize], row_group_rows: usize) -> Vec<(Vec<usize>, Vec<i32>)> {
+        use arrow::array::{AsArray, Int32Array};
+        use arrow::datatypes::{DataType, Field, Int32Type, Schema};
+
+        let schema = Arc::new(Schema::new(vec![Field::new("n", DataType::Int32, false)]));
+        let parquet_schema = Arc::new(ArrowSchemaConverter::new().convert(&schema).unwrap());
+        let config = PipelineConfig {
+            max_row_group_size: row_group_rows,
+            ..PipelineConfig::default()
+        };
+        let encoding = Arc::new(RowGroupEncoding::new(
+            Arc::clone(&schema),
+            parquet_schema,
+            Arc::new(WriterProperties::builder().build()),
+            config,
+        ));
+        let (batches_tx, batches_rx) = mpsc::channel(sizes.len().max(1));
+        let (groups_tx, mut groups_rx) = mpsc::channel(sizes.len().max(1) + 1);
+        let mut next = 0;
+        for rows in sizes {
+            let rows = i32::try_from(*rows).unwrap();
+            let values: Int32Array = (next..next + rows).collect();
+            next += rows;
+            let batch = RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(values)]).unwrap();
+            batches_tx.send(batch).await.unwrap();
+        }
+        drop(batches_tx);
+        ingestion_task(batches_rx, groups_tx, encoding)
+            .await
+            .unwrap();
+        let mut groups = Vec::new();
+        while let Some(work) = groups_rx.recv().await {
+            let pieces = work.batches.iter().map(RecordBatch::num_rows).collect();
+            let values: Vec<i32> = work
+                .batches
+                .iter()
+                .flat_map(|batch| {
+                    batch
+                        .column(0)
+                        .as_primitive::<Int32Type>()
+                        .values()
+                        .to_vec()
+                })
+                .collect();
+            assert_eq!(values.len(), work.num_rows);
+            groups.push((pieces, values));
+        }
+        groups
+    }
+
+    #[tokio::test]
+    async fn small_batches_are_copied_together_and_keep_their_order() {
+        let mut sizes = vec![1; 3000];
+        // a large batch between small ones goes after the small ones before it
+        sizes.insert(1500, 2000);
+        let groups = gather(&sizes, 4096).await;
+        let rows: Vec<usize> = groups.iter().map(|(_, values)| values.len()).collect();
+        assert_eq!(rows, [4096, 904]);
+        let values: Vec<i32> = groups
+            .into_iter()
+            .flat_map(|(pieces, values)| {
+                assert!(pieces.len() <= 5, "{pieces:?}");
+                values
+            })
+            .collect();
+        assert_eq!(values, (0..5000).collect::<Vec<_>>());
     }
 
     #[tokio::test]

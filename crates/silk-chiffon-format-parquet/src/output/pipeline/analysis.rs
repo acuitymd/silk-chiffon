@@ -6,8 +6,10 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result};
+use std::sync::Arc;
+
 use arrow::array::{Array, AsArray, RecordBatch};
-use arrow::datatypes::DataType;
+use arrow::datatypes::{DataType, Field, Schema};
 use datafusion::functions::string::expr_fn::octet_length;
 use datafusion::functions_aggregate::expr_fn::{approx_distinct, avg, count_distinct};
 use datafusion::prelude::{SessionConfig, SessionContext, ident};
@@ -66,9 +68,24 @@ impl RowGroupAnalyzer {
             if !is_analyzable(schema.field(index).data_type()) {
                 continue;
             }
+            // one schema for every piece: the sink accepts batches whose
+            // schemas differ in metadata or nullability, and a query over
+            // batches rejects any that its first batch's schema does not
+            // contain
+            let field = schema.field(index);
+            let column_schema = Arc::new(Schema::new(vec![Field::new(
+                field.name(),
+                field.data_type().clone(),
+                true,
+            )]));
             let column = row_group
                 .iter()
-                .map(|batch| batch.project(&[index]))
+                .map(|batch| {
+                    RecordBatch::try_new(
+                        Arc::clone(&column_schema),
+                        vec![Arc::clone(batch.column(index))],
+                    )
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             let (context, name) = (self.context.clone(), name.clone());
             scope.spawn_in_on(
@@ -209,6 +226,38 @@ mod tests {
 
     fn row_group(columns: Vec<(&str, ArrayRef)>) -> RecordBatch {
         RecordBatch::try_from_iter(columns).unwrap()
+    }
+
+    #[tokio::test]
+    async fn pieces_whose_schemas_differ_in_metadata_or_nullability_are_analyzed_together() {
+        use std::collections::HashMap as Metadata;
+
+        use arrow::array::StringArray;
+        use arrow::datatypes::{DataType, Field, Schema};
+
+        let piece = |nullable: bool, note: &str, values: Vec<&str>| {
+            let field = Field::new("s", DataType::Utf8, nullable)
+                .with_metadata(Metadata::from([("note".to_owned(), note.to_owned())]));
+            let schema = Schema::new(vec![field])
+                .with_metadata(Metadata::from([("file".to_owned(), note.to_owned())]));
+            RecordBatch::try_new(Arc::new(schema), vec![Arc::new(StringArray::from(values))])
+                .unwrap()
+        };
+        // the first piece's schema contains neither the second's nullability
+        // nor its metadata
+        let row_group = [
+            piece(false, "a", vec!["x", "y"]),
+            piece(true, "b", vec!["z", "x"]),
+        ];
+        let analysis = RowGroupAnalyzer::new(vec!["s".to_owned()])
+            .analyze(
+                &row_group,
+                &Handle::current(),
+                &PipelineTaskScope::new(CancellationToken::new()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(analysis["s"].approx_distinct, 3);
     }
 
     /// Analyzes a row group as two batches, the way its rows arrive.
