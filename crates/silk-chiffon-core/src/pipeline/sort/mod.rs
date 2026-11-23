@@ -148,16 +148,23 @@ const MIN_ROWS_PER_FILE: usize = 16 * 1024;
 /// reads a tenth of the blocks twice.
 const MERGE_SLICE_BLOCKS: usize = 256;
 
-/// The share of the pool that a block of a flush fills: one part in this
-/// many. The index of a flush keeps the first key of every block, and 40 bytes
-/// more, in memory for as long as the flush exists, so small blocks make an
-/// index that can outgrow the pool: blocks of 8 KiB with 50-byte keys make one
-/// a hundredth the size of what is spilled. A merge holds a block of every
-/// flush it reads, so large ones leave room for fewer flushes at once, and
-/// blocks are no larger than a read is worth.
-const BLOCK_POOL_SHARE: usize = 1024;
-const MIN_BLOCK_BYTES: usize = 4 * 1024;
-const MAX_BLOCK_BYTES: usize = 256 * 1024;
+/// The share of one thread's scratch memory that a block of rows in row
+/// format fills: one part in this many. A merge holds a block of every flush,
+/// so sixteen flushes merge in the memory a thread sorts a range in. Blocks
+/// are no larger than a read is worth.
+///
+/// The index of a flush keeps the first key of every block, and 40 bytes more,
+/// in memory for as long as the flush exists, so small blocks make a larger
+/// index. Blocks sized from the pool, a thousandth of it, kept the index small
+/// at small budgets, but left a merge room for a tenth of the flushes at
+/// once: 100M rows sorted in 1 GiB took 27 s where they took 20 s.
+const ROW_BLOCK_SCRATCH_SHARE: usize = 32;
+const MIN_ROW_BLOCK_BYTES: usize = 4 * 1024;
+const MAX_ROW_BLOCK_BYTES: usize = 256 * 1024;
+
+/// Records in a block of a flush of records, for each row that one thread's
+/// scratch memory is sized for: one in this many.
+const BLOCK_SCRATCH_ROWS_SHARE: usize = 16;
 
 /// Spill files kept at once where the process's open-file limit cannot be
 /// read: a quarter of 1024, the common default. Each spill file is an open
@@ -820,8 +827,6 @@ impl Sorter {
     fn shape_of(&self, words: Words, scratch_rows: usize, spill_batch_rows: usize) -> Shape {
         let parallelism = self.options.parallelism;
         let scratch_bytes = scratch_rows * 2 * words.record_bytes();
-        let block_bytes =
-            (self.pool_bytes / BLOCK_POOL_SHARE).clamp(MIN_BLOCK_BYTES, MAX_BLOCK_BYTES);
         Shape {
             words,
             chunk: ranges::chunk_words(words, scratch_bytes, parallelism),
@@ -833,8 +838,12 @@ impl Sorter {
                 Arc::clone(&self.schema),
                 self.ordering.clone(),
                 spill_batch_rows,
-                block_bytes / words.record_bytes(),
-                block_bytes,
+                // large enough that a block is worth a read, and small
+                // against a slice of the merge of flushes, which reads
+                // one block of every flush twice
+                scratch_rows / BLOCK_SCRATCH_ROWS_SHARE,
+                (scratch_bytes / ROW_BLOCK_SCRATCH_SHARE)
+                    .clamp(MIN_ROW_BLOCK_BYTES, MAX_ROW_BLOCK_BYTES),
                 &self.runtime,
                 self.spill_compression,
                 self.spill_metrics.clone(),
