@@ -1,10 +1,12 @@
-//! A memory pool that reserves capacity for non-spillable consumers.
+//! A memory pool that serves consumers that cannot spill before those that can.
 //!
 //! DataFusion's built-in `FairSpillPool` divides memory evenly among spillable
-//! consumers, but when spillable consumers have already consumed most of the
-//! pool, non-spillable consumers (like sort merge phases) can fail to allocate
-//! even small amounts. This pool solves that by maintaining a reserve that only
-//! non-spillable consumers can use.
+//! consumers, and refuses a non-spillable consumer whenever the pool is full.
+//! A sort that has filled the pool with data it could write to disk therefore
+//! makes an input reader, or the sort's own merge, fail for lack of a few
+//! megabytes. This pool grants those requests instead and takes the memory
+//! back from the spillable consumers, which are refused their next request and
+//! spill.
 
 use datafusion::common::{Result, resources_datafusion_err};
 use datafusion::execution::memory_pool::{
@@ -12,6 +14,12 @@ use datafusion::execution::memory_pool::{
 };
 use parking_lot::Mutex;
 use std::fmt::{self, Display, Formatter};
+
+/// Non-spillable consumers may push the pool this far over its size, as a
+/// divisor of the size, while spillable consumers still hold memory they were
+/// granted earlier. The transform sizes the pool below its memory budget, which
+/// leaves room for this.
+const OVERDRAFT_DIVISOR: usize = 4;
 
 /// A [`MemoryPool`] that guarantees a portion of capacity for non-spillable consumers.
 ///
@@ -33,8 +41,12 @@ use std::fmt::{self, Display, Formatter};
 ///
 /// - **Spillable consumers** can only use `pool_size - reserve_for_non_spillable`,
 ///   divided evenly among all registered spillable consumers (like `FairSpillPool`).
-/// - **Non-spillable consumers** can use the entire pool (spillable region + reserve),
-///   allocated first-come first-served.
+///   The region shrinks while non-spillable consumers hold more than the reserve.
+/// - **Non-spillable consumers** can use the entire pool, first-come first-served.
+///   When spillable consumers already hold part of it, a non-spillable request is
+///   still granted, up to a quarter of the pool over its size. The spillable
+///   consumers are then over their share, so their next request is refused and
+///   they spill.
 #[derive(Debug)]
 pub struct ReservedSpillPool {
     pool_size: usize,
@@ -152,10 +164,16 @@ impl MemoryPool for ReservedSpillPool {
                 state.spillable += additional;
             }
             false => {
-                // non-spillable consumers can use the full pool
-                let available = self
-                    .pool_size
-                    .saturating_sub(state.non_spillable + state.spillable);
+                // non-spillable consumers can use the full pool, and may
+                // overdraw it against memory spillable consumers will give back
+                let overdraft = if state.spillable > 0 {
+                    self.pool_size / OVERDRAFT_DIVISOR
+                } else {
+                    0
+                };
+                let available = (self.pool_size + overdraft)
+                    .saturating_sub(state.non_spillable + state.spillable)
+                    .min(self.pool_size.saturating_sub(state.non_spillable));
 
                 if available < additional {
                     return Err(resources_datafusion_err!(
@@ -308,20 +326,52 @@ mod tests {
     }
 
     #[test]
-    fn non_spillable_denied_when_pool_full() {
+    fn non_spillable_denied_when_nothing_can_spill() {
         let pool = Arc::new(ReservedSpillPool::new(100, 20)) as Arc<dyn MemoryPool>;
 
-        let s1 = MemoryConsumer::new("spiller")
-            .with_can_spill(true)
-            .register(&pool);
-        s1.try_grow(80).unwrap();
-
         let ns1 = MemoryConsumer::new("merger").register(&pool);
-        ns1.try_grow(20).unwrap();
+        ns1.try_grow(100).unwrap();
 
-        // pool is full (100/100), second non-spillable allocation fails
+        // no spillable consumer holds memory it could give back
         let ns2 = MemoryConsumer::new("merger2").register(&pool);
         let err = ns2.try_grow(1).unwrap_err().strip_backtrace();
+        assert!(err.contains("Failed to allocate"), "{err}");
+    }
+
+    #[test]
+    fn non_spillable_overdraws_a_pool_that_spillable_consumers_filled() {
+        let pool = Arc::new(ReservedSpillPool::new(100, 0)) as Arc<dyn MemoryPool>;
+
+        let sorter = MemoryConsumer::new("sorter")
+            .with_can_spill(true)
+            .register(&pool);
+        sorter.try_grow(100).unwrap();
+
+        // the reader is served although the pool is full
+        let reader = MemoryConsumer::new("reader").register(&pool);
+        reader.try_grow(20).unwrap();
+        assert_eq!(pool.reserved(), 120);
+
+        // which puts the sorter over its share, so it is refused until it spills
+        let err = sorter.try_grow(1).unwrap_err().strip_backtrace();
+        assert!(err.contains("Failed to allocate"), "{err}");
+        sorter.shrink(100);
+        sorter.try_grow(80).unwrap();
+        assert_eq!(pool.reserved(), 100);
+    }
+
+    #[test]
+    fn the_overdraft_is_a_quarter_of_the_pool() {
+        let pool = Arc::new(ReservedSpillPool::new(100, 0)) as Arc<dyn MemoryPool>;
+
+        let sorter = MemoryConsumer::new("sorter")
+            .with_can_spill(true)
+            .register(&pool);
+        sorter.try_grow(100).unwrap();
+
+        let reader = MemoryConsumer::new("reader").register(&pool);
+        reader.try_grow(25).unwrap();
+        let err = reader.try_grow(1).unwrap_err().strip_backtrace();
         assert!(err.contains("Failed to allocate"), "{err}");
     }
 

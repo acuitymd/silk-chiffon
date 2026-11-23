@@ -20,7 +20,7 @@ use datafusion::{
     error::DataFusionError,
     execution::{
         TaskContext,
-        memory_pool::{FairSpillPool, MemoryPool, TrackConsumersPool},
+        memory_pool::{MemoryPool, TrackConsumersPool},
     },
     physical_plan::{ExecutionPlan, RecordBatchStream, SendableRecordBatchStream, execute_stream},
     prelude::{DataFrame, SessionConfig, SessionContext},
@@ -186,16 +186,10 @@ impl Pipeline {
             0 => NonZeroUsize::MAX,
             count => NonZeroUsize::new(count).expect("nonzero by match"),
         };
-        let pool: Arc<dyn MemoryPool> = match self.config.non_spillable_reserve {
-            Some(reserve) => Arc::new(TrackConsumersPool::new(
-                ReservedSpillPool::new(memory_limit, reserve),
-                top_n,
-            )),
-            None => Arc::new(TrackConsumersPool::new(
-                FairSpillPool::new(memory_limit),
-                top_n,
-            )),
-        };
+        let pool: Arc<dyn MemoryPool> = Arc::new(TrackConsumersPool::new(
+            ReservedSpillPool::new(memory_limit, self.config.non_spillable_reserve.unwrap_or(0)),
+            top_n,
+        ));
         let mut runtime = datafusion::execution::runtime_env::RuntimeEnvBuilder::default()
             .with_temp_file_path(&spill_path)
             .with_memory_pool(pool);
