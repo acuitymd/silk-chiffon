@@ -698,14 +698,20 @@ struct TransformArgs {
 
     /// Reserve memory for non-spillable operations (sort merge phases, etc.).
     ///
-    /// Enables an alternative memory pool that prevents spillable operators
-    /// (sorts, aggregations) from consuming the entire pool, guaranteeing
-    /// headroom for non-spillable consumers that would otherwise fail.
+    /// Keeps spillable operators (sorts, aggregations) out of part of the memory
+    /// pool, so that consumers that cannot spill find it free.
+    ///
+    /// Without a reserve those consumers are still served when spillable
+    /// operators have filled the pool: they may overdraw it by up to a quarter
+    /// of its size, and the spillable operators are refused more memory until
+    /// they spill or finish and give it back.
+    /// A reserve also shrinks the memory spillable operators may use, so they
+    /// spill sooner.
     ///
     /// Accepts a percentage (e.g. "10%", "10") or a fixed byte size (e.g. "200MB").
     /// Percentages are resolved against the memory pool size.
     ///
-    /// When not set, the default DataFusion FairSpillPool is used instead.
+    /// Default: no reserve.
     #[arg(long, help_heading = "Execution", value_parser = PoolReserveSpec::from_str)]
     pub non_spillable_reserve: Option<PoolReserveSpec>,
 

@@ -93,11 +93,13 @@ Examples:
   Default value: `total:80%`
 - `--non-spillable-reserve <NON_SPILLABLE_RESERVE>` — Reserve memory for non-spillable operations (sort merge phases, etc.).
 
-  Enables an alternative memory pool that prevents spillable operators (sorts, aggregations) from consuming the entire pool, guaranteeing headroom for non-spillable consumers that would otherwise fail.
+  Keeps spillable operators (sorts, aggregations) out of part of the memory pool, so that consumers that cannot spill find it free.
+
+  Without a reserve those consumers are still served when spillable operators have filled the pool: they may overdraw it by up to a quarter of its size, and the spillable operators are refused more memory until they spill or finish and give it back. A reserve also shrinks the memory spillable operators may use, so they spill sooner.
 
   Accepts a percentage (e.g. "10%", "10") or a fixed byte size (e.g. "200MB"). Percentages are resolved against the memory pool size.
 
-  When not set, the default DataFusion FairSpillPool is used instead.
+  Default: no reserve.
 - `--memory-pool-top-consumers <MEMORY_POOL_TOP_CONSUMERS>` — Number of top memory consumers to report in out-of-memory error messages.
 
   When a memory allocation fails, the error message includes the N largest memory consumers to help diagnose what is using the pool. Set to 0 to report all consumers.

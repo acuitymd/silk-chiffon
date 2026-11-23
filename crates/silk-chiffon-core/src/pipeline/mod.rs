@@ -89,6 +89,10 @@ impl Pipeline {
     }
 
     /// Sets the DataFusion memory-pool limit in bytes.
+    ///
+    /// Consumers that cannot spill may take the pool up to a quarter over this
+    /// while spillable consumers hold memory, which those then give back by
+    /// spilling. Size the limit with that room left over.
     pub fn with_memory_limit(mut self, memory_limit: Option<usize>) -> Self {
         self.config.memory_limit = memory_limit;
         self
@@ -168,10 +172,13 @@ impl Pipeline {
             config = config.with_target_partitions(target_partitions);
         }
 
+        // a pool of no bytes refuses every request, which is the caller's to
+        // see as an error, where ReservedSpillPool would panic
         let memory_limit = self
             .config
             .memory_limit
-            .unwrap_or_else(default_memory_limit);
+            .unwrap_or_else(default_memory_limit)
+            .max(1);
         let spill_path = if let Some(path) = &self.config.spill_path {
             path.clone()
         } else {
@@ -334,8 +341,10 @@ impl fmt::Debug for PipelineExecution {
     }
 }
 
+/// 64% of the machine's memory, so that the pool and the quarter consumers
+/// that cannot spill may overdraw it come to 80%.
 fn default_memory_limit() -> usize {
-    total_memory() * 4 / 5
+    total_memory() * 16 / 25
 }
 
 #[allow(clippy::cast_possible_truncation)]
@@ -397,6 +406,18 @@ mod tests {
 
         assert_eq!(from_new, from_default);
         assert!(from_default.contains("num_of_top_consumers: 10"));
+    }
+
+    #[test]
+    fn a_pool_of_no_bytes_refuses_memory_instead_of_panicking() {
+        let session = Pipeline::new()
+            .with_memory_limit(Some(0))
+            .create_session_context()
+            .unwrap();
+        let pool = &session.runtime_env().memory_pool;
+        let reader =
+            datafusion::execution::memory_pool::MemoryConsumer::new("reader").register(pool);
+        assert!(reader.try_grow(1024).is_err());
     }
 
     #[test]

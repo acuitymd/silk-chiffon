@@ -4,9 +4,11 @@
 //! consumers, and refuses a non-spillable consumer whenever the pool is full.
 //! A sort that has filled the pool with data it could write to disk therefore
 //! makes an input reader, or the sort's own merge, fail for lack of a few
-//! megabytes. This pool grants those requests instead and takes the memory
-//! back from the spillable consumers, which are refused their next request and
-//! spill.
+//! megabytes. This pool grants those requests instead, up to a quarter of the
+//! pool over its size, and takes the memory back from the spillable consumers:
+//! each is refused its next request until it is within its share again, which
+//! a consumer that can spill does by spilling. Until they ask again, the pool
+//! stays over its size.
 
 use datafusion::common::{Result, resources_datafusion_err};
 use datafusion::execution::memory_pool::{
