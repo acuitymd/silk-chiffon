@@ -1661,6 +1661,39 @@ fn test_sort_by_reads_names_as_identifiers_and_exact_names_as_they_are() {
     }
 }
 
+/// A name that is a column exactly is taken as it is, where folding it would
+/// name no column.
+#[test]
+fn test_sort_by_takes_an_exact_mixed_case_name() {
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let output = temp_dir.path().join("output.arrow");
+    let schema = Arc::new(Schema::new(vec![Field::new(
+        "UserId",
+        DataType::Int32,
+        false,
+    )]));
+    let batch =
+        RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(vec![3, 1, 2]))]).unwrap();
+    TestFile::write_arrow_batch(&input, &batch);
+
+    cargo::cargo_bin_cmd!("silk-chiffon")
+        .args([
+            "transform",
+            "--from",
+            input.to_str().unwrap(),
+            "--to",
+            output.to_str().unwrap(),
+            "--sort-by",
+            "UserId",
+        ])
+        .assert()
+        .success();
+
+    let batches = TestFile::read_arrow(&output);
+    assert_eq!(TestExtract::i32_all(&batches, "UserId"), vec![1, 2, 3]);
+}
+
 /// The sort finds its columns by name, so after a self-join `b.id` would sort
 /// by the first `id`, which is `a.id`.
 #[test]
