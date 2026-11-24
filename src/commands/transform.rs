@@ -357,6 +357,7 @@ pub(crate) async fn run(args: TransformCommand) -> Result<()> {
             partition_fields: partition_columns,
             strategy: partition_strategy,
             max_open_partitions,
+            memory_budget: total_budget,
             exclude_columns,
             create_dirs,
             overwrite,
