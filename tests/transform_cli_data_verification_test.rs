@@ -1661,6 +1661,37 @@ fn test_sort_by_reads_names_as_identifiers_and_exact_names_as_they_are() {
     }
 }
 
+/// The sort finds its columns by name, so after a self-join `b.id` would sort
+/// by the first `id`, which is `a.id`.
+#[test]
+fn test_sort_by_refuses_a_name_that_several_columns_share() {
+    use predicates::prelude::*;
+
+    let temp_dir = TempDir::new().unwrap();
+    let input = temp_dir.path().join("input.arrow");
+    let output = temp_dir.path().join("output.arrow");
+    TestFile::write_arrow_batch(&input, &TestBatch::simple_with(&[2, 1], &["two", "one"]));
+
+    cargo::cargo_bin_cmd!("silk-chiffon")
+        .args([
+            "transform",
+            "--from",
+            input.to_str().unwrap(),
+            "--to",
+            output.to_str().unwrap(),
+            "--query",
+            "SELECT * FROM data AS a CROSS JOIN data AS b",
+            "--sort-by",
+            "b.id",
+        ])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains(r#"--sort-by "b.id" is ambiguous"#)
+                .and(predicate::str::contains("SELECT b.id AS b_id")),
+        );
+}
+
 #[test]
 fn test_spill_merge_fan_in_merges_in_several_passes() {
     let temp_dir = TempDir::new().unwrap();

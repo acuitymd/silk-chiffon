@@ -235,7 +235,7 @@ pub(crate) async fn run(args: TransformCommand) -> Result<()> {
     let input_schema = input.schema().as_arrow().clone();
     let mut user_sort_spec = SortSpec::default();
     user_sort_spec.extend(&SortSpec {
-        columns: sort_columns(&sort_by.clone().unwrap_or_default().columns, &input_schema),
+        columns: sort_columns(&sort_by.clone().unwrap_or_default().columns, &input_schema)?,
     });
 
     let user_sort_spec_without_partition_cols =
@@ -396,7 +396,10 @@ pub(crate) async fn run(args: TransformCommand) -> Result<()> {
 /// The columns a sort names. A name that is a column exactly is taken as it
 /// is. Any other is read as DataFusion reads an identifier, folded to lower
 /// case unless it is quoted, which is how `--sort-by` has always read names.
-fn sort_columns(columns: &[SortColumn], schema: &Schema) -> Vec<SortColumn> {
+///
+/// The sort finds its columns by name alone, so a name that several columns
+/// share, as after a self-join, is refused rather than sorted by the first.
+fn sort_columns(columns: &[SortColumn], schema: &Schema) -> Result<Vec<SortColumn>> {
     columns
         .iter()
         .map(|column| {
@@ -405,7 +408,27 @@ fn sort_columns(columns: &[SortColumn], schema: &Schema) -> Vec<SortColumn> {
             } else {
                 datafusion::common::Column::from_qualified_name(column.name()).name
             };
-            SortColumn::new(name, column.direction(), column.null_placement())
+            let matching = schema
+                .fields()
+                .iter()
+                .filter(|field| field.name() == &name)
+                .count();
+            if matching > 1 {
+                let table = datafusion::common::Column::from_qualified_name(column.name())
+                    .relation
+                    .map_or_else(|| "b".to_owned(), |relation| relation.to_string());
+                anyhow::bail!(
+                    "--sort-by {:?} is ambiguous: the output has {matching} columns named \
+                     {name:?}, and the sort finds its columns by name. Rename one in --query, \
+                     as in SELECT {table}.{name} AS {table}_{name}, and sort by the new name",
+                    column.name()
+                );
+            }
+            Ok(SortColumn::new(
+                name,
+                column.direction(),
+                column.null_placement(),
+            ))
         })
         .collect()
 }
