@@ -258,6 +258,7 @@ class Measurement:
     files: int | None = None
     digest: int | None = None
     out_of_order: int | None = None
+    misplaced: int | None = None
     command: list[str] = field(default_factory=list)
 
 
@@ -397,9 +398,26 @@ def out_of_order_sql(sort_by: str) -> str:
     """
 
 
+def misplaced_sql(partition_by: str) -> str:
+    """Counts rows whose file path lacks a `col=value` directory for each partition
+    column, in the files given as the one parameter."""
+    # read with hive_partitioning off, the values come from the file, so a row written
+    # under another partition's directory still matches the input's digest
+    placed = " AND ".join(
+        f"contains(filename, '/{column}=' || CAST({quoted(column)} AS VARCHAR) || '/')"
+        for column in partition_by.split(",")
+    )
+    return f"""
+        SELECT count(*)
+        FROM read_parquet(?, filename = true, hive_partitioning = false)
+        WHERE NOT ({placed})
+    """
+
+
 def check(args: argparse.Namespace) -> None:
-    """Prints the rows, files, digest, and optionally the rows out of order, of the
-    Parquet files under one output directory, as JSON."""
+    """Prints the rows, files, digest, and optionally the rows out of order and the
+    rows outside their partition's directory, of the Parquet files under one output
+    directory, as JSON."""
     import duckdb
 
     data = DATA_SETS[args.data]
@@ -419,16 +437,24 @@ def check(args: argparse.Namespace) -> None:
             checked["out_of_order"] = con.execute(
                 out_of_order_sql(args.sort_by), pattern
             ).fetchone()[0]
+        if args.partition_by:
+            checked["misplaced"] = con.execute(
+                misplaced_sql(args.partition_by), pattern
+            ).fetchone()[0]
     print(json.dumps(checked))
 
 
-def check_output(data: str, out: Path, sort_by: str | None) -> dict[str, int]:
+def check_output(
+    data: str, out: Path, sort_by: str | None, partition_by: str | None
+) -> dict[str, int]:
     # In its own process: on Linux a child's peak RSS is never reported below the
     # parent's peak when the child started, so DuckDB in this process would inflate
     # the peak RSS of every transform after it.
     command = [sys.executable, __file__, "check", "--data", data, str(out)]
     if sort_by is not None:
         command += ["--sort-by", sort_by]
+    if partition_by is not None:
+        command += ["--partition-by", partition_by]
     done = subprocess.run(command, capture_output=True, text=True, check=True)
     return json.loads(done.stdout.strip().splitlines()[-1])
 
@@ -504,17 +530,22 @@ def run_matrix(
                     if check_mode == "order" and settings.memory_budget == order_budget
                     else None
                 )
-                checked = check_output(data_name, out, order_by)
+                checked = check_output(data_name, out, order_by, stage.partition_by)
                 m.rows, m.files, m.digest = (
                     checked["rows"],
                     checked["files"],
                     checked["digest"],
                 )
                 m.out_of_order = checked.get("out_of_order")
-                checks = f" rows={m.rows}" + (
-                    f" out_of_order={m.out_of_order}"
-                    if m.out_of_order is not None
-                    else ""
+                m.misplaced = checked.get("misplaced")
+                checks = (
+                    f" rows={m.rows}"
+                    + (
+                        f" out_of_order={m.out_of_order}"
+                        if m.out_of_order is not None
+                        else ""
+                    )
+                    + (f" misplaced={m.misplaced}" if m.misplaced is not None else "")
                 )
             results.append(m)
             done += 1
@@ -539,7 +570,8 @@ def _reverse_builds(cases: list[tuple]) -> list[tuple]:
 def check_outputs(
     results: list[Measurement], input_rows: int | None = None
 ) -> list[str]:
-    """Every case of a stage must write the same rows, and none out of order."""
+    """Every case of a stage must write the same rows, none out of order and none
+    outside their partition's directory."""
     problems = []
     groups: dict[tuple, list[Measurement]] = {}
     for r in results:
@@ -553,6 +585,10 @@ def check_outputs(
         if r.out_of_order:
             problems.append(
                 f"{r.build} {r.source} {r.stage} {r.settings}: {r.out_of_order} rows out of order"
+            )
+        if r.misplaced:
+            problems.append(
+                f"{r.build} {r.source} {r.stage} {r.settings}: {r.misplaced} rows outside their partition's directory"
             )
     for key, group in groups.items():
         if len({(r.rows, r.files, r.digest) for r in group}) > 1:
@@ -844,7 +880,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     results: list[Measurement] = []
     # no stage filters rows, so every output must hold all of the input's
     input_rows = (
-        check_output(args.data, args.input, None)["rows"]
+        check_output(args.data, args.input, None, None)["rows"]
         if args.check != "none"
         else None
     )
@@ -956,6 +992,10 @@ def main() -> None:
     checker.add_argument("out", type=Path, help="the directory the transform wrote to")
     checker.add_argument(
         "--sort-by", help="also count rows out of order by this --sort-by"
+    )
+    checker.add_argument(
+        "--partition-by",
+        help="also count rows outside their directory for this --partition-by",
     )
     checker.set_defaults(func=check)
 
