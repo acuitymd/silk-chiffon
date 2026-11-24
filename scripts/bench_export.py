@@ -536,11 +536,18 @@ def _reverse_builds(cases: list[tuple]) -> list[tuple]:
     return [case for group in grouped.values() for case in reversed(group)]
 
 
-def check_outputs(results: list[Measurement]) -> list[str]:
+def check_outputs(
+    results: list[Measurement], input_rows: int | None = None
+) -> list[str]:
     """Every case of a stage must write the same rows, and none out of order."""
     problems = []
     groups: dict[tuple, list[Measurement]] = {}
     for r in results:
+        # cases agreeing with each other proves nothing when they all drop the same rows
+        if input_rows is not None and r.rows is not None and r.rows != input_rows:
+            problems.append(
+                f"{r.build} {r.source} {r.stage} {r.settings}: {r.rows} rows written, input has {input_rows}"
+            )
         if r.digest is not None:
             groups.setdefault((r.source, r.stage), []).append(r)
         if r.out_of_order:
@@ -790,7 +797,10 @@ def settings_from(args: argparse.Namespace) -> list[Settings]:
 
 
 def finish(
-    args: argparse.Namespace, builds: list[Build], results: list[Measurement]
+    args: argparse.Namespace,
+    builds: list[Build],
+    results: list[Measurement],
+    input_rows: int | None,
 ) -> None:
     results_path: Path = args.results
     payload = {
@@ -808,7 +818,7 @@ def finish(
     results_path.write_text(json.dumps(payload, indent=2))
     print()
     print(report(results, args.baseline or builds[0].name))
-    problems = check_outputs(results)
+    problems = check_outputs(results, input_rows)
     failed = [r for r in results if r.exit_code != 0]
     for p in problems:
         print(f"OUTPUT PROBLEM: {p}")
@@ -832,6 +842,12 @@ def cmd_run(args: argparse.Namespace) -> None:
     work: Path = args.work
     work.mkdir(parents=True, exist_ok=True)
     results: list[Measurement] = []
+    # no stage filters rows, so every output must hold all of the input's
+    input_rows = (
+        check_output(args.data, args.input, None)["rows"]
+        if args.check != "none"
+        else None
+    )
     run_matrix(
         builds,
         args.data,
@@ -845,7 +861,7 @@ def cmd_run(args: argparse.Namespace) -> None:
         results,
         args.results,
     )
-    finish(args, builds, results)
+    finish(args, builds, results, input_rows)
 
 
 def main() -> None:
