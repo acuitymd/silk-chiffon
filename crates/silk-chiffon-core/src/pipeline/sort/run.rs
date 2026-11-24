@@ -704,7 +704,7 @@ impl<'a, Emit: FnMut(RecordBatch) -> Result<()>> Batcher<'a, Emit> {
 ///
 /// A batch of output gathers rows from many batches of input, so it can hold
 /// more distinct values of a dictionary than any one of them did: more than
-/// 127 for keys of `Int8`. Arrow cannot build such a batch, whether it casts
+/// 128 for keys of `Int8`. Arrow cannot build such a batch, whether it casts
 /// a column decoded from row format back to a dictionary or merges the
 /// dictionaries of the batches it gathers from. It reports that as it builds,
 /// so only output that has too many values is split, and is built again.

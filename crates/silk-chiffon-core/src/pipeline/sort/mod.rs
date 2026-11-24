@@ -34,7 +34,7 @@
 //!   in parallel however the rows arrived.
 //! - **Dictionaries in output.** A batch of output gathers rows from many
 //!   batches of input, so it can hold more distinct values of a dictionary
-//!   than its key type indexes: more than 127 for keys of `Int8`. Arrow
+//!   than its key type indexes: more than 128 for keys of `Int8`. Arrow
 //!   cannot build such a batch, and DataFusion's sort fails there. This one
 //!   sends those rows as smaller batches instead: see
 //!   `run::emit_split_on_overflow`. One case still fails, as Arrow 59
