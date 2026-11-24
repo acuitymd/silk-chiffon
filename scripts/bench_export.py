@@ -423,12 +423,15 @@ def check(args: argparse.Namespace) -> None:
     import duckdb
 
     data = DATA_SETS[args.data]
-    files = len(list(args.out.rglob("*.parquet")))
+    # partitioned output is nested, but a transform reads only <input>/*.parquet, so
+    # counting the input recursively would count files it never reads
+    glob = "*.parquet" if args.top_level else "**/*.parquet"
+    files = len(list(args.out.glob(glob)))
     checked: dict[str, int] = {"rows": 0, "files": files, "digest": 0}
     if files:
         con = duckdb.connect()
         # the path goes in as a parameter, never into the SQL text
-        pattern = [f"{args.out}/**/*.parquet"]
+        pattern = [f"{args.out}/{glob}"]
         rows, digest = con.execute(
             f"SELECT count(*), coalesce(sum(hash({data.columns}) >> 8), 0)"
             " FROM read_parquet(?, hive_partitioning = false)",
@@ -447,7 +450,11 @@ def check(args: argparse.Namespace) -> None:
 
 
 def check_output(
-    data: str, out: Path, sort_by: str | None, partition_by: str | None
+    data: str,
+    out: Path,
+    sort_by: str | None,
+    partition_by: str | None,
+    top_level: bool = False,
 ) -> dict[str, int]:
     # In its own process: on Linux a child's peak RSS is never reported below the
     # parent's peak when the child started, so DuckDB in this process would inflate
@@ -457,6 +464,8 @@ def check_output(
         command += ["--sort-by", sort_by]
     if partition_by is not None:
         command += ["--partition-by", partition_by]
+    if top_level:
+        command.append("--top-level")
     done = subprocess.run(command, capture_output=True, text=True, check=True)
     return json.loads(done.stdout.strip().splitlines()[-1])
 
@@ -882,7 +891,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     results: list[Measurement] = []
     # no stage filters rows, so every output must hold all of the input's
     input_rows = (
-        check_output(args.data, args.input, None, None)["rows"]
+        check_output(args.data, args.input, None, None, top_level=True)["rows"]
         if args.check != "none"
         else None
     )
@@ -998,6 +1007,12 @@ def main() -> None:
     checker.add_argument(
         "--partition-by",
         help="also count rows outside their directory for this --partition-by",
+    )
+    checker.add_argument(
+        "--top-level",
+        action="store_true",
+        help="read only the directory's own Parquet files, not its subdirectories',"
+        " as a transform reads its input",
     )
     checker.set_defaults(func=check)
 
