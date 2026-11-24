@@ -63,12 +63,19 @@ fn sort_bytes(words: Words) -> usize {
 /// packs best. 2 GiB of 16,384-byte buffers took 24% more memory than they
 /// hold, and a 200M-row sort held 7.6 GiB of them for 6.0 GiB of records. The
 /// same 2 GiB in 16,320-byte buffers took 0.8% more.
+///
+/// A range too large for the scratch memory is sorted in pieces of whole
+/// chunks, so a chunk is no larger than sorts in it. Only the smallest
+/// scratch with one-word records needs that: a chunk of the least size would
+/// hold 248 records where 170 fit.
 pub(super) fn chunk_words(words: Words, scratch_bytes: usize, threads: usize) -> usize {
+    let fitting = scratch_bytes / sort_bytes(words);
     // a range is sized to sort in half of a thread's scratch memory
-    let range_words = scratch_bytes / sort_bytes(words) / 2 * words.record;
-    let wanted =
-        (range_words / threads.max(1) / CHUNKS_PER_SHARE).clamp(MIN_CHUNK_WORDS, MAX_CHUNK_WORDS);
-    let power_of_two = 1 << wanted.ilog2();
+    let range_words = fitting / 2 * words.record;
+    let wanted = (range_words / threads.max(1) / CHUNKS_PER_SHARE)
+        .clamp(MIN_CHUNK_WORDS, MAX_CHUNK_WORDS)
+        .min(fitting * words.record);
+    let power_of_two = 1_usize << wanted.ilog2();
     ((power_of_two - UNDER_POWER_OF_TWO_WORDS) / words.record).max(1) * words.record
 }
 
@@ -1166,6 +1173,30 @@ mod tests {
                 .filter(|splitter| splitters.record(*splitter) <= record)
                 .count();
             assert_eq!(splitters.range_of(record, order), expected, "{record:x?}");
+        }
+    }
+
+    /// A range too large for the scratch is sorted in pieces of whole chunks,
+    /// so a chunk has to sort within the scratch, also the smallest one.
+    #[test]
+    fn a_chunk_sorts_within_the_smallest_scratch() {
+        use crate::pipeline::sort::MIN_SCRATCH_ROWS;
+
+        for record in [8, 16, 24] {
+            let words = Words::new(RecordLayout {
+                inline: record,
+                record,
+                keys: Keys::Whole,
+                contents: Contents::Row,
+            });
+            let scratch_bytes = MIN_SCRATCH_ROWS * 2 * words.record_bytes();
+            for threads in [1, 4, 32] {
+                let records = chunk_words(words, scratch_bytes, threads) / words.record;
+                assert!(
+                    records * sort_bytes(words) <= scratch_bytes,
+                    "{records} records of {record} bytes, on {threads} threads"
+                );
+            }
         }
     }
 
