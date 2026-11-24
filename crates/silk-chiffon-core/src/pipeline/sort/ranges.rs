@@ -215,11 +215,20 @@ impl Ranges {
     pub(super) fn bytes_per_row(&self) -> usize {
         match self.words.layout.contents {
             Contents::Row => self.words.layout.inline,
-            Contents::Source => self
-                .source_bytes
-                .checked_div(self.rows_total)
-                .unwrap_or(0)
-                .max(1),
+            Contents::Source => {
+                let source = self.source_bytes.checked_div(self.rows_total).unwrap_or(0);
+                // the payload leaves out the key columns that output decodes
+                // from the kept full keys, or else from the records' key words
+                let keys = if self.encoder.payload_needs_keys() {
+                    let kept = self.rows.iter().flatten().map(Rows::size).sum::<usize>();
+                    kept.checked_div(self.rows_total)
+                        .unwrap_or(0)
+                        .max(self.words.key_bytes())
+                } else {
+                    0
+                };
+                (source + keys).max(1)
+            }
         }
     }
 
@@ -1032,6 +1041,100 @@ mod tests {
         let (sorted, settled) = sort_strings(&partitions, None);
         assert_eq!(sorted, in_order(&partitions));
         assert!(!settled);
+    }
+
+    /// Rows kept in row format leave out the key columns, which output
+    /// decodes from the keys. The window that output is buffered in is sized
+    /// from [`Ranges::bytes_per_row`], so that has to count them: here keys
+    /// of a kilobyte, held as a prefix, and of a hundred bytes, held whole,
+    /// beside a four-byte payload.
+    #[test]
+    fn output_batches_stay_within_the_smallest_window() {
+        use arrow::{
+            array::{Int32Array, StringArray},
+            datatypes::{DataType, Field, Schema},
+        };
+        use datafusion::physical_expr::{LexOrdering, PhysicalSortExpr, expressions::Column};
+
+        use crate::pipeline::sort::{MIN_OUTPUT_ROWS, Window};
+
+        const ROWS: usize = 2000;
+        const BATCH_SIZE: usize = 512;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("k", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ]));
+        let ordering =
+            LexOrdering::new([PhysicalSortExpr::new_default(Arc::new(Column::new("k", 0)))])
+                .unwrap();
+        let encoder = Arc::new(RowEncoder::try_new(&ordering, &schema).unwrap());
+        for (key_length, keys) in [(1000, Keys::Prefix), (100, Keys::Fitted)] {
+            let pad = "x".repeat(key_length - 7);
+            let batch = RecordBatch::try_new(
+                Arc::clone(&schema),
+                vec![
+                    Arc::new(StringArray::from_iter_values(
+                        (0..ROWS).rev().map(|row| format!("{row:07}{pad}")),
+                    )),
+                    Arc::new(Int32Array::from_iter_values(0..2000)),
+                ],
+            )
+            .unwrap();
+            let mut rows = Some(encoder.encode(&batch).unwrap());
+            let longest = rows.as_ref().unwrap().row(0).data().len();
+            let words = Words::new(encoder.layout_for(longest));
+            assert_eq!(words.layout.keys, keys);
+            let scratch_bytes = 4 * 1024 * 1024;
+            let chunk = chunk_words(words, scratch_bytes, 2);
+            let mut lane = Lane::default();
+            let mut payload = encoder.encode_payload(&batch).unwrap();
+            assert!(lane.insert(
+                &AtomicU32::new(0),
+                &batch,
+                &mut rows,
+                &mut payload,
+                words,
+                chunk,
+                &Always,
+            ));
+            let buffered = Buffered::take(&mut [&mut lane], Arc::clone(&encoder), words);
+            let ranges = Ranges::split(
+                buffered,
+                1,
+                chunk,
+                scratch_bytes,
+                0,
+                &Count::new(),
+                &Workers::try_new(2).unwrap(),
+            );
+            let row_bytes = ranges.bytes_per_row();
+            // the least that the sort grants output: two small batches
+            let window = Window::plan(
+                2 * MIN_OUTPUT_ROWS * row_bytes,
+                2,
+                ROWS / BATCH_SIZE + 2,
+                BATCH_SIZE,
+                row_bytes,
+            );
+            let mut sent = Vec::new();
+            let mut batcher = ranges
+                .batcher(window.batch_rows, |batch| {
+                    sent.push(batch.get_array_memory_size());
+                    Ok(())
+                })
+                .compacting();
+            ranges
+                .visit_sorted(0, |records| batcher.push(records))
+                .unwrap();
+            batcher.finish().unwrap();
+            // a part buffers this many batches before it waits
+            let buffered: usize = sent.iter().take(window.batches).sum();
+            assert!(
+                buffered <= window.bytes,
+                "keys of {key_length} bytes: {buffered} bytes buffered in a window of {}",
+                window.bytes
+            );
+        }
     }
 
     #[test]
