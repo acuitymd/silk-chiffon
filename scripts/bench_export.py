@@ -337,7 +337,9 @@ def directory_bytes(path: Path) -> int:
 def run_measured(
     cmd: list[str], log: Path, spill: Path
 ) -> tuple[int, float, float, int, int]:
-    """Run `cmd` alone; return its exit code, wall and CPU seconds, peak RSS, peak spill."""
+    """Run `cmd` alone; return its exit code, wall and CPU seconds, peak RSS, and peak
+    spill. Spill is sampled every quarter second, so a spill shorter than that, or a
+    peak between two samples, reads low."""
     peak_spill = 0
     done = threading.Event()
 
