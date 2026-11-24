@@ -90,7 +90,7 @@ use std::{
     ops::Range,
     sync::{
         Arc, OnceLock,
-        atomic::{AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering},
     },
     time::Instant,
 };
@@ -487,9 +487,9 @@ impl SortMetrics {
 /// unless the index of what was spilled has taken the credit, or the rows
 /// spilled are wider than the first batch's, which the credit was sized from.
 /// Memory beyond the floor is asked of the pool, and only what it grants is
-/// used. That includes the larger blocks that keys longer than the first
-/// batch's make, which a batch asks for before it is buffered: see
-/// `Sorter::plan_writers_for`.
+/// used. That includes the larger blocks of rows that keys longer than the
+/// first batch's make, which a flush asks for as it starts: see
+/// `Sorter::writers_for`.
 ///
 /// Jobs on the sort's threads hold the budget too, so a sort whose output is
 /// dropped gives its memory back when its last job stops, not before.
@@ -767,9 +767,12 @@ struct Sorter {
     /// Wider records that a run's keys needed, to buffer the rows after it in
     /// once its flush is written.
     wider: Mutex<Option<Words>>,
-    /// The longest key that the writers of flushes in blocks of rows are
-    /// planned for: see [`Self::plan_writers_for`].
-    writer_key: Mutex<usize>,
+    /// The longest key of the first batch, which the floor holds writers of
+    /// flushes in blocks of rows for: see [`Self::writers_for`].
+    floor_key: AtomicUsize,
+    /// The longest key buffered so far, which flushes and merges plan the
+    /// writers of blocks of rows for.
+    longest_key: AtomicUsize,
     /// Inserts hold this shared. Flushing and finishing hold it exclusively,
     /// which stops every lane between batches.
     gate: tokio::sync::RwLock<()>,
@@ -813,7 +816,8 @@ impl Sorter {
             spill_metrics: SpillMetrics::new(&plan.metrics, 0),
             shape: parking_lot::RwLock::new(None),
             wider: Mutex::new(None),
-            writer_key: Mutex::new(0),
+            floor_key: AtomicUsize::new(0),
+            longest_key: AtomicUsize::new(0),
             gate: tokio::sync::RwLock::new(()),
             lanes: (0..lane_count)
                 .map(|_| Mutex::new(Lane::default()))
@@ -887,7 +891,8 @@ impl Sorter {
             spill_batch_rows = (spill_batch_rows / 2).max(MIN_OUTPUT_ROWS);
         };
         self.metrics.record_bytes.set(words.record_bytes());
-        *self.writer_key.lock() = longest;
+        self.floor_key.store(longest, Ordering::Relaxed);
+        self.longest_key.fetch_max(longest, Ordering::Relaxed);
         let shape = Arc::new(shape);
         *slot = Some(Arc::clone(&shape));
         Ok(shape)
@@ -1093,11 +1098,9 @@ impl Sorter {
             .div_ceil(batch.num_rows());
         let keys = rows.as_ref().expect("encoded above");
         let shape = self.shape_for(keys, row_bytes)?;
-        if self.encoder.keeps_rows()
-            && shape.words.layout.keys != Keys::Whole
-            && !self.plan_writers_for(keys, &shape.spill)
-        {
-            return Ok(false);
+        if self.encoder.keeps_rows() && shape.words.layout.keys != Keys::Whole {
+            let longest = keys.iter().map(|key| key.data().len()).max().unwrap_or(0);
+            self.longest_key.fetch_max(longest, Ordering::Relaxed);
         }
         Ok(self.lanes[lane].lock().insert(
             &self.next_batch,
@@ -1110,30 +1113,49 @@ impl Sorter {
         ))
     }
 
-    /// Plans the writers of flushes in blocks of rows for the longest of
-    /// `keys`, asking the pool for what their blocks need beyond what they were
-    /// planned for. Returns `false` when the pool refused it.
+    /// How to write a flush of up to `files` files: the files, each by a
+    /// writer of its own, the longest key whose room a block is given, and the
+    /// memory the writers take beyond the floor, which the caller gives back
+    /// once the flush is written.
     ///
     /// A block of rows has room for 64 times its first key, so keys longer
     /// than the first batch's make larger blocks than the floor holds writers
-    /// for. The flush that writes them cannot ask for memory, as it is what
-    /// frees memory, so a batch that brings a longer key asks before it is
-    /// buffered, and is refused as any batch is. The memory is kept to the
-    /// sort's end, for every flush and merge that writes blocks.
-    fn plan_writers_for(&self, keys: &Rows, spill: &Spill) -> bool {
-        let longest = keys.iter().map(|key| key.data().len()).max().unwrap_or(0);
-        let mut planned = self.writer_key.lock();
-        if longest <= *planned {
-            return true;
+    /// for. Only a flush needs that room, so it asks the pool as it starts,
+    /// and a sort that stays in memory never asks. Where the pool grants less,
+    /// the flush is written as fewer files, one for each writer there is room
+    /// for. The pool is usually full when a flush starts, since the flush is
+    /// what frees it, so there may be room for none. One writer then gives a
+    /// block that starts with a longer key the room of the longest key that
+    /// fits, which leaves such blocks fewer rows and the flush a larger index.
+    fn writers_for(&self, files: usize) -> (usize, usize, usize) {
+        let spill = &self.shape().spill;
+        let (floor_key, longest) = (
+            self.floor_key.load(Ordering::Relaxed),
+            self.longest_key.load(Ordering::Relaxed),
+        );
+        let writer = spill.writer_bytes(longest);
+        // the floor holds a writer for every sort thread
+        let held = self.options.parallelism * spill.writer_bytes(floor_key);
+        if files * writer <= held {
+            return (files, longest, 0);
         }
-        // a flush is written by up to a writer per sort thread
-        let more =
-            self.options.parallelism * (spill.writer_bytes(longest) - spill.writer_bytes(*planned));
-        if more > 0 && !self.budget.grant(more) {
-            return false;
+        let more = self
+            .budget
+            .take_up_to(files * writer - held, 0)
+            .expect("taking what the pool grants never fails");
+        let writers = ((held + more) / writer).clamp(1, files);
+        let room = (held + more) / writers;
+        // a writer's room grows with its key, and the floor's key fits
+        let (mut fits, mut too_long) = (floor_key, longest + 1);
+        while fits + 1 < too_long {
+            let key = fits + (too_long - fits) / 2;
+            if spill.writer_bytes(key) <= room {
+                fits = key;
+            } else {
+                too_long = key;
+            }
         }
-        *planned = longest;
-        true
+        (writers, fits, more)
     }
 
     /// Takes everything buffered out of the lanes. Needs the gate held
@@ -1225,9 +1247,13 @@ impl Sorter {
     /// gives back what they held but the index of what was written, which
     /// stays in memory until the flush is merged.
     async fn write_ranges(self: &Arc<Self>, ranges: Ranges, files: usize) -> Result<()> {
+        let (files, key_room, writer_bytes) = self.writers_for(files);
         let this = Arc::clone(self);
         let (written, held) = self
-            .on_pool(move || (this.write(&ranges, files), ranges.held()))
+            .on_pool(move || {
+                let written = this.write(&ranges, files, key_room);
+                (written, ranges.held() + writer_bytes)
+            })
             .await?;
         match written {
             Ok(index) => self.budget.replace(held, index),
@@ -1238,17 +1264,19 @@ impl Sorter {
         }
     }
 
-    /// Writes sorted ranges to disk as one flush of up to `files` files. Runs
-    /// on the sort's threads. Returns the bytes of the flush's index.
-    fn write(&self, ranges: &Ranges, files: usize) -> Result<usize> {
+    /// Writes sorted ranges to disk as one flush of up to `files` files, whose
+    /// blocks of rows have the room of keys of up to `key_room` bytes. Runs on
+    /// the sort's threads. Returns the bytes of the flush's index.
+    fn write(&self, ranges: &Ranges, files: usize, key_room: usize) -> Result<usize> {
         let spill = &self.shape().spill;
         if matches!(&*self.flushed.lock(), Flushes::Blocks(_)) {
             let groups = range_groups(ranges.range_count(), files);
-            let flush = spill.write_parts(groups.len(), ranges.kept(), |file, push| {
-                groups[file]
-                    .clone()
-                    .try_for_each(|range| ranges.visit_sorted(range, &mut *push))
-            })?;
+            let flush =
+                spill.write_parts(groups.len(), ranges.kept(), key_room, |file, push| {
+                    groups[file]
+                        .clone()
+                        .try_for_each(|range| ranges.visit_sorted(range, &mut *push))
+                })?;
             let index = flush.index_bytes();
             self.keep(Flushes::Blocks(vec![flush]));
             Ok(index)
@@ -1349,7 +1377,7 @@ impl Sorter {
     async fn merge_block_flushes(self: &Arc<Self>, flushes: Vec<BlockFlush>) -> Result<BlockFlush> {
         let spill = Arc::clone(&self.shape().spill);
         let input = spill.input_bytes(&flushes);
-        let writer = spill.writer_bytes(*self.writer_key.lock());
+        let writer = spill.writer_bytes(self.longest_key.load(Ordering::Relaxed));
         let at_most = self.options.parallelism.clamp(
             1,
             (self.options.max_open_files / flushes.len().max(1)).max(1),
@@ -1618,7 +1646,7 @@ impl Sorter {
         // least, however small
         let beside_inputs = shape
             .spill
-            .writer_bytes(*self.writer_key.lock())
+            .writer_bytes(self.longest_key.load(Ordering::Relaxed))
             .max(2 * MIN_OUTPUT_ROWS * row_bytes);
         let mut bytes = self
             .budget

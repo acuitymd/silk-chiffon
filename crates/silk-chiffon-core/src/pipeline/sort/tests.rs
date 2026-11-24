@@ -601,7 +601,8 @@ async fn keys_longer_than_the_first_batch_had_widen_later_runs() {
 /// A block of rows has room for 64 times its first key, so keys of a
 /// kilobyte after a first batch of short ones make blocks far larger than the
 /// floor planned writers for, and merge passes write blocks larger than they
-/// read. The sort asks the pool for both, and still sorts in a small one.
+/// read. The sort asks the pool for both, and still sorts in a small one: a
+/// flush the pool is too full for gives such blocks less room.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn keys_far_longer_than_the_first_batch_had_grow_blocks_within_the_pool() {
     let mut random = Random(109);
@@ -621,6 +622,42 @@ async fn keys_far_longer_than_the_first_batch_had_grow_blocks_within_the_pool() 
         sorted.flushes
     );
     assert_sorted(&input, &sorted.batches, &key);
+}
+
+/// One key far longer than the rest, in a sort that fits in memory. A writer
+/// of a block that starts with it needs far more than the floor holds, and
+/// more than the pool has for every thread's writer, but nothing is written.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn one_long_key_in_a_sort_that_fits_in_memory() {
+    let key = [("name", ASCENDING), ("row", DESCENDING_NULLS_LAST)];
+    for (key_bytes, threads, memory_limit) in [(1 << 20, 1, 16 << 20), (512 << 10, 24, 1 << 30)] {
+        let mut random = Random(113);
+        let mut input = batches(&mut random, 4, 2000, 0, random_code);
+        let mut columns = input[2].columns().to_vec();
+        let names: StringArray = columns[2]
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .iter()
+            .enumerate()
+            .map(|(row, name)| match row {
+                0 => Some("z".repeat(key_bytes)),
+                _ => name.map(str::to_owned),
+            })
+            .collect();
+        columns[2] = Arc::new(names);
+        input[2] = RecordBatch::try_new(input[2].schema(), columns).unwrap();
+        let input = vec![input];
+        let sorted = sort(
+            input.clone(),
+            &key,
+            options(threads, 256 * 1024),
+            memory_limit,
+        )
+        .await;
+        assert_eq!(sorted.spill_files, 0, "a key of {key_bytes} bytes");
+        assert_sorted(&input, &sorted.batches, &key);
+    }
 }
 
 /// Keys too long for any record are sorted by a prefix that is respelled for

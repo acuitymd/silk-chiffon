@@ -34,7 +34,10 @@ const ROW_HEADER: usize = 8;
 /// the first key of every block in memory for as long as the flush exists, so
 /// this keeps the index to a small share of what is spilled however long the
 /// keys are. A block of 1 KiB holds about four rows with keys of 300 bytes,
-/// so the index of such a flush would be about a quarter of its size.
+/// so the index of such a flush would be about a quarter of its size. A flush
+/// whose writers the pool has too little for gives a block that starts with a
+/// long key the room of a shorter one, and keeps a larger index: see
+/// `Sorter::writers_for`.
 pub(super) const BLOCK_KEY_MULTIPLE: usize = 64;
 
 fn length(bytes: &[u8]) -> usize {
@@ -47,12 +50,16 @@ fn parts(row: &[u8]) -> (&[u8], &[u8]) {
 }
 
 impl Spill {
-    pub(super) fn row_writer(&self, what: &str) -> Result<RowWriter<'_>> {
+    /// A writer that gives a block the room of a key of at most `key_room`
+    /// bytes, whatever its first key, so that it holds no more than
+    /// [`Spill::writer_bytes`] of `key_room`.
+    pub(super) fn row_writer(&self, what: &str, key_room: usize) -> Result<RowWriter<'_>> {
         Ok(RowWriter {
             blocks: self.block_writer(what)?,
             block: Vec::with_capacity(self.row_block_bytes),
             block_rows: 0,
             block_end: self.row_block_bytes,
+            key_room,
             index: WrittenIndex::default(),
             rows: 0,
         })
@@ -94,6 +101,8 @@ pub(super) struct RowWriter<'a> {
     block_rows: usize,
     /// The most the block being filled holds: see [`BLOCK_KEY_MULTIPLE`].
     block_end: usize,
+    /// The longest key whose room a block is given.
+    key_room: usize,
     index: WrittenIndex,
     rows: usize,
 }
@@ -162,7 +171,10 @@ impl RowWriter<'_> {
         }
         if self.block.is_empty() {
             self.index.firsts.extend_from_slice(key);
-            self.block_end = self.blocks.spill.row_block_end(key.len());
+            self.block_end = self
+                .blocks
+                .spill
+                .row_block_end(key.len().min(self.key_room));
             // a `Vec` that grows doubles, which no plan counts
             self.block.reserve_exact(self.block_end.max(bytes));
         }
@@ -529,7 +541,7 @@ mod tests {
             row.extend_from_slice(&rest);
             row
         };
-        let mut writer = spill.row_writer("test").unwrap();
+        let mut writer = spill.row_writer("test", usize::MAX).unwrap();
         for at in 0..200 {
             writer.push_row(&row(20, at)).unwrap();
         }

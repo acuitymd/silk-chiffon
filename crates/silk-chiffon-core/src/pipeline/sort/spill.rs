@@ -647,11 +647,12 @@ impl Spill {
     /// Writes one flush as `parts` files, in parallel. `fill` pushes a file's
     /// records in sorted order, and every record of a file sorts before those
     /// of the next. Records that name rows of `kept` are written as those
-    /// rows.
+    /// rows, in blocks with the room of keys of up to `key_room` bytes.
     pub(super) fn write_parts(
         &self,
         parts: usize,
         kept: Kept<'_>,
+        key_room: usize,
         fill: impl Fn(usize, &mut dyn FnMut(&[u64]) -> Result<()>) -> Result<()> + Sync,
     ) -> Result<BlockFlush> {
         let written = self
@@ -663,7 +664,7 @@ impl Spill {
                     writer.finish()
                 }
                 BlockKind::Rows => {
-                    let mut writer = self.row_writer("sort run")?;
+                    let mut writer = self.row_writer("sort run", key_room)?;
                     fill(part, &mut |records| writer.push_kept(kept, records))?;
                     writer.finish()
                 }
@@ -736,7 +737,9 @@ impl Spill {
                         writer.finish()
                     }
                     BlockKind::Rows => {
-                        let mut writer = self.row_writer("sort merge pass")?;
+                        // a merge asks for writers of the longest key it can
+                        // read
+                        let mut writer = self.row_writer("sort merge pass", usize::MAX)?;
                         self.visit_row_slice(&slices, chunk[at], |row| writer.push_row(row))?;
                         writer.finish()
                     }
