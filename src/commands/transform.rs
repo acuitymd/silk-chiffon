@@ -441,11 +441,17 @@ fn sort_columns(columns: &[SortColumn], schema: &Schema) -> Result<Vec<SortColum
 /// an operator that takes all its input before it emits, such as the parallel
 /// sort, the work is done by the time the output is written.
 fn merges_while_writing(plan: &Arc<dyn ExecutionPlan>) -> bool {
-    if plan.is::<SortExec>() || plan.is::<SortPreservingMergeExec>() {
-        return true;
+    // a stack, not recursion: a plan's depth follows the --query
+    let mut pending = vec![Arc::clone(plan)];
+    while let Some(plan) = pending.pop() {
+        if plan.is::<SortExec>() || plan.is::<SortPreservingMergeExec>() {
+            return true;
+        }
+        if plan.properties().emission_type != EmissionType::Final {
+            pending.extend(plan.children().into_iter().cloned());
+        }
     }
-    plan.properties().emission_type != EmissionType::Final
-        && plan.children().into_iter().any(merges_while_writing)
+    false
 }
 
 /// What `--explain-analyze` reports once the output is complete.
