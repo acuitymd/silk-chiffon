@@ -180,10 +180,11 @@ const MAX_OPEN_FILES: usize = 4096;
 /// The spill files to keep at once: a quarter of the files this process may
 /// have open, which leaves the rest to its inputs and outputs.
 ///
-/// Past this many, the flushes on disk are merged into one, which reads and
-/// writes everything spilled so far once more. Sorting 100M rows of 13
-/// columns in 1 GiB made 390 files, and merging them early to stay under 256
-/// was a quarter of the run.
+/// Past this many, the smallest flushes on disk are merged into one, which
+/// reads and writes them once more: see `Sorter::compact`. Sorting 100M rows
+/// of 13 columns in 1 GiB made 390 files, and merging every flush into one to
+/// stay under 256 was a quarter of the run. The command line raises the soft
+/// limit to the hard one when it starts, which is far more on most hosts.
 fn open_file_limit() -> usize {
     #[cfg(unix)]
     let allowed = rustix::process::getrlimit(rustix::process::Resource::Nofile)
@@ -208,7 +209,8 @@ pub struct ParallelSortOptions {
     /// spilled, before it writes a run to disk.
     pub min_run_bytes: usize,
     /// Spill files kept at once, and read at once across every merge in
-    /// flight.
+    /// flight. A flush, or a merge of flushes, writes a quarter of these at
+    /// most.
     pub max_open_files: usize,
 }
 
@@ -403,7 +405,8 @@ struct SortMetrics {
     /// memory, and were sorted in more.
     oversized_range_rows: Count,
     flushes: Count,
-    /// Times the flushes on disk were merged into one to bound the open files.
+    /// Times the smallest flushes on disk were merged into one to bound the
+    /// open files.
     compactions: Count,
     /// Files that one flush is written as.
     flush_files: Gauge,
@@ -636,6 +639,52 @@ fn range_groups(ranges: usize, files: usize) -> Vec<Range<usize>> {
     (0..files)
         .map(|file| file * ranges / files..(file + 1) * ranges / files)
         .collect()
+}
+
+/// Splits off the flushes that a compaction merges into one: those of fewest
+/// rows, until the files of the rest, with the up to `merged_files` files that
+/// the merged flush is written as, are half of `max_files` or less. Returns
+/// those to merge, at least two, and the rest. `measure` gives a flush's files
+/// and rows.
+///
+/// Every flush written while input is read has about as many rows as the
+/// budget holds, and a merged flush has those of all it merged. So the
+/// smallest are the newest flushes, and a merged flush is merged again only
+/// once flushes about as large have come after it, as in a tiered merge: where
+/// the cap holds several merged flushes, a row is rewritten a number of times
+/// that grows with the logarithm of the flushes. Merging every flush into one
+/// rewrote everything spilled at every compaction. With a cap of 8 files and
+/// 4 threads, that wrote 13.7 rows for each row of a 120,000-row sort and 32
+/// for each of 240,000, where this writes 2.6 and 6.1. Leaving half the files
+/// free puts several flushes between compactions.
+fn smallest_flushes<T>(
+    flushes: Vec<T>,
+    measure: impl Fn(&T) -> (usize, usize),
+    merged_files: usize,
+    max_files: usize,
+) -> (Vec<T>, Vec<T>) {
+    let mut measured: Vec<(usize, usize, T)> = flushes
+        .into_iter()
+        .map(|flush| {
+            let (files, rows) = measure(&flush);
+            (rows, files, flush)
+        })
+        .collect();
+    measured.sort_by_key(|(rows, _, _)| *rows);
+    let mut rest_files: usize = measured.iter().map(|(_, files, _)| files).sum();
+    let mut count = 0;
+    while count < measured.len() && (count < 2 || rest_files + merged_files > max_files / 2) {
+        rest_files -= measured[count].1;
+        count += 1;
+    }
+    let rest = measured.split_off(count);
+    let flushes = |measured: Vec<(usize, usize, T)>| {
+        measured
+            .into_iter()
+            .map(|(_, _, flush)| flush)
+            .collect::<Vec<T>>()
+    };
+    (flushes(measured), flushes(rest))
 }
 
 /// What a sort has written to disk: flushes in blocks, of records that hold
@@ -1148,13 +1197,13 @@ impl Sorter {
         }
         let _timer = self.metrics.flush_time.timer();
         self.metrics.flushes.add(1);
-        let files = (buffered.num_rows() / MIN_ROWS_PER_FILE).clamp(1, self.options.parallelism);
+        let files = self.files_for(buffered.num_rows());
         let ready = self.prepare(buffered).await?;
         self.write_ranges(ready, files).await?;
         if let Some(words) = self.wider.lock().take() {
             self.reshape(words);
         }
-        if self.flushed.lock().files_after(self.options.parallelism) > self.options.max_open_files {
+        if self.flushed.lock().files_after(self.most_files()) > self.options.max_open_files {
             self.compact().await?;
         }
         self.flush_count.fetch_add(1, Ordering::AcqRel);
@@ -1224,26 +1273,62 @@ impl Sorter {
         }
     }
 
-    /// Merges every flush on disk into one, which bounds how many spill files
-    /// exist however many flushes the input needs.
+    /// Merges the smallest flushes on disk into one, which bounds how many
+    /// spill files exist however many flushes the input needs: see
+    /// [`smallest_flushes`].
     async fn compact(self: &Arc<Self>) -> Result<()> {
         self.metrics.compactions.add(1);
         let on_disk = match &mut *self.flushed.lock() {
             Flushes::Blocks(flushes) => Flushes::Blocks(std::mem::take(flushes)),
             Flushes::Batches(flushes) => Flushes::Batches(std::mem::take(flushes)),
         };
+        let max_files = self.options.max_open_files;
         match on_disk {
             Flushes::Blocks(flushes) => {
-                let merged = self.merge_block_flushes(flushes).await?;
-                self.keep(Flushes::Blocks(vec![merged]));
+                let (merging, mut rest) = smallest_flushes(
+                    flushes,
+                    |flush| (flush.files(), flush.rows()),
+                    self.most_files(),
+                    max_files,
+                );
+                rest.push(self.merge_block_flushes(merging).await?);
+                self.keep(Flushes::Blocks(rest));
             }
-            Flushes::Batches(flushes) => match self.compact_batches(&flushes).await? {
-                Some(merged) => self.keep(Flushes::Batches(vec![merged])),
-                // nothing was merged, so the flushes are still what holds the rows
-                None => self.keep(Flushes::Batches(flushes)),
-            },
+            Flushes::Batches(flushes) => {
+                // every flush has a segment for each group, or none
+                let groups = flushes.iter().map(Vec::len).max().unwrap_or(0);
+                let (merging, mut rest) = smallest_flushes(
+                    flushes,
+                    |flush| (groups, flush.iter().flatten().map(Segment::rows).sum()),
+                    groups,
+                    max_files,
+                );
+                match self.compact_batches(&merging).await? {
+                    Some(merged) => rest.push(merged),
+                    // nothing was merged, so the flushes are still what holds
+                    // the rows
+                    None => rest.extend(merging),
+                }
+                self.keep(Flushes::Batches(rest));
+            }
         }
         Ok(())
+    }
+
+    /// Files that a flush, or a merge of flushes, is written as at most: one
+    /// per sort thread, and no more than a quarter of the spill files kept, so
+    /// that a compaction always leaves room for several flushes.
+    fn most_files(&self) -> usize {
+        self.options
+            .parallelism
+            .min(self.options.max_open_files / 4)
+            .max(1)
+    }
+
+    /// Files to write `rows` rows as: one per [`MIN_ROWS_PER_FILE`], up to
+    /// [`Self::most_files`]. Each file is written by a thread of its own.
+    fn files_for(&self, rows: usize) -> usize {
+        (rows / MIN_ROWS_PER_FILE).clamp(1, self.most_files())
     }
 
     /// Merges flushes in blocks into one. As many files are written at once as
@@ -1273,7 +1358,7 @@ impl Sorter {
         let per_file = flushes.len() * spill.input_bytes(&flushes) + writer;
         let concurrent = (bytes / per_file.max(1)).clamp(1, at_most);
         let index = index_bytes(&flushes);
-        let files = self.options.parallelism;
+        let files = self.files_for(flushes.iter().map(BlockFlush::rows).sum());
         let merged = self
             .on_pool(move || spill.merge_flushes(flushes, files, concurrent))
             .await
@@ -1292,8 +1377,8 @@ impl Sorter {
 
     /// Merges flushes in blocks a pass at a time, from the `bytes` the caller
     /// holds, until one merge reads all of those left in them with `beside`
-    /// to spare, for its output or a pass's writer. Each pass writes up to a
-    /// file per sort thread, one at a time on one thread.
+    /// to spare, for its output or a pass's writer. Each pass writes its files
+    /// one at a time on one thread.
     ///
     /// A merged flush can have larger blocks than the ones it replaced, since
     /// a block has room for a multiple of its first key. So what fits is
@@ -1334,7 +1419,7 @@ impl Sorter {
             let merging: Vec<BlockFlush> = flushes.drain(..count).collect();
             let index = index_bytes(&merging);
             let spill = Arc::clone(&spill);
-            let files = self.options.parallelism;
+            let files = self.files_for(merging.iter().map(BlockFlush::rows).sum());
             let merged = self
                 .on_pool(move || spill.merge_flushes(merging, files, 1))
                 .await??;
@@ -1405,8 +1490,7 @@ impl Sorter {
                 self.budget.release(buffered.held());
                 return Ok(());
             }
-            let files =
-                (buffered.num_rows() / MIN_ROWS_PER_FILE).clamp(1, self.options.parallelism);
+            let files = self.files_for(buffered.num_rows());
             let ranges = self.prepare(buffered).await?;
             match self.output_window(&ranges)? {
                 Some(window) => return self.emit_ranges(ranges, window, output).await,

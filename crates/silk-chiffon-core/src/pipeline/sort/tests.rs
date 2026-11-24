@@ -213,6 +213,8 @@ struct Sorted {
     cut_keys: usize,
     /// Times the records were made wider.
     widenings: usize,
+    /// Rows written to spill files, by flushes and by every merge pass.
+    spilled_rows: usize,
 }
 
 /// The schema of the input, which is [`schema`] or [`narrow`]'s part of it.
@@ -366,6 +368,8 @@ async fn sort_compressed(
         widenings: metrics
             .sum_by_name("record_widenings")
             .map_or(0, |value| value.as_usize()),
+        // `sum_by_name` skips DataFusion's own spill metrics
+        spilled_rows: metrics.spilled_rows().unwrap_or(0),
     }
 }
 
@@ -940,22 +944,42 @@ async fn sorts_rows_the_row_format_cannot_hold() {
 }
 
 /// Every spill file is an open file descriptor. A sort that needs more flushes
-/// than fit under the limit merges the ones it has into one and carries on.
+/// than fit under the limit merges its smallest flushes into one and carries
+/// on. Merging every flush instead wrote 13.7 rows for each row here with four
+/// threads. With eight it compacted at every flush and wrote 30, since a
+/// merged flush of a file per thread left no room for the next.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn many_flushes_are_compacted_to_bound_open_files() {
     let mut random = Random(43);
     let input: Vec<_> = (0..3)
-        .map(|partition| batches(&mut random, 250, 40, partition * 1_000_000, random_code))
+        .map(|partition| batches(&mut random, 1000, 40, partition * 1_000_000, random_code))
         .collect();
-    // the 750 batches become dozens of flushes of one file each, past the
-    // limit of eight files
-    let options = ParallelSortOptions {
-        max_open_files: 8,
-        ..options(4, 16 * 1024)
-    };
-    let sorted = sort(input.clone(), &EXPORT_KEY, options, 512 * 1024).await;
-    assert!(sorted.compactions > 0, "{} spill files", sorted.spill_files);
-    assert_sorted(&input, &sorted.batches, &EXPORT_KEY);
+    let rows = input
+        .iter()
+        .flatten()
+        .map(RecordBatch::num_rows)
+        .sum::<usize>();
+    // the 3,000 batches become dozens of flushes, past the limit of eight
+    // files, with fewer threads than that and as many
+    for parallelism in [4, 8] {
+        let options = ParallelSortOptions {
+            max_open_files: 8,
+            ..options(parallelism, 16 * 1024)
+        };
+        let sorted = sort(input.clone(), &EXPORT_KEY, options, 512 * 1024).await;
+        assert!(
+            sorted.compactions > 1 && 2 * sorted.compactions < sorted.flushes,
+            "{parallelism} threads: {} compactions of {} flushes",
+            sorted.compactions,
+            sorted.flushes
+        );
+        assert!(
+            sorted.spilled_rows < 6 * rows,
+            "{parallelism} threads: {} rows written for {rows}",
+            sorted.spilled_rows
+        );
+        assert_sorted(&input, &sorted.batches, &EXPORT_KEY);
+    }
 }
 
 /// Input that arrives already sorted. When it spills, the groups come from
