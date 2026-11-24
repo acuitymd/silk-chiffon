@@ -314,6 +314,9 @@ async fn ingestion_task(
         let received = ingestion_rx.recv().await;
         let mut pieces = Vec::with_capacity(2);
         match received {
+            // holding an empty batch until the next copy would keep its
+            // arrays alive for nothing
+            Some(batch) if batch.num_rows() == 0 => continue,
             Some(batch) if batch.num_rows() < MIN_PIECE_ROWS => {
                 small_rows += batch.num_rows();
                 small.push(batch);
