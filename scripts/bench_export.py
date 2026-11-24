@@ -262,9 +262,9 @@ class Measurement:
     command: list[str] = field(default_factory=list)
 
 
-def sql_string(path: Path) -> str:
-    """A path as a SQL string literal, for statements that take no parameters."""
-    return "'" + str(path).replace("'", "''") + "'"
+def sql_string(text: str | Path) -> str:
+    """Text or a path as a SQL string literal, where a statement takes no parameter."""
+    return "'" + str(text).replace("'", "''") + "'"
 
 
 def quoted(name: str) -> str:
@@ -406,7 +406,8 @@ def misplaced_sql(partition_by: str) -> str:
     # read with hive_partitioning off, the values come from the file, so a row written
     # under another partition's directory still matches the input's digest
     placed = " AND ".join(
-        f"contains(filename, '/{column}=' || CAST({quoted(column)} AS VARCHAR) || '/')"
+        f"contains(filename, {sql_string(f'/{column}=')} || CAST({quoted(column)} AS VARCHAR)"
+        " || '/')"
         for column in partition_by.split(",")
     )
     return f"""
