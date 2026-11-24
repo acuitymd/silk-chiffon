@@ -47,9 +47,9 @@ impl RowGroupAnalyzer {
     ///
     /// A row group is analyzed as it is encoded, not as its batches arrive,
     /// so that several row groups and all of their columns are analyzed at
-    /// once. One query over every batch of the file in turn was a single
-    /// thread that every row passed through, and it was slower than the
-    /// encoders it fed.
+    /// once. A query per row group, run one at a time as its batches
+    /// arrived, was a single thread that every row passed through, and it was
+    /// slower than the encoders it fed.
     pub(crate) async fn analyze(
         &self,
         row_group: &[RecordBatch],

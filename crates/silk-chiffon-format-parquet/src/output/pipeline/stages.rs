@@ -809,7 +809,8 @@ mod tests {
         let (batches_tx, batches_rx) = mpsc::channel(8);
         let (groups_tx, mut groups_rx) = mpsc::channel(8);
         let mut next = 0;
-        // the second batch ends one row group and fills the next exactly
+        // the first two batches, copied together, end one row group and fill
+        // the next exactly
         for rows in [3, 5, 4, 1] {
             let values: Int32Array = (next..next + rows).collect();
             next += rows;
