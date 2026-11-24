@@ -589,11 +589,16 @@ impl Spill {
         match self.kind {
             BlockKind::Records => self.input_bytes_of(self.block_bytes(), 0),
             BlockKind::Rows => {
-                // a block ends with the row that fills it
-                let block = self.row_block_bytes.max(BLOCK_KEY_MULTIPLE * key_bytes) + row_bytes;
+                let block = self.row_block_end(key_bytes).max(row_bytes);
                 self.input_bytes_of(block, block / row_bytes.max(1))
             }
         }
+    }
+
+    /// The most a block of rows holds when its first key is up to `key_bytes`
+    /// long, unless one row alone is larger: see [`BLOCK_KEY_MULTIPLE`].
+    fn row_block_end(&self, key_bytes: usize) -> usize {
+        self.row_block_bytes.max(BLOCK_KEY_MULTIPLE * key_bytes)
     }
 
     fn input_bytes_of(&self, block: usize, block_rows: usize) -> usize {
@@ -612,11 +617,12 @@ impl Spill {
 
     /// Memory one writer of blocks holds besides what it writes: the block
     /// being filled, the block as stored, for records the block transposed,
-    /// and with zstd the compressor.
-    pub(super) fn writer_bytes(&self) -> usize {
+    /// and with zstd the compressor. A block of rows is sized from its first
+    /// key, so a writer of rows is planned for keys of up to `key_bytes`.
+    pub(super) fn writer_bytes(&self, key_bytes: usize) -> usize {
         let (block, copies) = match self.kind {
             BlockKind::Records => (self.block_bytes(), 3),
-            BlockKind::Rows => (self.row_block_bytes, 2),
+            BlockKind::Rows => (self.row_block_end(key_bytes), 2),
         };
         let context = match self.compression {
             SpillCompression::Zstd => zstd_compress_context_bytes(block),
@@ -943,7 +949,7 @@ impl BlockWriter<'_> {
             SpillCompression::Lz4Frame => lz4_flex::block::get_maximum_output_size(block.len()),
             SpillCompression::Zstd => zstd::zstd_safe::compress_bound(block.len()),
         };
-        self.stored.resize(BLOCK_HEADER + bound, 0);
+        resize_exact(&mut self.stored, BLOCK_HEADER + bound);
         let (header, body) = self.stored.split_at_mut(BLOCK_HEADER);
         let length = match compression {
             SpillCompression::Uncompressed => {
@@ -1082,8 +1088,8 @@ impl BlockReader {
 }
 
 /// Resizes a buffer that is reused for blocks of about one size. Growing a
-/// `Vec` a little doubles its capacity, which a merge that holds a block of
-/// every flush has not planned for.
+/// `Vec` a little doubles its capacity, which neither a writer nor a merge
+/// that holds a block of every flush has planned for.
 fn resize_exact(buffer: &mut Vec<u8>, bytes: usize) {
     buffer.reserve_exact(bytes.saturating_sub(buffer.len()));
     buffer.resize(bytes, 0);

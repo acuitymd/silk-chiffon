@@ -28,7 +28,7 @@ use crate::pipeline::sort::{
 /// of it, each a little-endian `u32`.
 const ROW_HEADER: usize = 8;
 
-/// The least a block holds, as a multiple of its first key. The index keeps
+/// The room a block has, as a multiple of its first key. The index keeps
 /// the first key of every block in memory for as long as the flush exists, so
 /// this keeps the index to a small share of what is spilled however long the
 /// keys are. A block of 1 KiB holds about four rows with keys of 300 bytes,
@@ -90,7 +90,7 @@ pub(super) struct RowWriter<'a> {
     /// The block being filled.
     block: Vec<u8>,
     block_rows: usize,
-    /// Where the block being filled ends: see [`BLOCK_KEY_MULTIPLE`].
+    /// The most the block being filled holds: see [`BLOCK_KEY_MULTIPLE`].
     block_end: usize,
     index: WrittenIndex,
     rows: usize,
@@ -133,41 +133,43 @@ impl RowWriter<'_> {
                 })
             };
             let (key_length, rest_length) = (header(key)?, header(rest)?);
-            self.start_row(key);
+            self.start_row(key, ROW_HEADER + key.len() + rest.len())?;
             self.block.extend_from_slice(&key_length.to_le_bytes());
             self.block.extend_from_slice(&rest_length.to_le_bytes());
             self.block.extend_from_slice(key);
             self.block.extend_from_slice(rest);
-            self.end_row()?;
+            self.end_row();
         }
         Ok(())
     }
 
     /// Writes a row as it was read back from a block.
     pub(super) fn push_row(&mut self, row: &[u8]) -> Result<()> {
-        self.start_row(parts(row).0);
+        self.start_row(parts(row).0, row.len())?;
         self.block.extend_from_slice(row);
-        self.end_row()
+        self.end_row();
+        Ok(())
     }
 
-    fn start_row(&mut self, key: &[u8]) {
-        if self.block.is_empty() {
-            self.index.firsts.extend_from_slice(key);
-            self.block_end = self
-                .blocks
-                .spill
-                .row_block_bytes
-                .max(BLOCK_KEY_MULTIPLE * key.len());
-        }
-    }
-
-    fn end_row(&mut self) -> Result<()> {
-        self.block_rows += 1;
-        self.rows += 1;
-        if self.block.len() >= self.block_end {
+    /// Makes room for a row of `bytes` whose key is `key`. A block is written
+    /// before a row that would take it past its end, so it holds no more than
+    /// [`Spill::writer_bytes`] planned, unless one row alone is larger.
+    fn start_row(&mut self, key: &[u8], bytes: usize) -> Result<()> {
+        if !self.block.is_empty() && self.block.len() + bytes > self.block_end {
             self.write_block()?;
         }
+        if self.block.is_empty() {
+            self.index.firsts.extend_from_slice(key);
+            self.block_end = self.blocks.spill.row_block_end(key.len());
+            // a `Vec` that grows doubles, which no plan counts
+            self.block.reserve_exact(self.block_end.max(bytes));
+        }
         Ok(())
+    }
+
+    fn end_row(&mut self) {
+        self.block_rows += 1;
+        self.rows += 1;
     }
 
     /// Writes the block being filled.
@@ -471,7 +473,72 @@ impl<'a, Emit: FnMut(RecordBatch) -> Result<()>> RowBatcher<'a, Emit> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+
+    /// A block of rows has room for a multiple of its first key, so keys
+    /// longer than the first ones make larger blocks. Each still ends before
+    /// the row that would take it past that, in a buffer of that size.
+    #[tokio::test]
+    async fn blocks_stay_within_the_room_their_first_key_gives() {
+        use arrow::datatypes::{DataType, Field, Schema};
+        use datafusion::{
+            config::SpillCompression,
+            execution::runtime_env::RuntimeEnv,
+            physical_expr::{LexOrdering, PhysicalSortExpr, expressions::Column},
+            physical_plan::metrics::{ExecutionPlanMetricsSet, SpillMetrics},
+        };
+
+        use crate::pipeline::sort::workers::Workers;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("k", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ]));
+        let ordering =
+            LexOrdering::new([PhysicalSortExpr::new_default(Arc::new(Column::new("k", 0)))])
+                .unwrap();
+        let encoder = Arc::new(RowEncoder::try_new(&ordering, &schema).unwrap());
+        let spill = Spill::new(
+            Arc::clone(&encoder),
+            Words::new(encoder.layout_for(24)),
+            schema,
+            ordering,
+            512,
+            64,
+            4096,
+            &Arc::new(RuntimeEnv::default()),
+            SpillCompression::Uncompressed,
+            SpillMetrics::new(&ExecutionPlanMetricsSet::new(), 0),
+            Arc::new(Workers::try_new(1).unwrap()),
+        );
+        let row = |key_bytes: usize, at: usize| {
+            let key = format!("{at:0key_bytes$}");
+            let rest = [7_u8; 100];
+            let mut row = Vec::new();
+            row.extend_from_slice(&u32::try_from(key.len()).unwrap().to_le_bytes());
+            row.extend_from_slice(&u32::try_from(rest.len()).unwrap().to_le_bytes());
+            row.extend_from_slice(key.as_bytes());
+            row.extend_from_slice(&rest);
+            row
+        };
+        let mut writer = spill.row_writer("test").unwrap();
+        for at in 0..200 {
+            writer.push_row(&row(20, at)).unwrap();
+        }
+        for at in 200..400 {
+            writer.push_row(&row(2000, at)).unwrap();
+        }
+        let room = spill.row_block_end(2000);
+        assert!(
+            writer.block.capacity() <= room,
+            "{}",
+            writer.block.capacity()
+        );
+        let (_, index) = writer.finish().unwrap().unwrap();
+        assert!(index.largest_block <= room, "{}", index.largest_block);
+    }
 
     #[test]
     fn leads_order_keys_as_their_bytes_do_or_tie() {

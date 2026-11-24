@@ -26,8 +26,8 @@
 //!   "write what is buffered to disk". The sort fails only when the pool will
 //!   not give it its floor, room for one batch with nothing else buffered, or
 //!   the least it needs to merge what it spilled, which grows with the index
-//!   of a large spill and with rows wider than the first batch's: see
-//!   `Budget`.
+//!   of a large spill and with rows wider and keys longer than the first
+//!   batch's: see `Budget`.
 //! - **Spilling.** Rows held in row format are written to disk as they are,
 //!   in blocks, and a flush keeps the first key of each block it wrote. The
 //!   merge of the flushes is cut into slices from those, and the slices merge
@@ -111,7 +111,7 @@ use futures::StreamExt;
 use parking_lot::Mutex;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
-use keys::{Contents, RowEncoder};
+use keys::{Contents, Keys, RowEncoder};
 use ranges::{Ranges, SPLIT_HEADROOM_SHARE};
 use record::Words;
 use run::{Buffered, Grant, Lane, Splitters};
@@ -473,7 +473,9 @@ impl SortMetrics {
 /// unless the index of what was spilled has taken the credit, or the rows
 /// spilled are wider than the first batch's, which the credit was sized from.
 /// Memory beyond the floor is asked of the pool, and only what it grants is
-/// used.
+/// used. That includes the larger blocks that keys longer than the first
+/// batch's make, which a batch asks for before it is buffered: see
+/// `Sorter::plan_writers_for`.
 ///
 /// Jobs on the sort's threads hold the budget too, so a sort whose output is
 /// dropped gives its memory back when its last job stops, not before.
@@ -705,6 +707,9 @@ struct Sorter {
     /// Wider records that a run's keys needed, to buffer the rows after it in
     /// once its flush is written.
     wider: Mutex<Option<Words>>,
+    /// The longest key that the writers of flushes in blocks of rows are
+    /// planned for: see [`Self::plan_writers_for`].
+    writer_key: Mutex<usize>,
     /// Inserts hold this shared. Flushing and finishing hold it exclusively,
     /// which stops every lane between batches.
     gate: tokio::sync::RwLock<()>,
@@ -748,6 +753,7 @@ impl Sorter {
             spill_metrics: SpillMetrics::new(&plan.metrics, 0),
             shape: parking_lot::RwLock::new(None),
             wider: Mutex::new(None),
+            writer_key: Mutex::new(0),
             gate: tokio::sync::RwLock::new(()),
             lanes: (0..lane_count)
                 .map(|_| Mutex::new(Lane::default()))
@@ -821,6 +827,7 @@ impl Sorter {
             spill_batch_rows = (spill_batch_rows / 2).max(MIN_OUTPUT_ROWS);
         };
         self.metrics.record_bytes.set(words.record_bytes());
+        *self.writer_key.lock() = longest;
         let shape = Arc::new(shape);
         *slot = Some(Arc::clone(&shape));
         Ok(shape)
@@ -873,7 +880,7 @@ impl Sorter {
             )
         } else {
             (
-                spill.writer_bytes(),
+                spill.writer_bytes(key_bytes),
                 spill.planned_input_bytes(key_bytes + row_bytes, key_bytes),
             )
         };
@@ -1024,7 +1031,14 @@ impl Sorter {
             .as_ref()
             .map_or(batch.get_array_memory_size(), Rows::size)
             .div_ceil(batch.num_rows());
-        let shape = self.shape_for(rows.as_ref().expect("encoded above"), row_bytes)?;
+        let keys = rows.as_ref().expect("encoded above");
+        let shape = self.shape_for(keys, row_bytes)?;
+        if self.encoder.keeps_rows()
+            && shape.words.layout.keys != Keys::Whole
+            && !self.plan_writers_for(keys, &shape.spill)
+        {
+            return Ok(false);
+        }
         Ok(self.lanes[lane].lock().insert(
             &self.next_batch,
             batch,
@@ -1034,6 +1048,32 @@ impl Sorter {
             shape.chunk,
             &*self.budget,
         ))
+    }
+
+    /// Plans the writers of flushes in blocks of rows for the longest of
+    /// `keys`, asking the pool for what their blocks need beyond what they were
+    /// planned for. Returns `false` when the pool refused it.
+    ///
+    /// A block of rows has room for 64 times its first key, so keys longer
+    /// than the first batch's make larger blocks than the floor holds writers
+    /// for. The flush that writes them cannot ask for memory, as it is what
+    /// frees memory, so a batch that brings a longer key asks before it is
+    /// buffered, and is refused as any batch is. The memory is kept to the
+    /// sort's end, for every flush and merge that writes blocks.
+    fn plan_writers_for(&self, keys: &Rows, spill: &Spill) -> bool {
+        let longest = keys.iter().map(|key| key.data().len()).max().unwrap_or(0);
+        let mut planned = self.writer_key.lock();
+        if longest <= *planned {
+            return true;
+        }
+        // a flush is written by up to a writer per sort thread
+        let more =
+            self.options.parallelism * (spill.writer_bytes(longest) - spill.writer_bytes(*planned));
+        if more > 0 && !self.budget.grant(more) {
+            return false;
+        }
+        *planned = longest;
+        true
     }
 
     /// Takes everything buffered out of the lanes. Needs the gate held
@@ -1212,18 +1252,17 @@ impl Sorter {
     /// merge to read them all.
     async fn merge_block_flushes(self: &Arc<Self>, flushes: Vec<BlockFlush>) -> Result<BlockFlush> {
         let spill = Arc::clone(&self.shape().spill);
-        let (input, writer) = (spill.input_bytes(&flushes), spill.writer_bytes());
+        let input = spill.input_bytes(&flushes);
+        let writer = spill.writer_bytes(*self.writer_key.lock());
         let at_most = self.options.parallelism.clamp(
             1,
             (self.options.max_open_files / flushes.len().max(1)).max(1),
         );
-        let bytes = self.budget.take_up_to(
+        let mut bytes = self.budget.take_up_to(
             at_most * (flushes.len() * input + writer),
             2 * input + writer,
         )?;
-        let fan_in =
-            (bytes.saturating_sub(writer) / input.max(1)).clamp(2, self.options.max_open_files);
-        let flushes = match self.reduce_flushes(flushes, fan_in).await {
+        let flushes = match self.reduce_flushes(flushes, &mut bytes, writer).await {
             Ok(flushes) => flushes,
             Err(error) => {
                 self.budget.release(bytes);
@@ -1251,28 +1290,58 @@ impl Sorter {
         }
     }
 
-    /// Merges flushes in blocks a pass at a time, `fan_in` at once, until at
-    /// most `fan_in` are left. Each pass writes up to a file per sort thread,
-    /// one at a time on one thread, from memory the caller holds.
+    /// Merges flushes in blocks a pass at a time, from the `bytes` the caller
+    /// holds, until one merge reads all of those left in them with `beside`
+    /// to spare, for its output or a pass's writer. Each pass writes up to a
+    /// file per sort thread, one at a time on one thread.
+    ///
+    /// A merged flush can have larger blocks than the ones it replaced, since
+    /// a block has room for a multiple of its first key. So what fits is
+    /// counted again after every pass, and once a pass has run, the pool is
+    /// asked for what the flushes left need before they are merged down
+    /// further. Where `bytes` does not cover two of them, the pool is asked
+    /// for that, and the sort fails if it refuses. `bytes` grows by what the
+    /// pool grants.
     async fn reduce_flushes(
         self: &Arc<Self>,
         mut flushes: Vec<BlockFlush>,
-        fan_in: usize,
+        bytes: &mut usize,
+        beside: usize,
     ) -> Result<Vec<BlockFlush>> {
-        while flushes.len() > fan_in {
+        let spill = Arc::clone(&self.shape().spill);
+        let max_open_files = self.options.max_open_files;
+        let mut merged_any = false;
+        loop {
+            let input = spill.input_bytes(&flushes).max(1);
+            let fits = bytes.saturating_sub(beside) / input;
+            if flushes.len() <= fits.min(max_open_files) {
+                return Ok(flushes);
+            }
+            let wanted = flushes.len() * input + beside;
+            if merged_any && flushes.len() <= max_open_files && self.budget.grant(wanted - *bytes) {
+                *bytes = wanted;
+                return Ok(flushes);
+            }
+            if fits < 2 {
+                let least = flushes.len().min(2) * input + beside;
+                self.budget.replace(0, least - *bytes)?;
+                *bytes = least;
+                continue;
+            }
+            let fan_in = fits.min(max_open_files).max(2);
             // leave exactly `fan_in` when one pass can
             let count = fan_in.min(flushes.len() - fan_in + 1);
             let merging: Vec<BlockFlush> = flushes.drain(..count).collect();
             let index = index_bytes(&merging);
-            let spill = Arc::clone(&self.shape().spill);
+            let spill = Arc::clone(&spill);
             let files = self.options.parallelism;
             let merged = self
                 .on_pool(move || spill.merge_flushes(merging, files, 1))
                 .await??;
             self.budget.replace(index, merged.index_bytes())?;
             flushes.push(merged);
+            merged_any = true;
         }
-        Ok(flushes)
     }
 
     /// Merges flushes of Arrow batches into one, group by group.
@@ -1454,15 +1523,16 @@ impl Sorter {
         // least, however small
         let beside_inputs = shape
             .spill
-            .writer_bytes()
+            .writer_bytes(*self.writer_key.lock())
             .max(2 * MIN_OUTPUT_ROWS * row_bytes);
-        let bytes = self
+        let mut bytes = self
             .budget
             .take_up_to(at_most * per_slice, 2 * input_bytes + beside_inputs)?;
         // what the grant does not cover in one pass is merged in several
-        let fan_in = (bytes.saturating_sub(beside_inputs) / input_bytes.max(1))
-            .clamp(2, self.options.max_open_files);
-        let flushes = match self.reduce_flushes(flushes, fan_in).await {
+        let flushes = match self
+            .reduce_flushes(flushes, &mut bytes, beside_inputs)
+            .await
+        {
             Ok(flushes) => flushes,
             Err(error) => {
                 self.budget.release(bytes);

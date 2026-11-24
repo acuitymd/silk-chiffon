@@ -591,6 +591,31 @@ async fn keys_longer_than_the_first_batch_had_widen_later_runs() {
     assert_sorted(&input, &spilled.batches, &key);
 }
 
+/// A block of rows has room for 64 times its first key, so keys of a
+/// kilobyte after a first batch of short ones make blocks far larger than the
+/// floor planned writers for, and merge passes write blocks larger than they
+/// read. The sort asks the pool for both, and still sorts in a small one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn keys_far_longer_than_the_first_batch_had_grow_blocks_within_the_pool() {
+    let mut random = Random(109);
+    let key = [("name", ASCENDING), ("row", DESCENDING_NULLS_LAST)];
+    let start = "a start far longer than any key of the first batch, ".repeat(20);
+    // one partition, so that the first batch is the one that arrives first
+    let mut input = batches(&mut random, 30, 1000, 0, random_code);
+    for batch in input.iter_mut().skip(1).step_by(2) {
+        *batch = with_longer_names(batch, &start);
+    }
+    let input = vec![input];
+    let sorted = sort(input.clone(), &key, options(3, 16 * 1024), 2 * 1024 * 1024).await;
+    assert!(
+        sorted.merge_fan_in < sorted.flushes,
+        "{} flushes at once of {}",
+        sorted.merge_fan_in,
+        sorted.flushes
+    );
+    assert_sorted(&input, &sorted.batches, &key);
+}
+
 /// Keys too long for any record are sorted by a prefix that is respelled for
 /// each run, with ties broken through the row format.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
