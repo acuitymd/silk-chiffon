@@ -26,7 +26,7 @@ use datafusion::{
     physical_expr::{LexOrdering, PhysicalSortExpr, expressions::Column},
     physical_plan::{
         ExecutionPlan, ExecutionPlanProperties, RecordBatchStream, SendableRecordBatchStream,
-        execute_stream,
+        execute_stream, sorts::sort_preserving_merge::SortPreservingMergeExec,
     },
     prelude::{DataFrame, SessionConfig, SessionContext, ident},
 };
@@ -292,23 +292,30 @@ impl Pipeline {
                 .is_some_and(|ordering| ParallelSortExec::supports(&logical_schema, &ordering))
         {
             let unsorted = data_frame.clone().create_physical_plan().await?;
-            // an input that is already in order needs no sort, and DataFusion's
-            // planner is what knows how to keep that order
-            if let Some(ordering) = physical_ordering(&unsorted.schema(), columns)
-                && !unsorted
+            if let Some(ordering) = physical_ordering(&unsorted.schema(), columns) {
+                // an input that is already in order needs no sort. It is kept
+                // here, merged the way DataFusion would merge it, since falling
+                // through would plan the input a second time
+                if unsorted
                     .equivalence_properties()
                     .ordering_satisfy(ordering.clone())?
-                && ParallelSortExec::supports(&unsorted.schema(), &ordering)
-            {
-                let parallelism = self
-                    .config
-                    .target_partitions
-                    .unwrap_or_else(|| session.state().config().target_partitions());
-                return Ok(Arc::new(ParallelSortExec::try_new(
-                    unsorted,
-                    ordering,
-                    ParallelSortOptions::new(parallelism),
-                )?));
+                {
+                    if unsorted.output_partitioning().partition_count() == 1 {
+                        return Ok(unsorted);
+                    }
+                    return Ok(Arc::new(SortPreservingMergeExec::new(ordering, unsorted)));
+                }
+                if ParallelSortExec::supports(&unsorted.schema(), &ordering) {
+                    let parallelism = self
+                        .config
+                        .target_partitions
+                        .unwrap_or_else(|| session.state().config().target_partitions());
+                    return Ok(Arc::new(ParallelSortExec::try_new(
+                        unsorted,
+                        ordering,
+                        ParallelSortOptions::new(parallelism),
+                    )?));
+                }
             }
         }
         Ok(sort_data_frame(data_frame, columns)?
@@ -633,6 +640,99 @@ mod tests {
             .await;
             assert_eq!(descending, vec![Some(3), Some(2), Some(1), None, None]);
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_input_already_in_order_is_planned_once_and_not_sorted_again() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use async_trait::async_trait;
+        use datafusion::{
+            catalog::{Session, TableProvider},
+            datasource::MemTable,
+            logical_expr::{Expr, TableType},
+        };
+
+        /// A table that counts how often it is planned. A BigQuery table
+        /// opens a read session each time.
+        #[derive(Debug)]
+        struct Counted {
+            table: MemTable,
+            scans: AtomicUsize,
+        }
+
+        #[async_trait]
+        impl TableProvider for Counted {
+            fn schema(&self) -> SchemaRef {
+                self.table.schema()
+            }
+
+            fn table_type(&self) -> TableType {
+                TableType::Base
+            }
+
+            async fn scan(
+                &self,
+                state: &dyn Session,
+                projection: Option<&Vec<usize>>,
+                filters: &[Expr],
+                limit: Option<usize>,
+            ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
+                self.scans.fetch_add(1, Ordering::Relaxed);
+                self.table.scan(state, projection, filters, limit).await
+            }
+        }
+
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, true)]));
+        // two partitions, each in order, which a merge puts together
+        let partitions = [[1, 3, 5], [2, 4, 6]].map(|ids| {
+            vec![
+                RecordBatch::try_new(
+                    Arc::clone(&schema),
+                    vec![Arc::new(Int32Array::from(ids.to_vec()))],
+                )
+                .unwrap(),
+            ]
+        });
+        let table = Arc::new(Counted {
+            table: MemTable::try_new(Arc::clone(&schema), partitions.to_vec())
+                .unwrap()
+                .with_sort_order(vec![vec![ident("id").sort(true, false)]]),
+            scans: AtomicUsize::new(0),
+        });
+        let mut pipeline = Pipeline::new()
+            .with_sort(vec![SortColumn::new(
+                "id",
+                SortDirection::Ascending,
+                NullPlacement::Last,
+            )])
+            .with_sort_engine(SortEngine::Parallel);
+        let session = pipeline.create_session_context().unwrap();
+        let input = session
+            .read_table(Arc::clone(&table) as Arc<dyn TableProvider>)
+            .unwrap();
+        let prepared = pipeline.prepare(input, session).await.unwrap();
+        assert_eq!(table.scans.load(Ordering::Relaxed), 1);
+        assert_ne!(prepared.execution_plan().name(), "ParallelSortExec");
+        let batches: Vec<RecordBatch> = prepared
+            .begin_execution()
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        let ids: Vec<Option<i32>> = batches
+            .iter()
+            .flat_map(|batch| {
+                batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<Int32Array>()
+                    .unwrap()
+                    .iter()
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(ids, (1..=6).map(Some).collect::<Vec<_>>());
     }
 
     #[test]
