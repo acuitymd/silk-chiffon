@@ -682,11 +682,12 @@ impl FinishingSinks {
     ///
     /// A completing sink still holds its last rows, up to a Parquet row group,
     /// outside the memory pool, and the formats size its buffers as if it were
-    /// the only sink open. A default row group of 1,048,576 rows of 200 bytes
-    /// is 200 MiB, so each 256 MiB of the budget allows one: at least 1, and 16
-    /// from 4 GiB up.
+    /// the only sink open. A sorting transform's pool takes three quarters of
+    /// the budget, so the sinks share the last quarter. A default row group of
+    /// 1,048,576 rows of 200 bytes is 200 MiB, so each 256 MiB of that quarter
+    /// allows one: 1 at 1 GiB, 4 at 4 GiB, and 16 from 16 GiB up.
     fn limit_for(memory_budget: usize) -> usize {
-        (memory_budget / (256 * 1024 * 1024)).clamp(1, 16)
+        (memory_budget / 4 / (256 * 1024 * 1024)).clamp(1, 16)
     }
 
     fn new(partition_fields: Arc<[String]>, limit: usize) -> Self {
@@ -1104,8 +1105,9 @@ mod tests {
     fn finishing_limit_follows_the_memory_budget() {
         const GIB: usize = 1024 * 1024 * 1024;
         assert_eq!(FinishingSinks::limit_for(64 * GIB), 16);
-        assert_eq!(FinishingSinks::limit_for(4 * GIB), 16);
-        assert_eq!(FinishingSinks::limit_for(GIB), 4);
+        assert_eq!(FinishingSinks::limit_for(16 * GIB), 16);
+        assert_eq!(FinishingSinks::limit_for(4 * GIB), 4);
+        assert_eq!(FinishingSinks::limit_for(GIB), 1);
         assert_eq!(FinishingSinks::limit_for(100 * 1024 * 1024), 1);
     }
 
