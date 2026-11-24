@@ -11,7 +11,6 @@ use datafusion::{
     physical_plan::{
         ExecutionPlan, SendableRecordBatchStream,
         display::DisplayableExecutionPlan,
-        execution_plan::EmissionType,
         sorts::{sort::SortExec, sort_preserving_merge::SortPreservingMergeExec},
         stream::RecordBatchStreamAdapter,
     },
@@ -438,8 +437,12 @@ fn sort_columns(columns: &[SortColumn], schema: &Schema) -> Result<Vec<SortColum
 
 /// Whether DataFusion's sort, or its merge of partitions in order, is still
 /// merging while the output is written, sharing the CPUs with encoding. Below
-/// an operator that takes all its input before it emits, such as the parallel
-/// sort, the work is done by the time the output is written.
+/// the parallel sort, which takes all its input before it emits, the work is
+/// done by the time the output is written.
+///
+/// Emitting only at the end is not enough to stop at: a projection above
+/// DataFusion's sort, as a query that renames the key plans, reports the
+/// sort's emission as its own while the sort still merges below it.
 fn merges_while_writing(plan: &Arc<dyn ExecutionPlan>) -> bool {
     // a stack, not recursion: a plan's depth follows the --query
     let mut pending = vec![Arc::clone(plan)];
@@ -447,7 +450,8 @@ fn merges_while_writing(plan: &Arc<dyn ExecutionPlan>) -> bool {
         if plan.is::<SortExec>() || plan.is::<SortPreservingMergeExec>() {
             return true;
         }
-        if plan.properties().emission_type != EmissionType::Final {
+        // by name, since the core does not export the operator
+        if plan.name() != "ParallelSortExec" {
             pending.extend(plan.children().into_iter().cloned());
         }
     }
@@ -715,6 +719,13 @@ mod tests {
     #[tokio::test]
     async fn datafusion_sort_merges_while_writing() {
         let plan = planned_sort(SortEngine::DataFusion, false, None).await;
+        assert!(merges_while_writing(&plan), "{}", plan.name());
+    }
+
+    #[tokio::test]
+    async fn datafusion_sort_below_a_projection_merges_while_writing() {
+        let query = "SELECT other AS id FROM data";
+        let plan = planned_sort(SortEngine::DataFusion, false, Some(query)).await;
         assert!(merges_while_writing(&plan), "{}", plan.name());
     }
 
