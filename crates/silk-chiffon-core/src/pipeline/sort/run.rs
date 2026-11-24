@@ -6,6 +6,7 @@
 
 use std::{
     collections::HashSet,
+    ops::Range,
     sync::{
         Arc,
         atomic::{AtomicU32, Ordering as AtomicOrdering},
@@ -17,9 +18,10 @@ use arrow::{
     buffer::Buffer,
     compute::interleave_record_batch,
     datatypes::DataType,
+    error::ArrowError,
     row::Rows,
 };
-use datafusion::error::Result;
+use datafusion::error::{DataFusionError, Result};
 use parking_lot::Mutex;
 
 use super::keys::{Contents, KeyWidths, Keys, RowEncoder, cut_buckets, key_width_bucket};
@@ -642,19 +644,22 @@ impl<'a, Emit: FnMut(RecordBatch) -> Result<()>> Batcher<'a, Emit> {
         if self.rows == 0 {
             return Ok(());
         }
-        let batch = match (&mut self.gatherer, self.words.layout.contents) {
+        let (encoder, words, payloads, key_rows) =
+            (self.encoder, self.words, self.payloads, self.key_rows);
+        // key words are padded to whole words
+        let key_bytes = words.key_bytes();
+        let build = |rows: Range<usize>| match (&mut self.gatherer, words.layout.contents) {
             (Some(gatherer), _) => {
-                let batch = gatherer.gather(&self.sources)?;
+                let batch = gatherer.gather(&self.sources[rows])?;
                 if self.compact {
-                    compact_views(&batch)?
+                    compact_views(&batch)
                 } else {
-                    batch
+                    Ok(batch)
                 }
             }
             (None, Contents::Source) => {
-                let (payloads, key_rows) = (self.payloads, self.key_rows);
-                let rows = self
-                    .sources
+                let sources = &self.sources[rows.clone()];
+                let payload_rows = sources
                     .iter()
                     .map(|&(batch, row)| payloads[batch as usize].row(row as usize));
                 let kept_key = |&(batch, row): &(u32, u32)| {
@@ -664,36 +669,77 @@ impl<'a, Emit: FnMut(RecordBatch) -> Result<()>> Batcher<'a, Emit> {
                         .row(row as usize)
                 };
                 if self.inline_keys {
-                    let parser = self.encoder.key_parser();
-                    let words = self.words;
-                    // key words are padded to whole words
-                    let keys = self
-                        .keys
-                        .chunks_exact(words.key_bytes())
-                        .zip(&self.sources)
+                    let parser = encoder.key_parser();
+                    let keys = self.keys[rows.start * key_bytes..rows.end * key_bytes]
+                        .chunks_exact(key_bytes)
+                        .zip(sources)
                         .map(|(key, source)| match words.layout.keys {
                             Keys::Fitted => words
                                 .fitted_key(key)
                                 .map_or_else(|| kept_key(source), |key| parser.parse(key)),
                             Keys::Whole | Keys::Prefix => parser.parse(&key[..words.layout.inline]),
                         });
-                    self.encoder.decode_payload(keys, rows)?
-                } else if self.encoder.payload_needs_keys() {
-                    let keys = self.sources.iter().map(kept_key);
-                    self.encoder.decode_payload(keys, rows)?
+                    encoder.decode_payload(keys, payload_rows)
+                } else if encoder.payload_needs_keys() {
+                    encoder.decode_payload(sources.iter().map(kept_key), payload_rows)
                 } else {
-                    self.encoder.decode_payload(std::iter::empty(), rows)?
+                    encoder.decode_payload(std::iter::empty(), payload_rows)
                 }
             }
-            (None, Contents::Row) => self
-                .encoder
-                .decode(self.keys.chunks_exact(self.words.key_bytes()))?,
+            (None, Contents::Row) => encoder.decode(
+                self.keys[rows.start * key_bytes..rows.end * key_bytes].chunks_exact(key_bytes),
+            ),
         };
+        emit_split_on_overflow(self.rows, build, &mut self.emit)?;
         self.keys.clear();
         self.sources.clear();
         self.rows = 0;
-        (self.emit)(batch)
+        Ok(())
     }
+}
+
+/// Emits the batch of rows `0..rows` that `build` makes, or, where a
+/// dictionary in it would hold more values than its key type indexes, those
+/// rows as two batches, each split again until it builds.
+///
+/// A batch of output gathers rows from many batches of input, so it can hold
+/// more distinct values of a dictionary than any one of them did: more than
+/// 127 for keys of `Int8`. Arrow cannot build such a batch, whether it casts
+/// a column decoded from row format back to a dictionary or merges the
+/// dictionaries of the batches it gathers from. It reports that as it builds,
+/// so only output that has too many values is split, and is built again.
+pub(super) fn emit_split_on_overflow(
+    rows: usize,
+    mut build: impl FnMut(Range<usize>) -> Result<RecordBatch>,
+    mut emit: impl FnMut(RecordBatch) -> Result<()>,
+) -> Result<()> {
+    let mut rows = 0..rows;
+    // the rows to go out after `rows`, last first
+    let mut later = Vec::new();
+    loop {
+        match build(rows.clone()) {
+            Ok(batch) => {
+                emit(batch)?;
+                let Some(next) = later.pop() else {
+                    return Ok(());
+                };
+                rows = next;
+            }
+            Err(error) if rows.len() > 1 && overflows_dictionary(&error) => {
+                let middle = rows.start + rows.len() / 2;
+                later.push(middle..rows.end);
+                rows.end = middle;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// Whether Arrow failed to build a batch because a dictionary in it would hold
+/// more values than its key type indexes.
+pub(super) fn overflows_dictionary(error: &DataFusionError) -> bool {
+    matches!(error, DataFusionError::ArrowError(error, _)
+        if matches!(**error, ArrowError::DictionaryKeyOverflowError))
 }
 
 /// Builds output batches from rows scattered across the kept batches.

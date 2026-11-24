@@ -82,7 +82,7 @@ use super::keys::{Contents, RowEncoder};
 use super::{Budget, run::Grant};
 use super::{
     record::{Order, Words},
-    run::{Batcher, Input, Kept, merge_rounds},
+    run::{Batcher, Input, Kept, merge_rounds, overflows_dictionary},
     workers::Workers,
 };
 use rows::{BLOCK_KEY_MULTIPLE, RowBatcher};
@@ -873,30 +873,59 @@ impl Spill {
     }
 
     /// Calls `emit` with the merged batches of segments of Arrow batches.
+    ///
+    /// DataFusion's merge fails where a batch it builds would hold more values
+    /// of a dictionary than the key type indexes, and cannot go on: see
+    /// [`super::run::emit_split_on_overflow`]. It is then started again with
+    /// batches half the size, and the rows already emitted are skipped. They
+    /// come first again: the merge orders rows, ties included, the same way
+    /// whatever the size of its batches.
     fn merge_batches(
         &self,
         segments: &[Segment],
         memory: &MergeMemory,
         mut emit: impl FnMut(RecordBatch) -> Result<()>,
     ) -> Result<()> {
-        let mut merged = {
-            // reading a spill file starts a task
-            let _runtime = self.runtime.enter();
-            self.batch_stream(segments, memory)?
-        };
-        // one batch at a time, so that `emit` may block: it is outside the
-        // runtime between batches
-        while let Some(batch) = self.runtime.block_on(merged.next()) {
-            emit(batch?)?;
+        let (mut batch_size, mut emitted) = (self.batch_size, 0);
+        loop {
+            let mut merged = {
+                // reading a spill file starts a task
+                let _runtime = self.runtime.enter();
+                self.batch_stream(segments, memory, batch_size)?
+            };
+            let mut skip = emitted;
+            // one batch at a time, so that `emit` may block: it is outside the
+            // runtime between batches
+            loop {
+                match self.runtime.block_on(merged.next()) {
+                    None => return Ok(()),
+                    Some(Ok(batch)) if skip == 0 => {
+                        emitted += batch.num_rows();
+                        emit(batch)?;
+                    }
+                    Some(Ok(batch)) => {
+                        let rows = batch.num_rows();
+                        if skip < rows {
+                            emitted += rows - skip;
+                            emit(batch.slice(skip, rows - skip))?;
+                        }
+                        skip = skip.saturating_sub(rows);
+                    }
+                    Some(Err(error)) if batch_size > 1 && overflows_dictionary(&error) => break,
+                    Some(Err(error)) => return Err(error),
+                }
+            }
+            batch_size /= 2;
         }
-        Ok(())
     }
 
-    /// The merge of `segments`, which reserves from `memory`.
+    /// The merge of `segments` in batches of `batch_size`, which reserves from
+    /// `memory`.
     fn batch_stream(
         &self,
         segments: &[Segment],
         memory: &MergeMemory,
+        batch_size: usize,
     ) -> Result<SendableRecordBatchStream> {
         let mut inputs = segments
             .iter()
@@ -913,7 +942,7 @@ impl Spill {
             .with_schema(Arc::clone(&self.schema))
             .with_expressions(&self.ordering)
             .with_metrics(BaselineMetrics::new(&self.merge_metrics, 0))
-            .with_batch_size(self.batch_size)
+            .with_batch_size(batch_size)
             .with_fetch(None)
             .with_reservation({
                 let pool: Arc<dyn MemoryPool> = Arc::new(MergePool {

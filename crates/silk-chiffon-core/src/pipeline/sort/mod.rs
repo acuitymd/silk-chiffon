@@ -32,6 +32,17 @@
 //!   in blocks, and a flush keeps the first key of each block it wrote. The
 //!   merge of the flushes is cut into slices from those, and the slices merge
 //!   in parallel however the rows arrived.
+//! - **Dictionaries in output.** A batch of output gathers rows from many
+//!   batches of input, so it can hold more distinct values of a dictionary
+//!   than its key type indexes: more than 127 for keys of `Int8`. Arrow
+//!   cannot build such a batch, and DataFusion's sort fails there. This one
+//!   sends those rows as smaller batches instead: see
+//!   `run::emit_split_on_overflow`. One case still fails, as Arrow 59
+//!   panics: a sort that keeps the batches its rows arrived in, with a
+//!   dictionary of values that Arrow does not merge, which is any but
+//!   primitives, `Utf8`, `LargeUtf8`, `Binary` and `LargeBinary`, when the
+//!   batches that one batch of output gathers from hold more of those values
+//!   together than the key type indexes.
 //!
 //! # Rows the row format cannot hold
 //!

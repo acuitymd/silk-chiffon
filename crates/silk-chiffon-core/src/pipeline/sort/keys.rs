@@ -191,7 +191,10 @@ impl Payload {
     ///   column as its values, so the column decodes to its values and is
     ///   cast back to a dictionary. Arrow has no such cast for values that
     ///   are booleans, durations, intervals, dictionaries, or run-end
-    ///   encoded. The cast is tried here, on a batch of no rows.
+    ///   encoded. The cast is tried here, on a batch of no rows, which shows
+    ///   only that Arrow has it. A batch of output whose values are more
+    ///   than its key type indexes fails the cast, and goes out as smaller
+    ///   batches instead: see [`super::run::emit_split_on_overflow`].
     /// - **The cast back may not be exact:** a dictionary in a field that may
     ///   not be null: see `loses_dictionary`.
     ///
@@ -468,6 +471,10 @@ impl RowEncoder {
 
     /// Rebuilds a batch from rows that [`Self::encode_payload`] encoded, and
     /// from the keys of the same rows when [`Self::payload_needs_keys`].
+    ///
+    /// Fails with Arrow's dictionary key overflow when the rows hold more
+    /// values of a dictionary column than its key type indexes: see
+    /// [`super::run::emit_split_on_overflow`].
     pub(in crate::pipeline) fn decode_payload<'a>(
         &self,
         keys: impl IntoIterator<Item = Row<'a>>,

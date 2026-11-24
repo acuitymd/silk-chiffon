@@ -14,6 +14,8 @@
 //! in 16 GiB and 39.5 s in 1 GiB that way, and takes 31 s and 30.5 s this
 //! way.
 
+use std::ops::Range;
+
 use arrow::array::RecordBatch;
 use datafusion::error::{DataFusionError, Result};
 
@@ -21,7 +23,7 @@ use super::{BlockFlush, BlockReader, BlockWriter, Part, Slices, Spill, WrittenIn
 use crate::pipeline::sort::{
     keys::{Keys, RowEncoder},
     record::{MAX_WORDS, Words},
-    run::Kept,
+    run::{Kept, emit_split_on_overflow},
 };
 
 /// Bytes before each row in a block: the length of its key, then of the rest
@@ -455,19 +457,23 @@ impl<'a, Emit: FnMut(RecordBatch) -> Result<()>> RowBatcher<'a, Emit> {
         if self.ends.is_empty() {
             return Ok(());
         }
-        let rows = || {
-            self.ends.iter().scan(0, |start, end| {
-                let row = &self.rows[*start..*end];
-                *start = *end;
-                Some(parts(row))
-            })
+        let (bytes, ends) = (&self.rows, &self.ends);
+        let build = |rows: Range<usize>| {
+            let first = rows.start.checked_sub(1).map_or(0, |before| ends[before]);
+            let stored = || {
+                ends[rows.clone()].iter().scan(first, |start, end| {
+                    let row = &bytes[*start..*end];
+                    *start = *end;
+                    Some(parts(row))
+                })
+            };
+            self.encoder
+                .decode_stored(stored().map(|(key, _)| key), stored().map(|(_, rest)| rest))
         };
-        let batch = self
-            .encoder
-            .decode_stored(rows().map(|(key, _)| key), rows().map(|(_, rest)| rest))?;
+        emit_split_on_overflow(self.ends.len(), build, &mut self.emit)?;
         self.rows.clear();
         self.ends.clear();
-        (self.emit)(batch)
+        Ok(())
     }
 }
 

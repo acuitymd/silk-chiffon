@@ -9,10 +9,13 @@ use std::{
 use arrow::{
     array::{
         Array, ArrayRef, BinaryArray, BooleanArray, Date32Array, Decimal128Array, DictionaryArray,
-        Float64Array, Int16Array, Int32Array, LargeStringArray, ListArray, RecordBatch,
+        Float64Array, Int8Array, Int16Array, Int32Array, LargeStringArray, ListArray, RecordBatch,
         StringArray, StructArray, TimestampMicrosecondArray, UInt32Array,
     },
-    compute::{SortColumn, SortOptions, concat_batches, lexsort_to_indices, take_record_batch},
+    buffer::OffsetBuffer,
+    compute::{
+        SortColumn, SortOptions, cast, concat_batches, lexsort_to_indices, take_record_batch,
+    },
     datatypes::{DataType, Field, Int32Type, Schema, SchemaRef},
 };
 use datafusion::{
@@ -895,6 +898,127 @@ async fn merges_spilled_batches_whose_keys_are_long_dictionary_values() {
     let sorted = sort(input.clone(), &key, options(3, 64 * 1024), 8 * 1024 * 1024).await;
     assert!(sorted.spill_files > 1, "{} spill files", sorted.spill_files);
     assert_sorted(&input, &sorted.batches, &key);
+}
+
+/// Adds a dictionary column with 8-bit keys, and a list column of the same.
+/// Each batch's dictionary holds 90 of a thousand values, so the batches
+/// together hold about a thousand, far more than such keys index.
+fn with_narrow_dictionaries(
+    random: &mut Random,
+    partitions: Vec<Vec<RecordBatch>>,
+) -> Vec<Vec<RecordBatch>> {
+    let tag_type = DataType::Dictionary(Box::new(DataType::Int8), Box::new(DataType::Utf8));
+    let item = Arc::new(Field::new_list_field(tag_type.clone(), true));
+    let key = |random: &mut Random| (random.below(10) != 0).then(|| small::<i8>(random.below(90)));
+    partitions
+        .into_iter()
+        .map(|batches| {
+            batches
+                .into_iter()
+                .map(|batch| {
+                    let values: ArrayRef = Arc::new(StringArray::from_iter_values(
+                        (0..90).map(|_| format!("tag {:04}", random.below(1000))),
+                    ));
+                    let rows = batch.num_rows();
+                    let keys: Int8Array = (0..rows).map(|_| key(random)).collect();
+                    let tag = DictionaryArray::try_new(keys, Arc::clone(&values)).unwrap();
+                    let lengths: Vec<usize> = (0..rows).map(|_| small(random.below(3))).collect();
+                    let items: Int8Array = (0..lengths.iter().sum()).map(|_| key(random)).collect();
+                    let tags = ListArray::new(
+                        Arc::clone(&item),
+                        OffsetBuffer::from_lengths(lengths),
+                        Arc::new(DictionaryArray::try_new(items, values).unwrap()),
+                        None,
+                    );
+                    let mut fields = batch.schema().fields().to_vec();
+                    fields.push(Arc::new(Field::new("tag", tag_type.clone(), true)));
+                    fields.push(Arc::new(Field::new("tags", tags.data_type().clone(), true)));
+                    let mut columns = batch.columns().to_vec();
+                    columns.push(Arc::new(tag));
+                    columns.push(Arc::new(tags));
+                    RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap()
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// The batches with each dictionary, and each list of them, cast to its
+/// values, which Arrow concatenates however many values there are.
+fn without_dictionaries(batches: &[RecordBatch]) -> Vec<RecordBatch> {
+    let plain = |data_type: &DataType| match data_type {
+        DataType::Dictionary(_, values) => values.as_ref().clone(),
+        DataType::List(item) => match item.data_type() {
+            DataType::Dictionary(_, values) => DataType::List(Arc::new(Field::new_list_field(
+                values.as_ref().clone(),
+                item.is_nullable(),
+            ))),
+            _ => data_type.clone(),
+        },
+        _ => data_type.clone(),
+    };
+    batches
+        .iter()
+        .map(|batch| {
+            let fields: Vec<Field> = batch
+                .schema()
+                .fields()
+                .iter()
+                .map(|field| {
+                    field
+                        .as_ref()
+                        .clone()
+                        .with_data_type(plain(field.data_type()))
+                })
+                .collect();
+            let columns = batch
+                .columns()
+                .iter()
+                .zip(&fields)
+                .map(|(column, field)| cast(column, field.data_type()).unwrap())
+                .collect();
+            RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap()
+        })
+        .collect()
+}
+
+/// Output casts a dictionary decoded from row format back to its type, and
+/// gathering rows from kept batches merges their dictionaries. Sorted by other
+/// columns, a batch of output holds far more distinct values than 8-bit keys
+/// index, and goes out as several smaller batches.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sorts_more_dictionary_values_than_their_keys_index() {
+    let mut random = Random(113);
+    let input: Vec<_> = (0..3)
+        .map(|partition| batches(&mut random, 30, 1000, partition * 1_000_000, random_code))
+        .collect();
+    let input = with_narrow_dictionaries(&mut random, input);
+    let keys: [&[(&str, SortOptions)]; 2] = [
+        &EXPORT_KEY,
+        // the dictionary as a key, which output takes back from the keys
+        &[
+            ("code", ASCENDING),
+            ("tag", DESCENDING_NULLS_LAST),
+            ("row", ASCENDING),
+        ],
+    ];
+    // kept in row format, and kept as batches, which are gathered and spilled
+    // as Arrow batches for DataFusion to merge
+    for input in [input.clone(), with_unencodable_column(input)] {
+        let plain_input: Vec<Vec<RecordBatch>> = input
+            .iter()
+            .map(|batches| without_dictionaries(batches))
+            .collect();
+        for key in keys {
+            for memory_limit in [AMPLE, 2 * 1024 * 1024] {
+                let sorted = sort(input.clone(), key, options(3, 256 * 1024), memory_limit).await;
+                assert_eq!(sorted.spill_files > 0, memory_limit != AMPLE);
+                let schema = schema_of(&input);
+                assert!(sorted.batches.iter().all(|batch| batch.schema() == schema));
+                assert_sorted(&plain_input, &without_dictionaries(&sorted.batches), key);
+            }
+        }
+    }
 }
 
 /// A plan says which of the three ways its sort holds rows, which is how a
