@@ -411,7 +411,7 @@ Examples:
 
   Controls the rayon thread pool size for encoding columns within row groups. Column encoding is CPU-intensive and benefits from parallelism.
 
-  Default: 75% of available CPU cores, or 25% when DataFusion's sort orders the output, whose merge runs while the output is encoded. That is with --sort-engine datafusion, or when the default engine hands a sort it cannot do to DataFusion's.
+  Default: 75% of available CPU cores, or 25% when the transform's --sort-by leaves DataFusion's sort, or its merge of partitions that are each in order, merging while the output is encoded. That is with --sort-engine datafusion, when the default engine hands a sort it cannot do to DataFusion's, or when the input is already in order but in several partitions.
 - `--parquet-ingestion-queue-size <PARQUET_INGESTION_QUEUE_SIZE>` — Queue size for record batches waiting to be assembled into row groups.
 
   Controls backpressure between the data source and ingestion stage. Higher values allow the source to stay ahead of row group assembly.

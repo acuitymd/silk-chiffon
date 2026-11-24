@@ -9,7 +9,10 @@ use datafusion::{
     error::DataFusionError,
     execution::disk_manager::DEFAULT_MAX_TEMP_DIRECTORY_SIZE,
     physical_plan::{
-        ExecutionPlan, SendableRecordBatchStream, display::DisplayableExecutionPlan,
+        ExecutionPlan, SendableRecordBatchStream,
+        display::DisplayableExecutionPlan,
+        execution_plan::EmissionType,
+        sorts::{sort::SortExec, sort_preserving_merge::SortPreservingMergeExec},
         stream::RecordBatchStreamAdapter,
     },
 };
@@ -321,12 +324,11 @@ pub(crate) async fn run(args: TransformCommand) -> Result<()> {
     }
 
     let output_ordering = user_sort_spec_without_partition_cols.columns.clone();
-    // DataFusion's sort merges while the output is written, so it shares the
-    // CPUs with encoding. The parallel sort has done its heavy work by then.
     // What was planned decides, not --sort-engine: the parallel engine falls
-    // back to DataFusion's sort for keys it cannot encode.
-    let sorts_in_parallel = prepared.execution_plan().name() == "ParallelSortExec";
-    let output_threads = if has_sort && !sorts_in_parallel {
+    // back to DataFusion's sort for keys it cannot encode, and an input already
+    // in order is not sorted at all. A transform without --sort-by keeps the
+    // share it had, whatever its --query plans
+    let output_threads = if has_sort && merges_while_writing(prepared.execution_plan()) {
         (usable_cpus / 4).max(1)
     } else {
         three_quarter_cpus
@@ -432,6 +434,18 @@ fn sort_columns(columns: &[SortColumn], schema: &Schema) -> Result<Vec<SortColum
             ))
         })
         .collect()
+}
+
+/// Whether DataFusion's sort, or its merge of partitions in order, is still
+/// merging while the output is written, sharing the CPUs with encoding. Below
+/// an operator that takes all its input before it emits, such as the parallel
+/// sort, the work is done by the time the output is written.
+fn merges_while_writing(plan: &Arc<dyn ExecutionPlan>) -> bool {
+    if plan.is::<SortExec>() || plan.is::<SortPreservingMergeExec>() {
+        return true;
+    }
+    plan.properties().emission_type != EmissionType::Final
+        && plan.children().into_iter().any(merges_while_writing)
 }
 
 /// What `--explain-analyze` reports once the output is complete.
@@ -634,4 +648,74 @@ fn projection_indices_excluding(
             .filter(|index| !exclude_columns.contains(schema.field(*index).name()))
             .collect()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use arrow::{
+        array::{Int32Array, RecordBatch},
+        datatypes::{DataType, Field},
+    };
+    use datafusion::{datasource::MemTable, prelude::ident};
+    use silk_chiffon_core::{NullPlacement, SortDirection, SortEngine};
+
+    use super::*;
+
+    /// Plans a sort by `id` of one partition of rows, which `ordered` declares
+    /// to be in order already.
+    async fn planned_sort(
+        engine: SortEngine,
+        ordered: bool,
+        query: Option<&str>,
+    ) -> Arc<dyn ExecutionPlan> {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("other", DataType::Int32, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 2, 3])),
+                Arc::new(Int32Array::from(vec![3, 1, 2])),
+            ],
+        )
+        .unwrap();
+        let mut table = MemTable::try_new(schema, vec![vec![batch]]).unwrap();
+        if ordered {
+            table = table.with_sort_order(vec![vec![ident("id").sort(true, false)]]);
+        }
+        let mut pipeline = Pipeline::new()
+            .with_sort(vec![SortColumn::new(
+                "id",
+                SortDirection::Ascending,
+                NullPlacement::Last,
+            )])
+            .with_sort_engine(engine);
+        let session = pipeline.create_session_context().unwrap();
+        let mut input = session.read_table(Arc::new(table)).unwrap();
+        if let Some(query) = query {
+            input = apply_query(&session, input, query).await.unwrap();
+        }
+        let prepared = pipeline.prepare(input, session).await.unwrap();
+        Arc::clone(prepared.execution_plan())
+    }
+
+    #[tokio::test]
+    async fn an_input_already_in_order_is_not_merged_while_writing() {
+        let plan = planned_sort(SortEngine::Parallel, true, None).await;
+        assert!(!merges_while_writing(&plan), "{}", plan.name());
+    }
+
+    #[tokio::test]
+    async fn datafusion_sort_merges_while_writing() {
+        let plan = planned_sort(SortEngine::DataFusion, false, None).await;
+        assert!(merges_while_writing(&plan), "{}", plan.name());
+    }
+
+    #[tokio::test]
+    async fn a_sort_below_the_parallel_sort_is_done_before_writing() {
+        let query = "SELECT * FROM data ORDER BY other LIMIT 2";
+        let plan = planned_sort(SortEngine::Parallel, false, Some(query)).await;
+        assert!(!merges_while_writing(&plan), "{}", plan.name());
+    }
 }
