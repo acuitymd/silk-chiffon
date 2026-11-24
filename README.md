@@ -242,7 +242,7 @@ How the two sorts compare, on a 30-vCPU cloud VM with 15 cores and `--target-par
 | 4 GiB               | 17.5 / fails | 19.3 / fails | 20.9 / fails | 20.2 / fails |
 | 1 GiB               | 19.5 / fails | 21.2 / fails | 23.0 / fails | 20.9 / fails |
 
-The default sort takes about half the time when the rows fit in memory, and 37 to 46% less when both spill at 16 GiB. At 4 GiB and 1 GiB DataFusion's sort stops with an allocation error, and the default sort still finishes. These runs are of an earlier version of this sort; later changes took up to a further 9% off some of its times, and the table was not rerun after them.
+The default sort takes about half the time when the rows fit in memory, and 41 to 46% less when both spill at 16 GiB. At 4 GiB and 1 GiB DataFusion's sort stops with an allocation error, and the default sort still finishes. These runs are of an earlier version of this sort; later changes took up to a further 9% off some of its times, and the table was not rerun after them.
 
 To see where a transform spent its time, add `--explain-analyze`. When the transform finishes, it prints to stderr how long the inputs took to open and the executed plan with each operator's metrics. For a sort, `input_wait_time` is time spent waiting for the input and `output_wait_time` is time spent waiting for the output to be written.
 
