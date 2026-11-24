@@ -46,9 +46,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result, anyhow};
-use arrow::array::RecordBatch;
-use arrow::compute::concat_batches;
-use arrow::datatypes::SchemaRef;
+use arrow::array::{Array, RecordBatch, RecordBatchOptions};
+use arrow::compute::concat;
+use arrow::datatypes::{Field, Schema, SchemaRef};
 use futures::StreamExt;
 use futures::stream::FuturesOrdered;
 use parquet::arrow::ArrowSchemaConverter;
@@ -270,6 +270,35 @@ pub(super) async fn settle_pipeline_tasks(
 /// batches of a row or two.
 const MIN_PIECE_ROWS: usize = 1024;
 
+/// Copies small batches into one piece. Not `concat_batches` under the sink's
+/// schema: the sink accepts batches whose nested fields are non-nullable where
+/// its own are nullable, and `RecordBatch::try_new` rejects those columns under
+/// its schema. The encoders read a piece's columns, never its schema.
+fn copy_together(schema: &SchemaRef, small: &[RecordBatch]) -> Result<RecordBatch> {
+    let columns = (0..schema.fields().len())
+        .map(|index| {
+            let arrays: Vec<&dyn Array> = small
+                .iter()
+                .map(|batch| batch.column(index).as_ref())
+                .collect();
+            concat(&arrays)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let fields: Vec<Field> = schema
+        .fields()
+        .iter()
+        .zip(&columns)
+        .map(|(field, column)| Field::new(field.name(), column.data_type().clone(), true))
+        .collect();
+    let options = RecordBatchOptions::new()
+        .with_row_count(Some(small.iter().map(RecordBatch::num_rows).sum()));
+    Ok(RecordBatch::try_new_with_options(
+        Arc::new(Schema::new(fields)),
+        columns,
+        &options,
+    )?)
+}
+
 async fn ingestion_task(
     mut ingestion_rx: mpsc::Receiver<RecordBatch>,
     encoding_tx: mpsc::Sender<RowGroupWork>,
@@ -291,14 +320,14 @@ async fn ingestion_task(
                 // never past the row group's end, so that a row group goes to
                 // the encoders as soon as it is full
                 if small_rows >= MIN_PIECE_ROWS.min(row_group_rows - num_rows) {
-                    pieces.push(concat_batches(&encoding.schema, &small)?);
+                    pieces.push(copy_together(&encoding.schema, &small)?);
                     (small, small_rows) = (Vec::new(), 0);
                 }
             }
             received => {
                 // the small batches before it go first, to keep the rows in order
                 if !small.is_empty() {
-                    pieces.push(concat_batches(&encoding.schema, &small)?);
+                    pieces.push(copy_together(&encoding.schema, &small)?);
                     (small, small_rows) = (Vec::new(), 0);
                 }
                 pieces.extend(received);
@@ -716,6 +745,45 @@ mod tests {
             })
             .collect();
         assert_eq!(values, (0..5000).collect::<Vec<_>>());
+    }
+
+    #[tokio::test]
+    async fn small_batches_may_narrow_nested_nullability() {
+        use arrow::array::{AsArray, Int32Builder, ListBuilder};
+        use arrow::datatypes::{DataType, Field, Schema};
+
+        let list = |nullable| DataType::new_list(DataType::Int32, nullable);
+        let schema = Arc::new(Schema::new(vec![Field::new("l", list(true), true)]));
+        let parquet_schema = Arc::new(ArrowSchemaConverter::new().convert(&schema).unwrap());
+        let encoding = Arc::new(RowGroupEncoding::new(
+            Arc::clone(&schema),
+            parquet_schema,
+            Arc::new(WriterProperties::builder().build()),
+            PipelineConfig::default(),
+        ));
+        let narrow = Arc::new(Schema::new(vec![Field::new("l", list(false), true)]));
+        let (batches_tx, batches_rx) = mpsc::channel(2);
+        let (groups_tx, mut groups_rx) = mpsc::channel(2);
+        for rows in [2, 3] {
+            let mut builder = ListBuilder::new(Int32Builder::new())
+                .with_field(Field::new_list_field(DataType::Int32, false));
+            for n in 0..rows {
+                builder.append_value([Some(n)]);
+            }
+            let batch = RecordBatch::try_new(Arc::clone(&narrow), vec![Arc::new(builder.finish())])
+                .unwrap();
+            batches_tx.send(batch).await.unwrap();
+        }
+        drop(batches_tx);
+        ingestion_task(batches_rx, groups_tx, encoding)
+            .await
+            .unwrap();
+
+        let work = groups_rx.recv().await.unwrap();
+        assert!(groups_rx.recv().await.is_none());
+        let rows: usize = work.batches.iter().map(RecordBatch::num_rows).sum();
+        assert_eq!((rows, work.num_rows), (5, 5));
+        assert_eq!(work.batches[0].column(0).as_list::<i32>().len(), 5);
     }
 
     #[tokio::test]
