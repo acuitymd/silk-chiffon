@@ -91,10 +91,14 @@ pub(crate) struct ReadSessionSpec {
 }
 
 impl ReadSessionSpec {
+    /// `row_restriction` does not change the schema BigQuery returns, but BigQuery plans the
+    /// session over every partition the restriction leaves, which takes seconds for a table
+    /// of thousands of partitions and under a second for one of them.
     pub(crate) fn discovery(
         reference: &BigQueryReference,
         snapshot: PinnedSnapshot,
         owner_project: &str,
+        row_restriction: Option<String>,
     ) -> Result<Self, ReadSessionSpecError> {
         Self::new(
             SessionPurpose::Discovery,
@@ -103,7 +107,7 @@ impl ReadSessionSpec {
             owner_project,
             reference.expected_location().map(str::to_owned),
             Vec::new(),
-            None,
+            row_restriction,
             ArrowWireCompression::None,
             ResponseCompression::None,
             PicosTimestampPrecision::Micros,
@@ -859,7 +863,8 @@ mod tests {
 
     #[test]
     fn discovery_pins_snapshot_and_requests_schema_without_reading_rows() {
-        let spec = ReadSessionSpec::discovery(&reference(), snapshot(), "session-project").unwrap();
+        let spec =
+            ReadSessionSpec::discovery(&reference(), snapshot(), "session-project", None).unwrap();
         let request = spec.create_request();
         let session = request.read_session.unwrap();
 
@@ -914,7 +919,8 @@ mod tests {
 
     #[test]
     fn session_validation_accepts_matching_schema_location_streams_and_estimate() {
-        let spec = ReadSessionSpec::discovery(&reference(), snapshot(), "session-project").unwrap();
+        let spec =
+            ReadSessionSpec::discovery(&reference(), snapshot(), "session-project", None).unwrap();
         let lease = validate_response(
             &spec,
             response(&spec),
@@ -939,7 +945,8 @@ mod tests {
 
     #[test]
     fn session_validation_accepts_an_empty_result() {
-        let spec = ReadSessionSpec::discovery(&reference(), snapshot(), "session-project").unwrap();
+        let spec =
+            ReadSessionSpec::discovery(&reference(), snapshot(), "session-project", None).unwrap();
         let mut session = response(&spec);
         session.streams.clear();
         session.estimated_row_count = 0;
@@ -960,7 +967,8 @@ mod tests {
 
     #[test]
     fn session_validation_rejects_source_location_stream_schema_and_estimate_mismatches() {
-        let spec = ReadSessionSpec::discovery(&reference(), snapshot(), "session-project").unwrap();
+        let spec =
+            ReadSessionSpec::discovery(&reference(), snapshot(), "session-project", None).unwrap();
         let limit = DecodeLimit::new(256 * 1024 * 1024).unwrap();
         let mut cases = Vec::new();
 
@@ -993,7 +1001,8 @@ mod tests {
             "bqs:///projects/table-project/datasets/dataset/tables/table?location=US",
         )
         .unwrap();
-        let spec = ReadSessionSpec::discovery(&reference, snapshot(), "session-project").unwrap();
+        let spec =
+            ReadSessionSpec::discovery(&reference, snapshot(), "session-project", None).unwrap();
         let limit = DecodeLimit::new(256 * 1024 * 1024).unwrap();
         assert!(validate_response(&spec, response(&spec), Duration::ZERO, limit).is_ok());
 
