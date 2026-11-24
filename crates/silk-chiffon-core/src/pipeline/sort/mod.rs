@@ -981,18 +981,11 @@ impl Sorter {
                 batch.num_rows()
             )));
         }
-        let mut rows = Some(self.encoder.encode(&batch)?);
-        let mut payload = self.encoder.encode_payload(&batch)?;
-        let row_bytes = payload
-            .as_ref()
-            .map_or(batch.get_array_memory_size(), Rows::size)
-            .div_ceil(batch.num_rows());
-        self.shape_for(rows.as_ref().expect("encoded above"), row_bytes)?;
         loop {
             let flushes = self.flush_count.load(Ordering::Acquire);
             let inserted = {
                 let _shared = self.gate.read().await;
-                self.try_insert(lane, &batch, &mut rows, &mut payload)
+                self.try_insert(lane, &batch)?
             };
             if inserted {
                 return Ok(());
@@ -1014,25 +1007,33 @@ impl Sorter {
         }
     }
 
-    /// Buffers a batch in its lane. Returns `false` when the pool refused the
-    /// memory.
-    fn try_insert(
-        &self,
-        lane: usize,
-        batch: &RecordBatch,
-        rows: &mut Option<Rows>,
-        payload: &mut Option<Rows>,
-    ) -> bool {
-        let shape = self.shape();
-        self.lanes[lane].lock().insert(
+    /// Encodes a batch and buffers it in its lane. Returns `false` when the
+    /// pool refused the memory. Needs the gate held shared.
+    ///
+    /// The budget counts an encoded batch only once it is buffered, so a
+    /// batch is encoded here, under the gate, and what was encoded is dropped
+    /// when the pool refuses. A lane then never holds an encoded batch through
+    /// a flush, where 24 lanes of 8,192 rows of 1 KB would hold 200 MB that
+    /// the pool does not see. The refused lane encodes its batch again once
+    /// the flush is written, which is one batch per waiting lane per flush,
+    /// and nothing for a sort that stays in memory.
+    fn try_insert(&self, lane: usize, batch: &RecordBatch) -> Result<bool> {
+        let mut rows = Some(self.encoder.encode(batch)?);
+        let mut payload = self.encoder.encode_payload(batch)?;
+        let row_bytes = payload
+            .as_ref()
+            .map_or(batch.get_array_memory_size(), Rows::size)
+            .div_ceil(batch.num_rows());
+        let shape = self.shape_for(rows.as_ref().expect("encoded above"), row_bytes)?;
+        Ok(self.lanes[lane].lock().insert(
             &self.next_batch,
             batch,
-            rows,
-            payload,
+            &mut rows,
+            &mut payload,
             shape.words,
             shape.chunk,
             &*self.budget,
-        )
+        ))
     }
 
     /// Takes everything buffered out of the lanes. Needs the gate held
