@@ -700,8 +700,8 @@ struct TransformArgs {
     ///
     /// `datafusion` sorts each partition separately and merges them on one thread.
     /// It can fail with "Additional allocation failed for ExternalSorterMerge" when
-    /// the pool is full. A sort whose key is a dictionary of lists, structs, maps, or unions
-    /// uses it whatever this is set to.
+    /// the pool is full. A sort whose key is, or holds at any depth, a dictionary of
+    /// lists, structs, maps, or unions uses it whatever this is set to.
     #[arg(long, value_enum, default_value_t, help_heading = "Execution")]
     pub sort_engine: SortEngine,
 

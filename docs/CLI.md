@@ -88,7 +88,7 @@ Examples:
 
   `parallel` keeps each row as one run of bytes in Arrow's row format, and is slower when a column cannot be kept that way. It then keeps the input batches whole, and merges what it spills in a few large stretches of the key range, one at a time when memory is short. The columns are dictionaries whose values are lists, structs, maps, unions, booleans, durations, intervals, dictionaries, or run-end encoded, and dictionaries in columns that may not be null, alone or nested in another column. --explain-analyze shows `rows=batches` on the `ParallelSortExec` line of such a sort.
 
-  `datafusion` sorts each partition separately and merges them on one thread. It can fail with "Additional allocation failed for ExternalSorterMerge" when the pool is full. A sort whose key is a dictionary of lists, structs, maps, or unions uses it whatever this is set to.
+  `datafusion` sorts each partition separately and merges them on one thread. It can fail with "Additional allocation failed for ExternalSorterMerge" when the pool is full. A sort whose key is, or holds at any depth, a dictionary of lists, structs, maps, or unions uses it whatever this is set to.
 
   Default value: `parallel`
 
