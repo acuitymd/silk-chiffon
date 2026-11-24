@@ -5310,6 +5310,7 @@ dependencies = [
  "prost",
  "prost-types",
  "rand 0.10.4",
+ "rustix",
  "serde",
  "serde_json",
  "silk-chiffon-core",

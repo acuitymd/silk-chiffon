@@ -85,6 +85,9 @@ tokio = { version = "^1.54.1", features = ["rt-multi-thread", "macros", "io-util
 tokio-util.workspace = true
 url.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "^1.1.6", features = ["process"] }
+
 [build-dependencies]
 chrono = "^0.4.45"
 chrono-tz = "^0.10.4"
