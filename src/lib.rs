@@ -778,9 +778,10 @@ struct TransformArgs {
     /// ExternalSorterMerge".
     ///
     /// With a limit, a pass merges at most this many spill files into a new spill file,
-    /// repeating until the rest fit in one pass. A lower limit sets a smaller cap on
-    /// merge memory and, when a sort has more spill files than the limit, writes the
-    /// data to disk more times. Each extra pass writes its new spill file while the
+    /// repeating until the rest fit in one pass. A lower limit caps what a pass
+    /// reserves beyond the merge memory the sort set aside when it started, so it saves
+    /// memory only once that many files need more than that. When a sort has more
+    /// spill files than the limit, it writes the data to disk more times. Each extra pass writes its new spill file while the
     /// files it merges are still on disk, so those passes also raise the peak disk
     /// space spill files use and can hit --max-spill-size where an unlimited merge
     /// would not.
