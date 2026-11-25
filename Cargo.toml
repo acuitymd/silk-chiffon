@@ -140,12 +140,10 @@ lto = true
 codegen-units = 1
 panic = "abort"
 
-[profile.dev] # faster dev builds
+[profile.dev]
+# Tests inherit this profile. Line tables keep backtraces useful with less linker input.
 opt-level = 0
-debug = true
-
-[profile.dev.package."*"]
-opt-level = 2 # optimize deps, not your code
+debug = "line-tables-only"
 
 [profile.profiling]
 inherits = "release"
