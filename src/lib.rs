@@ -688,6 +688,12 @@ struct TransformArgs {
     /// support an optional minimum: "total:80:min:4GB". Examples: "total:90", "available:60%",
     /// "reserve:2GB:min:1GB", "4GB".
     ///
+    /// The memory pool, which sorts and DataFusion's operators reserve from, is
+    /// 75% of the budget when the transform sorts and 25% when it does not, and
+    /// never grants more than that when asked. Output writers, and most input
+    /// readers, do not reserve from the pool, which is what can take the process
+    /// over the budget.
+    ///
     /// Setting this too low may cause out-of-memory errors, since some
     /// internal buffers cannot spill to disk. The minimum depends on schema
     /// width, batch size, and parallelism — there is no fixed floor.
@@ -696,16 +702,24 @@ struct TransformArgs {
     #[arg(long, help_heading = "Execution", value_parser = MemoryBudgetSpec::from_str, default_value = "total:80%")]
     pub memory_budget: MemoryBudgetSpec,
 
-    /// Reserve memory for non-spillable operations (sort merge phases, etc.).
+    /// Reserve memory for operators that cannot spill.
     ///
-    /// Enables an alternative memory pool that prevents spillable operators
-    /// (sorts, aggregations) from consuming the entire pool, guaranteeing
-    /// headroom for non-spillable consumers that would otherwise fail.
+    /// Keeps part of the memory pool free for consumers that cannot spill, such
+    /// as input readers and a sort's merge, beside what they already hold.
+    /// Spillable operators (sorts, aggregations) that hold memory are refused
+    /// more once it would leave less than the reserve free, and spill instead.
+    /// The pool grants no more than its size when asked, so a consumer that
+    /// cannot spill and finds the pool full fails the transform. A larger
+    /// reserve makes that less likely, and leaves the sorts less to buffer, so
+    /// they spill sooner.
+    ///
+    /// The pool is 75% of `--memory-budget` when the transform sorts and 25% when
+    /// it does not.
     ///
     /// Accepts a percentage (e.g. "10%", "10") or a fixed byte size (e.g. "200MB").
     /// Percentages are resolved against the memory pool size.
     ///
-    /// When not set, the default DataFusion FairSpillPool is used instead.
+    /// Default: 20% of the pool.
     #[arg(long, help_heading = "Execution", value_parser = PoolReserveSpec::from_str)]
     pub non_spillable_reserve: Option<PoolReserveSpec>,
 

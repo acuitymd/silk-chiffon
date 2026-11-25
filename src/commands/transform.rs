@@ -13,7 +13,7 @@ use futures::TryStreamExt;
 use owo_colors::OwoColorize;
 use silk_chiffon_core::{
     OpenSinkMode, Pipeline, PreparedPipeline, PresentationMode, SinkBindingConfig,
-    union_input_providers_by_name,
+    default_non_spillable_reserve, union_input_providers_by_name,
 };
 use tabled::{builder::Builder, settings::Style};
 
@@ -31,6 +31,11 @@ use projection::project_stream;
 use query::apply_query;
 use scheme::explicit_scheme;
 use sort::apply_sort;
+
+/// The share of the memory budget that the memory pool gets when the
+/// transform sorts, and when it does not.
+const SORT_POOL_PERCENT: usize = 75;
+const POOL_PERCENT: usize = 25;
 
 pub(crate) async fn run(args: TransformCommand) -> Result<()> {
     let TransformCommand {
@@ -95,12 +100,14 @@ pub(crate) async fn run(args: TransformCommand) -> Result<()> {
 
     let total_budget = memory_budget.resolve();
 
+    // the pool's default reserve is a fifth of it, so a sort may buffer up to
+    // 60% of the budget and a transform without one up to 20%, less what
+    // consumers that cannot spill hold. The rest of the budget is for the
+    // writers, which do not reserve from the pool
     let effective_memory_limit = if has_sort {
-        // sorting needs more DataFusion memory, leave 40% for encoding/queues
-        Some(total_budget * 60 / 100)
+        Some(total_budget * SORT_POOL_PERCENT / 100)
     } else {
-        // no sorting: DataFusion just needs query overhead, give more to encoding
-        Some(total_budget * 20 / 100)
+        Some(total_budget * POOL_PERCENT / 100)
     };
 
     if non_spillable_reserve.is_some() && effective_memory_limit.is_none() {
@@ -232,9 +239,13 @@ pub(crate) async fn run(args: TransformCommand) -> Result<()> {
     let mut prepared = pipeline.prepare(input, session).await?;
 
     if has_sort {
-        let memory_limit = effective_memory_limit.unwrap_or(total_budget * 60 / 100);
+        let memory_limit = effective_memory_limit.unwrap_or(total_budget * SORT_POOL_PERCENT / 100);
         let partitions = effective_target_partitions.unwrap_or(three_quarter_cpus);
-        let memory_per_partition = memory_limit / partitions.max(1);
+        // a sort can hold no more than the pool less its reserve, which the
+        // pool keeps for consumers that cannot spill
+        let reserve = effective_non_spillable_reserve
+            .unwrap_or_else(|| default_non_spillable_reserve(memory_limit));
+        let memory_per_partition = memory_limit.saturating_sub(reserve) / partitions.max(1);
         let reservation = sort_memory::sort_spill_reservation_from_plan(
             prepared.execution_plan(),
             memory_per_partition,

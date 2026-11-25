@@ -20,7 +20,7 @@ use datafusion::{
     error::DataFusionError,
     execution::{
         TaskContext,
-        memory_pool::{FairSpillPool, MemoryPool, TrackConsumersPool},
+        memory_pool::{MemoryPool, TrackConsumersPool},
     },
     physical_plan::{ExecutionPlan, RecordBatchStream, SendableRecordBatchStream, execute_stream},
     prelude::{DataFrame, SessionConfig, SessionContext},
@@ -88,7 +88,8 @@ impl Pipeline {
         self
     }
 
-    /// Sets the DataFusion memory-pool limit in bytes.
+    /// Sets the DataFusion memory-pool limit in bytes. The pool never grants
+    /// more than this. Without one, the limit is 80% of the machine's memory.
     pub fn with_memory_limit(mut self, memory_limit: Option<usize>) -> Self {
         self.config.memory_limit = memory_limit;
         self
@@ -136,7 +137,11 @@ impl Pipeline {
         self
     }
 
-    /// Reserves pool capacity for operators that cannot spill.
+    /// Reserves pool capacity for operators that cannot spill. The pool keeps
+    /// it free beside what those operators already hold, so a reader or a
+    /// merge that cannot spill finds room. A spillable operator, such as a
+    /// sort, gets none of it through `try_grow` unless it holds nothing yet.
+    /// Without one, the reserve is a fifth of the pool.
     pub fn with_non_spillable_reserve(mut self, reserve: Option<usize>) -> Self {
         self.config.non_spillable_reserve = reserve;
         self
@@ -168,10 +173,14 @@ impl Pipeline {
             config = config.with_target_partitions(target_partitions);
         }
 
+        // ReservedSpillPool panics on a pool of no bytes, so a zero limit
+        // becomes one byte, which refuses any request larger than a byte and
+        // leaves the caller an error to see
         let memory_limit = self
             .config
             .memory_limit
-            .unwrap_or_else(default_memory_limit);
+            .unwrap_or_else(default_memory_limit)
+            .max(1);
         let spill_path = if let Some(path) = &self.config.spill_path {
             path.clone()
         } else {
@@ -186,16 +195,14 @@ impl Pipeline {
             0 => NonZeroUsize::MAX,
             count => NonZeroUsize::new(count).expect("nonzero by match"),
         };
-        let pool: Arc<dyn MemoryPool> = match self.config.non_spillable_reserve {
-            Some(reserve) => Arc::new(TrackConsumersPool::new(
-                ReservedSpillPool::new(memory_limit, reserve),
-                top_n,
-            )),
-            None => Arc::new(TrackConsumersPool::new(
-                FairSpillPool::new(memory_limit),
-                top_n,
-            )),
-        };
+        let reserve = self
+            .config
+            .non_spillable_reserve
+            .unwrap_or_else(|| default_non_spillable_reserve(memory_limit));
+        let pool: Arc<dyn MemoryPool> = Arc::new(TrackConsumersPool::new(
+            ReservedSpillPool::new(memory_limit, reserve),
+            top_n,
+        ));
         let mut runtime = datafusion::execution::runtime_env::RuntimeEnvBuilder::default()
             .with_temp_file_path(&spill_path)
             .with_memory_pool(pool);
@@ -340,6 +347,18 @@ impl fmt::Debug for PipelineExecution {
     }
 }
 
+/// The pool's share kept for consumers that cannot spill when no reserve is
+/// given: a fifth. Input readers and merges that cannot spill then find room
+/// however full the sorts keep the rest.
+const DEFAULT_RESERVE_DIVISOR: usize = 5;
+
+/// The reserve a pool of `memory_limit` bytes keeps free for consumers that
+/// cannot spill when the caller sets none.
+pub fn default_non_spillable_reserve(memory_limit: usize) -> usize {
+    memory_limit / DEFAULT_RESERVE_DIVISOR
+}
+
+/// 80% of the machine's memory.
 fn default_memory_limit() -> usize {
     total_memory() * 4 / 5
 }
@@ -403,6 +422,18 @@ mod tests {
 
         assert_eq!(from_new, from_default);
         assert!(from_default.contains("num_of_top_consumers: 10"));
+    }
+
+    #[test]
+    fn a_pool_of_no_bytes_refuses_memory_instead_of_panicking() {
+        let session = Pipeline::new()
+            .with_memory_limit(Some(0))
+            .create_session_context()
+            .unwrap();
+        let pool = &session.runtime_env().memory_pool;
+        let reader =
+            datafusion::execution::memory_pool::MemoryConsumer::new("reader").register(pool);
+        assert!(reader.try_grow(1024).is_err());
     }
 
     #[test]
