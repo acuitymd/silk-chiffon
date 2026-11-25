@@ -73,6 +73,7 @@ impl PipelineTaskScope {
         }));
     }
 
+    #[cfg(test)]
     fn spawn<F>(&self, future: F) -> AbortOnDropHandle<F::Output>
     where
         F: Future + Send + 'static,

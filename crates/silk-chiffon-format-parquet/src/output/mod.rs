@@ -4,7 +4,6 @@
 //! sinks. Each sink owns its bounded pipeline and storage upload together so
 //! finish, abort, and drop cannot detach codec work from upload cleanup.
 
-mod analysis_provider;
 mod pipeline;
 mod runtime;
 
@@ -1144,6 +1143,147 @@ mod tests {
                 &batches[0],
                 &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
                 &["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"],
+            );
+        }
+
+        /// A row group is encoded from the batches it was gathered from, a
+        /// column at a time. Every column has to take those pieces in the same
+        /// order, the leaves of nested columns included.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn nested_columns_keep_their_rows_in_order_across_batches() {
+            use arrow::array::{ArrayRef, Int32Array, ListArray, StringArray, StructArray};
+            use arrow::compute::{cast, concat_batches};
+            use arrow::datatypes::{DataType, Field, Int32Type, Schema};
+
+            let temp_dir = tempdir().unwrap();
+            let output_path = temp_dir.path().join("nested.parquet");
+            let point = vec![
+                Arc::new(Field::new("x", DataType::Int32, true)),
+                Arc::new(Field::new("tag", DataType::Utf8, true)),
+            ];
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("id", DataType::Int32, false),
+                Field::new("point", DataType::Struct(point.clone().into()), true),
+                Field::new(
+                    "values",
+                    // named as Parquet names a list's elements, so that the
+                    // file reads back with this schema
+                    DataType::List(Arc::new(Field::new("element", DataType::Int32, true))),
+                    true,
+                ),
+            ]));
+            let mut next = 0;
+            let batches: Vec<RecordBatch> = [2, 5, 1, 4]
+                .into_iter()
+                .map(|rows| {
+                    let ids: Vec<i32> = (next..next + rows).collect();
+                    next += rows;
+                    let xs: Int32Array = ids
+                        .iter()
+                        .map(|id| (id % 3 != 0).then_some(id * 10))
+                        .collect();
+                    let tags: StringArray = ids.iter().map(|id| Some(format!("t{id}"))).collect();
+                    let points = StructArray::new(
+                        point.clone().into(),
+                        vec![Arc::new(xs) as ArrayRef, Arc::new(tags)],
+                        Some(ids.iter().map(|id| id % 4 != 1).collect()),
+                    );
+                    let values =
+                        ListArray::from_iter_primitive::<Int32Type, _, _>(ids.iter().map(|id| {
+                            (id % 5 != 2).then(|| {
+                                (0..id % 3)
+                                    .map(|item| Some(id * 100 + item))
+                                    .collect::<Vec<_>>()
+                            })
+                        }));
+                    let values = cast(&values, schema.field(2).data_type()).unwrap();
+                    RecordBatch::try_new(
+                        Arc::clone(&schema),
+                        vec![Arc::new(Int32Array::from(ids)), Arc::new(points), values],
+                    )
+                    .unwrap()
+                })
+                .collect();
+            let mut sink = Sink::create(
+                prepared_local_output_target(&output_path),
+                &schema,
+                &OutputConfig::new()
+                    .with_max_row_group_size(3)
+                    .with_max_row_group_concurrency(2),
+                test_runtimes(),
+            )
+            .unwrap();
+            for batch in &batches {
+                sink.write_batch(batch.clone()).await.unwrap();
+            }
+            Box::new(sink).finish().await.unwrap();
+
+            let written = TestFile::read_parquet(&output_path);
+            assert_eq!(
+                concat_batches(&schema, &written).unwrap(),
+                concat_batches(&schema, &batches).unwrap()
+            );
+        }
+
+        /// Every batch of a dictionary column brings its own dictionary, and a
+        /// row group is encoded from several of them.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn dictionary_columns_are_encoded_from_batches_with_different_dictionaries() {
+            use arrow::array::{Array, DictionaryArray, StringArray};
+            use arrow::compute::{cast, concat};
+            use arrow::datatypes::{DataType, Field, Int32Type, Schema};
+
+            let temp_dir = tempdir().unwrap();
+            let output_path = temp_dir.path().join("dictionaries.parquet");
+            let label = DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8));
+            let schema = Arc::new(Schema::new(vec![Field::new("label", label, true)]));
+            let batches: Vec<RecordBatch> = [
+                vec![Some("north"), Some("south"), None],
+                vec![Some("east"), Some("north")],
+                vec![None, Some("west"), Some("east"), Some("west"), Some("up")],
+            ]
+            .into_iter()
+            .map(|labels| {
+                let labels: DictionaryArray<Int32Type> = labels.into_iter().collect();
+                RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(labels)]).unwrap()
+            })
+            .collect();
+            let mut sink = Sink::create(
+                prepared_local_output_target(&output_path),
+                &schema,
+                &OutputConfig::new().with_max_row_group_size(4),
+                test_runtimes(),
+            )
+            .unwrap();
+            for batch in &batches {
+                sink.write_batch(batch.clone()).await.unwrap();
+            }
+            Box::new(sink).finish().await.unwrap();
+
+            let strings = |columns: Vec<&dyn Array>| {
+                let column = cast(&concat(&columns).unwrap(), &DataType::Utf8).unwrap();
+                column
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap()
+                    .iter()
+                    .map(|label| label.map(str::to_owned))
+                    .collect::<Vec<_>>()
+            };
+            let written = TestFile::read_parquet(&output_path);
+            assert_eq!(
+                strings(
+                    written
+                        .iter()
+                        .map(|batch| batch.column(0).as_ref())
+                        .collect()
+                ),
+                strings(
+                    batches
+                        .iter()
+                        .map(|batch| batch.column(0).as_ref())
+                        .collect()
+                )
             );
         }
 

@@ -17,13 +17,20 @@
 //!
 //! 1. **Source**: RecordBatches flow into the ingestion channel.
 //!
-//! 2. **Ingestion** (1 task): Accumulates batches into row groups. Two modes:
-//!    - **Pass-through**: Simple accumulation with `BatchCoalescer`.
-//!    - **Analyze**: Streams to background analysis for `dictionary: auto` columns.
+//! 2. **Ingestion** (1 task): Gathers batches into row groups. A row group
+//!    is the batches it was gathered from, cut where it ends, and not a copy
+//!    of them: one task copying every row was all that the encoders behind
+//!    it could be fed by. Copying 100M rows of 13 columns from one Parquet
+//!    file to another, on 24 threads, took 8.9 s with that copy and takes
+//!    7.5 s without it. Only batches under [`MIN_PIECE_ROWS`] rows are still
+//!    copied, together, since each piece of a row group costs a call per
+//!    column to encode.
 //!
 //! 3. **Encoder Coordinator** (1 task): Uses `FuturesOrdered` to spawn tasks on
 //!    the encoding runtime, up to `max_row_group_concurrency`. Results remain
-//!    ordered.
+//!    ordered. A row group's task first analyzes the columns whose encoding
+//!    depends on their cardinality, a task per column, then encodes it, also
+//!    a task per column.
 //!
 //! 4. **Writing** (1 task): Receives encoded row groups in order and feeds the
 //!    object-upload bridge.
@@ -39,9 +46,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result, anyhow};
-use arrow::array::RecordBatch;
-use arrow::compute::BatchCoalescer;
-use arrow::datatypes::SchemaRef;
+use arrow::array::{Array, RecordBatch, RecordBatchOptions};
+use arrow::compute::concat;
+use arrow::datatypes::{Field, Schema, SchemaRef};
 use futures::StreamExt;
 use futures::stream::FuturesOrdered;
 use parquet::arrow::ArrowSchemaConverter;
@@ -58,7 +65,7 @@ use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
-use super::analysis::{ColumnAnalysis, RowGroupAnalysisState};
+use super::analysis::RowGroupAnalyzer;
 use super::config::{ColumnPolicies, PipelineConfig};
 use super::encoding::build_row_group_properties;
 use super::{PipelineCancelled, PipelineTaskScope};
@@ -75,10 +82,41 @@ pub(super) struct PipelineSetup {
 }
 
 pub(crate) struct RowGroupWork {
-    pub batch: RecordBatch,
-    pub props: WriterPropertiesPtr,
-    pub parquet_schema: SchemaDescPtr,
-    pub schema: SchemaRef,
+    /// The row group's rows, in order, as the batches they arrived in.
+    pub batches: Vec<RecordBatch>,
+    pub num_rows: usize,
+    pub encoding: Arc<RowGroupEncoding>,
+}
+
+/// What every row group of a file is encoded with.
+pub(crate) struct RowGroupEncoding {
+    schema: SchemaRef,
+    parquet_schema: SchemaDescPtr,
+    base_props: WriterPropertiesPtr,
+    config: PipelineConfig,
+    policies: ColumnPolicies,
+    /// `None` when no column's encoding depends on its cardinality.
+    analyzer: Option<RowGroupAnalyzer>,
+}
+
+impl RowGroupEncoding {
+    fn new(
+        schema: SchemaRef,
+        parquet_schema: SchemaDescPtr,
+        base_props: WriterPropertiesPtr,
+        config: PipelineConfig,
+    ) -> Self {
+        let policies = ColumnPolicies::resolve(&schema, &config);
+        let columns = policies.columns_needing_analysis();
+        Self {
+            analyzer: (!columns.is_empty()).then(|| RowGroupAnalyzer::new(columns)),
+            schema,
+            parquet_schema,
+            base_props,
+            config,
+            policies,
+        }
+    }
 }
 
 pub(crate) struct EncodedRowGroup {
@@ -137,18 +175,16 @@ pub(super) async fn run_pipeline(setup: PipelineSetup) -> Result<u64> {
     let total_rows = Arc::new(AtomicU64::new(0));
     let mut pipeline_tasks: JoinSet<Result<()>> = JoinSet::new();
     let max_row_group_concurrency = config.max_row_group_concurrency;
+    let encoding = Arc::new(RowGroupEncoding::new(
+        schema,
+        parquet_schema,
+        base_props,
+        config,
+    ));
 
     scope.spawn_stage(
         &mut pipeline_tasks,
-        ingestion_task(
-            ingestion_rx,
-            encoding_tx,
-            schema,
-            parquet_schema,
-            base_props,
-            config,
-            scope.clone(),
-        ),
+        ingestion_task(ingestion_rx, encoding_tx, encoding),
     );
 
     let encoding_handle = runtimes.encoding().clone();
@@ -228,225 +264,111 @@ pub(super) async fn settle_pipeline_tasks(
     result
 }
 
+/// Batches with fewer rows than this are copied together before they join a
+/// row group. Every piece of a row group costs the encoders a call per column,
+/// and holds an array per column, and partitioned output can hand a file
+/// batches of a row or two.
+const MIN_PIECE_ROWS: usize = 1024;
+
+/// Copies small batches into one piece. Not `concat_batches` under the sink's
+/// schema: the sink accepts batches whose nested fields are non-nullable where
+/// its own are nullable, and `RecordBatch::try_new` rejects those columns under
+/// its schema. The encoders read a piece's columns, never its schema.
+fn copy_together(schema: &SchemaRef, small: &[RecordBatch]) -> Result<RecordBatch> {
+    let columns = (0..schema.fields().len())
+        .map(|index| {
+            let arrays: Vec<&dyn Array> = small
+                .iter()
+                .map(|batch| batch.column(index).as_ref())
+                .collect();
+            concat(&arrays)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let fields: Vec<Field> = schema
+        .fields()
+        .iter()
+        .zip(&columns)
+        .map(|(field, column)| Field::new(field.name(), column.data_type().clone(), true))
+        .collect();
+    let options = RecordBatchOptions::new()
+        .with_row_count(Some(small.iter().map(RecordBatch::num_rows).sum()));
+    Ok(RecordBatch::try_new_with_options(
+        Arc::new(Schema::new(fields)),
+        columns,
+        &options,
+    )?)
+}
+
 async fn ingestion_task(
-    ingestion_rx: mpsc::Receiver<RecordBatch>,
-    encoding_tx: mpsc::Sender<RowGroupWork>,
-    schema: SchemaRef,
-    parquet_schema: SchemaDescPtr,
-    base_props: WriterPropertiesPtr,
-    config: PipelineConfig,
-    scope: PipelineTaskScope,
-) -> Result<()> {
-    let resolved = ColumnPolicies::resolve(&schema, &config);
-    let columns_to_analyze = resolved.columns_needing_analysis();
-
-    if columns_to_analyze.is_empty() {
-        ingestion_task_passthrough(
-            ingestion_rx,
-            encoding_tx,
-            schema,
-            parquet_schema,
-            base_props,
-            config,
-            resolved,
-        )
-        .await
-    } else {
-        ingestion_task_analyze(
-            ingestion_rx,
-            encoding_tx,
-            schema,
-            parquet_schema,
-            base_props,
-            config,
-            resolved,
-            scope,
-        )
-        .await
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn ingestion_task_passthrough(
     mut ingestion_rx: mpsc::Receiver<RecordBatch>,
     encoding_tx: mpsc::Sender<RowGroupWork>,
-    schema: SchemaRef,
-    parquet_schema: SchemaDescPtr,
-    base_props: WriterPropertiesPtr,
-    config: PipelineConfig,
-    resolved: ColumnPolicies,
+    encoding: Arc<RowGroupEncoding>,
 ) -> Result<()> {
-    let mut coalescer = BatchCoalescer::new(Arc::clone(&schema), config.max_row_group_size);
-    let empty_analysis: HashMap<String, ColumnAnalysis> = HashMap::new();
+    let row_group_rows = encoding.config.max_row_group_size.max(1);
+    let mut batches = Vec::new();
+    let mut num_rows = 0;
+    let mut small = Vec::new();
+    let mut small_rows = 0;
 
-    while let Some(batch) = ingestion_rx.recv().await {
-        coalescer.push_batch(batch)?;
-
-        while let Some(batch) = coalescer.next_completed_batch() {
-            let num_rows = batch.num_rows();
-            let props = build_row_group_properties(
-                &schema,
-                &base_props,
-                &config,
-                &resolved,
-                &empty_analysis,
-                num_rows,
-            )?;
-            let work = RowGroupWork {
-                batch,
-                props: Arc::new(props),
-                parquet_schema: Arc::clone(&parquet_schema),
-                schema: Arc::clone(&schema),
-            };
-            if encoding_tx.send(work).await.is_err() {
-                return Ok(());
+    loop {
+        let received = ingestion_rx.recv().await;
+        let mut pieces = Vec::with_capacity(2);
+        match received {
+            // holding an empty batch until the next copy would keep its
+            // arrays alive for nothing
+            Some(batch) if batch.num_rows() == 0 => continue,
+            Some(batch) if batch.num_rows() < MIN_PIECE_ROWS => {
+                small_rows += batch.num_rows();
+                small.push(batch);
+                // never past the row group's end, so that a row group goes to
+                // the encoders as soon as it is full
+                if small_rows >= MIN_PIECE_ROWS.min(row_group_rows - num_rows) {
+                    pieces.push(copy_together(&encoding.schema, &small)?);
+                    (small, small_rows) = (Vec::new(), 0);
+                }
+            }
+            received => {
+                // the small batches before it go first, to keep the rows in order
+                if !small.is_empty() {
+                    pieces.push(copy_together(&encoding.schema, &small)?);
+                    (small, small_rows) = (Vec::new(), 0);
+                }
+                pieces.extend(received);
             }
         }
-    }
-
-    coalescer.finish_buffered_batch()?;
-    if let Some(batch) = coalescer.next_completed_batch() {
-        let num_rows = batch.num_rows();
-        let props = build_row_group_properties(
-            &schema,
-            &base_props,
-            &config,
-            &resolved,
-            &empty_analysis,
-            num_rows,
-        )?;
-        let work = RowGroupWork {
-            batch,
-            props: Arc::new(props),
-            parquet_schema: Arc::clone(&parquet_schema),
-            schema: Arc::clone(&schema),
-        };
-        // channel close is graceful shutdown
-        let _ = encoding_tx.send(work).await;
-    }
-
-    Ok(())
-}
-
-/// Wraps BatchCoalescer with hard row limit splitting.
-/// Returns the pushed portion so callers can forward it elsewhere (e.g., analysis).
-struct HardLimitBatchCoalescer {
-    coalescer: BatchCoalescer,
-    max_rows: usize,
-    rows: usize,
-}
-
-impl HardLimitBatchCoalescer {
-    fn new(schema: &SchemaRef, max_rows: usize) -> Self {
-        Self {
-            coalescer: BatchCoalescer::new(Arc::clone(schema), max_rows),
-            max_rows,
-            rows: 0,
-        }
-    }
-
-    /// Push a batch, splitting at boundary if needed.
-    /// Returns (pushed_portion, remaining_portion).
-    fn push_batch(&mut self, batch: RecordBatch) -> Result<(RecordBatch, Option<RecordBatch>)> {
-        let space_left = self.max_rows - self.rows;
-
-        if space_left == 0 {
-            return Ok((RecordBatch::new_empty(batch.schema()), Some(batch)));
-        }
-
-        let (to_push, remaining) = if batch.num_rows() <= space_left {
-            (batch, None)
-        } else {
-            let for_current = batch.slice(0, space_left);
-            let for_next = batch.slice(space_left, batch.num_rows() - space_left);
-            (for_current, Some(for_next))
-        };
-
-        self.rows += to_push.num_rows();
-        self.coalescer.push_batch(to_push.clone())?;
-        Ok((to_push, remaining))
-    }
-
-    fn is_full(&self) -> bool {
-        self.rows >= self.max_rows
-    }
-
-    fn finish(&mut self) -> Result<Option<RecordBatch>> {
-        self.coalescer.finish_buffered_batch()?;
-        self.rows = 0;
-        Ok(self.coalescer.next_completed_batch())
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn ingestion_task_analyze(
-    mut ingestion_rx: mpsc::Receiver<RecordBatch>,
-    encoding_tx: mpsc::Sender<RowGroupWork>,
-    schema: SchemaRef,
-    parquet_schema: SchemaDescPtr,
-    base_props: WriterPropertiesPtr,
-    config: PipelineConfig,
-    resolved: ColumnPolicies,
-    scope: PipelineTaskScope,
-) -> Result<()> {
-    let columns_to_analyze = resolved.columns_needing_analysis();
-    let max_rows = config.max_row_group_size;
-    let mut coalescer = HardLimitBatchCoalescer::new(&schema, max_rows);
-    let mut analysis = RowGroupAnalysisState::try_new(&schema, &columns_to_analyze, &scope)?;
-
-    while let Some(batch) = ingestion_rx.recv().await {
-        let mut remaining = Some(batch);
-
-        while let Some(batch) = remaining.take() {
-            let (pushed, rest) = coalescer.push_batch(batch)?;
-            remaining = rest;
-            if pushed.num_rows() > 0 {
-                analysis.push(pushed).await?;
-            }
-
-            if coalescer.is_full() {
-                let batch = coalescer.finish()?.expect("coalescer was full");
-                let num_rows = batch.num_rows();
-                let analysis_result = analysis.finalize().await?;
-                let props = build_row_group_properties(
-                    &schema,
-                    &base_props,
-                    &config,
-                    &resolved,
-                    &analysis_result,
-                    num_rows,
-                )?;
+        let finished = pieces.is_empty() && small.is_empty();
+        for mut batch in pieces {
+            // a batch that reaches past the row group's end is cut there,
+            // which copies nothing
+            while num_rows + batch.num_rows() >= row_group_rows {
+                let fitting = row_group_rows - num_rows;
+                batches.push(batch.slice(0, fitting));
+                batch = batch.slice(fitting, batch.num_rows() - fitting);
                 let work = RowGroupWork {
-                    batch,
-                    props: Arc::new(props),
-                    parquet_schema: Arc::clone(&parquet_schema),
-                    schema: Arc::clone(&schema),
+                    batches: std::mem::take(&mut batches),
+                    num_rows: row_group_rows,
+                    encoding: Arc::clone(&encoding),
                 };
+                num_rows = 0;
                 if encoding_tx.send(work).await.is_err() {
                     return Ok(());
                 }
-                coalescer = HardLimitBatchCoalescer::new(&schema, max_rows);
-                analysis = RowGroupAnalysisState::try_new(&schema, &columns_to_analyze, &scope)?;
             }
+            if batch.num_rows() > 0 {
+                num_rows += batch.num_rows();
+                batches.push(batch);
+            }
+        }
+        if finished {
+            break;
         }
     }
 
-    if let Some(batch) = coalescer.finish()? {
-        let num_rows = batch.num_rows();
-        let analysis_result = analysis.finalize().await?;
-        let props = build_row_group_properties(
-            &schema,
-            &base_props,
-            &config,
-            &resolved,
-            &analysis_result,
-            num_rows,
-        )?;
+    if num_rows > 0 {
         let work = RowGroupWork {
-            batch,
-            props: Arc::new(props),
-            parquet_schema: Arc::clone(&parquet_schema),
-            schema: Arc::clone(&schema),
+            batches,
+            num_rows,
+            encoding,
         };
         // channel close is graceful shutdown
         let _ = encoding_tx.send(work).await;
@@ -556,21 +478,42 @@ async fn encode_row_group(
     encoding_handle: Handle,
     scope: PipelineTaskScope,
 ) -> Result<EncodedRowGroup> {
-    let num_rows = work.batch.num_rows();
+    let RowGroupWork {
+        batches,
+        num_rows,
+        encoding,
+    } = work;
+
+    let analysis = match &encoding.analyzer {
+        Some(analyzer) => analyzer.analyze(&batches, &encoding_handle, &scope).await?,
+        None => HashMap::new(),
+    };
+    let props = Arc::new(build_row_group_properties(
+        &encoding.schema,
+        &encoding.base_props,
+        &encoding.config,
+        &encoding.policies,
+        &analysis,
+        num_rows,
+    )?);
 
     #[allow(deprecated)]
-    let column_writers = get_column_writers(&work.parquet_schema, &work.props, &work.schema)?;
+    let column_writers = get_column_writers(&encoding.parquet_schema, &props, &encoding.schema)?;
     let num_columns = column_writers.len();
 
     let mut leaves_per_column: Vec<Vec<_>> = (0..num_columns).map(|_| Vec::new()).collect();
-    let mut col_idx = 0;
-    for (field, column) in work.schema.fields().iter().zip(work.batch.columns()) {
-        let leaves = compute_leaves(field.as_ref(), column)?;
-        for leaf in leaves {
-            leaves_per_column[col_idx].push(leaf);
-            col_idx += 1;
+    for batch in &batches {
+        let mut col_idx = 0;
+        for (field, column) in encoding.schema.fields().iter().zip(batch.columns()) {
+            let leaves = compute_leaves(field.as_ref(), column)?;
+            for leaf in leaves {
+                leaves_per_column[col_idx].push(leaf);
+                col_idx += 1;
+            }
         }
     }
+    // the leaves hold what they need of the batches
+    drop(batches);
 
     let mut col_tasks = JoinSet::new();
     for (col_idx, (writer, leaves)) in column_writers
@@ -734,5 +677,175 @@ mod tests {
 
         assert!(error.to_string().contains("task panicked"));
         assert!(sibling_dropped.load(Ordering::SeqCst));
+    }
+
+    /// Gathers batches of `sizes` rows, numbered in order, into row groups of
+    /// `row_group_rows`, and returns each row group's pieces' row counts and
+    /// its values.
+    async fn gather(sizes: &[usize], row_group_rows: usize) -> Vec<(Vec<usize>, Vec<i32>)> {
+        use arrow::array::{AsArray, Int32Array};
+        use arrow::datatypes::{DataType, Field, Int32Type, Schema};
+
+        let schema = Arc::new(Schema::new(vec![Field::new("n", DataType::Int32, false)]));
+        let parquet_schema = Arc::new(ArrowSchemaConverter::new().convert(&schema).unwrap());
+        let config = PipelineConfig {
+            max_row_group_size: row_group_rows,
+            ..PipelineConfig::default()
+        };
+        let encoding = Arc::new(RowGroupEncoding::new(
+            Arc::clone(&schema),
+            parquet_schema,
+            Arc::new(WriterProperties::builder().build()),
+            config,
+        ));
+        let (batches_tx, batches_rx) = mpsc::channel(sizes.len().max(1));
+        let (groups_tx, mut groups_rx) = mpsc::channel(sizes.len().max(1) + 1);
+        let mut next = 0;
+        for rows in sizes {
+            let rows = i32::try_from(*rows).unwrap();
+            let values: Int32Array = (next..next + rows).collect();
+            next += rows;
+            let batch = RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(values)]).unwrap();
+            batches_tx.send(batch).await.unwrap();
+        }
+        drop(batches_tx);
+        ingestion_task(batches_rx, groups_tx, encoding)
+            .await
+            .unwrap();
+        let mut groups = Vec::new();
+        while let Some(work) = groups_rx.recv().await {
+            let pieces = work.batches.iter().map(RecordBatch::num_rows).collect();
+            let values: Vec<i32> = work
+                .batches
+                .iter()
+                .flat_map(|batch| {
+                    batch
+                        .column(0)
+                        .as_primitive::<Int32Type>()
+                        .values()
+                        .to_vec()
+                })
+                .collect();
+            assert_eq!(values.len(), work.num_rows);
+            groups.push((pieces, values));
+        }
+        groups
+    }
+
+    #[tokio::test]
+    async fn small_batches_are_copied_together_and_keep_their_order() {
+        let mut sizes = vec![1; 3000];
+        // a large batch between small ones goes after the small ones before it
+        sizes.insert(1500, 2000);
+        let groups = gather(&sizes, 4096).await;
+        let rows: Vec<usize> = groups.iter().map(|(_, values)| values.len()).collect();
+        assert_eq!(rows, [4096, 904]);
+        let values: Vec<i32> = groups
+            .into_iter()
+            .flat_map(|(pieces, values)| {
+                assert!(pieces.len() <= 5, "{pieces:?}");
+                values
+            })
+            .collect();
+        assert_eq!(values, (0..5000).collect::<Vec<_>>());
+    }
+
+    #[tokio::test]
+    async fn small_batches_may_narrow_nested_nullability() {
+        use arrow::array::{AsArray, Int32Builder, ListBuilder};
+        use arrow::datatypes::{DataType, Field, Schema};
+
+        let list = |nullable| DataType::new_list(DataType::Int32, nullable);
+        let schema = Arc::new(Schema::new(vec![Field::new("l", list(true), true)]));
+        let parquet_schema = Arc::new(ArrowSchemaConverter::new().convert(&schema).unwrap());
+        let encoding = Arc::new(RowGroupEncoding::new(
+            Arc::clone(&schema),
+            parquet_schema,
+            Arc::new(WriterProperties::builder().build()),
+            PipelineConfig::default(),
+        ));
+        let narrow = Arc::new(Schema::new(vec![Field::new("l", list(false), true)]));
+        let (batches_tx, batches_rx) = mpsc::channel(2);
+        let (groups_tx, mut groups_rx) = mpsc::channel(2);
+        for rows in [2, 3] {
+            let mut builder = ListBuilder::new(Int32Builder::new())
+                .with_field(Field::new_list_field(DataType::Int32, false));
+            for n in 0..rows {
+                builder.append_value([Some(n)]);
+            }
+            let batch = RecordBatch::try_new(Arc::clone(&narrow), vec![Arc::new(builder.finish())])
+                .unwrap();
+            batches_tx.send(batch).await.unwrap();
+        }
+        drop(batches_tx);
+        ingestion_task(batches_rx, groups_tx, encoding)
+            .await
+            .unwrap();
+
+        let work = groups_rx.recv().await.unwrap();
+        assert!(groups_rx.recv().await.is_none());
+        let rows: usize = work.batches.iter().map(RecordBatch::num_rows).sum();
+        assert_eq!((rows, work.num_rows), (5, 5));
+        assert_eq!(work.batches[0].column(0).as_list::<i32>().len(), 5);
+    }
+
+    #[tokio::test]
+    async fn a_row_group_is_its_batches_cut_where_it_ends() {
+        use arrow::array::{AsArray, Int32Array};
+        use arrow::datatypes::{DataType, Field, Int32Type, Schema};
+
+        let schema = Arc::new(Schema::new(vec![Field::new("n", DataType::Int32, false)]));
+        let parquet_schema = Arc::new(ArrowSchemaConverter::new().convert(&schema).unwrap());
+        let config = PipelineConfig {
+            max_row_group_size: 4,
+            ..PipelineConfig::default()
+        };
+        let encoding = Arc::new(RowGroupEncoding::new(
+            Arc::clone(&schema),
+            parquet_schema,
+            Arc::new(WriterProperties::builder().build()),
+            config,
+        ));
+        let (batches_tx, batches_rx) = mpsc::channel(8);
+        let (groups_tx, mut groups_rx) = mpsc::channel(8);
+        let mut next = 0;
+        // the first two batches, copied together, end one row group and fill
+        // the next exactly
+        for rows in [3, 5, 4, 1] {
+            let values: Int32Array = (next..next + rows).collect();
+            next += rows;
+            let batch = RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(values)]).unwrap();
+            batches_tx.send(batch).await.unwrap();
+        }
+        drop(batches_tx);
+        ingestion_task(batches_rx, groups_tx, encoding)
+            .await
+            .unwrap();
+
+        let mut groups = Vec::new();
+        while let Some(work) = groups_rx.recv().await {
+            let values: Vec<i32> = work
+                .batches
+                .iter()
+                .flat_map(|batch| {
+                    batch
+                        .column(0)
+                        .as_primitive::<Int32Type>()
+                        .values()
+                        .to_vec()
+                })
+                .collect();
+            assert_eq!(values.len(), work.num_rows);
+            groups.push(values);
+        }
+        assert_eq!(
+            groups,
+            [
+                vec![0, 1, 2, 3],
+                vec![4, 5, 6, 7],
+                vec![8, 9, 10, 11],
+                vec![12]
+            ]
+        );
     }
 }
