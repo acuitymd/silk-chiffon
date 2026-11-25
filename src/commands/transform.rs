@@ -60,6 +60,7 @@ pub(crate) async fn run(args: TransformCommand) -> Result<()> {
         spill_path,
         spill_compression,
         max_spill_size,
+        max_spill_merge_fan_in,
         formats,
         storage,
         service_inputs,
@@ -119,7 +120,8 @@ pub(crate) async fn run(args: TransformCommand) -> Result<()> {
         .with_target_partitions(effective_target_partitions)
         .with_spill_path(spill_path)
         .with_spill_compression(spill_compression)
-        .with_max_spill_size(max_spill_size);
+        .with_max_spill_size(max_spill_size)
+        .with_max_spill_merge_fan_in(max_spill_merge_fan_in);
     let session = pipeline.create_session_context()?;
 
     let file_inputs = FileInputPreparer::new(&storage, &formats, input_format.as_deref(), &session);
