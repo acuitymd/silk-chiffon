@@ -736,10 +736,20 @@ pub(super) fn emit_split_on_overflow(
 }
 
 /// Whether Arrow failed to build a batch because a dictionary in it would hold
-/// more values than its key type indexes.
+/// more values than its key type indexes. DataFusion's streams wrap errors in
+/// context, and in external errors, so every cause in the chain is looked at.
 pub(super) fn overflows_dictionary(error: &DataFusionError) -> bool {
-    matches!(error, DataFusionError::ArrowError(error, _)
-        if matches!(**error, ArrowError::DictionaryKeyOverflowError))
+    let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    while let Some(error) = cause {
+        if matches!(
+            error.downcast_ref::<ArrowError>(),
+            Some(ArrowError::DictionaryKeyOverflowError)
+        ) {
+            return true;
+        }
+        cause = error.source();
+    }
+    false
 }
 
 /// Builds output batches from rows scattered across the kept batches.
@@ -805,6 +815,26 @@ fn compact_views(batch: &RecordBatch) -> Result<RecordBatch> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_dictionary_overflow_is_found_under_the_errors_that_wrap_it() {
+        let overflow =
+            || DataFusionError::ArrowError(Box::new(ArrowError::DictionaryKeyOverflowError), None);
+        assert!(overflows_dictionary(&overflow()));
+        assert!(overflows_dictionary(
+            &overflow().context("merging spilled batches")
+        ));
+        assert!(overflows_dictionary(&DataFusionError::Shared(
+            std::sync::Arc::new(overflow())
+        )));
+        assert!(overflows_dictionary(&DataFusionError::External(Box::new(
+            ArrowError::DictionaryKeyOverflowError
+        ))));
+        assert!(!overflows_dictionary(&DataFusionError::ArrowError(
+            Box::new(ArrowError::ComputeError("another failure".into())),
+            None
+        )));
+    }
     use crate::pipeline::sort::keys::RecordLayout;
 
     struct Random(u64);
