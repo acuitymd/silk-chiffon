@@ -66,7 +66,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: "ci-ubuntu-latest"
+          # Clippy can save metadata before the test job finishes building linkable libraries.
+          shared-key: "ci-tests-ubuntu-latest"
 
       - name: Get pwd
         run: pwd
