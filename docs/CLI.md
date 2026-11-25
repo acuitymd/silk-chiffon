@@ -86,18 +86,22 @@ Examples:
 
   Accepts a byte size (e.g. "8GB"), "total[:pct]" for a percentage of total RAM, "available[:pct]" for a percentage of free RAM, or "reserve:<size>" to use total RAM minus a reserved amount. All keyword modes (total, available, reserve) support an optional minimum: "total:80:min:4GB". Examples: "total:90", "available:60%", "reserve:2GB:min:1GB", "4GB".
 
+  The memory pool, which sorts and DataFusion's operators reserve from, is 75% of the budget when the transform sorts and 25% when it does not, and never grants more than that when asked. Output writers, and most input readers, do not reserve from the pool, which is what can take the process over the budget.
+
   Setting this too low may cause out-of-memory errors, since some internal buffers cannot spill to disk. The minimum depends on schema width, batch size, and parallelism — there is no fixed floor.
 
   Default: 80% of total memory, container-aware on Linux.
 
   Default value: `total:80%`
-- `--non-spillable-reserve <NON_SPILLABLE_RESERVE>` — Reserve memory for non-spillable operations (sort merge phases, etc.).
+- `--non-spillable-reserve <NON_SPILLABLE_RESERVE>` — Reserve memory for operators that cannot spill.
 
-  Enables an alternative memory pool that prevents spillable operators (sorts, aggregations) from consuming the entire pool, guaranteeing headroom for non-spillable consumers that would otherwise fail.
+  Keeps part of the memory pool free for consumers that cannot spill, such as input readers and a sort's merge, beside what they already hold. Spillable operators (sorts, aggregations) that hold memory are refused more once it would leave less than the reserve free, and spill instead. The pool grants no more than its size when asked, so a consumer that cannot spill and finds the pool full fails the transform. A larger reserve makes that less likely, and leaves the sorts less to buffer, so they spill sooner.
+
+  The pool is 75% of `--memory-budget` when the transform sorts and 25% when it does not.
 
   Accepts a percentage (e.g. "10%", "10") or a fixed byte size (e.g. "200MB"). Percentages are resolved against the memory pool size.
 
-  When not set, the default DataFusion FairSpillPool is used instead.
+  Default: 20% of the pool.
 - `--memory-pool-top-consumers <MEMORY_POOL_TOP_CONSUMERS>` — Number of top memory consumers to report in out-of-memory error messages.
 
   When a memory allocation fails, the error message includes the N largest memory consumers to help diagnose what is using the pool. Set to 0 to report all consumers.
@@ -133,6 +137,15 @@ Examples:
   Caps the combined size of the spill files that exist at one time, after compression. A transform that needs more fails instead of filling the disk. Accepts a byte size (e.g. "500GB", "1TiB").
 
   Default: 100 GiB.
+- `--max-spill-merge-fan-in <MAX_SPILL_MERGE_FAN_IN>` — Maximum number of spill files merged in one pass of a spilled sort or aggregation.
+
+  When a sort partition runs out of memory, it sorts the rows it has buffered and writes them to disk as a spill file. After its input ends, it merges its spill files. Each spill file in a merge pass reserves memory that cannot be spilled, up to four times the file's largest batch. Without a limit, a pass reserves room for as many spill files as the memory pool has free and holds that memory until the pass ends. One partition's merge can then take most of the pool, and another partition's merge can fail with "Additional allocation failed for ExternalSorterMerge".
+
+  With a limit, a pass merges at most this many spill files into a new spill file, repeating until the rest fit in one pass. A lower limit caps what a pass reserves beyond the merge memory the sort set aside when it started, so it saves memory only once that many files need more than that. When a sort has more spill files than the limit, it writes the data to disk more times. Each extra pass writes its new spill file while the files it merges are still on disk, so those passes also raise the peak disk space spill files use and can hit --max-spill-size where an unlimited merge would not.
+
+  The limit does not apply to the merge a partition runs over its buffered batches to write each spill file. That merge can fail with the same error. --non-spillable-reserve keeps part of the pool out of reach of buffered sort input, which makes that failure less likely. It also leaves sorts less memory to buffer, so a reserve that is too large can make them fail with "Not enough memory to continue external sort" instead.
+
+  Must be at least 2. Default: no limit.
 - `--preserve-input-order` — Preserve the row order from the input file in the output.
 
   By default, DataFusion reads files using multiple partitions for parallelism, which can interleave rows. This flag forces single-partition reading to maintain the original row order. Only valid for single-file-to-single-file transforms without queries or sorting.

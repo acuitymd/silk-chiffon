@@ -22,7 +22,8 @@ pub use format::{
 pub use inspection::InspectionOutput;
 pub use pipeline::{
     Pipeline, PipelineExecution, PipelineExecutionStartError, PipelinePreparationError,
-    PreparedPipeline, QueryDialect, SpillCompression, union_input_providers_by_name,
+    PreparedPipeline, QueryDialect, SpillCompression, default_non_spillable_reserve,
+    union_input_providers_by_name,
 };
 pub use schema::{schemas_match_ignoring_metadata, validate_batch_schema};
 pub use service_input::{

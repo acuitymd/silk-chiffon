@@ -40,6 +40,15 @@ fn parse_at_least_one(s: &str) -> Result<usize> {
     Ok(n)
 }
 
+fn parse_at_least_two(s: &str) -> Result<usize> {
+    let n: usize = s.parse().map_err(anyhow::Error::new)?;
+
+    if n < 2 {
+        anyhow::bail!("value must be at least 2");
+    }
+    Ok(n)
+}
+
 /// Parse a human-readable byte size (e.g., "512MB", "2GB") that must be greater than 0.
 #[allow(clippy::cast_possible_truncation)]
 fn parse_nonzero_byte_size(s: &str) -> Result<usize> {
@@ -679,6 +688,12 @@ struct TransformArgs {
     /// support an optional minimum: "total:80:min:4GB". Examples: "total:90", "available:60%",
     /// "reserve:2GB:min:1GB", "4GB".
     ///
+    /// The memory pool, which sorts and DataFusion's operators reserve from, is
+    /// 75% of the budget when the transform sorts and 25% when it does not, and
+    /// never grants more than that when asked. Output writers, and most input
+    /// readers, do not reserve from the pool, which is what can take the process
+    /// over the budget.
+    ///
     /// Setting this too low may cause out-of-memory errors, since some
     /// internal buffers cannot spill to disk. The minimum depends on schema
     /// width, batch size, and parallelism — there is no fixed floor.
@@ -687,16 +702,24 @@ struct TransformArgs {
     #[arg(long, help_heading = "Execution", value_parser = MemoryBudgetSpec::from_str, default_value = "total:80%")]
     pub memory_budget: MemoryBudgetSpec,
 
-    /// Reserve memory for non-spillable operations (sort merge phases, etc.).
+    /// Reserve memory for operators that cannot spill.
     ///
-    /// Enables an alternative memory pool that prevents spillable operators
-    /// (sorts, aggregations) from consuming the entire pool, guaranteeing
-    /// headroom for non-spillable consumers that would otherwise fail.
+    /// Keeps part of the memory pool free for consumers that cannot spill, such
+    /// as input readers and a sort's merge, beside what they already hold.
+    /// Spillable operators (sorts, aggregations) that hold memory are refused
+    /// more once it would leave less than the reserve free, and spill instead.
+    /// The pool grants no more than its size when asked, so a consumer that
+    /// cannot spill and finds the pool full fails the transform. A larger
+    /// reserve makes that less likely, and leaves the sorts less to buffer, so
+    /// they spill sooner.
+    ///
+    /// The pool is 75% of `--memory-budget` when the transform sorts and 25% when
+    /// it does not.
     ///
     /// Accepts a percentage (e.g. "10%", "10") or a fixed byte size (e.g. "200MB").
     /// Percentages are resolved against the memory pool size.
     ///
-    /// When not set, the default DataFusion FairSpillPool is used instead.
+    /// Default: 20% of the pool.
     #[arg(long, help_heading = "Execution", value_parser = PoolReserveSpec::from_str)]
     pub non_spillable_reserve: Option<PoolReserveSpec>,
 
@@ -756,6 +779,37 @@ struct TransformArgs {
     /// Default: 100 GiB.
     #[arg(long, help_heading = "Execution", value_parser = parse_nonzero_byte_size)]
     pub max_spill_size: Option<usize>,
+
+    /// Maximum number of spill files merged in one pass of a spilled sort or aggregation.
+    ///
+    /// When a sort partition runs out of memory, it sorts the rows it has buffered and
+    /// writes them to disk as a spill file. After its input ends, it merges its spill
+    /// files. Each spill file in a merge pass reserves memory that cannot be spilled,
+    /// up to four times the file's largest batch. Without a limit, a pass reserves room
+    /// for as many spill files as the memory pool has free and holds that memory until
+    /// the pass ends. One partition's merge can then take most of the pool, and another
+    /// partition's merge can fail with "Additional allocation failed for
+    /// ExternalSorterMerge".
+    ///
+    /// With a limit, a pass merges at most this many spill files into a new spill file,
+    /// repeating until the rest fit in one pass. A lower limit caps what a pass
+    /// reserves beyond the merge memory the sort set aside when it started, so it saves
+    /// memory only once that many files need more than that. When a sort has more
+    /// spill files than the limit, it writes the data to disk more times. Each extra pass writes its new spill file while the
+    /// files it merges are still on disk, so those passes also raise the peak disk
+    /// space spill files use and can hit --max-spill-size where an unlimited merge
+    /// would not.
+    ///
+    /// The limit does not apply to the merge a partition runs over its buffered
+    /// batches to write each spill file. That merge can fail with the same error.
+    /// --non-spillable-reserve keeps part of the pool out of reach of buffered sort
+    /// input, which makes that failure less likely. It also leaves sorts less memory
+    /// to buffer, so a reserve that is too large can make them fail with "Not enough
+    /// memory to continue external sort" instead.
+    ///
+    /// Must be at least 2. Default: no limit.
+    #[arg(long, help_heading = "Execution", value_parser = parse_at_least_two)]
+    pub max_spill_merge_fan_in: Option<usize>,
 
     /// Preserve the row order from the input file in the output.
     ///
@@ -837,6 +891,7 @@ pub struct TransformCommand {
     spill_path: Option<Utf8PathBuf>,
     spill_compression: SpillCompression,
     max_spill_size: Option<usize>,
+    max_spill_merge_fan_in: Option<usize>,
     preserve_input_order: bool,
     by: Option<String>,
     partition_strategy: PartitionStrategy,
@@ -888,6 +943,7 @@ impl TransformCommand {
             spill_path,
             spill_compression,
             max_spill_size,
+            max_spill_merge_fan_in,
             preserve_input_order,
             by,
             partition_strategy,
@@ -922,6 +978,7 @@ impl TransformCommand {
             spill_path,
             spill_compression,
             max_spill_size,
+            max_spill_merge_fan_in,
             preserve_input_order,
             by,
             partition_strategy,
