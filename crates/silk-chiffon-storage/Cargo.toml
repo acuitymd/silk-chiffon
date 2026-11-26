@@ -3,7 +3,6 @@ name = "silk-chiffon-storage"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
-homepage.workspace = true
 license.workspace = true
 publish = false
 readme = "README.md"
