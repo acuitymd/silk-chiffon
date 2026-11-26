@@ -94,6 +94,11 @@ test-bigquery-benchmark:
 benchmark-bigquery *args: build-native test-bigquery-benchmark
     uv run scripts/bqs_benchmark.py campaign {{args}}
 
+# time sorted transforms across builds, sort engines, and memory budgets; see scripts/bench_export.py
+[positional-arguments]
+benchmark-export *args:
+    uv run scripts/bench_export.py "$@"
+
 test-cloud-live-soak:
     cargo test --test cloud_live_soak live_seeded_mixed_input_cross_provider_soak -- --ignored --exact --nocapture
 
