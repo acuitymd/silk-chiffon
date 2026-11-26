@@ -1,18 +1,24 @@
-use std::{num::NonZeroUsize, sync::Arc};
+use std::{num::NonZeroUsize, sync::Arc, time::Instant};
 
 use crate::{PartitionStrategy, SortSpec, TransformCommand, default_thread_budget};
 use anyhow::{Result, anyhow};
 use camino::Utf8Path;
 use datafusion::{
+    arrow::datatypes::Schema,
     catalog::TableProvider,
     error::DataFusionError,
     execution::disk_manager::DEFAULT_MAX_TEMP_DIRECTORY_SIZE,
-    physical_plan::{SendableRecordBatchStream, stream::RecordBatchStreamAdapter},
+    physical_plan::{
+        ExecutionPlan, SendableRecordBatchStream,
+        display::DisplayableExecutionPlan,
+        sorts::{sort::SortExec, sort_preserving_merge::SortPreservingMergeExec},
+        stream::RecordBatchStreamAdapter,
+    },
 };
 use futures::TryStreamExt;
 use owo_colors::OwoColorize;
 use silk_chiffon_core::{
-    OpenSinkMode, Pipeline, PreparedPipeline, PresentationMode, SinkBindingConfig,
+    OpenSinkMode, Pipeline, PreparedPipeline, PresentationMode, SinkBindingConfig, SortColumn,
     default_non_spillable_reserve, union_input_providers_by_name,
 };
 use tabled::{builder::Builder, settings::Style};
@@ -22,7 +28,6 @@ mod file_output;
 mod projection;
 mod query;
 mod scheme;
-mod sort;
 mod sort_memory;
 
 use file_input::FileInputPreparer;
@@ -30,7 +35,6 @@ use file_output::{FileOutputBinder, FileOutputReport, FileOutputRequest};
 use projection::project_stream;
 use query::apply_query;
 use scheme::explicit_scheme;
-use sort::apply_sort;
 
 /// The share of the memory budget that the memory pool gets when the
 /// transform sorts, and when it does not.
@@ -38,6 +42,7 @@ const SORT_POOL_PERCENT: usize = 75;
 const POOL_PERCENT: usize = 25;
 
 pub(crate) async fn run(args: TransformCommand) -> Result<()> {
+    let started = Instant::now();
     let TransformCommand {
         inputs,
         to,
@@ -53,6 +58,7 @@ pub(crate) async fn run(args: TransformCommand) -> Result<()> {
         query,
         dialect,
         sort_by,
+        sort_engine,
         memory_budget,
         non_spillable_reserve,
         memory_pool_top_consumers,
@@ -65,6 +71,7 @@ pub(crate) async fn run(args: TransformCommand) -> Result<()> {
         spill_path,
         spill_compression,
         max_spill_size,
+        explain_analyze,
         max_spill_merge_fan_in,
         formats,
         storage,
@@ -180,6 +187,7 @@ pub(crate) async fn run(args: TransformCommand) -> Result<()> {
         anyhow::bail!("no inputs were selected");
     }
     let mut input = union_input_providers_by_name(&session, providers)?;
+    let inputs_opened = Instant::now();
 
     let list_outputs_mode = list_outputs;
 
@@ -220,7 +228,17 @@ pub(crate) async fn run(args: TransformCommand) -> Result<()> {
         PartitionStrategy::NosortMulti | PartitionStrategy::NosortEvict => SortSpec::default(),
     };
 
-    let user_sort_spec = sort_by.clone().unwrap_or(SortSpec::default());
+    if let Some(q) = &query {
+        input = apply_query(&session, input, q).await?;
+    }
+
+    // names are resolved before they are compared, so that `--sort-by REGION`
+    // and `--by region` name one column
+    let input_schema = input.schema().as_arrow().clone();
+    let mut user_sort_spec = SortSpec::default();
+    user_sort_spec.extend(&SortSpec {
+        columns: sort_columns(&sort_by.clone().unwrap_or_default().columns, &input_schema)?,
+    });
 
     let user_sort_spec_without_partition_cols =
         user_sort_spec.without_columns_named(&partition_columns);
@@ -228,15 +246,18 @@ pub(crate) async fn run(args: TransformCommand) -> Result<()> {
     let mut full_sort_spec = partition_sort_spec.clone();
     full_sort_spec.extend(&user_sort_spec_without_partition_cols);
 
-    if let Some(q) = &query {
-        input = apply_query(&session, input, q).await?;
-    }
+    let mut prepared = pipeline
+        .with_sort(full_sort_spec.columns.clone())
+        .with_sort_engine(sort_engine)
+        .prepare(input, session)
+        .await?;
 
-    if !full_sort_spec.is_empty() {
-        input = apply_sort(input, &full_sort_spec.columns)?;
-    }
-
-    let mut prepared = pipeline.prepare(input, session).await?;
+    let analysis = explain_analyze.then(|| ExecutionAnalysis {
+        plan: Arc::clone(prepared.execution_plan()),
+        started,
+        inputs_opened,
+        planned: Instant::now(),
+    });
 
     if has_sort {
         let memory_limit = effective_memory_limit.unwrap_or(total_budget * SORT_POOL_PERCENT / 100);
@@ -277,6 +298,9 @@ pub(crate) async fn run(args: TransformCommand) -> Result<()> {
                     stream = project_stream(stream, indices)?;
                 }
                 service_outputs[*index].consume(target, stream).await?;
+                if let Some(analysis) = analysis {
+                    analysis.print();
+                }
                 return Ok(());
             }
             Some(crate::registration::OutputSchemeOwner::FileOutput) => {}
@@ -299,7 +323,11 @@ pub(crate) async fn run(args: TransformCommand) -> Result<()> {
     }
 
     let output_ordering = user_sort_spec_without_partition_cols.columns.clone();
-    let output_threads = if has_sort {
+    // What was planned decides, not --sort-engine: the parallel engine falls
+    // back to DataFusion's sort for keys it cannot encode, and an input already
+    // in order is not sorted at all. A transform without --sort-by keeps the
+    // share it had, whatever its --query plans
+    let output_threads = if has_sort && merges_while_writing(prepared.execution_plan()) {
         (usable_cpus / 4).max(1)
     } else {
         three_quarter_cpus
@@ -330,6 +358,7 @@ pub(crate) async fn run(args: TransformCommand) -> Result<()> {
             partition_fields: partition_columns,
             strategy: partition_strategy,
             max_open_partitions,
+            memory_budget: total_budget,
             exclude_columns,
             create_dirs,
             overwrite,
@@ -359,8 +388,99 @@ pub(crate) async fn run(args: TransformCommand) -> Result<()> {
     if let Some(mode) = list_outputs_mode {
         print_output_files(&report, mode, list_outputs_file.as_deref())?;
     }
+    if let Some(analysis) = analysis {
+        analysis.print();
+    }
 
     Ok(())
+}
+
+/// The columns a sort names. A name that is a column exactly is taken as it
+/// is. Any other is read as DataFusion reads an identifier, folded to lower
+/// case unless it is quoted, which is how `--sort-by` has always read names.
+///
+/// The sort finds its columns by name alone, so a name that several columns
+/// share, as after a self-join, is refused rather than sorted by the first.
+fn sort_columns(columns: &[SortColumn], schema: &Schema) -> Result<Vec<SortColumn>> {
+    columns
+        .iter()
+        .map(|column| {
+            let name = if schema.field_with_name(column.name()).is_ok() {
+                column.name().to_owned()
+            } else {
+                datafusion::common::Column::from_qualified_name(column.name()).name
+            };
+            let matching = schema
+                .fields()
+                .iter()
+                .filter(|field| field.name() == &name)
+                .count();
+            if matching > 1 {
+                let table = datafusion::common::Column::from_qualified_name(column.name())
+                    .relation
+                    .map_or_else(|| "b".to_owned(), |relation| relation.to_string());
+                anyhow::bail!(
+                    "--sort-by {:?} is ambiguous: the output has {matching} columns named \
+                     {name:?}, and the sort finds its columns by name. Rename one in --query, \
+                     as in SELECT {table}.{name} AS {table}_{name}, and sort by the new name",
+                    column.name()
+                );
+            }
+            Ok(SortColumn::new(
+                name,
+                column.direction(),
+                column.null_placement(),
+            ))
+        })
+        .collect()
+}
+
+/// Whether DataFusion's sort, or its merge of partitions in order, is still
+/// merging while the output is written, sharing the CPUs with encoding. Below
+/// the parallel sort, which takes all its input before it emits, the work is
+/// done by the time the output is written.
+///
+/// Emitting only at the end is not enough to stop at: a projection above
+/// DataFusion's sort, as a query that renames the key plans, reports the
+/// sort's emission as its own while the sort still merges below it.
+fn merges_while_writing(plan: &Arc<dyn ExecutionPlan>) -> bool {
+    // a stack, not recursion: a plan's depth follows the --query
+    let mut pending = vec![Arc::clone(plan)];
+    while let Some(plan) = pending.pop() {
+        if plan.is::<SortExec>() || plan.is::<SortPreservingMergeExec>() {
+            return true;
+        }
+        // by name, since the core does not export the operator
+        if plan.name() != "ParallelSortExec" {
+            pending.extend(plan.children().into_iter().cloned());
+        }
+    }
+    false
+}
+
+/// What `--explain-analyze` reports once the output is complete.
+struct ExecutionAnalysis {
+    plan: Arc<dyn ExecutionPlan>,
+    started: Instant,
+    inputs_opened: Instant,
+    planned: Instant,
+}
+
+impl ExecutionAnalysis {
+    fn print(&self) {
+        let finished = Instant::now();
+        eprintln!(
+            "transform took {:.3}s: {:.3}s opening inputs, {:.3}s planning, {:.3}s executing",
+            (finished - self.started).as_secs_f64(),
+            (self.inputs_opened - self.started).as_secs_f64(),
+            (self.planned - self.inputs_opened).as_secs_f64(),
+            (finished - self.planned).as_secs_f64(),
+        );
+        eprintln!(
+            "{}",
+            DisplayableExecutionPlan::with_metrics(self.plan.as_ref()).indent(true)
+        );
+    }
 }
 
 fn print_output_files(
@@ -538,4 +658,81 @@ fn projection_indices_excluding(
             .filter(|index| !exclude_columns.contains(schema.field(*index).name()))
             .collect()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use arrow::{
+        array::{Int32Array, RecordBatch},
+        datatypes::{DataType, Field},
+    };
+    use datafusion::{datasource::MemTable, prelude::ident};
+    use silk_chiffon_core::{NullPlacement, SortDirection, SortEngine};
+
+    use super::*;
+
+    /// Plans a sort by `id` of one partition of rows, which `ordered` declares
+    /// to be in order already.
+    async fn planned_sort(
+        engine: SortEngine,
+        ordered: bool,
+        query: Option<&str>,
+    ) -> Arc<dyn ExecutionPlan> {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("other", DataType::Int32, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 2, 3])),
+                Arc::new(Int32Array::from(vec![3, 1, 2])),
+            ],
+        )
+        .unwrap();
+        let mut table = MemTable::try_new(schema, vec![vec![batch]]).unwrap();
+        if ordered {
+            table = table.with_sort_order(vec![vec![ident("id").sort(true, false)]]);
+        }
+        let mut pipeline = Pipeline::new()
+            .with_sort(vec![SortColumn::new(
+                "id",
+                SortDirection::Ascending,
+                NullPlacement::Last,
+            )])
+            .with_sort_engine(engine);
+        let session = pipeline.create_session_context().unwrap();
+        let mut input = session.read_table(Arc::new(table)).unwrap();
+        if let Some(query) = query {
+            input = apply_query(&session, input, query).await.unwrap();
+        }
+        let prepared = pipeline.prepare(input, session).await.unwrap();
+        Arc::clone(prepared.execution_plan())
+    }
+
+    #[tokio::test]
+    async fn an_input_already_in_order_is_not_merged_while_writing() {
+        let plan = planned_sort(SortEngine::Parallel, true, None).await;
+        assert!(!merges_while_writing(&plan), "{}", plan.name());
+    }
+
+    #[tokio::test]
+    async fn datafusion_sort_merges_while_writing() {
+        let plan = planned_sort(SortEngine::DataFusion, false, None).await;
+        assert!(merges_while_writing(&plan), "{}", plan.name());
+    }
+
+    #[tokio::test]
+    async fn datafusion_sort_below_a_projection_merges_while_writing() {
+        let query = "SELECT other AS id FROM data";
+        let plan = planned_sort(SortEngine::DataFusion, false, Some(query)).await;
+        assert!(merges_while_writing(&plan), "{}", plan.name());
+    }
+
+    #[tokio::test]
+    async fn a_sort_below_the_parallel_sort_is_done_before_writing() {
+        let query = "SELECT * FROM data ORDER BY other LIMIT 2";
+        let plan = planned_sort(SortEngine::Parallel, false, Some(query)).await;
+        assert!(!merges_while_writing(&plan), "{}", plan.name());
+    }
 }

@@ -3,7 +3,7 @@ mod report;
 mod target_template;
 
 use std::{
-    collections::{HashMap, hash_map::Entry},
+    collections::{HashMap, VecDeque, hash_map::Entry},
     fmt,
     num::NonZeroUsize,
     sync::Arc,
@@ -20,6 +20,7 @@ use silk_chiffon_core::{
 use silk_chiffon_storage::{
     ExistingOutput, LocationInput, OutputPreparation, PreparedOutputTarget, StorageSession,
 };
+use tokio_util::task::AbortOnDropHandle;
 
 use crate::{PartitionStrategy, commands::transform::projection::project_stream};
 
@@ -43,6 +44,7 @@ pub(super) enum FileOutputRequest {
         partition_fields: Vec<String>,
         strategy: PartitionStrategy,
         max_open_partitions: Option<usize>,
+        memory_budget: usize,
         exclude_columns: Vec<String>,
         create_dirs: bool,
         overwrite: bool,
@@ -107,6 +109,7 @@ impl<'a> FileOutputBinder<'a> {
                 partition_fields,
                 strategy,
                 max_open_partitions,
+                memory_budget,
                 exclude_columns,
                 create_dirs,
                 overwrite,
@@ -163,6 +166,7 @@ impl<'a> FileOutputBinder<'a> {
                     },
                     strategy,
                     max_open,
+                    finishing_limit: FinishingSinks::limit_for(memory_budget),
                 })
             }
         }
@@ -215,6 +219,7 @@ pub(super) enum BoundFileOutput {
         writer: PartitionedOutputWriter,
         strategy: PartitionStrategy,
         max_open: NonZeroUsize,
+        finishing_limit: usize,
     },
 }
 
@@ -234,8 +239,11 @@ impl BoundFileOutput {
                 writer,
                 strategy,
                 max_open,
+                finishing_limit,
             } => match strategy {
-                PartitionStrategy::SortSingle => writer.write_sort_single(stream).await,
+                PartitionStrategy::SortSingle => {
+                    writer.write_sort_single(stream, finishing_limit).await
+                }
                 PartitionStrategy::NosortMulti => writer.write_nosort_multi(stream).await,
                 PartitionStrategy::NosortEvict => writer.write_nosort_evict(stream, max_open).await,
             },
@@ -361,6 +369,7 @@ impl PartitionedOutputWriter {
     async fn write_sort_single(
         &self,
         stream: SendableRecordBatchStream,
+        finishing_limit: usize,
     ) -> std::result::Result<FileOutputReport, FileOutputFailure> {
         let context = PartitionProjection::new(
             &stream.schema(),
@@ -370,14 +379,15 @@ impl PartitionedOutputWriter {
         .map_err(|error| FileOutputFailure::new(error, Vec::new(), Vec::new()))?;
         let mut partitioned = PartitionRunStream::new(stream, self.partition_fields.clone());
         let mut current: Option<OpenFileSink> = None;
-        let mut completed = Vec::new();
+        let mut finishing =
+            FinishingSinks::new(Arc::from(self.partition_fields.clone()), finishing_limit);
 
         while let Some(item) = partitioned.next().await {
             let run = match item {
                 Ok(run) => run,
                 Err(primary) => {
                     let cleanup = self.abort_all(current.take().into_iter().collect()).await;
-                    return Err(FileOutputFailure::new(primary, completed, cleanup));
+                    return Err(finishing.fail(primary, cleanup).await);
                 }
             };
             let values = run.values;
@@ -387,26 +397,21 @@ impl PartitionedOutputWriter {
                 .is_some_and(|open| !partition_values_equal(&open.partition_values, &values));
             if changed {
                 let open = current.take().expect("checked above");
-                match self.finish(open).await {
-                    Ok(output) => completed.push(output),
-                    Err(primary) => {
-                        return Err(FileOutputFailure::new(primary, completed, Vec::new()));
-                    }
+                if let Err(primary) = finishing.start(open).await {
+                    return Err(finishing.fail(primary, Vec::new()).await);
                 }
             }
             if current.is_none() {
                 current = match self.open(&values, &context.projected_schema, None).await {
                     Ok(open) => Some(open),
-                    Err(primary) => {
-                        return Err(FileOutputFailure::new(primary, completed, Vec::new()));
-                    }
+                    Err(primary) => return Err(finishing.fail(primary, Vec::new()).await),
                 };
             }
             let projected = match context.project_batch(batch) {
                 Ok(batch) => batch,
                 Err(primary) => {
                     let cleanup = self.abort_all(current.take().into_iter().collect()).await;
-                    return Err(FileOutputFailure::new(primary, completed, cleanup));
+                    return Err(finishing.fail(primary, cleanup).await);
                 }
             };
             if let Err(primary) = current
@@ -416,18 +421,15 @@ impl PartitionedOutputWriter {
                 .await
             {
                 let cleanup = self.abort_all(current.take().into_iter().collect()).await;
-                return Err(FileOutputFailure::new(primary, completed, cleanup));
+                return Err(finishing.fail(primary, cleanup).await);
             }
         }
-        if let Some(open) = current {
-            match self.finish(open).await {
-                Ok(output) => completed.push(output),
-                Err(primary) => {
-                    return Err(FileOutputFailure::new(primary, completed, Vec::new()));
-                }
-            }
+        if let Some(open) = current
+            && let Err(primary) = finishing.start(open).await
+        {
+            return Err(finishing.fail(primary, Vec::new()).await);
         }
-        Ok(FileOutputReport::new(completed))
+        finishing.finish().await
     }
 
     async fn write_nosort_multi(
@@ -618,19 +620,7 @@ impl PartitionedOutputWriter {
     }
 
     async fn finish(&self, open: OpenFileSink) -> Result<CompletedFileOutput> {
-        let OpenFileSink {
-            target,
-            sink,
-            partition_values,
-        } = open;
-        let fields = partition_field_values(&partition_values, &self.partition_fields);
-        Ok(completed_output(
-            &sink
-                .finish()
-                .await
-                .with_context(|| format!("while completing partitioned file output {target:?}"))?,
-            fields,
-        ))
+        finish_sink(open, &self.partition_fields).await
     }
 
     async fn abort_all(&self, mut open: Vec<OpenFileSink>) -> Vec<anyhow::Error> {
@@ -648,6 +638,115 @@ impl PartitionedOutputWriter {
             }
         }
         errors
+    }
+}
+
+async fn finish_sink(
+    open: OpenFileSink,
+    partition_fields: &[String],
+) -> Result<CompletedFileOutput> {
+    let OpenFileSink {
+        target,
+        sink,
+        partition_values,
+    } = open;
+    let fields = partition_field_values(&partition_values, partition_fields);
+    Ok(completed_output(
+        &sink
+            .finish()
+            .await
+            .with_context(|| format!("while completing partitioned file output {target:?}"))?,
+        fields,
+    ))
+}
+
+/// Sinks that have received their last batch and are completing.
+///
+/// Completing a file means encoding what it still buffers, writing its footer,
+/// and closing it. With hundreds of small files that wait is most of the work,
+/// so the sorted writer hands each finished sink here and goes on to the next
+/// partition. Outputs are reported in the order they were handed over.
+///
+/// Each sink completing keeps its own buffers until it is done, as an open sink
+/// does, so as many of them as [`Self::limit_for`] allows are in memory at once
+/// beside the one being written.
+struct FinishingSinks {
+    partition_fields: Arc<[String]>,
+    limit: usize,
+    tasks: VecDeque<AbortOnDropHandle<Result<CompletedFileOutput>>>,
+    completed: Vec<CompletedFileOutput>,
+}
+
+impl FinishingSinks {
+    /// How many sinks may complete at once within `memory_budget`.
+    ///
+    /// A completing sink still holds its last rows, up to a Parquet row group,
+    /// outside the memory pool, and the formats size its buffers as if it were
+    /// the only sink open. A sorting transform's pool takes three quarters of
+    /// the budget, so the sinks share the last quarter. A default row group of
+    /// 1,048,576 rows of 200 bytes is 200 MiB, so each 256 MiB of that quarter
+    /// allows one: 1 at 1 GiB, 4 at 4 GiB, and 16 from 16 GiB up.
+    fn limit_for(memory_budget: usize) -> usize {
+        (memory_budget / 4 / (256 * 1024 * 1024)).clamp(1, 16)
+    }
+
+    fn new(partition_fields: Arc<[String]>, limit: usize) -> Self {
+        Self {
+            partition_fields,
+            limit,
+            tasks: VecDeque::new(),
+            completed: Vec::new(),
+        }
+    }
+
+    /// Starts completing a sink, waiting first for the oldest one if the limit
+    /// is reached. Returns that older sink's error.
+    async fn start(&mut self, open: OpenFileSink) -> Result<()> {
+        let room = if self.tasks.len() >= self.limit {
+            self.join_oldest().await
+        } else {
+            Ok(())
+        };
+        let partition_fields = Arc::clone(&self.partition_fields);
+        self.tasks
+            .push_back(AbortOnDropHandle::new(tokio::spawn(async move {
+                finish_sink(open, &partition_fields).await
+            })));
+        room
+    }
+
+    async fn join_oldest(&mut self) -> Result<()> {
+        let Some(task) = self.tasks.pop_front() else {
+            return Ok(());
+        };
+        let output = task.await.context("a file output task stopped early")??;
+        self.completed.push(output);
+        Ok(())
+    }
+
+    /// Waits for every sink and reports the outputs.
+    async fn finish(mut self) -> std::result::Result<FileOutputReport, FileOutputFailure> {
+        while !self.tasks.is_empty() {
+            if let Err(primary) = self.join_oldest().await {
+                return Err(self.fail(primary, Vec::new()).await);
+            }
+        }
+        Ok(FileOutputReport::new(self.completed))
+    }
+
+    /// Builds the failure for `primary`. Sinks already completing run to the
+    /// end first, so the failure reports every output that became durable.
+    async fn fail(
+        mut self,
+        primary: anyhow::Error,
+        mut cleanup: Vec<anyhow::Error>,
+    ) -> FileOutputFailure {
+        while !self.tasks.is_empty() {
+            if let Err(error) = self.join_oldest().await {
+                cleanup.push(error);
+            }
+        }
+        FileOutputFailure::new(primary, self.completed, cleanup)
     }
 }
 
@@ -931,6 +1030,85 @@ mod tests {
         let message = failure.to_string();
         assert!(message.contains("primary write failure"), "{message}");
         assert!(message.contains("cleanup failure"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn sort_single_reports_outputs_in_partition_order() {
+        let temporary = tempfile::tempdir().unwrap();
+        let pattern = temporary.path().join("{{category}}.arrow");
+        let state = Arc::new(Mutex::new(ScriptedState::default()));
+        let writer = scripted_partition_writer(&pattern, Arc::clone(&state));
+
+        // more partitions than may finish at once, so the writer has to wait
+        // for the oldest before it starts another
+        let names: Vec<String> = (0..40).map(|index| format!("p{index:02}")).collect();
+        let values: Vec<&str> = names.iter().flat_map(|name| [name.as_str(); 2]).collect();
+        let report = writer
+            .write_sort_single(partition_stream(&values), 16)
+            .await
+            .unwrap();
+
+        let reported: Vec<String> = report
+            .outputs()
+            .iter()
+            .map(|output| {
+                let location = &output.durable_locations[0];
+                location[location.rfind('/').unwrap() + 1..].to_owned()
+            })
+            .collect();
+        let expected: Vec<String> = names.iter().map(|name| format!("{name}.arrow")).collect();
+        assert_eq!(reported, expected);
+        assert!(
+            report
+                .outputs()
+                .iter()
+                .all(|output| output.rows_written == 2)
+        );
+        assert_eq!(state.lock().unwrap().active, 0);
+    }
+
+    #[tokio::test]
+    async fn sort_single_finish_failure_still_reports_the_outputs_that_completed() {
+        let temporary = tempfile::tempdir().unwrap();
+        let pattern = temporary.path().join("{{category}}.arrow");
+        let state = Arc::new(Mutex::new(ScriptedState {
+            fail_finish: Some("b.arrow".to_owned()),
+            ..ScriptedState::default()
+        }));
+        let writer = scripted_partition_writer(&pattern, Arc::clone(&state));
+
+        let failure = writer
+            .write_sort_single(partition_stream(&["a", "b", "c"]), 16)
+            .await
+            .unwrap_err();
+
+        let message = failure.to_string();
+        assert!(
+            message.contains("scripted finish failure for b.arrow"),
+            "{message}"
+        );
+        // `c` was already written when `b` failed, so it is completed and reported
+        let reported: Vec<&str> = failure
+            .report()
+            .outputs()
+            .iter()
+            .map(|output| {
+                let location = &output.durable_locations[0];
+                &location[location.rfind('/').unwrap() + 1..]
+            })
+            .collect();
+        assert_eq!(reported, ["a.arrow", "c.arrow"]);
+        assert_eq!(state.lock().unwrap().active, 0);
+    }
+
+    #[test]
+    fn finishing_limit_follows_the_memory_budget() {
+        const GIB: usize = 1024 * 1024 * 1024;
+        assert_eq!(FinishingSinks::limit_for(64 * GIB), 16);
+        assert_eq!(FinishingSinks::limit_for(16 * GIB), 16);
+        assert_eq!(FinishingSinks::limit_for(4 * GIB), 4);
+        assert_eq!(FinishingSinks::limit_for(GIB), 1);
+        assert_eq!(FinishingSinks::limit_for(100 * 1024 * 1024), 1);
     }
 
     #[tokio::test]

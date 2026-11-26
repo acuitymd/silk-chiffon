@@ -7,7 +7,8 @@ use camino::Utf8PathBuf;
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use silk_chiffon_core::{
-    NullPlacement, PresentationMode, QueryDialect, SortColumn, SortDirection, SpillCompression,
+    NullPlacement, PresentationMode, QueryDialect, SortColumn, SortDirection, SortEngine,
+    SpillCompression,
 };
 use std::{
     collections::HashSet,
@@ -521,10 +522,6 @@ impl From<Vec<String>> for SortSpec {
 }
 
 impl SortSpec {
-    pub(crate) fn is_empty(&self) -> bool {
-        self.columns.is_empty()
-    }
-
     pub(crate) fn without_columns_named(&self, column_names: &[String]) -> Self {
         Self {
             columns: self
@@ -680,6 +677,34 @@ struct TransformArgs {
     #[arg(short, long, help_heading = "Transformations")]
     pub sort_by: Option<SortSpec>,
 
+    /// The sort implementation, for --sort-by and for --by with the sort-single strategy.
+    ///
+    /// `parallel` splits the rows it has buffered by key range, sorts the ranges
+    /// on --target-partitions threads, and writes them out in order. When the
+    /// memory pool is full it writes what it has sorted to the spill path and
+    /// continues, so a small --memory-budget slows the sort. It never takes more
+    /// than the pool grants. It fails only when the pool is too small for the
+    /// memory it needs to start, for one batch, or for the least it needs to
+    /// merge what it spilled, which grows with the index of a large spill and
+    /// with rows wider than the first batch's. The error says what it could not
+    /// get.
+    ///
+    /// `parallel` keeps each row as one run of bytes in Arrow's row format, and is
+    /// slower when a column cannot be kept that way. It then keeps the input
+    /// batches whole, and merges what it spills in a few large stretches of the
+    /// key range, one at a time when memory is short. The columns are
+    /// dictionaries whose values are lists, structs, maps, unions, booleans,
+    /// durations, intervals, dictionaries, or run-end encoded, and dictionaries in
+    /// columns that may not be null, alone or nested in another column. --explain-analyze shows `rows=batches` on the
+    /// `ParallelSortExec` line of such a sort.
+    ///
+    /// `datafusion` sorts each partition separately and merges them on one thread.
+    /// It can fail with "Additional allocation failed for ExternalSorterMerge" when
+    /// the pool is full. A sort whose key is, or holds at any depth, a dictionary of
+    /// lists, structs, maps, or unions uses it whatever this is set to.
+    #[arg(long, value_enum, default_value_t, help_heading = "Execution")]
+    pub sort_engine: SortEngine,
+
     /// Target memory budget. Best-effort, not a hard limit.
     ///
     /// Accepts a byte size (e.g. "8GB"), "total[:pct]" for a percentage of total RAM,
@@ -694,9 +719,9 @@ struct TransformArgs {
     /// readers, do not reserve from the pool, which is what can take the process
     /// over the budget.
     ///
-    /// Setting this too low may cause out-of-memory errors, since some
-    /// internal buffers cannot spill to disk. The minimum depends on schema
-    /// width, batch size, and parallelism — there is no fixed floor.
+    /// Setting this too low fails the transform. The sort needs memory to start,
+    /// which grows with --target-partitions and the width of the rows, and the
+    /// error says how much.
     ///
     /// Default: 80% of total memory, container-aware on Linux.
     #[arg(long, help_heading = "Execution", value_parser = MemoryBudgetSpec::from_str, default_value = "total:80%")]
@@ -705,13 +730,13 @@ struct TransformArgs {
     /// Reserve memory for operators that cannot spill.
     ///
     /// Keeps part of the memory pool free for consumers that cannot spill, such
-    /// as input readers and a sort's merge, beside what they already hold.
-    /// Spillable operators (sorts, aggregations) that hold memory are refused
-    /// more once it would leave less than the reserve free, and spill instead.
-    /// The pool grants no more than its size when asked, so a consumer that
-    /// cannot spill and finds the pool full fails the transform. A larger
-    /// reserve makes that less likely, and leaves the sorts less to buffer, so
-    /// they spill sooner.
+    /// as input readers and the `datafusion` sort engine's merge, beside what
+    /// they already hold. Spillable operators (sorts, aggregations) that hold
+    /// memory are refused more once it would leave less than the reserve free,
+    /// and spill instead. The pool grants no more than its size when asked, so a
+    /// consumer that cannot spill and finds the pool full fails the transform. A
+    /// larger reserve makes that less likely, and leaves the sort less to
+    /// buffer, so it spills sooner.
     ///
     /// The pool is 75% of `--memory-budget` when the transform sorts and 25% when
     /// it does not.
@@ -748,7 +773,8 @@ struct TransformArgs {
 
     /// Number of partitions for query execution parallelism.
     ///
-    /// Controls how DataFusion partitions data during queries (aggregations, joins, sorts).
+    /// Controls how DataFusion partitions data during queries (aggregations, joins, sorts),
+    /// and how many threads the `parallel` sort engine sorts on.
     /// Higher values increase parallelism but use more memory.
     ///
     /// Default: auto-detected based on workload. With sorting (--sort-by or --by): 75%
@@ -807,9 +833,22 @@ struct TransformArgs {
     /// to buffer, so a reserve that is too large can make them fail with "Not enough
     /// memory to continue external sort" instead.
     ///
+    /// This applies to sorts with --sort-engine datafusion and to aggregations. The
+    /// default sort sizes its own merges from the memory pool and ignores it.
+    ///
     /// Must be at least 2. Default: no limit.
     #[arg(long, help_heading = "Execution", value_parser = parse_at_least_two)]
     pub max_spill_merge_fan_in: Option<usize>,
+
+    /// Print where the transform spent its time, to stderr, when it finishes.
+    ///
+    /// Shows how long the inputs took to open, how long planning and execution
+    /// took, and the executed plan with each operator's metrics. For a sort, the
+    /// metrics separate time waiting for input (`input_wait_time`) from time
+    /// waiting for the output to be written (`output_wait_time`). Time metrics
+    /// are summed over an operator's partitions, so they can exceed the wall time.
+    #[arg(long, help_heading = "Execution")]
+    pub explain_analyze: bool,
 
     /// Preserve the row order from the input file in the output.
     ///
@@ -883,6 +922,7 @@ pub struct TransformCommand {
     exclude_columns: Vec<String>,
     query: Option<String>,
     sort_by: Option<SortSpec>,
+    sort_engine: SortEngine,
     memory_budget: MemoryBudgetSpec,
     non_spillable_reserve: Option<PoolReserveSpec>,
     memory_pool_top_consumers: usize,
@@ -891,6 +931,7 @@ pub struct TransformCommand {
     spill_path: Option<Utf8PathBuf>,
     spill_compression: SpillCompression,
     max_spill_size: Option<usize>,
+    explain_analyze: bool,
     max_spill_merge_fan_in: Option<usize>,
     preserve_input_order: bool,
     by: Option<String>,
@@ -935,6 +976,7 @@ impl TransformCommand {
             exclude_columns,
             query,
             sort_by,
+            sort_engine,
             memory_budget,
             non_spillable_reserve,
             memory_pool_top_consumers,
@@ -943,6 +985,7 @@ impl TransformCommand {
             spill_path,
             spill_compression,
             max_spill_size,
+            explain_analyze,
             max_spill_merge_fan_in,
             preserve_input_order,
             by,
@@ -970,6 +1013,7 @@ impl TransformCommand {
             exclude_columns,
             query,
             sort_by,
+            sort_engine,
             memory_budget,
             non_spillable_reserve,
             memory_pool_top_consumers,
@@ -978,6 +1022,7 @@ impl TransformCommand {
             spill_path,
             spill_compression,
             max_spill_size,
+            explain_analyze,
             max_spill_merge_fan_in,
             preserve_input_order,
             by,
