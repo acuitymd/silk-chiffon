@@ -612,8 +612,11 @@ mod tests {
             let nested_dropped = Arc::clone(&nested_dropped);
             async move {
                 let _sibling = DropSignal(sibling_dropped);
+                // made before the spawn and moved in, so the nested task drops
+                // it even when it is aborted before it first runs
+                let nested_signal = DropSignal(nested_dropped);
                 let _nested = nested_scope.spawn(async move {
-                    let _nested = DropSignal(nested_dropped);
+                    let _nested = nested_signal;
                     pending::<()>().await;
                 });
                 ready.wait().await;
