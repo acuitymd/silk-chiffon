@@ -19,21 +19,31 @@ camino = "^1.2.6"
 clap.workspace = true
 datafusion.workspace = true
 futures.workspace = true
+# no default features: they include `safe-encode` and `safe-decode`, which would
+# also switch arrow-ipc and parquet to the slower implementation they opted out of
+lz4_flex = { version = "^0.14.2", default-features = false, features = ["frame", "std"] }
 object_store.workspace = true
 parking_lot.workspace = true
+rayon = "^1.12.0"
 serde_json.workspace = true
 silk-chiffon-storage = { path = "../silk-chiffon-storage", default-features = false }
 strum_macros = "^0.28.0"
 sysinfo = "^0.40.4"
 tempfile = "^3.27.0"
 thiserror.workspace = true
+tokio = { version = "^1.54.1", features = ["rt", "sync"] }
 url.workspace = true
+zstd = "^0.13.5"
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "^1.1.6", features = ["process"] }
 
 [dev-dependencies]
 chrono = "^0.4.45"
 datafusion-datasource = "=55.3.0"
 silk-chiffon-storage = { path = "../silk-chiffon-storage", features = ["local"] }
 silk-chiffon-test-support = { path = "../silk-chiffon-test-support" }
+tokio = { version = "^1.54.1", features = ["macros", "rt-multi-thread", "time"] }
 
 [lints]
 workspace = true

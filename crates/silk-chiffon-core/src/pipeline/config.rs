@@ -73,3 +73,27 @@ impl From<SpillCompression> for datafusion::config::SpillCompression {
         }
     }
 }
+
+/// The operator that sorts a transform's output.
+#[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[value(rename_all = "lowercase")]
+pub enum SortEngine {
+    /// Splits rows by key range and sorts the ranges in parallel. Spills when
+    /// the memory pool refuses more memory, and never takes more than the pool
+    /// grants: it fails only when the pool is too small for the memory it needs
+    /// to start, for one batch, or for the least it needs to merge what it
+    /// spilled.
+    #[default]
+    Parallel,
+    /// DataFusion's sort: one sorter per partition, merged on one thread.
+    DataFusion,
+}
+
+impl fmt::Display for SortEngine {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Parallel => "parallel",
+            Self::DataFusion => "datafusion",
+        })
+    }
+}

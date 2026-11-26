@@ -5074,8 +5074,11 @@ dependencies = [
  "datafusion",
  "datafusion-datasource",
  "futures",
+ "lz4_flex",
  "object_store",
  "parking_lot 0.13.0",
+ "rayon",
+ "rustix",
  "serde_json",
  "silk-chiffon-storage",
  "silk-chiffon-test-support",
@@ -5083,7 +5086,9 @@ dependencies = [
  "sysinfo",
  "tempfile",
  "thiserror",
+ "tokio",
  "url",
+ "zstd 0.13.5",
 ]
 
 [[package]]
